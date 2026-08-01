@@ -41,7 +41,17 @@ try {
   const commitResult = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" });
   assert.equal(commitResult.status, 0, commitResult.stderr);
   const commitSha = commitResult.stdout.trim();
-  const runtimeDigest = `sha256:${"c".repeat(64)}`;
+  const platformManifestBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    config: {
+      mediaType: "application/vnd.oci.image.config.v1+json",
+      digest: `sha256:${"1".repeat(64)}`,
+      size: 321,
+    },
+    layers: [],
+  }));
+  const runtimeDigest = `sha256:${crypto.createHash("sha256").update(platformManifestBytes).digest("hex")}`;
   const descriptor = {
     schemaVersion: 2,
     mediaType: "application/vnd.oci.image.index.v1+json",
@@ -49,7 +59,7 @@ try {
       {
         mediaType: "application/vnd.oci.image.manifest.v1+json",
         digest: runtimeDigest,
-        size: 123,
+        size: platformManifestBytes.length,
         platform: { os: "linux", architecture: "amd64" },
       },
       {
@@ -74,6 +84,7 @@ try {
     image,
     descriptorBytes,
     expectedPlatforms: ["linux/amd64"],
+    platformManifestBytes: { "linux/amd64": platformManifestBytes },
     resolvedAt: "2026-07-21T00:00:00Z",
   });
   const registryArtifact = writeJson("registry-resolution.json", registryResolution);

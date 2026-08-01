@@ -38,6 +38,8 @@ JS
 IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))"
 IMAGE_ID="sha256:$(printf '6%.0s' $(seq 1 64))"
 RELEASE_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf 'f%.0s' $(seq 1 64))"
+SCHEDULER_IMAGE="ghcr.io/owner/platform-infrastructure-backup-scheduler@sha256:$(printf '7%.0s' $(seq 1 64))"
+SCHEDULER_IMAGE_ID="sha256:$(printf 'a%.0s' $(seq 1 64))"
 RELEASE_SHA=$(printf 'a%.0s' $(seq 1 40))
 RELEASE_TREE=$(printf 'b%.0s' $(seq 1 40))
 MANIFEST_SHA=$(printf 'd%.0s' $(seq 1 64))
@@ -56,17 +58,26 @@ cat > "$FIXTURE_ROOT/governance/deployment-admission.json" <<'EOF'
 {"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","trustedOpsImageRepository":"ghcr.io/owner/platform-infrastructure-ops","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
 EOF
 cat > "$TMP/artifact.json" <<EOF
-{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$RELEASE_IMAGE"}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
+{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$RELEASE_IMAGE"},{"key":"PLATFORM_BACKUP_SCHEDULER_IMAGE","image":"$SCHEDULER_IMAGE"}],"subjectVerificationReceipts":[{"key":"PHP_APACHE_IMAGE","image":"$RELEASE_IMAGE","registry":{"rootDigest":"sha256:$(printf 'f%.0s' $(seq 1 64))","descriptorSha256":"$(printf 'f%.0s' $(seq 1 64))","platforms":[{"platform":"linux/amd64","digest":"sha256:$(printf '1%.0s' $(seq 1 64))","size":100,"imageId":"sha256:$(printf '8%.0s' $(seq 1 64))","configSize":50,"manifestArtifactSha256":"$(printf '2%.0s' $(seq 1 64))"}]}},{"key":"PLATFORM_BACKUP_SCHEDULER_IMAGE","image":"$SCHEDULER_IMAGE","registry":{"rootDigest":"sha256:$(printf '7%.0s' $(seq 1 64))","descriptorSha256":"$(printf '7%.0s' $(seq 1 64))","platforms":[{"platform":"linux/amd64","digest":"sha256:$(printf '3%.0s' $(seq 1 64))","size":100,"imageId":"$SCHEDULER_IMAGE_ID","configSize":50,"manifestArtifactSha256":"$(printf '4%.0s' $(seq 1 64))"}]}}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/runtime-intent.json" <<EOF
-{"version":1,"kind":"platform-runtime-intent/v1","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","projectName":"platform_infra_vps","environmentSha256":"$(printf '8%.0s' $(seq 1 64))","hostedWorkloadLockSha256":null,"coreComposeSha256":"$(printf '9%.0s' $(seq 1 64))","combinedComposeSha256":"$(printf '0%.0s' $(seq 1 64))","services":[{"service":"backup-scheduler","image":"$IMAGE","admission":{"kind":"ops-runner"},"expectedLocalImageId":"$IMAGE_ID"},{"service":"php-apache","image":"$RELEASE_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PHP_APACHE_IMAGE"},"expectedLocalImageId":"sha256:$(printf '8%.0s' $(seq 1 64))"}],"targetServingServices":["php-apache"]}
+{"version":2,"kind":"platform-runtime-intent/v2","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","projectName":"platform_infra_vps","environmentSha256":"$(printf '8%.0s' $(seq 1 64))","hostedWorkloadLockSha256":null,"sourceRenderSha256":"$(printf '9%.0s' $(seq 1 64))","combinedComposeSha256":"$(printf '0%.0s' $(seq 1 64))","persistentVolumes":[{"name":"enterprise_local_registry_data","createdAt":"2026-07-21T00:00:00.000Z","driver":"local","scope":"local","options":{},"labels":{"platform.infrastructure.managed":"true","platform.infrastructure.purpose":"local-registry"},"mountpoint":"/var/lib/docker/volumes/enterprise_local_registry_data/_data","owner":{"uid":0,"gid":0,"mode":"0755"}}],"services":[{"service":"backup-scheduler","image":"$SCHEDULER_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PLATFORM_BACKUP_SCHEDULER_IMAGE"},"expectedLocalImageId":"$SCHEDULER_IMAGE_ID"},{"service":"php-apache","image":"$RELEASE_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PHP_APACHE_IMAGE"},"expectedLocalImageId":"sha256:$(printf '8%.0s' $(seq 1 64))"}],"targetServingServices":["php-apache"]}
 EOF
 RUNTIME_INTENT_SHA=$(node "$ROOT/scripts/runtime-intent-policy.mjs" --hash "$TMP/runtime-intent.json")
 RUNTIME_INTENT=$(tr -d '\r\n' < "$TMP/runtime-intent.json")
 cat > "$TMP/admission.json" <<EOF
 {"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"$(printf '4%.0s' $(seq 1 40))","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"$PROVIDER_RUN_ID","runAttempt":$PROVIDER_RUN_ATTEMPT},"opsRunner":{"image":"$IMAGE","imageId":"$IMAGE_ID","verificationFingerprint":"$(printf '7%.0s' $(seq 1 64))","providerAttested":true},"runtimeIntent":$RUNTIME_INTENT,"runtimeIntentSha256":"$RUNTIME_INTENT_SHA"}
 EOF
+jq '. + {
+  deploymentTarget:{environment:"production",host:"example.internal",projectName:"platform_infra_vps"},
+  privilegedRuntime:{
+    activationBroker:{path:"/usr/local/libexec/platform-activation-broker",version:1,sha256:("'"$(printf '8%.0s' $(seq 1 64))"'"),providerAttested:true},
+    originFirewallHelper:{path:"/usr/local/libexec/platform-origin-firewall",version:1,sha256:("'"$(printf '9%.0s' $(seq 1 64))"'"),providerAttested:true},
+    workloadEgressHelper:{path:"/usr/local/libexec/platform-workload-egress-firewall",version:1,sha256:("'"$(printf '0%.0s' $(seq 1 64))"'"),providerAttested:true}
+  }
+}' "$TMP/admission.json" > "$TMP/admission.next"
+mv "$TMP/admission.next" "$TMP/admission.json"
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 cat > "$TMP/provider.json" <<EOF
 {"id":$PROVIDER_RUN_ID,"run_attempt":$PROVIDER_RUN_ATTEMPT,"repository":{"full_name":"owner/trusted-admission"},"head_repository":{"full_name":"owner/trusted-admission"},"path":".github/workflows/produce-admission.yml","head_branch":"main","head_sha":"$(printf '4%.0s' $(seq 1 40))","event":"workflow_dispatch","status":"completed","conclusion":"success"}
@@ -417,13 +428,28 @@ if grep -Eq 'platform/ops:local|docker build|"\$OPS_IMAGE" scripts/' "$ROOT/scri
 fi
 printf 'PASS\thosted-preparation-positive-path-uses-admitted-id\n'
 
-if grep -q 'platform/ops:local' "$ROOT/compose.backup-scheduler.yaml" || grep -q '^    build:' "$ROOT/compose.backup-scheduler.yaml"; then
+SCHEDULER_COMPOSE=${SCHEDULER_COMPOSE_PATH:-"$ROOT/compose.backup-scheduler.yaml"}
+SCHEDULER_ISOLATION_COMPOSE=${SCHEDULER_ISOLATION_COMPOSE_PATH:-"$ROOT/compose.runtime-isolation.yaml"}
+SCHEDULER_DOCKERFILE=${SCHEDULER_DOCKERFILE_PATH:-"$ROOT/docker/backup-scheduler.Dockerfile"}
+[ -f "$SCHEDULER_COMPOSE" ] && [ -f "$SCHEDULER_ISOLATION_COMPOSE" ] && [ -f "$SCHEDULER_DOCKERFILE" ] || {
+  echo "Integration blocker: dedicated backup scheduler image cohort is absent." >&2
+  exit 78
+}
+if grep -q 'platform/ops:local' "$SCHEDULER_COMPOSE" || grep -q '^    build:' "$SCHEDULER_COMPOSE"; then
   echo "FAIL: backup scheduler retains a mutable default or local build" >&2
   exit 1
 fi
-grep -F '${PLATFORM_OPS_IMAGE:?' "$ROOT/compose.backup-scheduler.yaml" >/dev/null
-grep -F '.admission.kind == "ops-runner" and .image == $deployment.opsRunner.image and .expectedLocalImageId == $deployment.opsRunner.imageId' "$ROOT/scripts/release-compose-admission.sh" >/dev/null
-printf 'PASS\tbackup-scheduler-binds-provider-admitted-ops-image\n'
+for scheduler_compose in "$SCHEDULER_COMPOSE" "$SCHEDULER_ISOLATION_COMPOSE"; do
+  grep -F '${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY:?' "$scheduler_compose" >/dev/null
+  grep -F '${PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256:?' "$scheduler_compose" >/dev/null
+done
+for env_template in "$ROOT/.env.example" "$ROOT/.env.vps.example"; do
+  [ "$(grep -c '^PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=' "$env_template")" -eq 1 ]
+  [ "$(grep -c '^PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256=' "$env_template")" -eq 1 ]
+done
+grep -F '"PLATFORM_BACKUP_SCHEDULER_IMAGE"; "backup-scheduler"' "$ROOT/scripts/release-compose-admission.sh" >/dev/null
+grep -F -- '--image "PLATFORM_BACKUP_SCHEDULER_IMAGE=' "$ROOT/.github/workflows/release-attestation.yml" >/dev/null
+printf 'PASS\tbackup-scheduler-binds-attested-image-ref-and-provider-runtime-image-id\n'
 
 live_workflow="$ROOT/.github/workflows/enterprise-live-evidence.yml"
 [ "$(grep -c 'sh ./scripts/infra-ops.sh' "$live_workflow")" -eq 7 ]

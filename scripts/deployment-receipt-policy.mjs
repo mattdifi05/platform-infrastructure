@@ -22,6 +22,76 @@ function exactTimestamp(value, label) {
   return text;
 }
 
+function exactClosedObject(value, label, expectedKeys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expectedKeys].sort())) {
+    invalid(`${label} does not use the exact closed schema.`);
+  }
+  return value;
+}
+
+function validatePrivilegedRuntime(runtime) {
+  exactClosedObject(runtime, "Trusted privileged runtime", [
+    "activationBroker",
+    "originFirewallHelper",
+    "workloadEgressHelper",
+  ]);
+  const expected = new Map([
+    ["activationBroker", "/usr/local/libexec/platform-activation-broker"],
+    ["originFirewallHelper", "/usr/local/libexec/platform-origin-firewall"],
+    ["workloadEgressHelper", "/usr/local/libexec/platform-workload-egress-firewall"],
+  ]);
+  for (const [key, pathname] of expected) {
+    const helper = exactClosedObject(runtime[key], `Trusted ${key}`, [
+      "path",
+      "version",
+      "sha256",
+      "providerAttested",
+    ]);
+    if (helper.path !== pathname || !/^[1-9][0-9]{0,8}$/.test(String(helper.version ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(helper.sha256 ?? "")) || helper.providerAttested !== true) {
+      invalid(`Trusted ${key} is not bound to the fixed provider-attested helper.`);
+    }
+  }
+  if (new Set([...expected.keys()].map((key) => runtime[key].sha256)).size !== expected.size) {
+    invalid("Trusted privileged runtime helper hashes must be distinct.");
+  }
+  return runtime;
+}
+
+function artifactPlatformImageIds(receipt, subjects) {
+  if (!Array.isArray(receipt.subjectVerificationReceipts)
+    || receipt.subjectVerificationReceipts.length !== subjects.length) {
+    invalid("Artifact verification receipt must bind one platform image ID receipt per release subject.");
+  }
+  const byKey = new Map(receipt.subjectVerificationReceipts.map((entry) => [entry?.key, entry]));
+  if (byKey.size !== subjects.length) invalid("Artifact platform image ID receipt keys must be exact and unique.");
+  const bindings = {};
+  for (const subject of subjects) {
+    const entry = byKey.get(subject.key);
+    const platforms = entry?.registry?.platforms;
+    if (entry?.image !== subject.image
+      || entry?.registry?.rootDigest !== subject.digest
+      || entry?.registry?.descriptorSha256 !== subject.sha256
+      || !Array.isArray(platforms) || platforms.length !== 1) {
+      invalid(`Artifact platform image ID receipt is not bound to ${subject.key}.`);
+    }
+    const platform = platforms[0];
+    if (platform?.platform !== "linux/amd64"
+      || !/^sha256:[a-f0-9]{64}$/.test(String(platform?.digest ?? ""))
+      || !/^sha256:[a-f0-9]{64}$/.test(String(platform?.imageId ?? ""))
+      || platform.imageId === platform.digest
+      || platform.imageId === subject.digest
+      || !Number.isInteger(platform?.size) || platform.size < 1
+      || !Number.isInteger(platform?.configSize) || platform.configSize < 1
+      || !/^[a-f0-9]{64}$/.test(String(platform?.manifestArtifactSha256 ?? ""))) {
+      invalid(`Artifact platform image ID receipt is invalid for ${subject.key}.`);
+    }
+    bindings[subject.key] = platform.imageId;
+  }
+  return bindings;
+}
+
 export function validateArtifactVerificationReceipt(receipt, { repository, commitSha }) {
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
@@ -45,7 +115,8 @@ export function validateArtifactVerificationReceipt(receipt, { repository, commi
   exactSha256(receipt.provenance?.verificationFingerprint, "artifact receipt verification fingerprint");
   exactSha256(receipt.provenance?.manifestVerificationFingerprint, "artifact receipt manifest verification fingerprint");
   exactTimestamp(receipt.generatedAt, "artifact receipt generatedAt");
-  canonicalReleaseSubjects(receipt.subjects);
+  const subjects = canonicalReleaseSubjects(receipt.subjects);
+  artifactPlatformImageIds(receipt, subjects);
   return receipt;
 }
 
@@ -59,6 +130,8 @@ export function validateTrustedDeploymentReceipt(receipt, {
   sourceArchiveSha256 = null,
   providerRunId = null,
   providerRunAttempt = null,
+  targetHost = null,
+  environmentSha256 = null,
 }) {
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
@@ -137,17 +210,38 @@ export function validateTrustedDeploymentReceipt(receipt, {
   ) {
     invalid("Trusted deployment receipt does not admit one exact provider-attested ops image digest and local image ID.");
   }
+  const artifactSubjects = canonicalReleaseSubjects(artifactReceipt.subjects);
   const runtimeIntent = validateRuntimeIntent(receipt.runtimeIntent, {
     repository: expectedRepository,
     commitSha: expectedCommit,
     treeSha: expectedTree,
     sourceArchiveSha256: expectedSourceArchive,
-    artifactSubjects: artifactReceipt.subjects,
+    artifactSubjects,
+    artifactPlatformImageIds: artifactPlatformImageIds(artifactReceipt, artifactSubjects),
     opsRunner: receipt.opsRunner,
   });
   if (receipt.runtimeIntentSha256 !== runtimeIntent.sha256) {
     invalid("Trusted deployment receipt does not authenticate the exact canonical runtime intent.");
   }
+  const target = exactClosedObject(receipt.deploymentTarget, "Trusted deployment target", [
+    "environment",
+    "host",
+    "projectName",
+  ]);
+  if (target.environment !== "production") {
+    invalid("Trusted deployment target environment is invalid.");
+  }
+  if (target.projectName !== receipt.runtimeIntent.projectName
+    || !/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(String(target.host ?? ""))) {
+    invalid("Trusted deployment target host/project binding is invalid.");
+  }
+  if (targetHost !== null && String(target.host).toLowerCase() !== String(targetHost).toLowerCase()) {
+    invalid("Trusted deployment target host is mismatched.");
+  }
+  if (environmentSha256 !== null && receipt.runtimeIntent.environmentSha256 !== exactSha256(environmentSha256, "expected environment SHA256")) {
+    invalid("Trusted deployment runtime environment hash is mismatched.");
+  }
+  validatePrivilegedRuntime(receipt.privilegedRuntime);
   exactSha256(receipt.verifier?.fingerprint, "trusted verifier fingerprint");
   exactTimestamp(receipt.verifier?.verifiedAt, "trusted verifier verifiedAt");
   exactTimestamp(receipt.generatedAt, "trusted deployment receipt generatedAt");
@@ -188,6 +282,8 @@ function main() {
       sourceArchiveSha256: options.sourceArchiveSha256 ?? null,
       providerRunId: options.providerRunId ?? null,
       providerRunAttempt: options.providerRunAttempt ?? null,
+      targetHost: options.targetHost ?? null,
+      environmentSha256: options.environmentSha256 ?? null,
     });
     process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, sourceArchiveSha256: deployment.document.sourceArchiveSha256, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256, runtimeIntentSha256: deployment.document.runtimeIntentSha256 })}\n`);
   } finally {

@@ -6,12 +6,19 @@ import { resolveRegistryDescriptor } from "./release-registry-resolution.mjs";
 
 const repository = "owner/repo";
 const commitSha = "b".repeat(40);
-const runtimeDigest = `sha256:${"c".repeat(64)}`;
+const platformImageId = `sha256:${"1".repeat(64)}`;
+const platformManifestBytes = Buffer.from(JSON.stringify({
+  schemaVersion: 2,
+  mediaType: "application/vnd.oci.image.manifest.v1+json",
+  config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: platformImageId, size: 321 },
+  layers: [],
+}));
+const runtimeDigest = `sha256:${crypto.createHash("sha256").update(platformManifestBytes).digest("hex")}`;
 const descriptor = {
   schemaVersion: 2,
   mediaType: "application/vnd.oci.image.index.v1+json",
   manifests: [
-    { mediaType: "application/vnd.oci.image.manifest.v1+json", digest: runtimeDigest, size: 123, platform: { os: "linux", architecture: "amd64" } },
+    { mediaType: "application/vnd.oci.image.manifest.v1+json", digest: runtimeDigest, size: platformManifestBytes.length, platform: { os: "linux", architecture: "amd64" } },
     {
       mediaType: "application/vnd.oci.image.manifest.v1+json", digest: `sha256:${"d".repeat(64)}`, size: 456,
       platform: { os: "unknown", architecture: "unknown" },
@@ -24,7 +31,8 @@ const imageDigest = crypto.createHash("sha256").update(registryDescriptorBytes).
 const image = `ghcr.io/owner/platform-infrastructure-php-apache@sha256:${imageDigest}`;
 const entries = [{ key: "PHP_APACHE_IMAGE", image }];
 const registryResolution = resolveRegistryDescriptor({
-  image, descriptorBytes: registryDescriptorBytes, expectedPlatforms: ["linux/amd64"], resolvedAt: "2026-07-21T00:00:00Z",
+  image, descriptorBytes: registryDescriptorBytes, expectedPlatforms: ["linux/amd64"],
+  platformManifestBytes: { "linux/amd64": platformManifestBytes }, resolvedAt: "2026-07-21T00:00:00Z",
 });
 const registryResolutionBytes = Buffer.from(`${JSON.stringify(registryResolution, null, 2)}\n`);
 const registryResolutionSha256 = crypto.createHash("sha256").update(registryResolutionBytes).digest("hex");
@@ -63,6 +71,7 @@ const artifact = createVerifiedReleaseArtifacts({
 assert.equal(artifact.manifest.source, "registry-resolved-cryptographically-verified-subjects");
 assert.deepEqual(artifact.manifest.subjects.map((subject) => subject.image), [image]);
 assert.deepEqual(artifact.manifest.subjects[0].platforms.map((entry) => entry.platform), ["linux/amd64"]);
+assert.equal(artifact.manifest.subjects[0].platforms[0].imageId, platformImageId);
 assert.match(artifact.manifest.sbom.sha256, /^[a-f0-9]{64}$/);
 assert.equal(artifact.sbom.components.filter((component) => component.type === "container").length, 1);
 assert.equal(artifact.sbom.components.filter((component) => component.type === "library").length, 1);
@@ -78,6 +87,7 @@ const releaseNames = [
   ["CONTROL_CENTER_IMAGE", "platform-infrastructure-control-center"],
   ["PHP_APACHE_IMAGE", "platform-infrastructure-php-apache"],
   ["PLATFORM_ALERT_DISPATCHER_IMAGE", "platform-infrastructure-alert-dispatcher"],
+  ["PLATFORM_BACKUP_SCHEDULER_IMAGE", "platform-infrastructure-backup-scheduler"],
   ["PROJECT_ROUTER_IMAGE", "platform-infrastructure-project-router"],
 ];
 const multiEntries = [];
@@ -92,6 +102,7 @@ for (const [key, name] of releaseNames) {
     image: subjectImage,
     descriptorBytes: subjectDescriptorBytes,
     expectedPlatforms: ["linux/amd64"],
+    platformManifestBytes: { "linux/amd64": platformManifestBytes },
     resolvedAt: "2026-07-21T00:00:00Z",
   });
   const resolutionBytes = Buffer.from(`${JSON.stringify(resolution, null, 2)}\n`);
@@ -132,11 +143,11 @@ const multi = createVerifiedReleaseArtifacts({
   serialNumber: "urn:uuid:223e4567-e89b-42d3-a456-426614174000",
 });
 assert.equal(multi.manifest.version, 4);
-assert.equal(multi.manifest.subjects.length, 4);
-assert.equal(multi.manifest.subjectEvidence.length, 4);
-assert.equal(multi.evidenceBundle.subjects.length, 4);
-assert.equal(multi.sbom.components.filter((component) => component.type === "container").length, 4);
-assert.equal(multi.sbom.components.filter((component) => component.type === "library").length, 4);
+assert.equal(multi.manifest.subjects.length, 5);
+assert.equal(multi.manifest.subjectEvidence.length, 5);
+assert.equal(multi.evidenceBundle.subjects.length, 5);
+assert.equal(multi.sbom.components.filter((component) => component.type === "container").length, 5);
+assert.equal(multi.sbom.components.filter((component) => component.type === "library").length, 5);
 assert.throws(() => createVerifiedReleaseArtifacts({
   entries: multiEntries,
   repository,

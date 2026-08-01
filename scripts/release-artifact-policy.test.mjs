@@ -80,14 +80,24 @@ const verification = {
   }],
 };
 const registryResolution = {
+  version: 2, kind: "platform-registry-subject-resolution/v2",
   status: "passed", image, rootDigest: `sha256:${"a".repeat(64)}`, descriptorSha256: "a".repeat(64),
-  platforms: [{ platform: "linux/amd64", digest: `sha256:${"c".repeat(64)}`, size: 123, mediaType: "application/vnd.oci.image.manifest.v1+json" }],
+  platforms: [{
+    platform: "linux/amd64", digest: `sha256:${"c".repeat(64)}`, size: 123,
+    mediaType: "application/vnd.oci.image.manifest.v1+json", imageId: `sha256:${"1".repeat(64)}`,
+    configSize: 321, configMediaType: "application/vnd.oci.image.config.v1+json",
+    manifestArtifactSha256: "2".repeat(64), manifestBase64: "e30=",
+  }],
 };
 const resolvedPlatforms = [{
   platform: "linux/amd64",
   digest: `sha256:${"c".repeat(64)}`,
   size: 123,
   mediaType: "application/vnd.oci.image.manifest.v1+json",
+  imageId: `sha256:${"1".repeat(64)}`,
+  configSize: 321,
+  configMediaType: "application/vnd.oci.image.config.v1+json",
+  manifestArtifactSha256: "2".repeat(64),
 }];
 const manifest = {
   version: 3,
@@ -98,7 +108,9 @@ const manifest = {
   registryResolution: { sha256: "f".repeat(64), descriptorSha256: "c".repeat(64), descriptorArtifactSha256: "a".repeat(64), platforms: ["linux/amd64"] },
   subjects: subjects.map((subject) => ({
     ...subject,
-    platforms: resolvedPlatforms.map(({ platform, digest: descriptorDigest, size, mediaType }) => ({ platform, descriptorDigest, size, mediaType })),
+    platforms: resolvedPlatforms.map(({ platform, digest: descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({
+      platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
+    })),
   })),
 };
 const manifestValidationOptions = {
@@ -184,6 +196,15 @@ test("builds a receipt bound to SBOM and verifier output", () => {
   assert.match(receipt.provenance.manifestVerificationFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(receipt.generatedAt, "2026-07-21T00:00:00.000Z");
   assert.equal(receipt.subjectVerificationReceipts[0].attestationReference.subject, `oci://${image}`);
+  assert.equal(receipt.subjectVerificationReceipts[0].registry.platforms[0].imageId, `sha256:${"1".repeat(64)}`);
+});
+test("rejects registry evidence without a platform config image ID", () => {
+  const changed = structuredClone(registryResolution);
+  delete changed.platforms[0].imageId;
+  assert.throws(() => buildReleaseAdmissionReceipt({
+    subjects, repository, commitSha, sourceArchiveSha256, sbomSha256: "d".repeat(64), verification,
+    registryResolution: changed, manifestVerification: verification.attestations[0],
+  }), /registry resolution/);
 });
 test("rejects a receipt without an exact source archive hash", () => {
   assert.throws(() => buildReleaseAdmissionReceipt({

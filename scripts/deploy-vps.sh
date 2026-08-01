@@ -1,214 +1,223 @@
 #!/usr/bin/env sh
 set -eu
-
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 umask 077
 
-REMOTE="${DEPLOY_REMOTE:-}"
-REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/opt/platform/platform-infrastructure}"
-SSH_PORT="${DEPLOY_SSH_PORT:-22}"
-SSH_KEY_PATH="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
-SSH_KNOWN_HOSTS_PATH="${DEPLOY_SSH_KNOWN_HOSTS_PATH:-$HOME/.ssh/known_hosts}"
-BRANCH="${DEPLOY_BRANCH:-main}"
-ENV_FILE="${DEPLOY_ENV_FILE:-.env}"
-PROJECT_NAME="${DEPLOY_PROJECT_NAME:-platform_infra_vps}"
-RELEASE_SHA="${DEPLOY_RELEASE_SHA:-}"
-RELEASE_TREE="${DEPLOY_RELEASE_TREE:-}"
-DEPLOY_REPO="${DEPLOY_REPO:-}"
-SOURCE_ARCHIVE="${DEPLOY_SOURCE_ARCHIVE_PATH:-}"
-ARTIFACT_RECEIPT="${DEPLOY_ARTIFACT_RECEIPT_PATH:-}"
-ARTIFACT_RECEIPT_SHA256="${DEPLOY_ARTIFACT_RECEIPT_SHA256:-}"
-ADMISSION_RECEIPT="${DEPLOY_ADMISSION_RECEIPT_PATH:-}"
-ADMISSION_RECEIPT_SHA256="${DEPLOY_ADMISSION_RECEIPT_SHA256:-}"
-PROVIDER_METADATA="${DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:-}"
-PROVIDER_METADATA_SHA256="${DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:-}"
-PROVIDER_RUN_ID="${DEPLOY_TRUSTED_PROVIDER_RUN_ID:-}"
-PROVIDER_RUN_ATTEMPT="${DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:-}"
-ADMISSION_POLICY="$ROOT_DIR/governance/deployment-admission.json"
+CODE_ROOT=${PLATFORM_OPS_CODE_ROOT:-/opt/platform-infrastructure}
+SCRIPT_ROOT="$CODE_ROOT/scripts"
+POLICY=${DEPLOY_ADMISSION_POLICY_PATH:-"$CODE_ROOT/governance/deployment-admission.json"}
+REMOTE=${DEPLOY_REMOTE:-}
+SSH_PORT=${DEPLOY_SSH_PORT:-}
+SSH_KEY_SOURCE=${DEPLOY_SSH_KEY_PATH:-/run/platform-deploy/ssh-key}
+KNOWN_HOSTS_SOURCE=${DEPLOY_SSH_KNOWN_HOSTS_PATH:-${DEPLOY_KNOWN_HOSTS_PATH:-/run/platform-deploy/known-hosts}}
+REPOSITORY=${DEPLOY_REPO:-}
+COMMIT_SHA=${DEPLOY_RELEASE_SHA:-}
+TREE_SHA=${DEPLOY_RELEASE_TREE:-}
+ENVIRONMENT_SHA256=${DEPLOY_ENVIRONMENT_SHA256:-}
+ARTIFACT_RECEIPT=${DEPLOY_ARTIFACT_RECEIPT_PATH:-}
+ARTIFACT_RECEIPT_SHA256=${DEPLOY_ARTIFACT_RECEIPT_SHA256:-}
+DEPLOYMENT_RECEIPT=${DEPLOY_ADMISSION_RECEIPT_PATH:-}
+DEPLOYMENT_RECEIPT_SHA256=${DEPLOY_ADMISSION_RECEIPT_SHA256:-}
+PROVIDER_METADATA=${DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:-}
+PROVIDER_METADATA_SHA256=${DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:-}
+PROVIDER_RUN_ID=${DEPLOY_TRUSTED_PROVIDER_RUN_ID:-}
+PROVIDER_RUN_ATTEMPT=${DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:-}
+DAST_RECEIPT=${DEPLOY_DAST_RECEIPT_PATH:-}
+DAST_RECEIPT_SHA256=${DEPLOY_DAST_RECEIPT_SHA256:-}
+BUNDLE_MANIFEST=${DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH:-}
+BUNDLE_SHA256=${DEPLOY_ACTIVATION_BUNDLE_SHA256:-}
+BUNDLE_SIZE_BYTES=${DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES:-}
+BUNDLE_MANIFEST_SHA256=${DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256:-}
+ACTIVATION_ADMISSION_SHA256=${DEPLOY_ACTIVATION_ADMISSION_SHA256:-}
+ACTIVATION_ADMISSION_SIZE_BYTES=${DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES:-}
+CONSUMER_RUN_ID=${DEPLOY_CONSUMER_RUN_ID:-${GITHUB_RUN_ID:-}}
+CONSUMER_RUN_ATTEMPT=${DEPLOY_CONSUMER_RUN_ATTEMPT:-${GITHUB_RUN_ATTEMPT:-}}
+RECEIPT_OUTPUT=${DEPLOY_ACTIVATION_RECEIPT_PATH:-}
 
-case "$REMOTE" in
-  *@*) remote_user=${REMOTE%%@*}; remote_host=${REMOTE#*@} ;;
-  *) echo "DEPLOY_REMOTE must be a simple user@hostname value." >&2; exit 1 ;;
-esac
-case "$remote_user" in [a-z_]*) ;; *) echo "DEPLOY_REMOTE contains an invalid user." >&2; exit 1 ;; esac
-case "$remote_user" in *[!a-z0-9_-]* ) echo "DEPLOY_REMOTE contains an invalid user." >&2; exit 1 ;; esac
-case "$remote_host" in [A-Za-z0-9]*) ;; *) echo "DEPLOY_REMOTE contains an invalid hostname." >&2; exit 1 ;; esac
-case "$remote_host" in *[!A-Za-z0-9.-]*|*@*|*..*|*-|*. ) echo "DEPLOY_REMOTE contains an invalid hostname." >&2; exit 1 ;; esac
-case "$REMOTE_DIR" in /*) ;; *) echo "DEPLOY_REMOTE_DIR must be absolute." >&2; exit 1 ;; esac
-case "$REMOTE_DIR" in *[!A-Za-z0-9_./-]*|*//*|*/../*|*/..) echo "DEPLOY_REMOTE_DIR contains invalid syntax." >&2; exit 1 ;; esac
-case "$SSH_PORT" in ''|*[!0-9]*) echo "DEPLOY_SSH_PORT must be numeric." >&2; exit 1 ;; esac
-[ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || { echo "DEPLOY_SSH_PORT must be between 1 and 65535." >&2; exit 1; }
-case "$SSH_KNOWN_HOSTS_PATH" in /*) ;; *) echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must be absolute." >&2; exit 1 ;; esac
-[ -f "$SSH_KEY_PATH" ] && [ -r "$SSH_KEY_PATH" ] && [ -s "$SSH_KEY_PATH" ] && [ ! -L "$SSH_KEY_PATH" ] || {
-  echo "DEPLOY_SSH_KEY_PATH must be a readable, non-empty dedicated private-key file, not a symlink." >&2
-  exit 1
+fail() {
+  echo "$1" >&2
+  exit "${2:-64}"
 }
-[ -f "$SSH_KNOWN_HOSTS_PATH" ] && [ -r "$SSH_KNOWN_HOSTS_PATH" ] && [ -s "$SSH_KNOWN_HOSTS_PATH" ] && [ ! -L "$SSH_KNOWN_HOSTS_PATH" ] || {
-  echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must be a readable, non-empty owner-approved regular file, not a symlink." >&2
-  exit 1
-}
-request_dir=$(mktemp -d "${TMPDIR:-/tmp}/platform-deploy-request.XXXXXX")
-trap 'rm -rf "$request_dir"' EXIT HUP INT TERM
-stable_ssh_key="$request_dir/deploy_key"
-stable_known_hosts="$request_dir/known_hosts"
-cp "$SSH_KEY_PATH" "$stable_ssh_key"
-cp "$SSH_KNOWN_HOSTS_PATH" "$stable_known_hosts"
-chmod 600 "$stable_ssh_key" "$stable_known_hosts"
-[ -s "$stable_ssh_key" ] && [ -s "$stable_known_hosts" ] || { echo "Stable SSH identity snapshot is incomplete." >&2; exit 1; }
-SSH_KEY_PATH=$stable_ssh_key
-SSH_KNOWN_HOSTS_PATH=$stable_known_hosts
-case "$ENV_FILE" in [A-Za-z0-9._/-]* ) ;; *) echo "DEPLOY_ENV_FILE is invalid." >&2; exit 1 ;; esac
-case "$ENV_FILE" in /*|*..*|*//*|*/ ) echo "DEPLOY_ENV_FILE must be a contained relative path." >&2; exit 1 ;; esac
-case "$PROJECT_NAME" in [a-z0-9]* ) ;; *) echo "DEPLOY_PROJECT_NAME is invalid." >&2; exit 1 ;; esac
-case "$PROJECT_NAME" in *[!a-z0-9_-]* ) echo "DEPLOY_PROJECT_NAME is invalid." >&2; exit 1 ;; esac
-case "$DEPLOY_REPO" in [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]* ) ;; *) echo "DEPLOY_REPO must be exact owner/name." >&2; exit 1 ;; esac
-case "$RELEASE_SHA" in *[!a-f0-9]*|'') echo "DEPLOY_RELEASE_SHA must be a lowercase full Git SHA." >&2; exit 1 ;; esac
-case "$RELEASE_TREE" in *[!a-f0-9]*|'') echo "DEPLOY_RELEASE_TREE must be a lowercase full Git tree SHA." >&2; exit 1 ;; esac
-[ "${#RELEASE_SHA}" -eq 40 ] && [ "${#RELEASE_TREE}" -eq 40 ] || { echo "Release commit and tree SHA must each contain 40 characters." >&2; exit 1; }
-CANONICAL_ORIGIN="https://github.com/${DEPLOY_REPO}.git"
-
-require_gate_enabled() {
-  [ "$2" = 1 ] || { echo "$1=1 is mandatory for the production deployment entrypoint." >&2; exit 1; }
-}
-
-run_waf_smoke=${DEPLOY_RUN_WAF_SMOKE:-}
-run_infra_health=${DEPLOY_RUN_INFRA_HEALTH:-}
-run_production_preflight=${DEPLOY_RUN_PRODUCTION_PREFLIGHT:-}
-run_pre_go_live=${DEPLOY_RUN_PRE_GO_LIVE:-}
-run_go_no_go=${DEPLOY_RUN_GO_NO_GO:-}
-pre_go_live_production_preflight=${DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT:-}
-pre_go_live_restore_drill=${DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:-}
-pre_go_live_offsite_restore_dry_run=${DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:-}
-pre_go_live_github_remote=${DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE:-}
-require_gate_enabled DEPLOY_RUN_WAF_SMOKE "$run_waf_smoke"
-require_gate_enabled DEPLOY_RUN_INFRA_HEALTH "$run_infra_health"
-require_gate_enabled DEPLOY_RUN_PRODUCTION_PREFLIGHT "$run_production_preflight"
-require_gate_enabled DEPLOY_RUN_PRE_GO_LIVE "$run_pre_go_live"
-require_gate_enabled DEPLOY_RUN_GO_NO_GO "$run_go_no_go"
-require_gate_enabled DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT "$pre_go_live_production_preflight"
-require_gate_enabled DEPLOY_PRE_GO_LIVE_RESTORE_DRILL "$pre_go_live_restore_drill"
-require_gate_enabled DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN "$pre_go_live_offsite_restore_dry_run"
-require_gate_enabled DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE "$pre_go_live_github_remote"
-
-case "$ARTIFACT_RECEIPT_SHA256:$ADMISSION_RECEIPT_SHA256:$PROVIDER_METADATA_SHA256" in
-  *[!a-f0-9:]*|::*|:*|*:) echo "Exact artifact, admission, and provider-metadata SHA256 values are required and must be lowercase." >&2; exit 1 ;;
-esac
-[ "${#ARTIFACT_RECEIPT_SHA256}" -eq 64 ] \
-  && [ "${#ADMISSION_RECEIPT_SHA256}" -eq 64 ] \
-  && [ "${#PROVIDER_METADATA_SHA256}" -eq 64 ] || {
-  echo "Artifact, admission, and provider-metadata SHA256 values must be complete." >&2
-  exit 1
-}
-case "$PROVIDER_RUN_ID:$PROVIDER_RUN_ATTEMPT" in
-  *[!0-9:]*|::*|:*|*:) echo "Exact trusted-provider run ID and attempt are required." >&2; exit 1 ;;
-esac
-[ "$PROVIDER_RUN_ID" -ge 1 ] && [ "$PROVIDER_RUN_ATTEMPT" -ge 1 ] || {
-  echo "Trusted-provider run ID and attempt must be positive." >&2
-  exit 1
-}
-for trust_input in "$SOURCE_ARCHIVE" "$ARTIFACT_RECEIPT" "$ADMISSION_RECEIPT" "$PROVIDER_METADATA"; do
-  [ -f "$trust_input" ] && [ -r "$trust_input" ] && [ -s "$trust_input" ] && [ ! -L "$trust_input" ] || { echo "Deployment trust input is missing, unreadable, empty, or a symlink." >&2; exit 1; }
-done
-
-head_sha=$(git -C "$ROOT_DIR" rev-parse HEAD)
-tree_sha=$(git -C "$ROOT_DIR" rev-parse "${RELEASE_SHA}^{tree}")
-[ "$head_sha" = "$RELEASE_SHA" ] && [ "$tree_sha" = "$RELEASE_TREE" ] || { echo "Local checkout is not the exact approved commit/tree." >&2; exit 1; }
-[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ] || { echo "Local release checkout is dirty." >&2; exit 1; }
 
 hash_file() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+  # POSIX shells may inherit EXIT traps into command substitutions. The hash
+  # subprocess must never run the parent cleanup and remove the request.
+  trap - EXIT HUP INT TERM
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
 }
 
-stable_artifact_receipt="$request_dir/artifact-verification.json"
-stable_admission_receipt="$request_dir/trusted-deployment-admission.json"
-stable_provider_metadata="$request_dir/trusted-provider-run.json"
-stable_source_archive="$request_dir/exact-source-archive.tar"
-cp "$ARTIFACT_RECEIPT" "$stable_artifact_receipt"
-cp "$ADMISSION_RECEIPT" "$stable_admission_receipt"
-cp "$PROVIDER_METADATA" "$stable_provider_metadata"
-cp "$SOURCE_ARCHIVE" "$stable_source_archive"
-chmod 600 "$stable_artifact_receipt" "$stable_admission_receipt" "$stable_provider_metadata" "$stable_source_archive"
-[ "$(hash_file "$stable_artifact_receipt")" = "$ARTIFACT_RECEIPT_SHA256" ] || { echo "Artifact verification receipt SHA256 mismatch." >&2; exit 1; }
-[ "$(hash_file "$stable_admission_receipt")" = "$ADMISSION_RECEIPT_SHA256" ] || { echo "Trusted deployment receipt SHA256 mismatch." >&2; exit 1; }
-[ "$(hash_file "$stable_provider_metadata")" = "$PROVIDER_METADATA_SHA256" ] || { echo "Trusted provider metadata SHA256 mismatch." >&2; exit 1; }
-SOURCE_ARCHIVE_SHA256=$(jq -er '.sourceArchiveSha256 | select(test("^[a-f0-9]{64}$"))' "$stable_artifact_receipt")
-[ "$(jq -er '.sourceArchiveSha256' "$stable_admission_receipt")" = "$SOURCE_ARCHIVE_SHA256" ] || {
-  echo "Trusted deployment receipt does not bind the artifact-verification source archive." >&2
-  exit 1
+require_sha256() {
+  label=$1
+  value=$2
+  case "$value" in ""|*[!a-f0-9]*) fail "$label must be one lowercase SHA256." ;; esac
+  [ "${#value}" -eq 64 ] || fail "$label must be one lowercase SHA256."
 }
-[ "$(hash_file "$stable_source_archive")" = "$SOURCE_ARCHIVE_SHA256" ] || { echo "Exact source archive SHA256 mismatch." >&2; exit 1; }
-node "$SCRIPT_DIR/trusted-provider-run-policy.mjs" \
-  --policy "$ADMISSION_POLICY" \
-  --metadata "$stable_provider_metadata" \
-  --metadataSha256 "$PROVIDER_METADATA_SHA256" \
-  --deploymentReceipt "$stable_admission_receipt" \
-  --runId "$PROVIDER_RUN_ID" \
-  --runAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null
-node "$SCRIPT_DIR/deployment-receipt-policy.mjs" \
-  --policy "$ADMISSION_POLICY" \
-  --artifactReceipt "$stable_artifact_receipt" \
-  --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
-  --deploymentReceipt "$stable_admission_receipt" \
-  --deploymentReceiptSha256 "$ADMISSION_RECEIPT_SHA256" \
-  --repo "$DEPLOY_REPO" --commit "$RELEASE_SHA" --tree "$RELEASE_TREE" \
-  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
-  --providerRunId "$PROVIDER_RUN_ID" \
-  --providerRunAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null
 
-encode() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
-encode_file() { base64 < "$1" | tr -d '\r\n'; }
+require_positive_integer() {
+  label=$1
+  value=$2
+  case "$value" in ""|*[!0-9]*|0) fail "$label must be a positive integer." ;; esac
+}
 
-node "$SCRIPT_DIR/pinned-ssh-host-key.mjs" verify \
+require_input_file() {
+  label=$1
+  filename=$2
+  [ -n "$filename" ] || fail "$label path is required."
+  [ -f "$filename" ] && [ -r "$filename" ] && [ -s "$filename" ] && [ ! -L "$filename" ] \
+    || fail "$label must be one readable, non-empty regular file and not a symlink."
+}
+
+[ "${PLATFORM_TRUSTED_OPS_RUNNER:-}" = 1 ] || fail \
+  "Deployment must execute through the exact provider-attested ops image entrypoint." 78
+[ "$#" -eq 0 ] || fail "deploy-vps.sh accepts no positional arguments."
+
+case "$REMOTE" in *@*) ;; *) fail "DEPLOY_REMOTE must be one canonical user@host endpoint." ;; esac
+REMOTE_USER=${REMOTE%@*}
+REMOTE_HOST=${REMOTE#*@}
+case "$REMOTE_USER" in ""|[!a-z_]*|*[!a-z0-9_-]*) fail "DEPLOY_REMOTE user is invalid." ;; esac
+case "$REMOTE_HOST" in ""|[!a-z0-9]*|*[!a-z0-9.-]*|*..*|*[-.]) fail "DEPLOY_REMOTE host is invalid." ;; esac
+case "$REMOTE" in *@*@*) fail "DEPLOY_REMOTE must contain exactly one separator." ;; esac
+require_positive_integer "DEPLOY_SSH_PORT" "$SSH_PORT"
+[ "$SSH_PORT" -le 65535 ] || fail "DEPLOY_SSH_PORT is outside the accepted range."
+case "$REPOSITORY" in
+  [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]* ) ;;
+  * ) fail "DEPLOY_REPO must be one owner/repository identifier." ;;
+esac
+case "$COMMIT_SHA:$TREE_SHA" in *[!a-f0-9:]*|::*|:*|*:) fail "Release commit/tree inputs are invalid." ;; esac
+[ "${#COMMIT_SHA}" -eq 40 ] && [ "${#TREE_SHA}" -eq 40 ] || fail "Release commit/tree inputs are incomplete."
+
+require_sha256 "Environment SHA256" "$ENVIRONMENT_SHA256"
+require_sha256 "Artifact receipt SHA256" "$ARTIFACT_RECEIPT_SHA256"
+require_sha256 "Deployment receipt SHA256" "$DEPLOYMENT_RECEIPT_SHA256"
+require_sha256 "Provider metadata SHA256" "$PROVIDER_METADATA_SHA256"
+require_sha256 "DAST receipt SHA256" "$DAST_RECEIPT_SHA256"
+require_sha256 "Activation bundle SHA256" "$BUNDLE_SHA256"
+require_sha256 "Activation bundle manifest SHA256" "$BUNDLE_MANIFEST_SHA256"
+require_sha256 "Activation admission SHA256" "$ACTIVATION_ADMISSION_SHA256"
+require_positive_integer "Activation bundle size" "$BUNDLE_SIZE_BYTES"
+require_positive_integer "Activation admission size" "$ACTIVATION_ADMISSION_SIZE_BYTES"
+require_positive_integer "Provider run ID" "$PROVIDER_RUN_ID"
+require_positive_integer "Provider run attempt" "$PROVIDER_RUN_ATTEMPT"
+require_positive_integer "Consumer run ID" "$CONSUMER_RUN_ID"
+require_positive_integer "Consumer run attempt" "$CONSUMER_RUN_ATTEMPT"
+
+require_input_file "Deployment admission policy" "$POLICY"
+require_input_file "Artifact receipt" "$ARTIFACT_RECEIPT"
+require_input_file "Deployment receipt" "$DEPLOYMENT_RECEIPT"
+require_input_file "Provider metadata" "$PROVIDER_METADATA"
+require_input_file "DAST receipt" "$DAST_RECEIPT"
+require_input_file "Activation bundle manifest" "$BUNDLE_MANIFEST"
+require_input_file "SSH private key" "$SSH_KEY_SOURCE"
+require_input_file "SSH known-hosts input" "$KNOWN_HOSTS_SOURCE"
+
+[ -x "$SCRIPT_ROOT/activation-request.mjs" ] || fail "The admitted ops image lacks its activation request producer." 78
+[ -x "$SCRIPT_ROOT/ssh-known-host-endpoint.sh" ] || fail "The admitted ops image lacks its SSH endpoint verifier." 78
+[ -x "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" ] || fail "The admitted ops image lacks its exact SSH host-key verifier." 78
+[ -x "$SCRIPT_ROOT/activation-receipt-policy.mjs" ] || fail "The admitted ops image lacks its activation receipt validator." 78
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-activation-client.XXXXXX")
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+ssh_key="$work/ssh-key"
+known_hosts="$work/known-hosts"
+request="$work/activation-request.json"
+receipt="$work/activation-receipt.json"
+
+key_before=$(hash_file "$SSH_KEY_SOURCE")
+known_before=$(hash_file "$KNOWN_HOSTS_SOURCE")
+cp "$SSH_KEY_SOURCE" "$ssh_key"
+cp "$KNOWN_HOSTS_SOURCE" "$known_hosts"
+chmod 600 "$ssh_key" "$known_hosts"
+[ "$(hash_file "$SSH_KEY_SOURCE")" = "$key_before" ] \
+  && [ "$(hash_file "$ssh_key")" = "$key_before" ] \
+  || fail "SSH private key changed during stable capture." 65
+[ "$(hash_file "$KNOWN_HOSTS_SOURCE")" = "$known_before" ] \
+  && [ "$(hash_file "$known_hosts")" = "$known_before" ] \
+  || fail "SSH known-hosts input changed during stable capture." 65
+
+sh "$SCRIPT_ROOT/ssh-known-host-endpoint.sh" "$REMOTE_HOST" "$SSH_PORT" "$known_hosts"
+node "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" verify \
   --remote "$REMOTE" \
   --port "$SSH_PORT" \
-  --file "$SSH_KNOWN_HOSTS_PATH" >/dev/null || {
-    echo "Pinned SSH host trust validation failed." >&2
-    exit 1
-  }
+  --file "$known_hosts" >/dev/null || fail "Pinned SSH host trust validation failed." 65
 
-set -- -F /dev/null -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
+node "$SCRIPT_ROOT/activation-request.mjs" \
+  --policy "$POLICY" \
+  --artifactReceipt "$ARTIFACT_RECEIPT" \
+  --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+  --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+  --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+  --providerMetadata "$PROVIDER_METADATA" \
+  --providerMetadataSha256 "$PROVIDER_METADATA_SHA256" \
+  --dastReceipt "$DAST_RECEIPT" \
+  --dastReceiptSha256 "$DAST_RECEIPT_SHA256" \
+  --bundleManifest "$BUNDLE_MANIFEST" \
+  --bundleSha256 "$BUNDLE_SHA256" \
+  --bundleSizeBytes "$BUNDLE_SIZE_BYTES" \
+  --bundleManifestSha256 "$BUNDLE_MANIFEST_SHA256" \
+  --activationAdmissionSha256 "$ACTIVATION_ADMISSION_SHA256" \
+  --activationAdmissionSizeBytes "$ACTIVATION_ADMISSION_SIZE_BYTES" \
+  --repository "$REPOSITORY" \
+  --commit "$COMMIT_SHA" \
+  --tree "$TREE_SHA" \
+  --targetHost "$REMOTE_HOST" \
+  --environmentSha256 "$ENVIRONMENT_SHA256" \
+  --providerRunId "$PROVIDER_RUN_ID" \
+  --providerRunAttempt "$PROVIDER_RUN_ATTEMPT" \
+  --consumerRunId "$CONSUMER_RUN_ID" \
+  --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+  --sshPort "$SSH_PORT" \
+  --output "$request" >/dev/null
+[ -f "$request" ] && [ -s "$request" ] && [ ! -L "$request" ] \
+  || fail "Activation request producer did not create one stable request." 65
+
+set -- \
+  -F /dev/null \
+  -i "$ssh_key" \
+  -p "$SSH_PORT" \
   -o BatchMode=yes \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes \
-  -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS_PATH" \
+  -o "UserKnownHostsFile=$known_hosts" \
   -o GlobalKnownHostsFile=/dev/null \
-  -o UpdateHostKeys=no
+  -o UpdateHostKeys=no \
+  -o PermitLocalCommand=no \
+  -o ClearAllForwardings=yes \
+  -o ExitOnForwardFailure=yes
 
-request_file="$request_dir/request.sh"
-{
-  printf "PLATFORM_REMOTE_DIR_B64='%s'\n" "$(encode "$REMOTE_DIR")"
-  printf "PLATFORM_ENV_FILE_B64='%s'\n" "$(encode "$ENV_FILE")"
-  printf "PLATFORM_PROJECT_NAME_B64='%s'\n" "$(encode "$PROJECT_NAME")"
-  printf "PLATFORM_RELEASE_SHA_B64='%s'\n" "$(encode "$RELEASE_SHA")"
-  printf "PLATFORM_RELEASE_TREE_B64='%s'\n" "$(encode "$RELEASE_TREE")"
-  printf "PLATFORM_SOURCE_ARCHIVE_SHA256_B64='%s'\n" "$(encode "$SOURCE_ARCHIVE_SHA256")"
-  printf "PLATFORM_DEPLOY_REPO_B64='%s'\n" "$(encode "$DEPLOY_REPO")"
-  printf "PLATFORM_CANONICAL_ORIGIN_B64='%s'\n" "$(encode "$CANONICAL_ORIGIN")"
-  printf "PLATFORM_SSH_PORT_B64='%s'\n" "$(encode "$SSH_PORT")"
-  printf "PLATFORM_ARTIFACT_RECEIPT_SHA256_B64='%s'\n" "$(encode "$ARTIFACT_RECEIPT_SHA256")"
-  printf "PLATFORM_ADMISSION_RECEIPT_SHA256_B64='%s'\n" "$(encode "$ADMISSION_RECEIPT_SHA256")"
-  printf "PLATFORM_PROVIDER_METADATA_SHA256_B64='%s'\n" "$(encode "$PROVIDER_METADATA_SHA256")"
-  printf "PLATFORM_PROVIDER_RUN_ID_B64='%s'\n" "$(encode "$PROVIDER_RUN_ID")"
-  printf "PLATFORM_PROVIDER_RUN_ATTEMPT_B64='%s'\n" "$(encode "$PROVIDER_RUN_ATTEMPT")"
-  printf "PLATFORM_ARTIFACT_RECEIPT_B64='%s'\n" "$(encode_file "$stable_artifact_receipt")"
-  printf "PLATFORM_ADMISSION_RECEIPT_B64='%s'\n" "$(encode_file "$stable_admission_receipt")"
-  printf "PLATFORM_PROVIDER_METADATA_B64='%s'\n" "$(encode_file "$stable_provider_metadata")"
-  printf '%s\n' 'platform_write_source_archive() {'
-  printf '%s\n' "  base64 -d <<'__PLATFORM_EXACT_SOURCE_ARCHIVE__'"
-  base64 < "$stable_source_archive"
-  printf '%s\n' '__PLATFORM_EXACT_SOURCE_ARCHIVE__'
-  printf '%s\n' '}'
-  printf "PLATFORM_RUN_WAF_SMOKE_B64='%s'\n" "$(encode "$run_waf_smoke")"
-  printf "PLATFORM_RUN_INFRA_HEALTH_B64='%s'\n" "$(encode "$run_infra_health")"
-  printf "PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64='%s'\n" "$(encode "$run_production_preflight")"
-  printf "PLATFORM_RUN_PRE_GO_LIVE_B64='%s'\n" "$(encode "$run_pre_go_live")"
-  printf "PLATFORM_RUN_GO_NO_GO_B64='%s'\n" "$(encode "$run_go_no_go")"
-  printf "PLATFORM_PRE_GO_LIVE_PRODUCTION_PREFLIGHT_B64='%s'\n" "$(encode "$pre_go_live_production_preflight")"
-  printf "PLATFORM_PRE_GO_LIVE_RESTORE_DRILL_B64='%s'\n" "$(encode "$pre_go_live_restore_drill")"
-  printf "PLATFORM_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN_B64='%s'\n" "$(encode "$pre_go_live_offsite_restore_dry_run")"
-  printf "PLATFORM_PRE_GO_LIVE_GITHUB_REMOTE_B64='%s'\n" "$(encode "$pre_go_live_github_remote")"
-  cat "$SCRIPT_DIR/deploy-vps-remote.sh"
-} > "$request_file"
+# The provider/admin-owned promoter must already have installed the exact
+# content-addressed bundle and its independently authenticated Sigstore/DSSE
+# admission sidecar. This client never stages into the trusted CAS and never
+# supplies a remote path or candidate executable.
+ssh "$@" -- "$REMOTE" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate' \
+  < "$request" > "$receipt"
 
-ssh "$@" "$REMOTE" 'sh -s' < "$request_file"
+node "$SCRIPT_ROOT/activation-receipt-policy.mjs" \
+  --request "$request" \
+  --receipt "$receipt" >/dev/null
+
+if [ -n "$RECEIPT_OUTPUT" ]; then
+  case "$RECEIPT_OUTPUT" in
+    */*) receipt_parent=${RECEIPT_OUTPUT%/*}; [ -n "$receipt_parent" ] || receipt_parent=/ ;;
+    *) receipt_parent=. ;;
+  esac
+  [ -d "$receipt_parent" ] && [ ! -L "$receipt_parent" ] || fail "Activation receipt output parent is invalid."
+  (umask 077; set -C; : > "$RECEIPT_OUTPUT") 2>/dev/null \
+    || fail "Activation receipt output already exists or is not writable."
+  cp "$receipt" "$RECEIPT_OUTPUT"
+  chmod 600 "$RECEIPT_OUTPUT"
+fi
+
+cat "$receipt"

@@ -36,6 +36,24 @@ function exactName(value, label) {
   return text;
 }
 
+function exactAbsolutePath(value, label) {
+  const text = String(value ?? "");
+  if (
+    !text.startsWith("/")
+    || text.includes("//")
+    || text.split("/").includes("..")
+    || !/^\/[A-Za-z0-9._/-]+$/.test(text)
+  ) {
+    invalid(`${label} must be one normalized absolute path.`);
+  }
+  return text;
+}
+
+function exactNonNegativeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) invalid(`${label} must be a non-negative integer.`);
+  return value;
+}
+
 function exactSubjectKey(value, label) {
   const text = String(value ?? "");
   if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(text)) invalid(`${label} is invalid.`);
@@ -76,6 +94,7 @@ export function validateRuntimeIntent(intent, {
   treeSha,
   sourceArchiveSha256,
   artifactSubjects,
+  artifactPlatformImageIds,
   opsRunner,
   projectName = PRODUCTION_PROJECT_NAME,
   environmentSha256 = null,
@@ -90,12 +109,13 @@ export function validateRuntimeIntent(intent, {
     "projectName",
     "environmentSha256",
     "hostedWorkloadLockSha256",
-    "coreComposeSha256",
+    "sourceRenderSha256",
     "combinedComposeSha256",
+    "persistentVolumes",
     "services",
     "targetServingServices",
   ]);
-  if (intent.version !== 1 || intent.kind !== "platform-runtime-intent/v1") invalid("Runtime intent kind/version is invalid.");
+  if (intent.version !== 2 || intent.kind !== "platform-runtime-intent/v2") invalid("Runtime intent kind/version is invalid.");
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
   const expectedTree = exactGitSha(treeSha, "tree SHA");
@@ -116,8 +136,67 @@ export function validateRuntimeIntent(intent, {
     invalid("Runtime intent environment SHA256 is mismatched.");
   }
   if (intent.hostedWorkloadLockSha256 !== null) exactSha256(intent.hostedWorkloadLockSha256, "hosted workload lock SHA256");
-  exactSha256(intent.coreComposeSha256, "core Compose SHA256");
+  exactSha256(intent.sourceRenderSha256, "source render SHA256");
   exactSha256(intent.combinedComposeSha256, "combined Compose SHA256");
+  if (intent.sourceRenderSha256 === intent.combinedComposeSha256) {
+    invalid("Source and final combined render SHA256 values must be distinct.");
+  }
+
+  if (!Array.isArray(intent.persistentVolumes) || intent.persistentVolumes.length !== 1) {
+    invalid("Runtime intent must bind the one exact local registry persistent volume.");
+  }
+  const registryVolume = exactObject(intent.persistentVolumes[0], "Runtime intent registry volume", [
+    "name",
+    "createdAt",
+    "driver",
+    "scope",
+    "options",
+    "labels",
+    "mountpoint",
+    "owner",
+  ]);
+  if (
+    registryVolume.name !== "enterprise_local_registry_data"
+    || registryVolume.driver !== "local"
+    || registryVolume.scope !== "local"
+  ) {
+    invalid("Runtime intent registry volume name, driver and scope are invalid.");
+  }
+  if (
+    typeof registryVolume.createdAt !== "string"
+    || !registryVolume.createdAt
+    || !Number.isFinite(Date.parse(registryVolume.createdAt))
+  ) {
+    invalid("Runtime intent registry volume creation timestamp is invalid.");
+  }
+  exactObject(registryVolume.options, "Runtime intent registry volume options", []);
+  exactObject(registryVolume.labels, "Runtime intent registry volume labels", [
+    "platform.infrastructure.managed",
+    "platform.infrastructure.purpose",
+  ]);
+  if (
+    registryVolume.labels["platform.infrastructure.managed"] !== "true"
+    || registryVolume.labels["platform.infrastructure.purpose"] !== "local-registry"
+  ) {
+    invalid("Runtime intent registry volume labels are invalid.");
+  }
+  const mountpoint = exactAbsolutePath(registryVolume.mountpoint, "Runtime intent registry volume mountpoint");
+  if (!mountpoint.endsWith("/enterprise_local_registry_data/_data")) {
+    invalid("Runtime intent registry volume mountpoint is not bound to the exact volume.");
+  }
+  const owner = exactObject(registryVolume.owner, "Runtime intent registry volume owner", [
+    "uid",
+    "gid",
+    "mode",
+  ]);
+  if (
+    exactNonNegativeInteger(owner.uid, "Runtime intent registry volume owner UID") !== 0
+    || exactNonNegativeInteger(owner.gid, "Runtime intent registry volume owner GID") !== 0
+    || !/^0[0-7]{3}$/.test(String(owner.mode ?? ""))
+    || (Number.parseInt(owner.mode, 8) & 0o022) !== 0
+  ) {
+    invalid("Runtime intent registry volume mountpoint must be root-owned and not group/other writable.");
+  }
 
   const admittedSubjects = Array.isArray(artifactSubjects)
     ? artifactSubjects.map((entry) => parseReleaseImage(entry?.image, entry?.key))
@@ -125,6 +204,19 @@ export function validateRuntimeIntent(intent, {
   if (admittedSubjects.length === 0) invalid("Artifact release subjects are required.");
   const subjectsByKey = new Map(admittedSubjects.map((entry) => [entry.key, entry]));
   if (subjectsByKey.size !== admittedSubjects.length) invalid("Artifact release subject keys must be unique.");
+  if (!artifactPlatformImageIds || typeof artifactPlatformImageIds !== "object" || Array.isArray(artifactPlatformImageIds)
+    || JSON.stringify(Object.keys(artifactPlatformImageIds).sort()) !== JSON.stringify([...subjectsByKey.keys()].sort())) {
+    invalid("Artifact platform image ID bindings must exactly cover the release subject set.");
+  }
+  const subjectImageIds = new Map(Object.entries(artifactPlatformImageIds).map(([key, imageId]) => [
+    key,
+    exactImageId(imageId, `artifact platform image ID ${key}`),
+  ]));
+  for (const [key, subject] of subjectsByKey) {
+    if (subjectImageIds.get(key) === subject.digest) {
+      invalid(`Artifact platform image ID ${key} must differ from the manifest/index digest.`);
+    }
+  }
   const admittedOpsImage = parseReleaseImage(opsRunner?.image, "PLATFORM_OPS_IMAGE");
   exactImageId(opsRunner?.imageId, "ops runner image ID");
 
@@ -132,7 +224,6 @@ export function validateRuntimeIntent(intent, {
   const services = [];
   const seenServices = new Set();
   const usedSubjects = new Set();
-  let opsRunnerUses = 0;
   for (const entry of intent.services) {
     exactObject(entry, "Runtime intent service", ["service", "image", "admission", "expectedLocalImageId"]);
     const service = exactName(entry.service, "runtime intent service name");
@@ -140,20 +231,22 @@ export function validateRuntimeIntent(intent, {
     seenServices.add(service);
     const image = parseReleaseImage(entry.image, `${service} image`);
     exactImageId(entry.expectedLocalImageId, `${service} expected local image ID`);
+    if (image.image === admittedOpsImage.image) {
+      invalid(`${service} may not reuse the privileged ops runner as a runtime service image.`);
+    }
     const admission = entry.admission;
     if (admission?.kind === "artifact-subject") {
       exactObject(admission, `${service} artifact admission`, ["kind", "subjectKey"]);
       const subjectKey = exactSubjectKey(admission.subjectKey, `${service} artifact subject key`);
       const subject = subjectsByKey.get(subjectKey);
       if (!subject || subject.image !== image.image) invalid(`${service} is not bound to its exact artifact release subject.`);
+      if (entry.expectedLocalImageId !== subjectImageIds.get(subjectKey)) {
+        invalid(`${service} expected local image ID is not bound to the attested platform image ID.`);
+      }
       if (usedSubjects.has(subjectKey)) invalid(`Artifact release subject ${subjectKey} is used by multiple services.`);
       usedSubjects.add(subjectKey);
     } else if (admission?.kind === "ops-runner") {
-      exactObject(admission, `${service} ops admission`, ["kind"]);
-      if (image.image !== admittedOpsImage.image || entry.expectedLocalImageId !== opsRunner.imageId) {
-        invalid(`${service} is not bound to the exact provider-attested ops runner image and image ID.`);
-      }
-      opsRunnerUses += 1;
+      invalid(`${service} may not execute the privileged ops runner in the production runtime.`);
     } else if (admission?.kind === "external-digest") {
       exactObject(admission, `${service} external image admission`, ["kind", "sourceKey"]);
       exactSubjectKey(admission.sourceKey, `${service} external image source key`);
@@ -170,8 +263,6 @@ export function validateRuntimeIntent(intent, {
   ) {
     invalid("Runtime intent does not consume the exact complete artifact release subject set.");
   }
-  if (opsRunnerUses !== 1) invalid("Runtime intent must consume the provider-attested ops runner exactly once.");
-
   const targetServingServices = sortedUnique(intent.targetServingServices, "Runtime intent target serving services", exactName);
   if (targetServingServices.some((service) => !seenServices.has(service))) {
     invalid("Runtime intent target serving services are not an exact subset of runtime services.");
@@ -182,6 +273,9 @@ export function validateRuntimeIntent(intent, {
     treeSha: expectedTree,
     sourceArchiveSha256: expectedArchive,
     environmentSha256: intent.environmentSha256,
+    sourceRenderSha256: intent.sourceRenderSha256,
+    combinedComposeSha256: intent.combinedComposeSha256,
+    persistentVolumes: intent.persistentVolumes,
     subjects: admittedSubjects,
     services,
     targetServingServices,

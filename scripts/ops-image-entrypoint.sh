@@ -15,6 +15,16 @@ if [ "${1:-}" = "backup-scheduler" ]; then
   shift
   exec sh "$CODE_ROOT/scripts/backup-scheduler.sh" "$@"
 fi
+if [ "${1:-}" = "deploy-vps" ]; then
+  shift
+  [ "$#" -eq 0 ] || {
+    echo "The immutable deployment client accepts no positional arguments." >&2
+    exit 64
+  }
+  export PLATFORM_TRUSTED_OPS_RUNNER=1
+  export PLATFORM_OPS_CODE_ROOT="$CODE_ROOT"
+  exec sh "$CODE_ROOT/scripts/deploy-vps.sh"
+fi
 
 case "$EXPECTED_SHA256" in
   *[!a-f0-9]*|"") echo "Exact infrastructure snapshot SHA256 is required." >&2; exit 78 ;;

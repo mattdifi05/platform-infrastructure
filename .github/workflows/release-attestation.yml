@@ -44,6 +44,7 @@ jobs:
           echo "CONTROL_CENTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-control-center" >> "$GITHUB_ENV"
           echo "PROJECT_ROUTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-project-router" >> "$GITHUB_ENV"
           echo "PLATFORM_ALERT_DISPATCHER_IMAGE=ghcr.io/${owner}/platform-infrastructure-alert-dispatcher" >> "$GITHUB_ENV"
+          echo "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=ghcr.io/${owner}/platform-infrastructure-backup-scheduler" >> "$GITHUB_ENV"
 
       - name: Login to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -123,11 +124,34 @@ jobs:
           subject-digest: ${{ steps.alert-dispatcher.outputs.digest }}
           push-to-registry: true
 
+      - name: Build and push Backup Scheduler image
+        id: backup-scheduler
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: docker/backup-scheduler.Dockerfile
+          push: true
+          sbom: true
+          platforms: linux/amd64
+          tags: ${{ env.PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=platform-infrastructure-backup-scheduler
+
+      - name: Attest Backup Scheduler image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ${{ env.PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY }}
+          subject-digest: ${{ steps.backup-scheduler.outputs.digest }}
+          push-to-registry: true
+
       - name: Resolve immutable registry platform and extract BuildKit SBOM
         env:
           CONTROL_CENTER_DIGEST: ${{ steps.control-center.outputs.digest }}
           PROJECT_ROUTER_DIGEST: ${{ steps.project-router.outputs.digest }}
           PLATFORM_ALERT_DISPATCHER_DIGEST: ${{ steps.alert-dispatcher.outputs.digest }}
+          PLATFORM_BACKUP_SCHEDULER_DIGEST: ${{ steps.backup-scheduler.outputs.digest }}
         run: |
           mkdir -p reports/release
           while IFS='|' read -r key image digest; do
@@ -136,16 +160,22 @@ jobs:
             descriptor="reports/release/registry-descriptor-${key}-${GITHUB_RUN_ID}.json"
             resolution="reports/release/registry-resolution-${key}-${GITHUB_RUN_ID}.json"
             buildkit="reports/release/buildkit-sbom-${key}-${GITHUB_RUN_ID}.spdx.json"
+            platform_manifest="reports/release/platform-manifest-${key}-${GITHUB_RUN_ID}-linux-amd64.json"
             docker buildx imagetools inspect "$subject" --raw > "$descriptor"
+            platform_digest="$(node -e 'const fs=require("node:fs");const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const m=(d.manifests||[]).filter(x=>x&&x.platform&&x.platform.os==="linux"&&x.platform.architecture==="amd64");if(m.length!==1||!/^sha256:[a-f0-9]{64}$/.test(String(m[0].digest||"")))process.exit(1);process.stdout.write(m[0].digest)' "$descriptor")"
+            docker buildx imagetools inspect "${image}@${platform_digest}" --raw > "$platform_manifest"
+            test -s "$platform_manifest"
             node ./scripts/release-registry-resolution.mjs \
               --image "$subject" \
               --descriptor "$descriptor" \
               --platform linux/amd64 \
+              --platformManifest "linux/amd64=$platform_manifest" \
               --receipt "$resolution"
             docker buildx imagetools inspect "$subject" --format '{{ json .SBOM }}' > "$buildkit"
             test -s "$buildkit"
           done <<EOF
           CONTROL_CENTER_IMAGE|${CONTROL_CENTER_IMAGE}|${CONTROL_CENTER_DIGEST}
+          PLATFORM_BACKUP_SCHEDULER_IMAGE|${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY}|${PLATFORM_BACKUP_SCHEDULER_DIGEST}
           PLATFORM_ALERT_DISPATCHER_IMAGE|${PLATFORM_ALERT_DISPATCHER_IMAGE}|${PLATFORM_ALERT_DISPATCHER_DIGEST}
           PROJECT_ROUTER_IMAGE|${PROJECT_ROUTER_IMAGE}|${PROJECT_ROUTER_DIGEST}
           EOF
@@ -156,6 +186,7 @@ jobs:
           CONTROL_CENTER_DIGEST: ${{ steps.control-center.outputs.digest }}
           PROJECT_ROUTER_DIGEST: ${{ steps.project-router.outputs.digest }}
           PLATFORM_ALERT_DISPATCHER_DIGEST: ${{ steps.alert-dispatcher.outputs.digest }}
+          PLATFORM_BACKUP_SCHEDULER_DIGEST: ${{ steps.backup-scheduler.outputs.digest }}
         run: |
           mkdir -p .tmp/release-attestation reports/release
           git -c tar.umask=0000 archive \
@@ -165,6 +196,7 @@ jobs:
           test -s "reports/release/source-archive-${GITHUB_RUN_ID}.tar"
           RELEASE_SUBJECTS_SHA256="$(node ./scripts/release-subject-manifest.mjs \
             --image "CONTROL_CENTER_IMAGE=${CONTROL_CENTER_IMAGE}@${CONTROL_CENTER_DIGEST}" \
+            --image "PLATFORM_BACKUP_SCHEDULER_IMAGE=${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY}@${PLATFORM_BACKUP_SCHEDULER_DIGEST}" \
             --image "PROJECT_ROUTER_IMAGE=${PROJECT_ROUTER_IMAGE}@${PROJECT_ROUTER_DIGEST}" \
             --image "PLATFORM_ALERT_DISPATCHER_IMAGE=${PLATFORM_ALERT_DISPATCHER_IMAGE}@${PLATFORM_ALERT_DISPATCHER_DIGEST}" \
             --repo "${GITHUB_REPOSITORY}" \
@@ -175,12 +207,15 @@ jobs:
             --workflowRunId "${GITHUB_RUN_ID}" \
             --workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --buildkitSbom "CONTROL_CENTER_IMAGE=reports/release/buildkit-sbom-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
+            --buildkitSbom "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/buildkit-sbom-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
             --buildkitSbom "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/buildkit-sbom-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
             --buildkitSbom "PROJECT_ROUTER_IMAGE=reports/release/buildkit-sbom-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
             --registryDescriptor "CONTROL_CENTER_IMAGE=reports/release/registry-descriptor-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryDescriptor "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/registry-descriptor-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.json" \
             --registryDescriptor "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/registry-descriptor-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.json" \
             --registryDescriptor "PROJECT_ROUTER_IMAGE=reports/release/registry-descriptor-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.json" \
             --registryResolution "CONTROL_CENTER_IMAGE=reports/release/registry-resolution-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryResolution "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/registry-resolution-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.json" \
             --registryResolution "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/registry-resolution-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.json" \
             --registryResolution "PROJECT_ROUTER_IMAGE=reports/release/registry-resolution-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.json" \
             --evidenceBundle "reports/release/release-subject-evidence-${GITHUB_RUN_ID}.json" \

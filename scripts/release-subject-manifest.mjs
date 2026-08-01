@@ -122,8 +122,8 @@ export function createVerifiedReleaseArtifacts({
       name: requested.name,
       digest: requested.digest,
       platforms: verifiedEvidence.find((entry) => entry.subject.key === requested.key).resolution.platforms
-        .map(({ platform, digest: descriptorDigest, size, mediaType }) => ({
-        platform, descriptorDigest, size, mediaType,
+        .map(({ platform, digest: descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({
+        platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
       })),
     };
   });

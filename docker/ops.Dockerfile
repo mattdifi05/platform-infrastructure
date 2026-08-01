@@ -16,6 +16,7 @@ RUN apk add --no-cache \
     docker-cli \
     docker-cli-compose \
     git \
+    jq \
     openssh-client \
     python3 \
     ruby \
@@ -36,12 +37,19 @@ RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts
     && rm -rf /tmp/control-center-dependencies
 
 COPY scripts/ /opt/platform-infrastructure/scripts/
+COPY governance/ /opt/platform-infrastructure/governance/
 COPY control-center/backup/ /opt/platform-infrastructure/control-center/backup/
 RUN chmod -R a-w /opt/platform-infrastructure \
     && chmod 0555 /opt/platform-infrastructure \
     && find /opt/platform-infrastructure -type d -exec chmod 0555 {} + \
     && find /opt/platform-infrastructure -type f -exec chmod 0444 {} + \
-    && chmod 0555 /opt/platform-infrastructure/scripts/ops-image-entrypoint.sh
+    && chmod 0555 \
+      /opt/platform-infrastructure/scripts/ops-image-entrypoint.sh \
+      /opt/platform-infrastructure/scripts/deploy-vps.sh \
+      /opt/platform-infrastructure/scripts/deploy-vps-remote.sh \
+      /opt/platform-infrastructure/scripts/activation-bundle.mjs \
+      /opt/platform-infrastructure/scripts/activation-request.mjs \
+      /opt/platform-infrastructure/scripts/activation-receipt-policy.mjs
 
 WORKDIR /workspace
 

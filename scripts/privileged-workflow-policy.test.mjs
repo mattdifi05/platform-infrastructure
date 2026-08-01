@@ -33,6 +33,10 @@ const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "ut
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace("      - release-admission\n", "")).join(" "),
+  /run-bound DAST receipt/,
+);
+assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("    if: github.event_name == 'workflow_dispatch'\n    environment:\n      name: staging", "    if: false\n    environment:\n      name: staging")).join(" "),
   /unconditionally/,
 );
@@ -46,8 +50,16 @@ assert.match(
 );
 assert.match(
   deploymentPrerequisiteMismatches(`${deployment}\n  alternate-deploy:\n    environment:\n      name: production\n    steps:\n      - run: sh ./scripts/deploy-vps.sh\n`).join(" "),
-  /exactly one deploy-vps\.sh sink|exactly one production environment/,
+  /must not invoke .* directly|exactly one production environment/,
+);
+assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace('            "$OPS_IMAGE_ID" deploy-vps', '            "$OPS_IMAGE_ID" inspect')).join(" "),
+  /exactly one trusted ops image/,
+);
+assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace("        run: |\n          PROMOTED=", "        run: sh ./scripts/deploy-vps.sh\n          PROMOTED=")).join(" "),
+  /must not invoke .* directly/,
 );
 
-const total = fixtures.length * 3 + 1 + 6;
+const total = fixtures.length * 3 + 1 + 9;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);

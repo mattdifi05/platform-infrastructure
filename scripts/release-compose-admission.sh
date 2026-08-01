@@ -25,23 +25,55 @@ jq -e -s '
   def exact_subject($receipt; $deployment; $compose; $key; $service):
     ([ $receipt.subjects[] | select(.key == $key) ] | length == 1) and
     ([ $receipt.subjects[] | select(.key == $key) ][0].image) as $image |
+    ([ $receipt.subjectVerificationReceipts[] | select(.key == $key and .image == $image) ] | length == 1) and
+    ([ $receipt.subjectVerificationReceipts[] | select(.key == $key and .image == $image) ][0].registry.platforms) as $platforms |
+    ($platforms | type == "array" and length == 1) and
+    ($platforms[0].platform == "linux/amd64") and
+    ($platforms[0].digest | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
+    ($platforms[0].imageId | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
+    ($platforms[0].imageId != $platforms[0].digest) and
+    ($platforms[0].imageId != ($image | split("@") | .[1])) and
     ($image | digest_image) and
     ([ $receipt.subjects[] | select(.key == $key) ][0].key == $key) and
     ([ $receipt.subjects[] | select(.key == $key) ][0].image == $image) and
     ([ $deployment.runtimeIntent.services[]
        | select(.service == $service and .admission.kind == "artifact-subject" and .admission.subjectKey == $key and .image == $image)
      ] | length == 1) and
+    ([ $deployment.runtimeIntent.services[] | select(.service == $service) ][0].expectedLocalImageId == $platforms[0].imageId) and
     ($compose.services[$service].image == $image);
   .[0] as $receipt | .[1] as $deployment | .[2] as $compose |
-  ($receipt.subjects | type == "array" and length == 3) and
-  (($receipt.subjects | map(.key) | sort) == ["CONTROL_CENTER_IMAGE", "PLATFORM_ALERT_DISPATCHER_IMAGE", "PROJECT_ROUTER_IMAGE"]) and
+  ($receipt.subjects | type == "array" and length == 4) and
+  (($receipt.subjects | map(.key) | sort) == ["CONTROL_CENTER_IMAGE", "PLATFORM_ALERT_DISPATCHER_IMAGE", "PLATFORM_BACKUP_SCHEDULER_IMAGE", "PROJECT_ROUTER_IMAGE"]) and
+  ($receipt.subjectVerificationReceipts | type == "array" and length == 4) and
+  (($receipt.subjectVerificationReceipts | map(.key) | sort) == ["CONTROL_CENTER_IMAGE", "PLATFORM_ALERT_DISPATCHER_IMAGE", "PLATFORM_BACKUP_SCHEDULER_IMAGE", "PROJECT_ROUTER_IMAGE"]) and
   ($deployment.opsRunner.image | digest_image) and
   ($deployment.opsRunner.imageId | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
   ($deployment.opsRunner.providerAttested == true) and
   ($deployment.runtimeIntentSha256 | type == "string" and test("^[a-f0-9]{64}$")) and
-  ($deployment.runtimeIntent.version == 1) and
-  ($deployment.runtimeIntent.kind == "platform-runtime-intent/v1") and
+  ($deployment.runtimeIntent.version == 2) and
+  ($deployment.runtimeIntent.kind == "platform-runtime-intent/v2") and
   ($deployment.runtimeIntent.projectName == "platform_infra_vps") and
+  ($deployment.runtimeIntent.sourceRenderSha256 | type == "string" and test("^[a-f0-9]{64}$")) and
+  ($deployment.runtimeIntent.combinedComposeSha256 | type == "string" and test("^[a-f0-9]{64}$")) and
+  ($deployment.runtimeIntent.sourceRenderSha256 != $deployment.runtimeIntent.combinedComposeSha256) and
+  ($deployment.runtimeIntent.persistentVolumes | type == "array" and length == 1) and
+  ($deployment.runtimeIntent.persistentVolumes[0] as $volume |
+    (($volume | keys | sort) == ["createdAt", "driver", "labels", "mountpoint", "name", "options", "owner", "scope"]) and
+    ($volume.name == "enterprise_local_registry_data") and
+    ($volume.createdAt | type == "string" and test("Z$")) and
+    ($volume.driver == "local") and
+    ($volume.scope == "local") and
+    ($volume.options == {}) and
+    ($volume.labels == {
+      "platform.infrastructure.managed": "true",
+      "platform.infrastructure.purpose": "local-registry"
+    }) and
+    ($volume.mountpoint | type == "string" and test("/enterprise_local_registry_data/_data$")) and
+    (($volume.owner | keys | sort) == ["gid", "mode", "uid"]) and
+    ($volume.owner.uid == 0) and
+    ($volume.owner.gid == 0) and
+    ($volume.owner.mode | type == "string" and test("^0[0-7][0145][0145]$"))
+  ) and
   ($deployment.runtimeIntent.services | type == "array" and length > 0) and
   (($deployment.runtimeIntent.services | map(.service)) == ($deployment.runtimeIntent.services | map(.service) | sort)) and
   ($compose.services | type == "object") and
@@ -53,9 +85,8 @@ jq -e -s '
     ($compose.services[.service].image == .image) and
     ($compose.services[.service] | has("build") | not)
   )) and
-  ([ $deployment.runtimeIntent.services[]
-     | select(.admission.kind == "ops-runner" and .image == $deployment.opsRunner.image and .expectedLocalImageId == $deployment.opsRunner.imageId)
-   ] | length == 1) and
+  (all($deployment.runtimeIntent.services[]; .admission.kind != "ops-runner" and .image != $deployment.opsRunner.image)) and
+  exact_subject($receipt; $deployment; $compose; "PLATFORM_BACKUP_SCHEDULER_IMAGE"; "backup-scheduler") and
   exact_subject($receipt; $deployment; $compose; "CONTROL_CENTER_IMAGE"; "control-center") and
   exact_subject($receipt; $deployment; $compose; "PLATFORM_ALERT_DISPATCHER_IMAGE"; "platform-alert-dispatcher") and
   exact_subject($receipt; $deployment; $compose; "PROJECT_ROUTER_IMAGE"; "project-router")

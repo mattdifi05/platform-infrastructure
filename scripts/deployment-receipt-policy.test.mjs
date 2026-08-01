@@ -12,6 +12,7 @@ const sbomSha256 = "e".repeat(64);
 const sourceArchiveSha256 = "0".repeat(64);
 const generatedAt = "2026-07-21T00:00:00.000Z";
 const image = `ghcr.io/owner/app@sha256:${"f".repeat(64)}`;
+const schedulerImage = `ghcr.io/owner/platform-infrastructure-backup-scheduler@sha256:${"7".repeat(64)}`;
 const policy = {
   status: "READY",
   trustedVerifierChannel: "external-admission-controller/prod",
@@ -39,15 +40,59 @@ const artifactReceipt = {
   generatedAt,
   manifestSha256,
   sbomSha256,
-  subjects: [{ key: "APP_IMAGE", image }],
+  subjects: [
+    { key: "APP_IMAGE", image },
+    { key: "PLATFORM_BACKUP_SCHEDULER_IMAGE", image: schedulerImage },
+  ],
+  subjectVerificationReceipts: [
+    {
+      key: "APP_IMAGE",
+      image,
+      registry: {
+        rootDigest: `sha256:${"f".repeat(64)}`,
+        descriptorSha256: "f".repeat(64),
+        platforms: [{
+          platform: "linux/amd64", digest: `sha256:${"1".repeat(64)}`, size: 100,
+          imageId: `sha256:${"8".repeat(64)}`, configSize: 50,
+          manifestArtifactSha256: "2".repeat(64),
+        }],
+      },
+    },
+    {
+      key: "PLATFORM_BACKUP_SCHEDULER_IMAGE",
+      image: schedulerImage,
+      registry: {
+        rootDigest: `sha256:${"7".repeat(64)}`,
+        descriptorSha256: "7".repeat(64),
+        platforms: [{
+          platform: "linux/amd64", digest: `sha256:${"3".repeat(64)}`, size: 100,
+          imageId: `sha256:${"6".repeat(64)}`, configSize: 50,
+          manifestArtifactSha256: "4".repeat(64),
+        }],
+      },
+    },
+  ],
   provenance: {
     verificationFingerprint: "1".repeat(64),
     manifestVerificationFingerprint: "2".repeat(64),
   },
 };
+const persistentVolumes = [{
+  name: "enterprise_local_registry_data",
+  createdAt: "2026-07-21T00:00:00.000Z",
+  driver: "local",
+  scope: "local",
+  options: {},
+  labels: {
+    "platform.infrastructure.managed": "true",
+    "platform.infrastructure.purpose": "local-registry",
+  },
+  mountpoint: "/var/lib/docker/volumes/enterprise_local_registry_data/_data",
+  owner: { uid: 0, gid: 0, mode: "0755" },
+}];
 const runtimeIntent = {
-  version: 1,
-  kind: "platform-runtime-intent/v1",
+  version: 2,
+  kind: "platform-runtime-intent/v2",
   repository,
   commitSha,
   treeSha,
@@ -55,8 +100,9 @@ const runtimeIntent = {
   projectName: "platform_infra_vps",
   environmentSha256: "8".repeat(64),
   hostedWorkloadLockSha256: null,
-  coreComposeSha256: "9".repeat(64),
+  sourceRenderSha256: "9".repeat(64),
   combinedComposeSha256: "0".repeat(64),
+  persistentVolumes,
   services: [
     {
       service: "app",
@@ -66,8 +112,8 @@ const runtimeIntent = {
     },
     {
       service: "backup-scheduler",
-      image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"5".repeat(64)}`,
-      admission: { kind: "ops-runner" },
+      image: schedulerImage,
+      admission: { kind: "artifact-subject", subjectKey: "PLATFORM_BACKUP_SCHEDULER_IMAGE" },
       expectedLocalImageId: `sha256:${"6".repeat(64)}`,
     },
   ],
@@ -107,10 +153,36 @@ const deploymentReceipt = {
   },
   runtimeIntent,
   runtimeIntentSha256: runtimeIntentSha256(runtimeIntent),
+  deploymentTarget: {
+    environment: "production",
+    host: "vps.example.internal",
+    projectName: "platform_infra_vps",
+  },
+  privilegedRuntime: {
+    activationBroker: {
+      path: "/usr/local/libexec/platform-activation-broker",
+      version: 1,
+      sha256: "a".repeat(64),
+      providerAttested: true,
+    },
+    originFirewallHelper: {
+      path: "/usr/local/libexec/platform-origin-firewall",
+      version: 1,
+      sha256: "b".repeat(64),
+      providerAttested: true,
+    },
+    workloadEgressHelper: {
+      path: "/usr/local/libexec/platform-workload-egress-firewall",
+      version: 1,
+      sha256: "c".repeat(64),
+      providerAttested: true,
+    },
+  },
 };
 const options = {
   policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt,
   providerRunId: "123456", providerRunAttempt: "2",
+  targetHost: "vps.example.internal", environmentSha256: runtimeIntent.environmentSha256,
 };
 
 assert.equal(validateTrustedDeploymentReceipt(deploymentReceipt, options), deploymentReceipt);
@@ -134,5 +206,33 @@ assert.throws(() => validateTrustedDeploymentReceipt({
 assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, runtimeIntent: { ...runtimeIntent, services: runtimeIntent.services.slice().reverse() },
 }, options), /lexicographically sorted/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt,
+  runtimeIntent: {
+    ...runtimeIntent,
+    services: runtimeIntent.services.map((service) => service.service === "backup-scheduler"
+      ? { ...service, expectedLocalImageId: `sha256:${"8".repeat(64)}` }
+      : service),
+  },
+}, options), /platform image ID/);
+const wrongArtifactImageId = structuredClone(artifactReceipt);
+wrongArtifactImageId.subjectVerificationReceipts[1].registry.platforms[0].imageId = `sha256:${"8".repeat(64)}`;
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
+  ...options,
+  artifactReceipt: wrongArtifactImageId,
+}), /platform image ID/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt, deploymentTarget: { ...deploymentReceipt.deploymentTarget, host: "attacker.example" },
+}, options), /target host/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt,
+  privilegedRuntime: {
+    ...deploymentReceipt.privilegedRuntime,
+    originFirewallHelper: { ...deploymentReceipt.privilegedRuntime.originFirewallHelper, path: "/tmp/helper" },
+  },
+}, options), /fixed provider-attested helper/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
+  ...options, environmentSha256: "0".repeat(64),
+}), /environment hash/);
 
-process.stdout.write("deployment receipt policy tests passed 13/13\n");
+process.stdout.write("deployment receipt policy tests passed 18/18\n");

@@ -49,6 +49,7 @@ export function approvedReleaseSubjects(entries, repository) {
     ["CONTROL_CENTER_IMAGE", `ghcr.io/${owner.toLowerCase()}/platform-infrastructure-control-center`],
     ["PROJECT_ROUTER_IMAGE", `ghcr.io/${owner.toLowerCase()}/platform-infrastructure-project-router`],
     ["PLATFORM_ALERT_DISPATCHER_IMAGE", `ghcr.io/${owner.toLowerCase()}/platform-infrastructure-alert-dispatcher`],
+    ["PLATFORM_BACKUP_SCHEDULER_IMAGE", `ghcr.io/${owner.toLowerCase()}/platform-infrastructure-backup-scheduler`],
   ]);
   for (const subject of subjects) {
     const expectedName = approved.get(subject.key);
@@ -229,13 +230,13 @@ export function validateAttestedReleaseManifest(manifest, {
       || manifest.registryResolution?.descriptorSha256 !== registryRootDescriptorSha256) {
       invalid("Attested release manifest does not bind exact registry resolution evidence.");
     }
-    const expectedPlatforms = (resolvedPlatforms ?? []).map(({ platform, digest, size, mediaType }) => ({
-      platform, descriptorDigest: digest, size, mediaType,
+    const expectedPlatforms = (resolvedPlatforms ?? []).map(({ platform, digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({
+      platform, descriptorDigest: digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
     })).sort((left, right) => left.platform.localeCompare(right.platform));
     if (expectedPlatforms.length === 0) invalid("Resolved release platform descriptors are required.");
     for (const subject of manifest.subjects) {
       const actualPlatforms = Array.isArray(subject.platforms)
-        ? subject.platforms.map(({ platform, descriptorDigest, size, mediaType }) => ({ platform, descriptorDigest, size, mediaType })).sort((left, right) => left.platform.localeCompare(right.platform))
+        ? subject.platforms.map(({ platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({ platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 })).sort((left, right) => left.platform.localeCompare(right.platform))
         : [];
       if (JSON.stringify(actualPlatforms) !== JSON.stringify(expectedPlatforms)) invalid(`Attested release subject ${subject.key} platform descriptors are mismatched.`);
     }
@@ -276,12 +277,12 @@ export function validateAttestedReleaseManifest(manifest, {
     }
     for (const subject of manifest.subjects) {
       const resolution = subjectEvidence.find((entry) => entry.key === subject.key)?.registryResolution;
-      const expectedPlatforms = resolution.platforms.map(({ platform, digest, size, mediaType }) => ({
-        platform, descriptorDigest: digest, size, mediaType,
+      const expectedPlatforms = resolution.platforms.map(({ platform, digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({
+        platform, descriptorDigest: digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
       })).sort((left, right) => left.platform.localeCompare(right.platform));
       const actualPlatforms = Array.isArray(subject.platforms)
-        ? subject.platforms.map(({ platform, descriptorDigest, size, mediaType }) => ({
-          platform, descriptorDigest, size, mediaType,
+        ? subject.platforms.map(({ platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 }) => ({
+          platform, descriptorDigest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
         })).sort((left, right) => left.platform.localeCompare(right.platform))
         : [];
       if (JSON.stringify(actualPlatforms) !== JSON.stringify(expectedPlatforms)) {
@@ -333,11 +334,18 @@ export function buildReleaseAdmissionReceipt({
     if (entry?.image !== subject.image
       || (!legacySingleEvidence && !/^[a-f0-9]{64}$/.test(String(entry?.buildkitSbomSha256 ?? "")))
       || (!legacySingleEvidence && !/^[a-f0-9]{64}$/.test(String(entry?.registryResolutionSha256 ?? "")))
+      || resolution?.version !== 2 || resolution?.kind !== "platform-registry-subject-resolution/v2"
       || resolution?.status !== "passed" || resolution?.image !== subject.image
       || resolution?.rootDigest !== subject.digest || resolution?.descriptorSha256 !== subject.sha256
       || !Array.isArray(resolution?.platforms) || resolution.platforms.length === 0
       || resolution.platforms.some((platform) => !/^linux\/(amd64|arm64)$/.test(String(platform?.platform ?? ""))
-        || !/^sha256:[a-f0-9]{64}$/.test(String(platform?.digest ?? "")) || !Number.isInteger(platform?.size) || platform.size < 1)) {
+        || !/^sha256:[a-f0-9]{64}$/.test(String(platform?.digest ?? ""))
+        || !/^sha256:[a-f0-9]{64}$/.test(String(platform?.imageId ?? ""))
+        || platform.imageId === platform.digest
+        || platform.imageId === resolution.rootDigest
+        || !Number.isInteger(platform?.size) || platform.size < 1
+        || !Number.isInteger(platform?.configSize) || platform.configSize < 1
+        || !/^[a-f0-9]{64}$/.test(String(platform?.manifestArtifactSha256 ?? "")))) {
       invalid(`Exact per-subject registry resolution is required for ${subject.key}.`);
     }
   }
@@ -365,7 +373,9 @@ export function buildReleaseAdmissionReceipt({
       registry: {
         rootDigest: evidenceByKey.get(subject.key).registryResolution.rootDigest,
         descriptorSha256: evidenceByKey.get(subject.key).registryResolution.descriptorSha256,
-        platforms: evidenceByKey.get(subject.key).registryResolution.platforms,
+        platforms: evidenceByKey.get(subject.key).registryResolution.platforms.map(({
+          platform, digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256,
+        }) => ({ platform, digest, size, mediaType, imageId, configSize, configMediaType, manifestArtifactSha256 })),
       },
       attestationReference: {
         provider: verification.provider,

@@ -22,10 +22,11 @@ assert.match(combined, /BatchMode=yes/);
 assert.match(combined, /IdentitiesOnly=yes/);
 assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh/);
 assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /ssh-known-host-endpoint\.sh/);
-assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh[\s\S]*ssh "\$@" "\$REMOTE"/);
+assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh[\s\S]*ssh "\$@" -- "\$REMOTE" '\/usr\/bin\/sudo -n -- \/usr\/local\/libexec\/platform-activation-broker activate'/);
 assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /known_hosts_snapshot[\s\S]*ssh-known-host-endpoint\.sh[\s\S]*ssh -i "\$ssh_key_snapshot"/);
-assert.match(sources["scripts/deploy-vps.sh"], /DEPLOY_SSH_KEY_PATH must be a readable, non-empty dedicated private-key file/);
-assert.doesNotMatch(sources["scripts/deploy-vps.sh"], /if \[ -f "\$SSH_KEY_PATH" \]/);
+assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH private key" "\$SSH_KEY_SOURCE"/);
+assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH known-hosts input" "\$KNOWN_HOSTS_SOURCE"/);
+assert.match(sources["scripts/deploy-vps.sh"], /key_before=.*[\s\S]*cp "\$SSH_KEY_SOURCE" "\$ssh_key"[\s\S]*hash_file "\$SSH_KEY_SOURCE"/);
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-host-key-policy-"));
 process.on("exit", () => fs.rmSync(temporary, { recursive: true, force: true }));
@@ -50,4 +51,4 @@ assert.notEqual(verify(`${endpoint},[alias.internal]:2222 ${key1}\n`).status, 0,
 assert.notEqual(verify(`${endpoint} ssh-ed25519 definitely-not-a-key\n`).status, 0, "malformed key base64 must fail before SSH");
 assert.notEqual(verify(`${endpoint} ssh-unknown ${key1.split(" ")[1]}\n`).status, 0, "an unsupported key type must fail before SSH");
 
-process.stdout.write("SSH host key policy tests passed 22/22\n");
+process.stdout.write("SSH host key policy tests passed 23/23\n");

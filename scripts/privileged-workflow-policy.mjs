@@ -9,6 +9,11 @@ function jobBlock(text, jobName) {
   return followingJob < 0 ? text.slice(jobStart) : text.slice(jobStart, jobStart + 1 + followingJob);
 }
 
+function exactNeeds(jobText) {
+  const match = jobText.match(/^    needs:[ \t]*\r?\n((?:^      - [A-Za-z0-9_-]+[ \t]*\r?\n)+)/m);
+  return match ? [...match[1].matchAll(/^      - ([A-Za-z0-9_-]+)[ \t]*$/gm)].map((item) => item[1]) : [];
+}
+
 export function privilegedWorkflowMismatches(workflowText, { jobName, forbidTagTrigger = false } = {}) {
   const text = String(workflowText);
   const issues = [];
@@ -37,8 +42,7 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   const admission = jobBlock(text, "release-admission");
   if (!deploy || !dast || !admission) return ["deployment DAG is missing deploy-vps, dast-zap, or release-admission"];
 
-  const needsMatch = deploy.match(/^    needs:[ \t]*\r?\n((?:^      - [A-Za-z0-9_-]+[ \t]*\r?\n)+)/m);
-  const needs = needsMatch ? [...needsMatch[1].matchAll(/^      - ([A-Za-z0-9_-]+)[ \t]*$/gm)].map((match) => match[1]) : [];
+  const needs = exactNeeds(deploy);
   const expectedNeeds = ["enterprise-readiness", "release-admission", "dast-zap"];
   if (JSON.stringify(needs) !== JSON.stringify(expectedNeeds)) {
     issues.push("deploy-vps must depend on the exact enterprise-readiness, release-admission, and dast-zap prerequisite set");
@@ -49,8 +53,11 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   if (!/^    if: github\.event_name == 'workflow_dispatch'\s*$/m.test(dast)) {
     issues.push("dast-zap must run unconditionally for every manual production deployment request");
   }
-  if (!/^    needs: enterprise-readiness\s*$/m.test(dast) || !/environment:\s*\n\s+name:\s+staging/.test(dast) || !/dast-zap-baseline\.sh/.test(dast)) {
-    issues.push("dast-zap must consume readiness and execute the staging DAST gate");
+  if (JSON.stringify(exactNeeds(dast)) !== JSON.stringify(["enterprise-readiness", "release-admission"])
+    || !/environment:\s*\n\s+name:\s+staging/.test(dast)
+    || !/dast-zap-baseline\.sh/.test(dast)
+    || !/dast-admission-policy\.mjs/.test(dast)) {
+    issues.push("dast-zap must consume the exact readiness and release-admission prerequisites and mint the run-bound DAST receipt");
   }
   if (!/^    needs: enterprise-readiness\s*$/m.test(admission)
     || !admission.includes(TRUSTED_REF_GUARD)
@@ -60,9 +67,13 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   if (/continue-on-error:\s*true/.test(`${dast}\n${admission}`)) {
     issues.push("DAST and release admission may not continue on error");
   }
-  const deployCalls = text.match(/run:\s*sh \.\/scripts\/deploy-vps\.sh/g) ?? [];
-  if (deployCalls.length !== 1 || !/run:\s*sh \.\/scripts\/deploy-vps\.sh/.test(deploy)) {
-    issues.push("production mutation must have exactly one deploy-vps.sh sink inside the gated deploy-vps job");
+  const legacyDeployCalls = text.match(/run:\s*sh \.\/scripts\/deploy-vps\.sh/g) ?? [];
+  if (legacyDeployCalls.length !== 0) {
+    issues.push("production mutation must not invoke the candidate checkout deploy-vps.sh directly");
+  }
+  const trustedOpsSinks = text.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? [];
+  if (trustedOpsSinks.length !== 1 || !/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/m.test(deploy)) {
+    issues.push("production mutation must have exactly one trusted ops image deploy-vps entrypoint sink inside the gated deploy-vps job");
   }
   const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
   if (productionEnvironments.length !== 1) {

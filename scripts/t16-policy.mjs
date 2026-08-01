@@ -103,19 +103,21 @@ record("vps-request-generator", includes(vpsWorkflow, "vps-evidence-request.mjs 
 record("vps-fixed-remote-command", includes(vpsWorkflow, "'$DEPLOY_REMOTE' 'bash -s'") || includes(vpsWorkflow, '"$DEPLOY_REMOTE" \'bash -s\''), "remote shell command is fixed");
 record("vps-no-remote-argv", !includes(vpsWorkflow, "bash -s --"), "workflow inputs are absent from SSH remote argv");
 record("vps-array-arguments", includes(vpsRemote, 'bootstrap_args+=(--deploy-user "$deploy_user")') && includes(vpsRemote, '"${hardening_args[@]}"'), "remote mutating scripts use arrays");
-record("deploy-vps-fixed-command", includes(deployVps, 'ssh "$@" "$REMOTE" \'sh -s\''), "production deploy uses a fixed remote command");
-record("deploy-vps-encoded-request", includes(deployVps, "PLATFORM_REMOTE_DIR_B64") && includes(deployVps, "base64"), "production deploy sends only encoded validated fields");
+record("deploy-vps-fixed-command", includes(deployVps, 'ssh "$@" -- "$REMOTE" \'/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate\''), "production deploy uses the absolute root-owned activation broker command");
+record(
+  "deploy-vps-canonical-request",
+  includes(deployVps, 'node "$SCRIPT_ROOT/activation-request.mjs"')
+    && includes(deployVps, '< "$request" > "$receipt"')
+    && !includes(deployVps, "base64"),
+  "production deploy sends only the bounded canonical activation request on stdin",
+);
 record("deploy-vps-no-remote-argv", !includes(deployVps, "sh -s --") && !includes(deployVps, "REMOTE_SCRIPT"), "production deploy has no dynamic SSH argv or heredoc interpolation");
 record(
   "deploy-vps-remote-revalidation",
-  includes(deployVpsRemote, "decode_field")
-    && includes(deployVpsRemote, "candidate_release_root")
-    && includes(deployVpsRemote, "--extractedRoot")
-    && includes(deployVpsRemote, "--archive")
-    && includes(deployVpsRemote, "platform-trusted-deployment-admission/v1")
-    && !includes(deployVpsRemote, "git checkout")
-    && !includes(deployVpsRemote, "PLATFORM_BRANCH_B64"),
-  "remote deploy decodes receipts and activates only an exact immutable archive root without checkout mutation",
+  includes(deployVpsRemote, "exec /usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate")
+    && includes(deployVps, 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"')
+    && !/decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
+  "remote sink delegates only to the root-owned broker and the client validates its exact receipt",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");

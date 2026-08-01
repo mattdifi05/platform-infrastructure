@@ -83,6 +83,8 @@ jobs:
     timeout-minutes: 45
     env:
       PLATFORM_OPS_IMAGE: ghcr.io/example.invalid/platform-ops@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: ghcr.io/example.invalid/platform-backup-scheduler
+      PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: "1111111111111111111111111111111111111111111111111111111111111111"
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -221,11 +223,6 @@ jobs:
         run: node --test scripts/hosted-workload-contract.test.mjs
       - name: Release artifact and admission policy tests
         run: |
-          mkdir -p .tmp/ci-sbom
-          cp .env.example .tmp/ci-release.env
-          printf '%s\n' '{"releaseImages":[{"key":"PLATFORM_ALERT_DISPATCHER_IMAGE","image":"registry.example/platform/alert-dispatcher:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}' > .tmp/ci-release-images.json
-          printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > .tmp/ci-sbom/pnpm-sbom-ci.json
-          sh ./scripts/infra-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --imageManifest .tmp/ci-release-images.json --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
           sh scripts/cloudflare-origin-lock-ufw-test.sh
           sh scripts/cloudflare-origin-lock-ufw-transaction-test.sh
           node scripts/release-trust.test.mjs
@@ -238,6 +235,11 @@ jobs:
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs
+          node scripts/dast-admission-policy.test.mjs
+          node scripts/activation-bundle.test.mjs
+          node scripts/activation-request.test.mjs
+          node scripts/activation-receipt-policy.test.mjs
+          node scripts/activation-promotion-policy.test.mjs
           node scripts/trusted-provider-run-policy.test.mjs
           node scripts/gh-verifier-workflow-policy.test.mjs
           node scripts/trusted-receipt-workflow.test.mjs
@@ -353,27 +355,69 @@ jobs:
   dast-zap:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: enterprise-readiness
+    needs:
+      - enterprise-readiness
+      - release-admission
     if: github.event_name == 'workflow_dispatch'
     environment:
       name: staging
       url: ${{ vars.DAST_TARGET }}
+    outputs:
+      receipt_sha256: ${{ steps.receipt.outputs.receipt_sha256 }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Download exact admitted deployment receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: admitted-deployment-receipts-${{ github.run_id }}
+          path: ${{ runner.temp }}/admitted-deployment-receipts
       - name: Run ZAP baseline against staging
         env:
           DAST_TARGET: ${{ vars.DAST_TARGET }}
         run: |
           test -n "$DAST_TARGET"
           sh ./scripts/dast-zap-baseline.sh "$DAST_TARGET"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
+      - name: Mint exact run-bound DAST admission receipt
+        id: receipt
+        env:
+          DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          DAST_TARGET: ${{ vars.DAST_TARGET }}
+        run: |
+          DAST_DIR="${RUNNER_TEMP}/dast-admission"
+          install -d -m 700 "$DAST_DIR"
+          CHALLENGE_NONCE="$(openssl rand -hex 32)"
+          node ./scripts/dast-admission-policy.mjs \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --report security/dast/zap-baseline.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_SHA" \
+            --tree "$RELEASE_TREE" \
+            --consumerRunId "$GITHUB_RUN_ID" \
+            --consumerRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --target "$DAST_TARGET" \
+            --output "$DAST_DIR/dast-admission.json" >/dev/null
+          printf 'receipt_sha256=%s\n' "$(sha256sum "$DAST_DIR/dast-admission.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Upload exact run-bound DAST admission
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zap-baseline
+          name: dast-admission-${{ github.run_id }}
+          path: ${{ runner.temp }}/dast-admission/dast-admission.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload DAST report evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dast-report-${{ github.run_id }}
           path: security/dast/
+          if-no-files-found: ignore
+          retention-days: 30
 
   release-admission:
     runs-on: ubuntu-latest
@@ -617,6 +661,75 @@ jobs:
         with:
           name: admitted-deployment-receipts-${{ github.run_id }}
           path: ${{ runner.temp }}/admitted-deployment-receipts
+      - name: Download exact run-bound DAST admission
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dast-admission-${{ github.run_id }}
+          path: ${{ runner.temp }}/dast-admission
+      - name: Load trusted post-DAST promoter policy
+        id: promotion_config
+        run: |
+          test "$(jq -er '.status' governance/activation-promotion.json)" = READY
+          test "$(jq -er '.trustedProducer.artifactName' governance/activation-promotion.json)" = platform-promoted-activation
+          printf 'repository=%s\n' "$(jq -er '.trustedProducer.repository' governance/activation-promotion.json)" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$(jq -er '.trustedProducer.artifactName' governance/activation-promotion.json)" >> "$GITHUB_OUTPUT"
+      - name: Install checksum-pinned GitHub attestation verifier
+        run: sh ./scripts/install-gh-attestation-verifier.sh
+      - name: Authenticate trusted post-DAST promoter run
+        id: promoter
+        env:
+          GH_TOKEN: ${{ secrets.ACTIVATION_PROMOTION_READ_TOKEN }}
+          PROMOTER_REPOSITORY: ${{ steps.promotion_config.outputs.repository }}
+          PROMOTER_RUN_ID: ${{ vars.ACTIVATION_PROMOTION_RUN_ID }}
+          PROMOTER_RUN_ATTEMPT: ${{ vars.ACTIVATION_PROMOTION_RUN_ATTEMPT }}
+        run: |
+          case "$PROMOTER_RUN_ID:$PROMOTER_RUN_ATTEMPT" in *[!0-9:]*|:*|*:) exit 78 ;; esac
+          test -n "$GH_TOKEN"
+          PROMOTER_METADATA="${RUNNER_TEMP}/activation-promoter-run.json"
+          /usr/local/bin/gh api "repos/${PROMOTER_REPOSITORY}/actions/runs/${PROMOTER_RUN_ID}" > "$PROMOTER_METADATA"
+          printf 'run_id=%s\n' "$PROMOTER_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$PROMOTER_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'metadata=%s\n' "$PROMOTER_METADATA" >> "$GITHUB_OUTPUT"
+      - name: Download provider-promoted activation artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.promotion_config.outputs.artifact_name }}
+          path: ${{ runner.temp }}/promoted-activation
+          run-id: ${{ steps.promoter.outputs.run_id }}
+          repository: ${{ steps.promotion_config.outputs.repository }}
+          github-token: ${{ secrets.ACTIVATION_PROMOTION_READ_TOKEN }}
+      - name: Verify exact CAS promotion and offline DSSE admission
+        id: promotion
+        env:
+          PROMOTED: ${{ runner.temp }}/promoted-activation
+          PROMOTER_METADATA: ${{ steps.promoter.outputs.metadata }}
+          PROMOTER_RUN_ID: ${{ steps.promoter.outputs.run_id }}
+          PROMOTER_RUN_ATTEMPT: ${{ steps.promoter.outputs.run_attempt }}
+          DAST_RECEIPT: ${{ runner.temp }}/dast-admission/dast-admission.json
+          DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.receipt_sha256 }}
+        run: |
+          test "$(sha256sum "$DAST_RECEIPT" | awk '{print $1}')" = "$DAST_RECEIPT_SHA256"
+          test -z "$(find "$PROMOTED" -mindepth 1 ! -type f -print -quit)"
+          test "$(find "$PROMOTED" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5
+          for name in activation.bundle activation-bundle-manifest.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json; do
+            test -f "$PROMOTED/$name" && test ! -L "$PROMOTED/$name" && test -s "$PROMOTED/$name"
+          done
+          RESULT="${RUNNER_TEMP}/activation-promotion-result.json"
+          node ./scripts/activation-promotion-policy.mjs \
+            --policy governance/activation-promotion.json \
+            --receipt "$PROMOTED/activation-promotion-receipt.json" \
+            --providerMetadata "$PROMOTER_METADATA" \
+            --bundle "$PROMOTED/activation.bundle" \
+            --bundleManifest "$PROMOTED/activation-bundle-manifest.json" \
+            --activationAdmission "$PROMOTED/activation-admission.jsonl" \
+            --trustedRoot "$PROMOTED/sigstore-trusted-root.json" \
+            --dastReceipt "$DAST_RECEIPT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --consumerRunId "$GITHUB_RUN_ID" \
+            --consumerRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --providerRunId "$PROMOTER_RUN_ID" \
+            --providerRunAttempt "$PROMOTER_RUN_ATTEMPT" > "$RESULT"
+          printf 'result=%s\n' "$RESULT" >> "$GITHUB_OUTPUT"
       - name: Revalidate deployment receipt handoff
         env:
           ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
@@ -679,15 +792,13 @@ jobs:
             --remote "$DEPLOY_REMOTE" \
             --port "$DEPLOY_SSH_PORT" \
             --file ~/.ssh/known_hosts
-      - name: Deploy to VPS
+      - name: Deploy through exact provider-attested ops entrypoint
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
-          DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
           DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
           DEPLOY_REPO: ${{ github.repository }}
           DEPLOY_RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           DEPLOY_RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
-          DEPLOY_SOURCE_ARCHIVE_PATH: ${{ runner.temp }}/admitted-deployment-receipts/exact-source-archive.tar
           DEPLOY_ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
           DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
@@ -696,13 +807,56 @@ jobs:
           DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
-          DEPLOY_RUN_WAF_SMOKE: "1"
-          DEPLOY_RUN_INFRA_HEALTH: "1"
-          DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
-          DEPLOY_RUN_PRE_GO_LIVE: "1"
-          DEPLOY_RUN_GO_NO_GO: "1"
-          DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT: "1"
-          DEPLOY_PRE_GO_LIVE_RESTORE_DRILL: "1"
-          DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN: "1"
-          DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE: "1"
-        run: sh ./scripts/deploy-vps.sh
+          DEPLOY_DAST_RECEIPT_PATH: ${{ runner.temp }}/dast-admission/dast-admission.json
+          DEPLOY_DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.receipt_sha256 }}
+          DEPLOY_ACTIVATION_PROMOTION_RESULT: ${{ steps.promotion.outputs.result }}
+        run: |
+          PROMOTED="${RUNNER_TEMP}/promoted-activation"
+          ACTIVATION_RECEIPT="${RUNNER_TEMP}/activation-receipt.json"
+          umask 077
+          export DEPLOY_ENVIRONMENT_SHA256="$(jq -er '.runtimeIntent.environmentSha256' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
+          export DEPLOY_ACTIVATION_BUNDLE_SHA256="$(jq -er '.bundle.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES="$(jq -er '.bundle.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256="$(jq -er '.bundle.manifestSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_ACTIVATION_ADMISSION_SHA256="$(jq -er '.activationAdmission.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES="$(jq -er '.activationAdmission.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          OPS_IMAGE="$(jq -er '.opsRunner.image' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
+          docker pull "$OPS_IMAGE"
+          OPS_RESULT="$(sh ./scripts/ops-image-trust.sh)"
+          OPS_IMAGE_ID="$(printf '%s' "$OPS_RESULT" | jq -er '.imageId')"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m \
+            -v "$HOME/.ssh/deploy_key:/run/platform-deploy/ssh-key:ro" \
+            -v "$HOME/.ssh/known_hosts:/run/platform-deploy/known-hosts:ro" \
+            -v "$DEPLOY_ARTIFACT_RECEIPT_PATH:/run/platform-deploy/artifact-verification.json:ro" \
+            -v "$DEPLOY_ADMISSION_RECEIPT_PATH:/run/platform-deploy/trusted-deployment-admission.json:ro" \
+            -v "$DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:/run/platform-deploy/trusted-provider-run.json:ro" \
+            -v "$DEPLOY_DAST_RECEIPT_PATH:/run/platform-deploy/dast-admission.json:ro" \
+            -v "$PROMOTED/activation-bundle-manifest.json:/run/platform-deploy/activation-bundle-manifest.json:ro" \
+            -e DEPLOY_REMOTE -e DEPLOY_SSH_PORT -e DEPLOY_REPO -e DEPLOY_RELEASE_SHA -e DEPLOY_RELEASE_TREE \
+            -e DEPLOY_ARTIFACT_RECEIPT_SHA256 -e DEPLOY_ADMISSION_RECEIPT_SHA256 \
+            -e DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256 -e DEPLOY_TRUSTED_PROVIDER_RUN_ID -e DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT \
+            -e DEPLOY_DAST_RECEIPT_SHA256 \
+            -e DEPLOY_ENVIRONMENT_SHA256 \
+            -e DEPLOY_ACTIVATION_BUNDLE_SHA256 -e DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES -e DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256 \
+            -e DEPLOY_ACTIVATION_ADMISSION_SHA256 -e DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES \
+            -e DEPLOY_CONSUMER_RUN_ID="$GITHUB_RUN_ID" -e DEPLOY_CONSUMER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            -e DEPLOY_ARTIFACT_RECEIPT_PATH=/run/platform-deploy/artifact-verification.json \
+            -e DEPLOY_ADMISSION_RECEIPT_PATH=/run/platform-deploy/trusted-deployment-admission.json \
+            -e DEPLOY_TRUSTED_PROVIDER_METADATA_PATH=/run/platform-deploy/trusted-provider-run.json \
+            -e DEPLOY_DAST_RECEIPT_PATH=/run/platform-deploy/dast-admission.json \
+            -e DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH=/run/platform-deploy/activation-bundle-manifest.json \
+            "$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"
+          test -f "$ACTIVATION_RECEIPT" && test ! -L "$ACTIVATION_RECEIPT" && test -s "$ACTIVATION_RECEIPT"
+          test "$(wc -c < "$ACTIVATION_RECEIPT" | tr -d ' ')" -le 16777216
+          test "$(jq -er '.schema' "$ACTIVATION_RECEIPT")" = platform-activation-receipt/v2
+          test "$(jq -er '.status' "$ACTIVATION_RECEIPT")" = ACTIVE
+          printf 'activation_status=ACTIVE activation_receipt_sha256=%s\n' \
+            "$(sha256sum "$ACTIVATION_RECEIPT" | awk '{print $1}')"
+      - name: Upload exact run-bound activation receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: activation-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/activation-receipt.json
+          if-no-files-found: error
+          retention-days: 1

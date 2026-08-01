@@ -7247,7 +7247,6 @@ async function governanceCheckBody() {
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*concurrency:[\s\S]*infra-production-deploy[\s\S]*cancel-in-progress:\s+false/, "Production deploys must be serialized.");
   assertNoMatch(infraWorkflow, /^\s{2}(?:compose-and-policy|shell-syntax):/m, "Infrastructure CI must use the four canonical required gates without duplicate legacy jobs.");
   assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
-  assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*enterprise-readiness/, "DAST must run only after enterprise readiness.");
   assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*(?:release-artifact-gate\.sh|node \.\/scripts\/infra-ops\.mjs release-artifact-gate)/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
   const deploymentDagIssues = deploymentPrerequisiteMismatches(infraWorkflow);
   if (deploymentDagIssues.length) fail(`Production deployment DAG is unsafe: ${deploymentDagIssues.join("; ")}`);
@@ -10242,12 +10241,10 @@ async function repoCoverageCheck() {
     ["shell-syntax", /for file in scripts\/\*\.sh/],
     ["workflow-dispatch", /workflow_dispatch:/],
     ["dast-manual", /dast-zap:[\s\S]*dast-zap-baseline\.sh/],
-    ["deploy-manual", /deploy-vps:[\s\S]*deploy-vps\.sh/],
-    ["deploy-production-preflight", /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"/],
-    ["deploy-pre-go-live-evidence", /DEPLOY_RUN_PRE_GO_LIVE:\s+"1"/],
-    ["deploy-production-go-no-go", /DEPLOY_RUN_GO_NO_GO:\s+"1"/],
-    ["deploy-restore-drill-evidence", /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"/],
-    ["deploy-offsite-restore-evidence", /DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/],
+    ["dast-run-bound-receipt", /dast-zap:[\s\S]*dast-admission-policy\.mjs[\s\S]*dast-admission-\$\{\{ github\.run_id \}\}/],
+    ["deploy-provider-promotion", /deploy-vps:[\s\S]*activation-promotion-policy\.mjs/],
+    ["deploy-trusted-ops-image", /deploy-vps:[\s\S]*ops-image-trust\.sh[\s\S]*"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"/],
+    ["deploy-activation-receipt", /activation-receipt-\$\{\{ github\.run_id \}\}/],
   ];
   const missingWorkflowGates = requiredWorkflowGates
     .filter(([, pattern]) => !pattern.test(workflow))

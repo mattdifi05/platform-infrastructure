@@ -12,13 +12,34 @@ const commitSha = "a".repeat(40);
 const treeSha = "b".repeat(40);
 const sourceArchiveSha256 = "c".repeat(64);
 const artifactImage = `ghcr.io/owner/platform-infrastructure-control-center@sha256:${"d".repeat(64)}`;
+const schedulerImage = `ghcr.io/owner/platform-infrastructure-backup-scheduler@sha256:${"7".repeat(64)}`;
 const opsImage = `ghcr.io/owner/platform-infrastructure-ops@sha256:${"e".repeat(64)}`;
 const opsImageId = `sha256:${"f".repeat(64)}`;
-const artifactSubjects = [{ key: "CONTROL_CENTER_IMAGE", image: artifactImage }];
+const artifactSubjects = [
+  { key: "CONTROL_CENTER_IMAGE", image: artifactImage },
+  { key: "PLATFORM_BACKUP_SCHEDULER_IMAGE", image: schedulerImage },
+];
+const artifactPlatformImageIds = {
+  CONTROL_CENTER_IMAGE: `sha256:${"4".repeat(64)}`,
+  PLATFORM_BACKUP_SCHEDULER_IMAGE: `sha256:${"8".repeat(64)}`,
+};
 const opsRunner = { image: opsImage, imageId: opsImageId };
+const persistentVolumes = [{
+  name: "enterprise_local_registry_data",
+  createdAt: "2026-07-21T00:00:00.000Z",
+  driver: "local",
+  scope: "local",
+  options: {},
+  labels: {
+    "platform.infrastructure.managed": "true",
+    "platform.infrastructure.purpose": "local-registry",
+  },
+  mountpoint: "/var/lib/docker/volumes/enterprise_local_registry_data/_data",
+  owner: { uid: 0, gid: 0, mode: "0755" },
+}];
 const intent = {
-  version: 1,
-  kind: "platform-runtime-intent/v1",
+  version: 2,
+  kind: "platform-runtime-intent/v2",
   repository,
   commitSha,
   treeSha,
@@ -26,14 +47,15 @@ const intent = {
   projectName: PRODUCTION_PROJECT_NAME,
   environmentSha256: "1".repeat(64),
   hostedWorkloadLockSha256: null,
-  coreComposeSha256: "2".repeat(64),
+  sourceRenderSha256: "2".repeat(64),
   combinedComposeSha256: "3".repeat(64),
+  persistentVolumes,
   services: [
     {
       service: "backup-scheduler",
-      image: opsImage,
-      admission: { kind: "ops-runner" },
-      expectedLocalImageId: opsImageId,
+      image: schedulerImage,
+      admission: { kind: "artifact-subject", subjectKey: "PLATFORM_BACKUP_SCHEDULER_IMAGE" },
+      expectedLocalImageId: `sha256:${"8".repeat(64)}`,
     },
     {
       service: "control-center",
@@ -50,7 +72,7 @@ const intent = {
   ],
   targetServingServices: ["control-center", "traefik"],
 };
-const options = { repository, commitSha, treeSha, sourceArchiveSha256, artifactSubjects, opsRunner };
+const options = { repository, commitSha, treeSha, sourceArchiveSha256, artifactSubjects, artifactPlatformImageIds, opsRunner };
 
 const validated = validateRuntimeIntent(intent, options);
 assert.equal(validated.sha256, runtimeIntentSha256(intent));
@@ -67,6 +89,17 @@ assert.throws(() => validateRuntimeIntent({ ...intent, targetServingServices: ["
 assert.throws(() => validateRuntimeIntent({ ...intent, targetServingServices: ["missing"] }, options), /subset/);
 assert.throws(() => validateRuntimeIntent({
   ...intent,
+  persistentVolumes: persistentVolumes.map((volume) => ({ ...volume, driver: "local-persist" })),
+}, options), /name, driver and scope/);
+assert.throws(() => validateRuntimeIntent({
+  ...intent,
+  persistentVolumes: persistentVolumes.map((volume) => ({
+    ...volume,
+    owner: { ...volume.owner, mode: "0777" },
+  })),
+}, options), /root-owned/);
+assert.throws(() => validateRuntimeIntent({
+  ...intent,
   services: intent.services.map((entry) => entry.service === "control-center"
     ? { ...entry, image: `ghcr.io/owner/attacker@sha256:${"d".repeat(64)}` }
     : entry),
@@ -74,9 +107,15 @@ assert.throws(() => validateRuntimeIntent({
 assert.throws(() => validateRuntimeIntent({
   ...intent,
   services: intent.services.map((entry) => entry.service === "backup-scheduler"
-    ? { ...entry, expectedLocalImageId: `sha256:${"0".repeat(64)}` }
+    ? { ...entry, expectedLocalImageId: `sha256:${"9".repeat(64)}` }
     : entry),
-}, options), /ops runner/);
+}, options), /platform image ID/);
+assert.throws(() => validateRuntimeIntent({
+  ...intent,
+  services: intent.services.map((entry) => entry.service === "backup-scheduler"
+    ? { ...entry, image: opsImage, admission: { kind: "ops-runner" }, expectedLocalImageId: opsImageId }
+    : entry),
+}, options), /may not reuse|may not execute/);
 assert.throws(() => validateRuntimeIntent({
   ...intent,
   services: intent.services.filter((entry) => entry.service !== "control-center"),
@@ -86,4 +125,4 @@ assert.throws(() => validateRuntimeIntent({
   services: [...intent.services, { ...intent.services[2] }],
 }, options), /duplicated/);
 
-process.stdout.write("runtime intent policy tests passed 13/13\n");
+process.stdout.write("runtime intent policy tests passed 16/16\n");

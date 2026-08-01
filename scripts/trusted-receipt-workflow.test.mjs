@@ -7,10 +7,21 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "enterprise-infra.yml"), "utf8");
 const producerWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-attestation.yml"), "utf8");
+const actionsRuntime = JSON.parse(fs.readFileSync(path.join(root, "governance", "github-actions-runtime.json"), "utf8"));
+
+function workflowJob(source, jobName) {
+  const start = source.search(new RegExp(`^  ${jobName}:`, "m"));
+  if (start < 0) return "";
+  const tail = source.slice(start + 1);
+  const next = tail.search(/^  [A-Za-z0-9_-]+:/m);
+  return next < 0 ? source.slice(start) : source.slice(start, start + 1 + next);
+}
 
 function wiringIssues(source) {
   const issues = [];
   const requireText = (text, label) => { if (!source.includes(text)) issues.push(label); };
+  const forbidText = (text, label) => { if (source.includes(text)) issues.push(label); };
+  const deploy = workflowJob(source, "deploy-vps");
   for (const input of [
     "trusted_admission_run_id:",
     "trusted_admission_run_attempt:",
@@ -46,7 +57,27 @@ function wiringIssues(source) {
   const policyCalls = source.match(/node \.\/scripts\/deployment-receipt-policy\.mjs/g) ?? [];
   if (policyCalls.length !== 2) issues.push("trusted receipt policy must run before upload and again before deploy");
   requireText("name: admitted-deployment-receipts-${{ github.run_id }}", "validated receipt handoff artifact is not run-bound");
+  requireText("needs:\n      - enterprise-readiness\n      - release-admission\n    if: github.event_name == 'workflow_dispatch'", "DAST does not require the exact admitted release candidate");
+  requireText("node ./scripts/dast-admission-policy.mjs", "DAST output is not converted to a closed run-bound receipt");
+  requireText('--challengeNonce "$CHALLENGE_NONCE"', "DAST receipt does not carry a fresh challenge");
+  requireText('--target "$DAST_TARGET"', "DAST receipt is not bound to the exact protected-environment target");
+  requireText("name: dast-admission-${{ github.run_id }}", "DAST admission artifact is not run-bound");
+  requireText("path: ${{ runner.temp }}/dast-admission/dast-admission.json", "DAST admission artifact does not contain only the exact receipt path");
   requireText("needs:\n      - enterprise-readiness\n      - release-admission\n      - dast-zap", "deploy DAG does not require readiness, admission and DAST");
+  requireText("test \"$(jq -er '.status' governance/activation-promotion.json)\" = READY", "external activation promotion policy does not fail closed");
+  requireText("test \"$(jq -er '.trustedProducer.artifactName' governance/activation-promotion.json)\" = platform-promoted-activation", "activation promotion artifact name is not fixed");
+  requireText("ACTIVATION_PROMOTION_READ_TOKEN", "trusted promoter read token is not isolated in the production environment");
+  requireText("ACTIVATION_PROMOTION_RUN_ID", "trusted promoter run ID is not provider-selected");
+  requireText("ACTIVATION_PROMOTION_RUN_ATTEMPT", "trusted promoter run attempt is not provider-selected");
+  if ((source.match(/Install checksum-pinned GitHub attestation verifier/g) ?? []).length < 2) {
+    issues.push("deploy job does not install the pinned verifier before promoter authentication");
+  }
+  requireText("node ./scripts/activation-promotion-policy.mjs", "trusted post-DAST promotion policy is not executed");
+  requireText("node scripts/activation-receipt-policy.test.mjs", "integrated CI does not replay the authoritative Docker active-receipt contract");
+  requireText('--activationAdmission "$PROMOTED/activation-admission.jsonl"', "activation DSSE admission sidecar is not verified");
+  requireText('--trustedRoot "$PROMOTED/sigstore-trusted-root.json"', "activation promotion does not use the policy-pinned trusted root");
+  requireText('--dastReceipt "$DAST_RECEIPT"', "activation promotion is not bound to the current DAST receipt");
+  requireText('test "$(find "$PROMOTED" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" -eq 5', "promoted activation artifact cardinality is not exact");
   for (const variable of [
     "DEPLOY_ARTIFACT_RECEIPT_PATH:",
     "DEPLOY_ARTIFACT_RECEIPT_SHA256:",
@@ -56,7 +87,73 @@ function wiringIssues(source) {
     "DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:",
     "DEPLOY_TRUSTED_PROVIDER_RUN_ID:",
     "DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:",
+    "DEPLOY_DAST_RECEIPT_PATH:",
+    "DEPLOY_DAST_RECEIPT_SHA256:",
+    "DEPLOY_ACTIVATION_PROMOTION_RESULT:",
   ]) requireText(variable, `deploy consumer is missing ${variable}`);
+  for (const variable of [
+    "DEPLOY_ENVIRONMENT_SHA256",
+    "DEPLOY_ACTIVATION_BUNDLE_SHA256",
+    "DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES",
+    "DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256",
+    "DEPLOY_ACTIVATION_ADMISSION_SHA256",
+    "DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES",
+  ]) requireText(`export ${variable}=`, `trusted ops input ${variable} is not exported to the isolated runner`);
+  requireText("OPS_RESULT=\"$(sh ./scripts/ops-image-trust.sh)\"", "ops image is not checked against the provider receipt");
+  requireText("docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges", "trusted ops runner lacks the fixed container hardening boundary");
+  requireText('"$OPS_IMAGE_ID" deploy-vps', "production mutation does not use the admitted ops image entrypoint");
+  requireText('"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"', "activation receipt is not captured outside the container without log disclosure");
+  requireText("name: activation-receipt-${{ github.run_id }}", "activation receipt evidence artifact is not run-bound");
+  requireText("path: ${{ runner.temp }}/activation-receipt.json", "activation receipt evidence path is not exact");
+  forbidText("run: sh ./scripts/deploy-vps.sh", "candidate checkout remains a production mutation sink");
+  forbidText("docker.sock", "trusted ops runner receives the Docker control socket");
+  if ((source.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? []).length !== 1) {
+    issues.push("trusted ops image entrypoint sink cardinality is not exact");
+  }
+  const expectedMounts = [
+    '"$HOME/.ssh/deploy_key:/run/platform-deploy/ssh-key:ro"',
+    '"$HOME/.ssh/known_hosts:/run/platform-deploy/known-hosts:ro"',
+    '"$DEPLOY_ARTIFACT_RECEIPT_PATH:/run/platform-deploy/artifact-verification.json:ro"',
+    '"$DEPLOY_ADMISSION_RECEIPT_PATH:/run/platform-deploy/trusted-deployment-admission.json:ro"',
+    '"$DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:/run/platform-deploy/trusted-provider-run.json:ro"',
+    '"$DEPLOY_DAST_RECEIPT_PATH:/run/platform-deploy/dast-admission.json:ro"',
+    '"$PROMOTED/activation-bundle-manifest.json:/run/platform-deploy/activation-bundle-manifest.json:ro"',
+  ].sort();
+  const mounts = [...deploy.matchAll(/^\s+-v\s+(.+?)\s+\\\s*$/gm)].map((match) => match[1]).sort();
+  if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts)) {
+    issues.push("trusted ops runner mount allowlist is not exact");
+  }
+  const expectedEnvironment = [
+    "DEPLOY_REMOTE", "DEPLOY_SSH_PORT", "DEPLOY_REPO", "DEPLOY_RELEASE_SHA", "DEPLOY_RELEASE_TREE",
+    "DEPLOY_ARTIFACT_RECEIPT_SHA256", "DEPLOY_ADMISSION_RECEIPT_SHA256",
+    "DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256", "DEPLOY_TRUSTED_PROVIDER_RUN_ID", "DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT",
+    "DEPLOY_DAST_RECEIPT_SHA256", "DEPLOY_ENVIRONMENT_SHA256",
+    "DEPLOY_ACTIVATION_BUNDLE_SHA256", "DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES", "DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256",
+    "DEPLOY_ACTIVATION_ADMISSION_SHA256", "DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES",
+    "DEPLOY_CONSUMER_RUN_ID", "DEPLOY_CONSUMER_RUN_ATTEMPT",
+    "DEPLOY_ARTIFACT_RECEIPT_PATH", "DEPLOY_ADMISSION_RECEIPT_PATH", "DEPLOY_TRUSTED_PROVIDER_METADATA_PATH",
+    "DEPLOY_DAST_RECEIPT_PATH", "DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH",
+  ].sort();
+  const environment = [...deploy.matchAll(/-e\s+([A-Z][A-Z0-9_]*)/g)].map((match) => match[1]).sort();
+  if (JSON.stringify(environment) !== JSON.stringify(expectedEnvironment)) {
+    issues.push("trusted ops runner environment allowlist is not exact");
+  }
+  if (/continue-on-error:\s*true|--entrypoint|--privileged|--cap-add|--pid(?:=|\s)|--userns|--env-file/.test(deploy)) {
+    issues.push("trusted ops runner admits a forbidden bypass flag");
+  }
+  if (/\$PWD|github\.workspace|\/opt\/platform-infrastructure/.test(mounts.join("\n"))) {
+    issues.push("candidate workspace or code is mounted over the admitted ops image");
+  }
+  const ordered = [
+    "node ./scripts/activation-promotion-policy.mjs",
+    "node ./scripts/deployment-receipt-policy.mjs",
+    'OPS_RESULT="$(sh ./scripts/ops-image-trust.sh)"',
+    'OPS_IMAGE_ID="$(printf',
+    '"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"',
+  ].map((needle) => deploy.indexOf(needle));
+  if (ordered.some((index) => index < 0) || ordered.some((index, position) => position > 0 && index <= ordered[position - 1])) {
+    issues.push("promotion, receipt revalidation, ops trust and activation sink are not causally ordered");
+  }
   return issues;
 }
 
@@ -70,7 +167,27 @@ assert.notDeepEqual(wiringIssues(workflow.replace('--sourceArchive "$RELEASE_SOU
 assert.notDeepEqual(wiringIssues(workflow.replace('cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"', "true")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("repository: ${{ steps.provider.outputs.repository }}", "repository: owner/caller-selected")), []);
 assert.notDeepEqual(wiringIssues(workflow.replaceAll('--providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"', '--providerRunAttempt "1"')), []);
-assert.notDeepEqual(wiringIssues(workflow.replace("DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:", "REMOVED_PROVIDER_METADATA_PATH:")), []);
+assert.notDeepEqual(wiringIssues(workflow.replaceAll("DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:", "REMOVED_PROVIDER_METADATA_PATH:")), []);
+assert.notDeepEqual(wiringIssues(workflow.replaceAll("DEPLOY_DAST_RECEIPT_PATH:", "REMOVED_DAST_PATH:")), []);
+assert.notDeepEqual(wiringIssues(workflow.replaceAll("ACTIVATION_PROMOTION_READ_TOKEN", "CALLER_TOKEN")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("Install checksum-pinned GitHub attestation verifier", "Removed verifier install")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace('"$OPS_IMAGE_ID" deploy-vps', '"$OPS_IMAGE_ID" attacker-selected')), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("docker run --rm --read-only", "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --read-only")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("export DEPLOY_ENVIRONMENT_SHA256=", "DEPLOY_ENVIRONMENT_SHA256=")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("platform-promoted-activation", "caller-selected-activation")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace('            -v "$HOME/.ssh/deploy_key:', '            -v "$PWD:/opt/platform-infrastructure" \\\n            -v "$HOME/.ssh/deploy_key:')), []);
+assert.notDeepEqual(wiringIssues(workflow.replace(
+  "docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges",
+  "docker run --rm --privileged --read-only --cap-drop ALL --security-opt no-new-privileges",
+)), []);
+assert.notDeepEqual(wiringIssues(workflow.replace('"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"', '"$OPS_IMAGE_ID" deploy-vps')), []);
+assert.notDeepEqual(wiringIssues(workflow.replace(
+  '"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"',
+  'true\n          "$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"',
+).replace(
+  "          test -z \"$(find \"$PROMOTED\"",
+  '          "$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"\n          test -z "$(find "$PROMOTED"',
+)), []);
 
 const manifestAttestation = producerWorkflow.indexOf("- name: Attest release subject manifest provenance");
 const finalizedReceipt = producerWorkflow.indexOf('--receiptOutput "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json"');
@@ -81,5 +198,28 @@ assert.doesNotMatch(
   /--receipt(?:Output)?\s+"reports\/release\/release-artifact-admission-/,
   "pre-attestation generation must not mint an artifact receipt",
 );
+const schedulerProducerBindings = [
+  "file: docker/backup-scheduler.Dockerfile",
+  "subject-name: ${{ env.PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY }}",
+  "subject-digest: ${{ steps.backup-scheduler.outputs.digest }}",
+  '--image "PLATFORM_BACKUP_SCHEDULER_IMAGE=${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY}@${PLATFORM_BACKUP_SCHEDULER_DIGEST}"',
+  '--buildkitSbom "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/buildkit-sbom-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.spdx.json"',
+  '--registryDescriptor "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/registry-descriptor-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.json"',
+  '--registryResolution "PLATFORM_BACKUP_SCHEDULER_IMAGE=reports/release/registry-resolution-PLATFORM_BACKUP_SCHEDULER_IMAGE-${GITHUB_RUN_ID}.json"',
+  'platform-manifest-${key}-${GITHUB_RUN_ID}-linux-amd64.json',
+  '--platformManifest "linux/amd64=$platform_manifest"',
+];
+assert.ok(schedulerProducerBindings.every((binding) => producerWorkflow.includes(binding)),
+  "release producer does not attest the dedicated scheduler image through every evidence layer");
+assert.ok(!schedulerProducerBindings.every((binding) => producerWorkflow
+  .replace("file: docker/backup-scheduler.Dockerfile", "file: docker/ops.Dockerfile").includes(binding)),
+"scheduler producer mutation was not detected");
+const productionRuntime = actionsRuntime.environments.find((environment) => environment.name === "production");
+const productionSecretNames = new Set(productionRuntime?.required_secrets?.map((item) => item.name) ?? []);
+const productionVariableNames = new Set(productionRuntime?.required_variables?.map((item) => item.name) ?? []);
+assert.ok(["DEPLOY_SSH_KEY", "DEPLOY_KNOWN_HOSTS", "ACTIVATION_PROMOTION_READ_TOKEN"]
+  .every((name) => productionSecretNames.has(name)), "production runtime policy omits a trusted deploy secret");
+assert.ok(["DEPLOY_REMOTE", "DEPLOY_SSH_PORT", "ACTIVATION_PROMOTION_RUN_ID", "ACTIVATION_PROMOTION_RUN_ATTEMPT"]
+  .every((name) => productionVariableNames.has(name)), "production runtime policy omits a trusted deploy variable");
 
-process.stdout.write("trusted receipt workflow wiring tests passed 25/25; provider channel remains EXTERNAL-PENDING\n");
+process.stdout.write("trusted receipt workflow wiring tests passed 28/28; provider channel remains EXTERNAL-PENDING\n");

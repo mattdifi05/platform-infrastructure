@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "status": "EXTERNAL-PENDING",
+  "requiredReceiptKind": "platform-activation-promotion/v1",
+  "selfAssertedAnnotationsAccepted": false,
+  "trustedRootSha256": null,
+  "trustedProducer": {
+    "repository": null,
+    "workflowPath": null,
+    "workflowSha": null,
+    "sourceRef": null,
+    "event": null,
+    "artifactName": "platform-promoted-activation"
+  },
+  "reason": "No provider-side post-DAST CAS promoter and Sigstore trusted root are configured."
+}
