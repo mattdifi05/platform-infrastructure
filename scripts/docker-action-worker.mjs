@@ -652,16 +652,12 @@ export function manageRestoreScratch(command, role, options = {}) {
   const relativePath = `${phaseRelativePath}/${engine}`;
   const engineRoot = path.join(root, ...relativePath.split("/"));
   if (role === "scratch-preparer") {
-    ensurePrivateRelativeDirectory(rootPolicy, phaseRelativePath, io);
-    ensureRuntimePrivateDirectory(engineRoot, rootPolicy, runtimePolicy, io);
+    ensurePrivateRelativeDirectory(rootPolicy, relativePath, io);
+    if (io.lstatSync(engineRoot).dev !== rootStat.dev) {
+      fail("restore scratch engine root crossed a filesystem boundary");
+    }
     ensureRuntimePrivateDirectory(
       path.join(engineRoot, "data"),
-      rootPolicy,
-      runtimePolicy,
-      io,
-    );
-    ensureRuntimePrivateDirectory(
-      path.join(engineRoot, "run"),
       rootPolicy,
       runtimePolicy,
       io,
@@ -669,10 +665,70 @@ export function manageRestoreScratch(command, role, options = {}) {
     fsyncDirectory(engineRoot, io);
     fsyncDirectory(path.dirname(engineRoot), io);
   } else {
-    removeBoundedRestoreScratchTree(engineRoot, runtimePolicy, io);
-    fsyncDirectory(path.dirname(engineRoot), io);
-    removeEmptyPrivateAncestors(
+    const engineStat = lstatIfPresent(engineRoot, io);
+    if (engineStat === null) {
+      assertPrivateAncestorPrefix(
+        path.dirname(engineRoot),
+        root,
+        rootPolicy,
+        io,
+      );
+      removeExistingEmptyPrivateAncestors(
+        path.dirname(engineRoot),
+        path.join(root, "requests"),
+        rootPolicy,
+        io,
+      );
+      return deepFreeze({
+        engine,
+        mutationPerformed: true,
+        phaseId: context.phaseId,
+        relativePath,
+        requestSha256,
+        role,
+        schema: "platform.docker-worker.scratch-result/v1",
+        status: "completed",
+      });
+    }
+    assertPrivateAncestorPrefix(
       path.dirname(engineRoot),
+      root,
+      rootPolicy,
+      io,
+    );
+    if (!engineStat.isDirectory() || engineStat.isSymbolicLink()
+      || engineStat.dev !== rootStat.dev
+      || engineStat.uid !== rootPolicy.expectedUid
+      || engineStat.gid !== rootPolicy.expectedGid
+      || (engineStat.mode & 0o7777) !== 0o700) {
+      fail("restore scratch engine root identity is invalid");
+    }
+    const engineIdentity = statIdentity(engineStat);
+    const engineEntries = io.readdirSync(engineRoot).sort();
+    if (!sameCanonical(engineEntries, [])
+      && !sameCanonical(engineEntries, ["data"])) {
+      fail("restore scratch engine root contains an unmodeled sibling");
+    }
+    if (engineEntries.length === 1) {
+      removeExactRestoreDataRoot(
+        path.join(engineRoot, "data"),
+        rootPolicy,
+        runtimePolicy,
+        io,
+      );
+    }
+    const finalEngineStat = io.lstatSync(engineRoot);
+    if (!sameFilesystemObjectIdentity(
+      engineIdentity,
+      statIdentity(finalEngineStat),
+    ) || io.readdirSync(engineRoot).length !== 0) {
+      fail("restore scratch engine root changed during exact cleanup");
+    }
+    const engineParent = path.dirname(engineRoot);
+    io.rmdirSync(engineRoot);
+    fsyncDirectory(engineParent, io);
+    removeEmptyPrivateAncestors(
+      engineParent,
       path.join(root, "requests"),
       rootPolicy,
       io,
@@ -734,8 +790,18 @@ export function prepareHelperFilesystem(command, options = {}) {
       ensurePrivateRelativeDirectory(backupPolicy, parent, io);
       preparedRelativePaths.push(`backup:${parent}`);
       if (profile.engine === "minio") {
-        ensurePrivateRelativeDirectory(backupPolicy, artifactRelativePath, io);
+        cleanCaptureTreeTarget(
+          path.join(backupPolicy.root, ...artifactRelativePath.split("/")),
+          backupPolicy,
+          io,
+        );
         preparedRelativePaths.push(`backup:${artifactRelativePath}`);
+      } else {
+        cleanCaptureFileTarget(
+          path.join(backupPolicy.root, ...artifactRelativePath.split("/")),
+          backupPolicy,
+          io,
+        );
       }
     }
   }
@@ -2195,6 +2261,218 @@ function ensurePrivateRelativeDirectory(policy, relativePath, io) {
   return directory;
 }
 
+function cleanCaptureFileTarget(target, policy, io) {
+  assertProtectedAncestors(
+    path.dirname(target),
+    policy.root,
+    { expectedGid: policy.expectedGid, expectedUid: policy.expectedUid },
+    io,
+  );
+  const before = lstatIfPresent(target, io);
+  if (before === null) return;
+  const rootDevice = io.lstatSync(policy.root).dev;
+  if (!before.isFile() || before.isSymbolicLink()
+    || before.dev !== rootDevice
+    || before.nlink !== 1
+    || before.uid !== policy.expectedUid
+    || before.gid !== policy.expectedGid
+    || (before.mode & 0o022) !== 0
+    || !Number.isSafeInteger(before.size)
+    || before.size < 0
+    || before.size > MAX_TERMINAL_ARTIFACT_BYTES) {
+    fail("stale capture file target is an unsafe link, type, owner, mode or size");
+  }
+  const identity = statIdentity(before);
+  let descriptor;
+  try {
+    descriptor = io.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const opened = io.fstatSync(descriptor);
+    if (!sameIdentity(identity, statIdentity(opened))) {
+      fail("stale capture file target changed before exact cleanup");
+    }
+    io.unlinkSync(target);
+    if (!sameFilesystemObjectIdentity(
+      identity,
+      statIdentity(io.fstatSync(descriptor)),
+    )) {
+      fail("stale capture file descriptor changed during exact cleanup");
+    }
+  } finally {
+    if (descriptor !== undefined) io.closeSync(descriptor);
+  }
+  if (lstatIfPresent(target, io) !== null) {
+    fail("stale capture file target reappeared during exact cleanup");
+  }
+  fsyncDirectory(path.dirname(target), io);
+}
+
+function cleanCaptureTreeTarget(target, policy, io) {
+  assertProtectedAncestors(
+    path.dirname(target),
+    policy.root,
+    { expectedGid: policy.expectedGid, expectedUid: policy.expectedUid },
+    io,
+  );
+  let before = lstatIfPresent(target, io);
+  if (before === null) {
+    io.mkdirSync(target, { mode: 0o700 });
+    before = io.lstatSync(target);
+  }
+  const rootDevice = io.lstatSync(policy.root).dev;
+  if (!before.isDirectory() || before.isSymbolicLink()
+    || before.dev !== rootDevice
+    || before.uid !== policy.expectedUid
+    || before.gid !== policy.expectedGid
+    || (before.mode & 0o022) !== 0) {
+    fail("stale capture tree target is an unsafe link, type, owner or mode");
+  }
+  let rootDescriptor;
+  try {
+    rootDescriptor = io.openSync(
+      target,
+      fs.constants.O_RDONLY
+        | fs.constants.O_NOFOLLOW
+        | (fs.constants.O_DIRECTORY ?? 0),
+    );
+    const opened = io.fstatSync(rootDescriptor);
+    if (!sameIdentity(statIdentity(before), statIdentity(opened))) {
+      fail("stale capture tree root changed before exact cleanup");
+    }
+    if ((opened.mode & 0o7777) !== 0o700) {
+      io.fchmodSync(rootDescriptor, 0o700);
+    }
+    const admitted = io.fstatSync(rootDescriptor);
+    if (!admitted.isDirectory() || admitted.isSymbolicLink()
+      || admitted.uid !== policy.expectedUid
+      || admitted.gid !== policy.expectedGid
+      || (admitted.mode & 0o7777) !== 0o700) {
+      fail("capture tree root normalization did not establish exact authority");
+    }
+  } finally {
+    if (rootDescriptor !== undefined) io.closeSync(rootDescriptor);
+  }
+
+  const rootIdentity = statIdentity(io.lstatSync(target));
+  const files = [];
+  const directories = [];
+  let entryCount = 0;
+  let totalBytes = 0;
+  const walk = (directory, depth) => {
+    if (depth > MAX_NATIVE_TREE_DEPTH) {
+      fail("stale capture tree depth is oversized");
+    }
+    const directoryBefore = io.lstatSync(directory);
+    if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()
+      || directoryBefore.dev !== rootDevice
+      || directoryBefore.uid !== policy.expectedUid
+      || directoryBefore.gid !== policy.expectedGid
+      || (directoryBefore.mode & 0o022) !== 0) {
+      fail("stale capture tree contains an unsafe directory");
+    }
+    const directoryIdentity = statIdentity(directoryBefore);
+    for (const name of io.readdirSync(directory).sort()) {
+      if (!name || name === "." || name === ".." || name.includes("/")
+        || name.includes("\\") || name.includes("\0")) {
+        fail("stale capture tree entry name is invalid");
+      }
+      const candidate = path.join(directory, name);
+      const stat = io.lstatSync(candidate);
+      entryCount += 1;
+      if (entryCount > MAX_NATIVE_TREE_ENTRIES) {
+        fail("stale capture tree entry count is oversized");
+      }
+      if (stat.isSymbolicLink()) {
+        fail("stale capture tree refuses symbolic links");
+      }
+      if (stat.dev !== rootDevice) {
+        fail("stale capture tree refuses a nested filesystem boundary");
+      }
+      if (stat.isDirectory()) {
+        walk(candidate, depth + 1);
+        directories.push({ identity: statIdentity(io.lstatSync(candidate)), path: candidate });
+        continue;
+      }
+      if (!stat.isFile() || stat.nlink !== 1
+        || stat.uid !== policy.expectedUid
+        || stat.gid !== policy.expectedGid
+        || (stat.mode & 0o022) !== 0
+        || !Number.isSafeInteger(stat.size)
+        || stat.size < 0) {
+        fail("stale capture tree refuses hardlinks, special files or foreign owners");
+      }
+      totalBytes += stat.size;
+      if (!Number.isSafeInteger(totalBytes)
+        || totalBytes > MAX_TERMINAL_ARTIFACT_BYTES) {
+        fail("stale capture tree total bytes are oversized");
+      }
+      let descriptor;
+      try {
+        descriptor = io.openSync(
+          candidate,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+        );
+        if (!sameIdentity(statIdentity(stat), statIdentity(io.fstatSync(descriptor)))) {
+          fail("stale capture tree file changed during preflight");
+        }
+      } finally {
+        if (descriptor !== undefined) io.closeSync(descriptor);
+      }
+      files.push({ identity: statIdentity(stat), path: candidate });
+    }
+    if (!sameIdentity(directoryIdentity, statIdentity(io.lstatSync(directory)))) {
+      fail("stale capture directory changed during preflight");
+    }
+  };
+  walk(target, 0);
+  for (const file of files.reverse()) {
+    const stat = io.lstatSync(file.path);
+    if (!sameIdentity(file.identity, statIdentity(stat))) {
+      fail("stale capture file changed after preflight");
+    }
+    let descriptor;
+    try {
+      descriptor = io.openSync(
+        file.path,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+      );
+      if (!sameIdentity(file.identity, statIdentity(io.fstatSync(descriptor)))) {
+        fail("stale capture file descriptor changed before deletion");
+      }
+      io.unlinkSync(file.path);
+    } finally {
+      if (descriptor !== undefined) io.closeSync(descriptor);
+    }
+    fsyncDirectory(path.dirname(file.path), io);
+  }
+  for (const directory of directories) {
+    const stat = io.lstatSync(directory.path);
+    if (!sameFilesystemObjectIdentity(directory.identity, statIdentity(stat))
+      || io.readdirSync(directory.path).length !== 0) {
+      fail("stale capture directory changed after preflight");
+    }
+    const parent = path.dirname(directory.path);
+    io.rmdirSync(directory.path);
+    fsyncDirectory(parent, io);
+  }
+  const finalRoot = io.lstatSync(target);
+  if (!sameFilesystemObjectIdentity(rootIdentity, statIdentity(finalRoot))
+    || (finalRoot.mode & 0o7777) !== 0o700
+    || io.readdirSync(target).length !== 0) {
+    fail("capture tree target was not established clean and exact");
+  }
+  fsyncDirectory(target, io);
+  fsyncDirectory(path.dirname(target), io);
+}
+
+function lstatIfPresent(target, io) {
+  try {
+    return io.lstatSync(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 function ensureRuntimePrivateDirectory(directory, rootPolicy, runtimePolicy, io) {
   let created = false;
   try {
@@ -2225,18 +2503,16 @@ function ensureRuntimePrivateDirectory(directory, rootPolicy, runtimePolicy, io)
         || (opened.mode & 0o7777) !== 0o700) {
         fail("new restore scratch directory owner or mode is invalid");
       }
-      if (opened.uid !== runtimePolicy.expectedUid
-        || opened.gid !== runtimePolicy.expectedGid) {
-        io.fchownSync(
-          descriptor,
-          runtimePolicy.expectedUid,
-          runtimePolicy.expectedGid,
-        );
-      }
       if ((opened.mode & 0o7777) !== 0o700) io.fchmodSync(descriptor, 0o700);
+      io.fchownSync(
+        descriptor,
+        runtimePolicy.expectedUid,
+        runtimePolicy.expectedGid,
+      );
     }
     const admitted = io.fstatSync(descriptor);
     if (!admitted.isDirectory() || admitted.isSymbolicLink()
+      || admitted.dev !== io.lstatSync(rootPolicy.root).dev
       || admitted.uid !== runtimePolicy.expectedUid
       || admitted.gid !== runtimePolicy.expectedGid
       || (admitted.mode & 0o7777) !== 0o700) {
@@ -2336,6 +2612,7 @@ function backupResourceDomain(resource) {
 
 function removeBoundedRestoreScratchTree(root, policy, io) {
   const rootStat = io.lstatSync(root);
+  const rootDevice = rootStat.dev;
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
     || rootStat.uid !== policy.expectedUid
     || rootStat.gid !== policy.expectedGid
@@ -2355,6 +2632,9 @@ function removeBoundedRestoreScratchTree(root, policy, io) {
     if (!before.isDirectory() || before.isSymbolicLink()) {
       fail("restore scratch cleanup encountered an unsafe directory");
     }
+    if (before.dev !== rootDevice) {
+      fail("restore scratch cleanup refuses a nested filesystem boundary");
+    }
     const identity = statIdentity(before);
     const names = io.readdirSync(directory).sort();
     for (const name of names) {
@@ -2370,6 +2650,9 @@ function removeBoundedRestoreScratchTree(root, policy, io) {
       }
       if (stat.isSymbolicLink()) {
         fail("restore scratch cleanup refuses symbolic links");
+      }
+      if (stat.dev !== rootDevice) {
+        fail("restore scratch cleanup refuses a nested filesystem boundary");
       }
       if (stat.isDirectory()) {
         walk(candidate, depth + 1);
@@ -2405,9 +2688,6 @@ function removeBoundedRestoreScratchTree(root, policy, io) {
     }
   };
   walk(root, 0);
-  if (!sameCanonical(io.readdirSync(root).sort(), ["data", "run"])) {
-    fail("restore scratch cleanup root contains an unmodeled sibling");
-  }
   for (const file of files.reverse()) {
     const stat = io.lstatSync(file.path);
     if (!sameIdentity(file.identity, statIdentity(stat))) {
@@ -2447,6 +2727,32 @@ function removeBoundedRestoreScratchTree(root, policy, io) {
   io.rmdirSync(root);
 }
 
+function removeExactRestoreDataRoot(root, rootPolicy, runtimePolicy, io) {
+  const stat = io.lstatSync(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+    || stat.dev !== io.lstatSync(rootPolicy.root).dev
+    || (stat.mode & 0o7777) !== 0o700) {
+    fail("restore scratch data root identity is invalid");
+  }
+  if (stat.uid === runtimePolicy.expectedUid
+    && stat.gid === runtimePolicy.expectedGid) {
+    removeBoundedRestoreScratchTree(root, runtimePolicy, io);
+    return;
+  }
+  if (stat.uid !== rootPolicy.expectedUid
+    || stat.gid !== rootPolicy.expectedGid
+    || io.readdirSync(root).length !== 0) {
+    fail("restore scratch partial data root owner or contents are invalid");
+  }
+  const identity = statIdentity(stat);
+  if (!sameIdentity(identity, statIdentity(io.lstatSync(root)))) {
+    fail("restore scratch partial data root changed before cleanup");
+  }
+  const parent = path.dirname(root);
+  io.rmdirSync(root);
+  fsyncDirectory(parent, io);
+}
+
 function sameFilesystemObjectIdentity(left, right) {
   return left.dev === right.dev
     && left.ino === right.ino
@@ -2456,14 +2762,62 @@ function sameFilesystemObjectIdentity(left, right) {
 }
 
 function removeEmptyPrivateAncestors(directory, stop, policy, io) {
+  const rootDevice = io.lstatSync(policy.root).dev;
   let cursor = directory;
   while (cursor !== stop && cursor.startsWith(`${stop}${path.sep}`)) {
     const stat = io.lstatSync(cursor);
     if (!stat.isDirectory() || stat.isSymbolicLink()
+      || stat.dev !== rootDevice
       || stat.uid !== policy.expectedUid
       || stat.gid !== policy.expectedGid
       || (stat.mode & 0o7777) !== 0o700) {
       fail("restore scratch ancestor identity changed during cleanup");
+    }
+    if (io.readdirSync(cursor).length !== 0) return;
+    const parent = path.dirname(cursor);
+    io.rmdirSync(cursor);
+    fsyncDirectory(parent, io);
+    cursor = parent;
+  }
+}
+
+function assertPrivateAncestorPrefix(directory, root, policy, io) {
+  const relative = path.relative(root, directory);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)) {
+    fail("restore scratch absent path escaped its authority root");
+  }
+  const rootDevice = io.lstatSync(root).dev;
+  let cursor = root;
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const stat = lstatIfPresent(cursor, io);
+    if (stat === null) return;
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+      || stat.dev !== rootDevice
+      || stat.uid !== policy.expectedUid
+      || stat.gid !== policy.expectedGid
+      || (stat.mode & 0o7777) !== 0o700) {
+      fail("restore scratch absent-path ancestor identity is invalid");
+    }
+  }
+}
+
+function removeExistingEmptyPrivateAncestors(directory, stop, policy, io) {
+  const rootDevice = io.lstatSync(policy.root).dev;
+  let cursor = directory;
+  while (cursor !== stop && cursor.startsWith(`${stop}${path.sep}`)) {
+    const stat = lstatIfPresent(cursor, io);
+    if (stat === null) {
+      cursor = path.dirname(cursor);
+      continue;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+      || stat.dev !== rootDevice
+      || stat.uid !== policy.expectedUid
+      || stat.gid !== policy.expectedGid
+      || (stat.mode & 0o7777) !== 0o700) {
+      fail("restore scratch absent-path ancestor identity changed during cleanup");
     }
     if (io.readdirSync(cursor).length !== 0) return;
     const parent = path.dirname(cursor);

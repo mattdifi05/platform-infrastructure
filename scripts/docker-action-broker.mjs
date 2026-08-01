@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   ACTIONS,
+  MAX_PHASE_OUTPUT_BYTES,
   MAX_REQUEST_BYTES,
   RESPONSE_SCHEMA,
   canonicalJson,
@@ -21,6 +22,11 @@ import {
   normalizeActivationPolicy,
   verifyActivationEnvelope,
 } from "./docker-action-activation.mjs";
+import {
+  assertExactSemanticHelperInspect,
+  bindSemanticHelperImageInspect,
+  buildSemanticHelperPlan,
+} from "./docker-action-helper-plan.mjs";
 
 const DEFAULT_SOCKET_PATH = "/run/platform/docker-action-broker/broker.sock";
 const DEFAULT_STATE_DIR = "/var/lib/platform/docker-action-broker";
@@ -36,6 +42,19 @@ const MAX_REPLAY_ENTRIES = 4096;
 const MAX_REPLAY_LEDGER_BYTES = 1024 * 1024;
 const MAX_LEASE_STATE_BYTES = MAX_TRUST_DOCUMENT_BYTES + MAX_REQUEST_BYTES + 64 * 1024;
 const CLEANUP_TIMEOUT_MS = 10_000;
+const MAX_WORKER_ENV_ENTRY_BYTES = 32 * 1024;
+const MAX_WORKER_ENV_TOTAL_BYTES = 64 * 1024;
+const SEMANTIC_WORKER_RESULT_SCHEMA = "platform.docker-worker.result/v2";
+const SEMANTIC_WORKER_ROLES_BY_PHASE = Object.freeze({
+  "catalog.capture": Object.freeze(["evidence-finalizer", "helper-preparer"]),
+  "job.backup.capture": Object.freeze(["evidence-finalizer", "helper-preparer"]),
+  "job.restore.verify": Object.freeze(["artifact-resolver", "evidence-finalizer", "helper-preparer", "scratch-cleaner", "scratch-preparer"]),
+  "offsite.sync": Object.freeze(["artifact-resolver", "evidence-finalizer", "helper-preparer"]),
+  "prune.apply": Object.freeze(["standalone"]),
+  "prune.plan": Object.freeze(["standalone"]),
+  "restore.capture": Object.freeze(["evidence-finalizer", "helper-preparer"]),
+  "restore.verify": Object.freeze(["evidence-finalizer", "helper-preparer", "scratch-cleaner", "scratch-preparer"]),
+});
 const LEASE_SCHEMA_V2 = "platform.docker-action.lease/v2";
 const LEASE_JOURNAL_SCHEMA_V2 = "platform.docker-action.lease-journal-entry/v2";
 const ZERO_SHA256 = "0".repeat(64);
@@ -52,7 +71,7 @@ const LEASE_EVENT_FIELDS = Object.freeze({
       "receiptDigest",
       "resourceName",
     ],
-    optional: ["requestSha256", "snapshot"],
+    optional: ["claimedBackupResources", "requestSha256", "snapshot"],
   }),
   "worker-created": Object.freeze({
     required: ["phaseId", "resourceName", "workerId"],
@@ -66,15 +85,119 @@ const LEASE_EVENT_FIELDS = Object.freeze({
     required: ["phaseId", "resourceName", "workerId"],
     optional: [],
   }),
+  "role-worker-recorded": Object.freeze({
+    required: ["action", "phaseId", "phaseProfileSha256", "receiptDigest", "resourceName", "workerRole"],
+    optional: ["artifactBinding", "claimedBackupResources", "helperResultsSnapshot", "requestSha256", "snapshot"],
+  }),
+  "role-worker-created": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "role-worker-start-attempted": Object.freeze({
+    required: ["mutationClass", "phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "role-worker-result-recorded": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId", "workerResultSha256", "workerRole"],
+    optional: [],
+  }),
+  "role-worker-deleted": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "scratch-bootstrap-recorded": Object.freeze({
+    required: ["action", "engine", "phaseId", "phaseProfileSha256", "receiptDigest", "resourceName", "workerRole"],
+    optional: ["claimedBackupResources", "requestSha256", "snapshot"],
+  }),
+  "scratch-bootstrap-created": Object.freeze({
+    required: ["engine", "phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "scratch-bootstrap-start-attempted": Object.freeze({
+    required: ["engine", "phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "scratch-bootstrap-result-recorded": Object.freeze({
+    required: ["engine", "phaseId", "resourceName", "workerId", "workerResultSha256", "workerRole"],
+    optional: [],
+  }),
+  "scratch-bootstrap-deleted": Object.freeze({
+    required: ["engine", "phaseId", "resourceName", "workerId", "workerRole"],
+    optional: [],
+  }),
+  "scratch-materialized": Object.freeze({
+    required: ["engine", "phaseId", "relativePath"],
+    optional: ["requestSha256"],
+  }),
+  "scratch-cleaned": Object.freeze({
+    required: ["engine", "phaseId", "relativePath"],
+    optional: ["requestSha256"],
+  }),
+  "helper-recorded": Object.freeze({
+    required: ["action", "bodySha256", "helperPlanSha256", "helperProfileId", "imageRuntimeConfigSha256", "ordinal", "phaseId", "phaseProfileSha256", "receiptDigest", "resourceName"],
+    optional: ["artifactBinding", "claimedBackupResources", "requestSha256", "snapshot"],
+  }),
+  "helper-created": Object.freeze({
+    required: ["helperProfileId", "phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "helper-start-attempted": Object.freeze({
+    required: ["helperProfileId", "phaseId", "remoteAttempt", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "helper-started": Object.freeze({
+    required: ["helperProfileId", "phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "helper-ready": Object.freeze({
+    required: ["helperProfileId", "phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "helper-result-recorded": Object.freeze({
+    required: ["helperProfileId", "phaseId", "resourceName", "workerId", "workerResultSha256"],
+    optional: [],
+  }),
+  "helper-deleted": Object.freeze({
+    required: ["helperProfileId", "phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "helper-results-materialized": Object.freeze({
+    required: ["helperResultsSnapshot", "phaseId"],
+    optional: ["requestSha256"],
+  }),
+  "helper-results-seal-intent": Object.freeze({
+    required: ["phaseId"],
+    optional: ["requestSha256"],
+  }),
+  "helper-results-intent-cleaned": Object.freeze({
+    required: ["phaseId"],
+    optional: ["requestSha256"],
+  }),
+  "helper-results-cleaned": Object.freeze({
+    required: ["helperResultsSnapshot", "phaseId"],
+    optional: ["requestSha256"],
+  }),
   "snapshot-cleaned": Object.freeze({
     required: ["phaseId", "snapshot"],
+    optional: ["requestSha256"],
+  }),
+  "action-result-recorded": Object.freeze({
+    required: ["resultSha256"],
     optional: ["requestSha256"],
   }),
   "action-completed": Object.freeze({
     required: ["resultSha256"],
     optional: ["requestSha256"],
   }),
+  "response-undelivered": Object.freeze({
+    required: ["resultSha256"],
+    optional: ["requestSha256"],
+  }),
   "remote-effect-unknown": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "local-effect-unknown": Object.freeze({
     required: ["phaseId", "resourceName", "workerId"],
     optional: [],
   }),
@@ -338,7 +461,7 @@ export class PersistentReplayStore {
       recordEvent: (event) => {
         if (closed || terminal) throw new Error("broker lease is closed or terminal; journal append rejected");
         const entry = this.appendLeaseEvent(record, event);
-        if (entry.event === "action-completed" || entry.event === "remote-effect-unknown") {
+        if (["action-completed", "local-effect-unknown", "response-undelivered", "remote-effect-unknown"].includes(entry.event)) {
           terminal = entry.event;
         }
         return entry;
@@ -350,9 +473,16 @@ export class PersistentReplayStore {
       release: () => {
         if (closed) return;
         if (terminal === "remote-effect-unknown") {
-          throw new Error("remote effect is unknown and requires reconciliation");
+          throw new Error("remote effect is unknown and requires manual reconciliation");
         }
-        if (record.recoveryIntent || (record.journalEntryCount > 0 && terminal !== "action-completed")) {
+        if (terminal === "local-effect-unknown") {
+          throw new Error("local effect is unknown and requires manual reconciliation");
+        }
+        if (terminal === "response-undelivered") {
+          throw new Error("response was undelivered and requires manual reconciliation");
+        }
+        if ((record.recoveryIntent && terminal !== "action-completed")
+          || (record.journalEntryCount > 0 && terminal !== "action-completed")) {
           throw new Error("broker lease cannot be released before durable action completion");
         }
         closed = true;
@@ -371,8 +501,23 @@ export class PersistentReplayStore {
     if (record.bootId === this.bootId) throw new Error("broker has an unexpected live lease before startup");
     const journalEntries = this.readAndValidateJournal(record);
     const terminal = journalEntries.at(-1)?.event ?? null;
+    if (terminal === "action-result-recorded") {
+      const resultSha256 = journalEntries.at(-1).resultSha256;
+      this.appendLeaseEvent(record, {
+        event: "response-undelivered",
+        requestSha256: record.requestSha256,
+        resultSha256,
+      });
+      throw new Error("response was undelivered and requires manual reconciliation");
+    }
     if (terminal === "remote-effect-unknown") {
       throw new Error("remote effect is unknown and requires manual reconciliation");
+    }
+    if (terminal === "local-effect-unknown") {
+      throw new Error("local effect is unknown and requires manual reconciliation");
+    }
+    if (terminal === "response-undelivered") {
+      throw new Error("response was undelivered and requires manual reconciliation");
     }
     if (terminal === "action-completed" || (journalEntries.length === 0 && !record.recoveryIntent)) {
       this.unlinkExactStateFile(this.lockPath);
@@ -514,9 +659,12 @@ export class PersistentReplayStore {
   }
 
   unlinkExactStateFile(file) {
-    const stat = this.io.lstatSync(file);
-    if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== this.expectedUid
-      || stat.gid !== this.expectedGid || (stat.mode & 0o777) !== 0o600) {
+    const stat = this.io.lstatSync(file, { bigint: true });
+    if (!stat?.isFile() || stat.isSymbolicLink()
+      || statInteger(stat.nlink) !== 1
+      || statInteger(stat.uid) !== this.expectedUid
+      || statInteger(stat.gid) !== this.expectedGid
+      || (statInteger(stat.mode) & 0o777) !== 0o600) {
       throw new Error("broker state unlink integrity failure");
     }
     this.io.unlinkSync(file);
@@ -527,7 +675,7 @@ export class PersistentReplayStore {
     this.validateLeaseRecord(record);
     const current = this.readAndValidateJournal(record);
     const terminal = current.at(-1)?.event;
-    if (terminal === "action-completed" || terminal === "remote-effect-unknown") {
+    if (["action-completed", "local-effect-unknown", "response-undelivered", "remote-effect-unknown"].includes(terminal)) {
       throw new Error("broker lease journal is terminal; append rejected");
     }
     const event = normalizeLeaseEvent(value, record);
@@ -803,6 +951,9 @@ function normalizeLeaseEvent(value, record) {
     throw new TypeError("broker lease journal resource identity is invalid");
   }
   for (const field of [
+    "bodySha256",
+    "helperPlanSha256",
+    "imageRuntimeConfigSha256",
     "phaseProfileSha256",
     "resultSha256",
     "workerId",
@@ -813,10 +964,57 @@ function normalizeLeaseEvent(value, record) {
       throw new TypeError(`broker lease journal ${field} is invalid`);
     }
   }
-  if (normalized.event === "worker-recorded") {
+  if (Object.hasOwn(normalized, "workerRole")
+    && !["artifact-resolver", "evidence-finalizer", "helper-preparer", "scratch-cleaner", "scratch-preparer", "standalone"]
+      .includes(normalized.workerRole)) {
+    throw new TypeError("broker lease journal worker role is invalid");
+  }
+  if (Object.hasOwn(normalized, "helperProfileId")
+    && !/^helper\.(?:capture|restore|offsite)\.[a-z0-9.-]{1,120}$/.test(normalized.helperProfileId)) {
+    throw new TypeError("broker lease journal helper profile identity is invalid");
+  }
+  if (Object.hasOwn(normalized, "engine")
+    && !["mariadb", "minio", "postgres"].includes(normalized.engine)) {
+    throw new TypeError("broker lease journal scratch engine is invalid");
+  }
+  if (Object.hasOwn(normalized, "ordinal")
+    && (!Number.isSafeInteger(normalized.ordinal) || normalized.ordinal < 0 || normalized.ordinal > 255)) {
+    throw new TypeError("broker lease journal helper ordinal is invalid");
+  }
+  if (Object.hasOwn(normalized, "remoteAttempt") && typeof normalized.remoteAttempt !== "boolean") {
+    throw new TypeError("broker lease journal helper remote-attempt policy is invalid");
+  }
+  if (Object.hasOwn(normalized, "mutationClass")
+    && !["local-nonidempotent", "none"].includes(normalized.mutationClass)) {
+    throw new TypeError("broker lease journal mutation class is invalid");
+  }
+  if (Object.hasOwn(normalized, "relativePath") && !isExactRelativeBackupPath(normalized.relativePath)) {
+    throw new TypeError("broker lease journal relative path is invalid");
+  }
+  const recordedEvents = new Set([
+    "helper-recorded",
+    "role-worker-recorded",
+    "scratch-bootstrap-recorded",
+    "worker-recorded",
+  ]);
+  if (recordedEvents.has(normalized.event)) {
     const phase = record.trusted?.receipt?.resources?.phaseProfiles?.[normalized.phaseId];
     if (!phase || phase.phaseSha256 !== normalized.phaseProfileSha256) {
       throw new TypeError("broker lease journal phase profile lineage is invalid");
+    }
+    const isClaimedJob = record.action === "backup.job.execute";
+    const hasClaimedResources = Object.hasOwn(normalized, "claimedBackupResources");
+    const hasSnapshot = Object.hasOwn(normalized, "snapshot");
+    if (isClaimedJob !== hasClaimedResources || isClaimedJob !== hasSnapshot
+      || (hasClaimedResources && (!isPlainRecord(normalized.claimedBackupResources)
+        || Object.keys(normalized.claimedBackupResources).length < 1))) {
+      throw new TypeError("broker lease journal claimed resource lineage is incomplete");
+    }
+    for (const [id, resource] of Object.entries(normalized.claimedBackupResources ?? {})) {
+      const admitted = record.trusted.receipt.resources?.backupResources?.[id];
+      if (!isPlainRecord(admitted) || canonicalJson(resource) !== canonicalJson(admitted)) {
+        throw new TypeError("broker lease journal claimed resource lineage is invalid");
+      }
     }
   }
   if (Object.hasOwn(normalized, "snapshot")) {
@@ -824,6 +1022,21 @@ function normalizeLeaseEvent(value, record) {
     if (normalized.snapshot.requestSha256 !== record.requestSha256) {
       throw new TypeError("broker lease journal snapshot lineage is invalid");
     }
+  }
+  if (Object.hasOwn(normalized, "helperResultsSnapshot")) {
+    normalized.helperResultsSnapshot = cloneCanonicalValue(
+      normalizeHelperResultsSnapshot(normalized.helperResultsSnapshot),
+    );
+    if (normalized.helperResultsSnapshot.requestSha256 !== record.requestSha256
+      || normalized.helperResultsSnapshot.action !== record.action
+      || normalized.helperResultsSnapshot.phaseId !== normalized.phaseId) {
+      throw new TypeError("broker lease journal helper-results snapshot lineage is invalid");
+    }
+  }
+  if (Object.hasOwn(normalized, "artifactBinding")) {
+    validateBrokerArtifactBinding(normalized.artifactBinding, {
+      consumerRequestSha256: record.requestSha256,
+    });
   }
   return normalized;
 }
@@ -865,11 +1078,23 @@ function validateStoredLeaseEvent(entry, record, { previousEntrySha256, sequence
 }
 
 function validateLeaseEventProgression(entries, record) {
+  const helpers = new Map();
+  const helperResultsIntents = new Set();
+  const helperResultsSnapshots = new Map();
+  const roleWorkers = new Map();
+  const scratch = new Map();
+  const scratchCleaned = new Set();
+  const scratchWorkers = new Map();
   const snapshots = new Map();
   const workers = new Map();
+  let actionResultSha256 = null;
   let terminal = false;
   for (const [index, entry] of entries.entries()) {
     if (terminal) throw new Error("lease journal contains a post-terminal entry");
+    if (actionResultSha256 !== null
+      && !["action-completed", "response-undelivered"].includes(entry.event)) {
+      throw new Error("lease journal contains a post-result nonterminal entry");
+    }
     if (entry.event === "snapshot-materialized") {
       if (snapshots.has(entry.phaseId)) {
         throw new Error("lease journal snapshot materialization is duplicated");
@@ -911,6 +1136,205 @@ function validateLeaseEventProgression(entries, record) {
         worker.deleted = true;
       }
     }
+    if (entry.event === "role-worker-recorded") {
+      if (roleWorkers.has(entry.resourceName)) throw new Error("lease journal contains a duplicate role worker");
+      if (entry.snapshot && snapshots.get(entry.phaseId) !== canonicalJson(entry.snapshot)) {
+        throw new Error("lease journal role worker claimed snapshot progression is corrupt");
+      }
+      if (entry.helperResultsSnapshot
+        && helperResultsSnapshots.get(entry.phaseId) !== canonicalJson(entry.helperResultsSnapshot)) {
+        throw new Error("lease journal role worker helper-results progression is corrupt");
+      }
+      roleWorkers.set(entry.resourceName, {
+        created: false,
+        deleted: false,
+        phaseId: entry.phaseId,
+        resultRecorded: false,
+        startAttempted: false,
+        mutationClass: null,
+        workerId: null,
+        workerRole: entry.workerRole,
+      });
+    } else if (["role-worker-created", "role-worker-start-attempted", "role-worker-result-recorded", "role-worker-deleted"].includes(entry.event)) {
+      const worker = roleWorkers.get(entry.resourceName);
+      if (!worker || worker.phaseId !== entry.phaseId || worker.workerRole !== entry.workerRole || worker.deleted) {
+        throw new Error("lease journal role worker progression is corrupt");
+      }
+      if (entry.event === "role-worker-created") {
+        if (worker.created) throw new Error("lease journal role worker creation is duplicated");
+        worker.created = true;
+        worker.workerId = entry.workerId;
+      } else if (entry.event === "role-worker-start-attempted") {
+        const expectedClass = ["artifact-resolver", "evidence-finalizer"].includes(entry.workerRole)
+          || (entry.phaseId === "prune.apply" && entry.workerRole === "standalone")
+          ? "local-nonidempotent"
+          : "none";
+        if (!worker.created || worker.startAttempted || worker.workerId !== entry.workerId
+          || entry.mutationClass !== expectedClass) {
+          throw new Error("lease journal role worker start-attempt identity is corrupt");
+        }
+        worker.startAttempted = true;
+        worker.mutationClass = entry.mutationClass;
+      } else if (entry.event === "role-worker-result-recorded") {
+        if (!worker.created || !worker.startAttempted || worker.resultRecorded || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal role worker result identity is corrupt");
+        }
+        worker.resultRecorded = true;
+      } else {
+        if (!worker.created || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal role worker deletion identity is corrupt");
+        }
+        worker.deleted = true;
+      }
+    }
+    if (entry.event === "scratch-bootstrap-recorded") {
+      if (scratchWorkers.has(entry.resourceName)) throw new Error("lease journal contains a duplicate scratch bootstrap");
+      scratchWorkers.set(entry.resourceName, {
+        created: false,
+        deleted: false,
+        engine: entry.engine,
+        phaseId: entry.phaseId,
+        resultRecorded: false,
+        startAttempted: false,
+        workerId: null,
+        workerRole: entry.workerRole,
+      });
+    } else if (["scratch-bootstrap-created", "scratch-bootstrap-start-attempted", "scratch-bootstrap-result-recorded", "scratch-bootstrap-deleted"].includes(entry.event)) {
+      const worker = scratchWorkers.get(entry.resourceName);
+      if (!worker || worker.phaseId !== entry.phaseId || worker.engine !== entry.engine
+        || worker.workerRole !== entry.workerRole || worker.deleted) {
+        throw new Error("lease journal scratch bootstrap progression is corrupt");
+      }
+      if (entry.event === "scratch-bootstrap-created") {
+        if (worker.created) throw new Error("lease journal scratch bootstrap creation is duplicated");
+        worker.created = true;
+        worker.workerId = entry.workerId;
+      } else if (entry.event === "scratch-bootstrap-start-attempted") {
+        if (!worker.created || worker.startAttempted || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal scratch bootstrap start-attempt identity is corrupt");
+        }
+        worker.startAttempted = true;
+      } else if (entry.event === "scratch-bootstrap-result-recorded") {
+        if (!worker.created || !worker.startAttempted || worker.resultRecorded || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal scratch bootstrap result identity is corrupt");
+        }
+        worker.resultRecorded = true;
+      } else {
+        if (!worker.created || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal scratch bootstrap deletion identity is corrupt");
+        }
+        worker.deleted = true;
+      }
+    }
+    if (entry.event === "scratch-materialized") {
+      const completed = [...scratchWorkers.values()].some((worker) => (
+        worker.phaseId === entry.phaseId && worker.engine === entry.engine
+          && worker.workerRole === "scratch-preparer" && worker.resultRecorded
+      ));
+      if (!completed || scratch.has(`${entry.phaseId}\0${entry.engine}`)) {
+        throw new Error("lease journal scratch materialization progression is corrupt");
+      }
+      scratch.set(`${entry.phaseId}\0${entry.engine}`, entry.relativePath);
+    } else if (entry.event === "scratch-cleaned") {
+      const key = `${entry.phaseId}\0${entry.engine}`;
+      const completed = [...scratchWorkers.values()].some((worker) => (
+        worker.phaseId === entry.phaseId && worker.engine === entry.engine
+          && worker.workerRole === "scratch-cleaner" && worker.resultRecorded
+      ));
+      const preparerIntent = [...scratchWorkers.values()].some((worker) => (
+        worker.phaseId === entry.phaseId && worker.engine === entry.engine
+          && worker.workerRole === "scratch-preparer"
+      ));
+      if (!completed || scratchCleaned.has(key)
+        || (scratch.get(key) !== entry.relativePath && !preparerIntent)) {
+        throw new Error("lease journal scratch cleanup progression is corrupt");
+      }
+      scratch.delete(key);
+      scratchCleaned.add(key);
+    }
+    if (entry.event === "helper-recorded") {
+      if (helpers.has(entry.resourceName)) throw new Error("lease journal contains a duplicate helper record");
+      helpers.set(entry.resourceName, {
+        created: false,
+        deleted: false,
+        helperProfileId: entry.helperProfileId,
+        phaseId: entry.phaseId,
+        ready: false,
+        remoteAttempted: false,
+        resultRecorded: false,
+        startAttempted: false,
+        started: false,
+        workerId: null,
+      });
+    } else if (["helper-created", "helper-start-attempted", "helper-started", "helper-ready", "helper-result-recorded", "helper-deleted"].includes(entry.event)) {
+      const helper = helpers.get(entry.resourceName);
+      if (!helper || helper.phaseId !== entry.phaseId
+        || helper.helperProfileId !== entry.helperProfileId || helper.deleted) {
+        throw new Error("lease journal helper progression is corrupt");
+      }
+      if (entry.event === "helper-created") {
+        if (helper.created) throw new Error("lease journal helper creation is duplicated");
+        helper.created = true;
+        helper.workerId = entry.workerId;
+      } else if (entry.event === "helper-start-attempted") {
+        if (!helper.created || helper.startAttempted || helper.started || helper.workerId !== entry.workerId
+          || entry.remoteAttempt !== (entry.helperProfileId === "helper.offsite.restic")) {
+          throw new Error("lease journal helper start-attempt identity is corrupt");
+        }
+        helper.startAttempted = true;
+        helper.remoteAttempted = entry.remoteAttempt;
+      } else if (entry.event === "helper-started") {
+        if (!helper.created || !helper.startAttempted || helper.started || helper.workerId !== entry.workerId) {
+          throw new Error("lease journal helper start identity is corrupt");
+        }
+        helper.started = true;
+      } else if (entry.event === "helper-ready") {
+        if (!helper.started || helper.ready || !entry.helperProfileId.endsWith(".server")
+          || helper.workerId !== entry.workerId) {
+          throw new Error("lease journal helper readiness identity is corrupt");
+        }
+        helper.ready = true;
+      } else if (entry.event === "helper-result-recorded") {
+        const serverReady = !entry.helperProfileId.endsWith(".server") || helper.ready;
+        if (!helper.started || !serverReady || helper.resultRecorded || helper.workerId !== entry.workerId) {
+          throw new Error("lease journal helper result identity is corrupt");
+        }
+        helper.resultRecorded = true;
+      } else {
+        if (!helper.created || helper.workerId !== entry.workerId) {
+          throw new Error("lease journal helper deletion identity is corrupt");
+        }
+        helper.deleted = true;
+      }
+    }
+    if (entry.event === "helper-results-seal-intent") {
+      if (helperResultsIntents.has(entry.phaseId) || helperResultsSnapshots.has(entry.phaseId)
+        || [...helpers.values()].some((helper) => (
+          helper.phaseId === entry.phaseId && (!helper.resultRecorded || !helper.deleted)
+        ))) {
+        throw new Error("lease journal helper-results seal intent progression is corrupt");
+      }
+      helperResultsIntents.add(entry.phaseId);
+    } else if (entry.event === "helper-results-materialized") {
+      if (!helperResultsIntents.has(entry.phaseId) || helperResultsSnapshots.has(entry.phaseId)
+        || [...helpers.values()].some((helper) => (
+          helper.phaseId === entry.phaseId && (!helper.resultRecorded || !helper.deleted)
+        ))) {
+        throw new Error("lease journal helper-results materialization progression is corrupt");
+      }
+      helperResultsSnapshots.set(entry.phaseId, canonicalJson(entry.helperResultsSnapshot));
+    } else if (entry.event === "helper-results-cleaned") {
+      if (helperResultsSnapshots.get(entry.phaseId) !== canonicalJson(entry.helperResultsSnapshot)) {
+        throw new Error("lease journal helper-results cleanup progression is corrupt");
+      }
+      helperResultsSnapshots.delete(entry.phaseId);
+      helperResultsIntents.delete(entry.phaseId);
+    } else if (entry.event === "helper-results-intent-cleaned") {
+      if (!helperResultsIntents.has(entry.phaseId) || helperResultsSnapshots.has(entry.phaseId)) {
+        throw new Error("lease journal helper-results intent cleanup progression is corrupt");
+      }
+      helperResultsIntents.delete(entry.phaseId);
+    }
     if (entry.event === "snapshot-cleaned") {
       const materialized = snapshots.get(entry.phaseId);
       const recoveryOnlyCleanup = index === 0 && entries.length >= 1;
@@ -924,18 +1348,38 @@ function validateLeaseEventProgression(entries, record) {
       snapshots.delete(entry.phaseId);
     }
     if (entry.event === "remote-effect-unknown") {
-      const worker = workers.get(entry.resourceName);
+      const worker = workers.get(entry.resourceName) ?? helpers.get(entry.resourceName);
       if (!worker || worker.phaseId !== entry.phaseId
-        || worker.workerId !== entry.workerId || !worker.deleted) {
+        || worker.workerId !== entry.workerId || !worker.deleted
+        || (helpers.has(entry.resourceName) && !worker.remoteAttempted)) {
         throw new Error("lease journal remote-effect identity is corrupt");
       }
     }
-    if (entry.event === "action-completed"
+    if (entry.event === "local-effect-unknown") {
+      const worker = roleWorkers.get(entry.resourceName);
+      if (!worker || worker.phaseId !== entry.phaseId || worker.workerId !== entry.workerId
+        || !worker.deleted || !worker.startAttempted
+        || worker.mutationClass !== "local-nonidempotent") {
+        throw new Error("lease journal local-effect identity is corrupt");
+      }
+    }
+    if (["action-result-recorded", "action-completed", "response-undelivered"].includes(entry.event)
       && ([...workers.values()].some(({ deleted, resultRecorded }) => !deleted || !resultRecorded)
-        || snapshots.size > 0)) {
+        || [...roleWorkers.values()].some(({ deleted, resultRecorded }) => !deleted || !resultRecorded)
+        || [...scratchWorkers.values()].some(({ deleted, resultRecorded }) => !deleted || !resultRecorded)
+        || [...helpers.values()].some(({ deleted, resultRecorded }) => !deleted || !resultRecorded)
+        || snapshots.size > 0 || scratch.size > 0 || helperResultsIntents.size > 0
+        || helperResultsSnapshots.size > 0)) {
       throw new Error("lease journal completed before resource cleanup");
     }
-    if (entry.event === "action-completed" || entry.event === "remote-effect-unknown") {
+    if (entry.event === "action-result-recorded") {
+      if (actionResultSha256 !== null) throw new Error("lease journal action result is duplicated");
+      actionResultSha256 = entry.resultSha256;
+    } else if (["action-completed", "response-undelivered"].includes(entry.event)
+      && actionResultSha256 !== null && entry.resultSha256 !== actionResultSha256) {
+      throw new Error("lease journal terminal result digest differs from recorded result");
+    }
+    if (["action-completed", "local-effect-unknown", "response-undelivered", "remote-effect-unknown"].includes(entry.event)) {
       if (index !== entries.length - 1) throw new Error("lease journal terminal entry is not final");
       terminal = true;
     }
@@ -950,20 +1394,63 @@ export function createDockerActionBroker({
   stateDir = DEFAULT_STATE_DIR,
   trustedContextProvider = defaultTrustedContextProvider,
   capabilityProvider = defaultCapabilityProvider,
-  engine = createFixedDockerEngine(),
+  claimedJobSnapshotProvider = defaultClaimedJobSnapshotProvider,
+  engine,
+  helperResultsFileStoreFactory = createHelperResultsFileStore,
   now = () => Date.now(),
   operationTimeoutMs = DEFAULT_TIMEOUT_MS,
+  replayStore,
+  semanticExecutorFactory = createSemanticHelperActionExecutor,
+  semanticExecutorOptions = {},
+  serverFactory = net.createServer,
+  snapshotFileStoreFactory = createSnapshotFileStore,
+  transport = new FixedDockerEngineTransport(),
 } = {}) {
   if (!Number.isInteger(operationTimeoutMs) || operationTimeoutMs < 1 || operationTimeoutMs > 24 * 60 * 60_000) {
     throw new Error("Docker action timeout is invalid");
   }
-  const replayStore = new PersistentReplayStore(stateDir, { now });
-  const core = createBrokerCore({ trustedContextProvider, capabilityProvider, engine, replayStore, now, operationTimeoutMs });
-  const server = net.createServer((connection) => serveConnection(connection, core));
+  if (typeof serverFactory !== "function" || typeof snapshotFileStoreFactory !== "function"
+    || typeof helperResultsFileStoreFactory !== "function"
+    || typeof semanticExecutorFactory !== "function"
+    || !isPlainRecord(semanticExecutorOptions)) {
+    throw new TypeError("Docker action broker assembly dependencies are invalid");
+  }
+  const activeReplayStore = replayStore ?? new PersistentReplayStore(stateDir, { now });
+  let activeEngine = engine;
+  if (activeEngine === undefined) {
+    const snapshotFileStore = semanticExecutorOptions.snapshotFileStore
+      ?? snapshotFileStoreFactory({
+        expectedGid: 0,
+        expectedUid: 0,
+        storageRoot: path.resolve(stateDir),
+      });
+    const helperResultsFileStore = semanticExecutorOptions.helperResultsFileStore
+      ?? helperResultsFileStoreFactory({
+        expectedGid: 0,
+        expectedUid: 0,
+        storageRoot: path.resolve(stateDir),
+      });
+    activeEngine = semanticExecutorFactory({
+      ...semanticExecutorOptions,
+      claimedJobSnapshotProvider,
+      helperResultsFileStore,
+      snapshotFileStore,
+      transport,
+    });
+  }
+  const core = createBrokerCore({
+    trustedContextProvider,
+    capabilityProvider,
+    engine: activeEngine,
+    replayStore: activeReplayStore,
+    now,
+    operationTimeoutMs,
+  });
+  const server = serverFactory((connection) => serveBrokerConnection(connection, core));
   server.on("listening", () => fs.chmodSync(socketPath, 0o660));
   server.socketPath = socketPath;
   server.prepareSocket = () => prepareSocket(socketPath);
-  server.initialize = () => replayStore.recover(engine);
+  server.initialize = () => activeReplayStore.recover(activeEngine);
   return server;
 }
 
@@ -983,7 +1470,14 @@ export function createBrokerCore({
     throw new TypeError("broker dependencies are incomplete");
   }
   return Object.freeze({
-    async handle(frame) {
+    async handle(frame, { deliveryMode = "immediate", peerState = null } = {}) {
+      if (peerState !== null
+        && (!peerState || typeof peerState !== "object" || typeof peerState.lost !== "boolean")) {
+        throw new TypeError("broker peer state is invalid");
+      }
+      if (!["explicit", "immediate"].includes(deliveryMode)) {
+        throw new TypeError("broker delivery mode is invalid");
+      }
       let parsed;
       try {
         if (!Buffer.isBuffer(frame)) frame = Buffer.from(String(frame));
@@ -1016,12 +1510,89 @@ export function createBrokerCore({
       replayStore.consume(request);
       const lease = replayStore.acquire(request, trusted);
       const controller = new AbortController();
+      const deliveryState = { abandoned: false };
+      let pendingCompletion = null;
+      let terminalFinalized = false;
+      let terminalSettlementStarted = false;
+      let completedResultSha256 = null;
+      const executionLease = Object.freeze({
+        ...lease,
+        recordEvent(event) {
+          if (pendingCompletion) {
+            throw new Error("broker action completion is already pending delivery");
+          }
+          if (event?.event === "action-completed") {
+            pendingCompletion = freezeCanonicalValue(event);
+            return pendingCompletion;
+          }
+          if (typeof lease.recordEvent !== "function") {
+            throw new TypeError("broker lease journal dependency is incomplete");
+          }
+          return lease.recordEvent(event);
+        },
+        recordWorker(event) {
+          if (pendingCompletion) {
+            throw new Error("broker action completion is already pending delivery");
+          }
+          if (typeof lease.recordWorker !== "function") {
+            throw new TypeError("broker lease worker journal dependency is incomplete");
+          }
+          return lease.recordWorker(event);
+        },
+      });
+      const validatePendingCompletion = (resultSha256) => {
+        if (!pendingCompletion) return;
+        if (!hasExactKeys(pendingCompletion, ["event", "resultSha256"], ["requestSha256"])
+          || pendingCompletion.event !== "action-completed"
+          || !/^[a-f0-9]{64}$/.test(String(pendingCompletion.resultSha256 ?? ""))
+          || (pendingCompletion.requestSha256 !== undefined
+            && pendingCompletion.requestSha256 !== requestSha256)
+          || pendingCompletion.resultSha256 !== resultSha256) {
+          throw new Error("broker action completion does not match the returned result");
+        }
+      };
+      const finalizeTerminal = (resultSha256, { undelivered }) => {
+        if (terminalSettlementStarted) return;
+        terminalSettlementStarted = true;
+        validatePendingCompletion(resultSha256);
+        if (undelivered) {
+          try {
+            if (typeof lease.recordEvent !== "function") {
+              throw new TypeError("broker lease journal dependency is incomplete");
+            }
+            lease.recordEvent({
+              event: "response-undelivered",
+              requestSha256,
+              resultSha256,
+            });
+            terminalFinalized = true;
+          } finally {
+            lease.preserve();
+          }
+          return;
+        }
+        try {
+          if (pendingCompletion) {
+            if (typeof lease.recordEvent !== "function") {
+              throw new TypeError("broker lease journal dependency is incomplete");
+            }
+            lease.recordEvent(pendingCompletion);
+            terminalFinalized = true;
+          }
+          terminalFinalized = true;
+          lease.release();
+        } catch (error) {
+          lease.preserve();
+          if (error && typeof error === "object") error.preserveLease = true;
+          throw error;
+        }
+      };
       let timeout;
       const operation = Promise.resolve().then(async () => {
         let executionCompleted = false;
         try {
           const engineResult = await engine.execute(request.action, {
-            lease,
+            lease: executionLease,
             parameters: request.parameters,
             request,
             requestId: request.requestId,
@@ -1031,24 +1602,97 @@ export function createBrokerCore({
           });
           executionCompleted = true;
           const result = sanitizeResult(engineResult);
+          completedResultSha256 = sha256(canonicalJson(result));
           const response = normalizeActionResponse(signActionResponse({
             action: request.action,
             errorCode: null,
             requestId: request.requestId,
             requestSha256,
             result,
-            resultSha256: sha256(canonicalJson(result)),
+            resultSha256: completedResultSha256,
             schema: RESPONSE_SCHEMA,
             status: "completed",
             statusCode: 200,
           }, capabilityKey), request, capabilityKey);
           encodeActionResponseFrame(response);
-          lease.release();
+          pendingCompletion ??= freezeCanonicalValue({
+            event: "action-completed",
+            requestSha256,
+            resultSha256: completedResultSha256,
+          });
+          validatePendingCompletion(completedResultSha256);
+          if (typeof lease.recordEvent !== "function") {
+            throw new TypeError("broker lease journal dependency is incomplete");
+          }
+          lease.recordEvent({
+            event: "action-result-recorded",
+            requestSha256,
+            resultSha256: completedResultSha256,
+          });
+          const delivery = Object.freeze({
+            delivered() {
+              finalizeTerminal(completedResultSha256, {
+                undelivered: deliveryState.abandoned || peerState?.lost === true,
+              });
+            },
+            undelivered() {
+              finalizeTerminal(completedResultSha256, { undelivered: true });
+            },
+          });
+          if (deliveryMode === "immediate" || deliveryState.abandoned || peerState?.lost === true) {
+            if (deliveryState.abandoned || peerState?.lost === true) delivery.undelivered();
+            else delivery.delivered();
+          }
           return {
             statusCode: 200,
             body: response,
+            ...(deliveryMode === "explicit" ? { delivery } : {}),
           };
         } catch (error) {
+          if (pendingCompletion && !terminalSettlementStarted) {
+            try {
+              const resultSha256 = completedResultSha256 ?? pendingCompletion.resultSha256;
+              validatePendingCompletion(resultSha256);
+              lease.recordEvent({
+                event: "response-undelivered",
+                requestSha256,
+                resultSha256,
+              });
+              terminalFinalized = true;
+            } catch {
+              // The original failure remains authoritative; the active lease is
+              // still preserved even if a terminal journal append cannot finish.
+            }
+            error.preserveLease = true;
+          } else if (terminalSettlementStarted && !terminalFinalized) {
+            error.preserveLease = true;
+          }
+          const semanticRejection = error?.semanticRejection === true
+            && Number.isSafeInteger(error.statusCode)
+            && error.statusCode >= 400
+            && error.statusCode <= 599
+            && /^[A-Z][A-Z0-9_]{2,63}$/.test(String(error.errorCode ?? ""));
+          if (semanticRejection) {
+            const result = null;
+            const response = normalizeActionResponse(signActionResponse({
+              action: request.action,
+              errorCode: error.errorCode,
+              requestId: request.requestId,
+              requestSha256,
+              result,
+              resultSha256: sha256(canonicalJson(result)),
+              schema: RESPONSE_SCHEMA,
+              status: "rejected",
+              statusCode: error.statusCode,
+            }, capabilityKey), request, capabilityKey);
+            encodeActionResponseFrame(response);
+            if (executionCompleted || error.preserveLease) lease.preserve();
+            else lease.release();
+            return {
+              statusCode: error.statusCode,
+              body: response,
+            };
+          }
           if (executionCompleted || error?.preserveLease) lease.preserve();
           else lease.release();
           throw error;
@@ -1060,6 +1704,7 @@ export function createBrokerCore({
           operation,
           new Promise((_, reject) => {
             timeout = setTimeout(() => {
+              deliveryState.abandoned = true;
               controller.abort();
               reject(brokerError(504, "Docker action timed out"));
             }, operationTimeoutMs);
@@ -1068,46 +1713,6 @@ export function createBrokerCore({
       } finally {
         clearTimeout(timeout);
       }
-    },
-  });
-}
-
-export function createFixedDockerEngine({
-  transport = new FixedDockerEngineTransport(),
-  randomBytes = crypto.randomBytes,
-  cleanupTimeoutMs = CLEANUP_TIMEOUT_MS,
-} = {}) {
-  return Object.freeze({
-    async recoverLease(record, signal) {
-      if (!record?.resourceName || !record?.worker?.body || !record?.worker?.imageId || !record?.worker?.hostPath) {
-        throw new Error("worker recovery record is incomplete");
-      }
-      const inspect = await transport.inspectContainerForRecovery(record.resourceName, signal);
-      if (!inspect) return { status: "absent" };
-      assertExactWorkerInspect(inspect, {
-        id: inspect.Id,
-        name: record.resourceName,
-        body: record.worker.body,
-        imageId: record.worker.imageId,
-        hostPath: record.worker.hostPath,
-      });
-      await transport.deleteContainer(inspect.Id, signal);
-      return { status: "deleted", id: inspect.Id };
-    },
-    async execute(action, context) {
-      const contract = ACTIONS[action];
-      if (!contract?.modeled) throw brokerError(422, "action is not modeled");
-      if (contract.engineAction === "runtimeSnapshot") {
-        return runtimeSnapshot(context.trusted.receipt.resources.containers, transport, context.signal);
-      }
-      if (contract.workerCommand) {
-        return executeFixedWorkerAction(action, contract, context, {
-          transport,
-          randomBytes,
-          cleanupTimeoutMs,
-        });
-      }
-      throw brokerError(422, "action is not modeled");
     },
   });
 }
@@ -1121,12 +1726,44 @@ export class FixedDockerEngineTransport {
     return this.#request("POST", `/containers/create?name=${encodeURIComponent(name)}`, body, signal);
   }
 
+  createHelper(name, body, signal) {
+    return this.#request("POST", `/containers/create?name=${encodeURIComponent(name)}`, body, signal);
+  }
+
+  inspectNetwork(id, signal) {
+    assertEngineId(id);
+    return this.#request("GET", `/networks/${encodeURIComponent(id)}`, undefined, signal);
+  }
+
+  inspectVolume(name, signal) {
+    assertEngineId(name);
+    return this.#request("GET", `/volumes/${encodeURIComponent(name)}`, undefined, signal);
+  }
+
   inspectContainer(id, signal) {
     assertEngineId(id);
     return this.#request("GET", `/containers/${encodeURIComponent(id)}/json`, undefined, signal);
   }
 
+  inspectHelper(id, signal) {
+    assertEngineId(id);
+    return this.#request("GET", `/containers/${encodeURIComponent(id)}/json`, undefined, signal);
+  }
+
+  inspectHelperImage(id, signal) {
+    if (!/^sha256:[a-f0-9]{64}$/.test(String(id ?? ""))) {
+      throw brokerError(502, "helper image ID is invalid");
+    }
+    return this.#request("GET", `/images/${encodeURIComponent(id)}/json`, undefined, signal);
+  }
+
   async inspectContainerForRecovery(id, signal) {
+    assertEngineId(id);
+    const value = await this.#request("GET", `/containers/${encodeURIComponent(id)}/json`, undefined, signal, new Set([200, 404]));
+    return value?.Id ? value : null;
+  }
+
+  async inspectHelperForRecovery(id, signal) {
     assertEngineId(id);
     const value = await this.#request("GET", `/containers/${encodeURIComponent(id)}/json`, undefined, signal, new Set([200, 404]));
     return value?.Id ? value : null;
@@ -1137,14 +1774,29 @@ export class FixedDockerEngineTransport {
     return this.#request("POST", `/containers/${encodeURIComponent(id)}/start`, undefined, signal, new Set([204, 304]));
   }
 
+  startHelper(id, signal) {
+    assertEngineId(id);
+    return this.#request("POST", `/containers/${encodeURIComponent(id)}/start`, undefined, signal, new Set([204, 304]));
+  }
+
   waitContainer(id, signal) {
+    assertEngineId(id);
+    return this.#request("POST", `/containers/${encodeURIComponent(id)}/wait?condition=not-running`, undefined, signal);
+  }
+
+  waitHelper(id, signal) {
     assertEngineId(id);
     return this.#request("POST", `/containers/${encodeURIComponent(id)}/wait?condition=not-running`, undefined, signal);
   }
 
   logsContainer(id, signal) {
     assertEngineId(id);
-    return this.#request("GET", `/containers/${encodeURIComponent(id)}/logs?stdout=1&stderr=1&tail=200`, undefined, signal, new Set([200]), false);
+    return this.#request("GET", `/containers/${encodeURIComponent(id)}/logs?stdout=1&stderr=1`, undefined, signal, new Set([200]), false);
+  }
+
+  logsHelper(id, signal) {
+    assertEngineId(id);
+    return this.#request("GET", `/containers/${encodeURIComponent(id)}/logs?stdout=1&stderr=1`, undefined, signal, new Set([200]), false);
   }
 
   deleteContainer(id, signal) {
@@ -1152,9 +1804,25 @@ export class FixedDockerEngineTransport {
     return this.#request("DELETE", `/containers/${encodeURIComponent(id)}?force=1&v=1`, undefined, signal, new Set([204, 404]));
   }
 
+  deleteHelper(id, signal) {
+    assertEngineId(id);
+    return this.#request("DELETE", `/containers/${encodeURIComponent(id)}?force=1&v=1`, undefined, signal, new Set([204, 404]));
+  }
+
   #request(method, requestPath, body, signal, accepted = new Set([200, 201]), parseJson = true) {
     const payload = body === undefined ? null : Buffer.from(canonicalJson(body));
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const resolveOnce = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const rejectOnce = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
       const request = http.request({
         socketPath: this.socketPath,
         method,
@@ -1164,7 +1832,10 @@ export class FixedDockerEngineTransport {
       }, (response) => {
         const chunks = [];
         let length = 0;
+        response.on("aborted", () => rejectOnce(brokerError(502, "Engine response was aborted")));
+        response.on("error", () => rejectOnce(brokerError(502, "Engine response stream failed")));
         response.on("data", (chunk) => {
+          if (settled) return;
           length += chunk.length;
           if (length > MAX_ENGINE_RESPONSE_BYTES) {
             request.destroy(brokerError(502, "Engine response is oversized"));
@@ -1173,17 +1844,18 @@ export class FixedDockerEngineTransport {
           chunks.push(chunk);
         });
         response.on("end", () => {
+          if (settled) return;
           const bytes = Buffer.concat(chunks);
-          if (!accepted.has(response.statusCode)) return reject(brokerError(502, `fixed Engine request failed (${response.statusCode})`));
-          if (!parseJson || bytes.length === 0) return resolve(bytes);
+          if (!accepted.has(response.statusCode)) return rejectOnce(brokerError(502, `fixed Engine request failed (${response.statusCode})`));
+          if (!parseJson || bytes.length === 0) return resolveOnce(bytes);
           try {
-            resolve(JSON.parse(bytes.toString("utf8")));
+            resolveOnce(JSON.parse(bytes.toString("utf8")));
           } catch {
-            reject(brokerError(502, "Engine response is malformed"));
+            rejectOnce(brokerError(502, "Engine response is malformed"));
           }
         });
       });
-      request.on("error", reject);
+      request.on("error", rejectOnce);
       if (payload) request.write(payload);
       request.end();
     });
@@ -1804,6 +2476,268 @@ export function createSnapshotFileStore({
   });
 }
 
+export function createHelperResultsFileStore({
+  expectedUid = 0,
+  expectedGid = 0,
+  io = fs,
+  storageRoot,
+} = {}) {
+  if (!isUnixIdentity(expectedUid) || !isUnixIdentity(expectedGid)
+    || typeof storageRoot !== "string" || !path.isAbsolute(storageRoot)
+    || path.normalize(storageRoot) !== storageRoot || storageRoot.includes("\0")
+    || !io || typeof io !== "object"
+    || ["closeSync", "existsSync", "fstatSync", "fsyncSync", "lstatSync", "mkdirSync",
+      "openSync", "readSync", "readdirSync", "realpathSync", "rmdirSync", "unlinkSync",
+      "writeSync"].some((method) => typeof io[method] !== "function")
+    || !Number.isInteger(io.constants?.O_RDONLY)
+    || !Number.isInteger(io.constants?.O_WRONLY)
+    || !Number.isInteger(io.constants?.O_CREAT)
+    || !Number.isInteger(io.constants?.O_EXCL)
+    || !Number.isInteger(io.constants?.O_DIRECTORY)
+    || !Number.isInteger(io.constants?.O_NOFOLLOW)
+    || io.constants.O_NOFOLLOW === 0) {
+    throw new TypeError("helper-results store policy is invalid");
+  }
+  const root = path.resolve(storageRoot);
+  const base = path.join(root, "helper-results");
+  const validateRoot = (directory, label) => {
+    const stat = io.lstatSync(directory, { bigint: true });
+    assertSnapshotDirectoryStat(stat, expectedUid, expectedGid, label);
+    if (path.resolve(String(io.realpathSync(directory))) !== directory) {
+      throw new Error(`${label} realpath escaped its exact authority path`);
+    }
+  };
+  const createChild = (parent, child, label) => {
+    if (io.existsSync(child)) throw new Error(`${label} already exists; replay or collision rejected`);
+    const parentDescriptor = io.openSync(
+      parent,
+      io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW,
+    );
+    try {
+      io.mkdirSync(child, { mode: 0o700 });
+      io.fsyncSync(parentDescriptor);
+    } finally {
+      io.closeSync(parentDescriptor);
+    }
+    validateRoot(child, label);
+  };
+  const ensureBase = () => {
+    validateRoot(root, "helper-results storage root");
+    if (!io.existsSync(base)) createChild(root, base, "helper-results directory");
+    else validateRoot(base, "helper-results directory");
+  };
+  const syncDirectory = (directory) => {
+    const descriptor = io.openSync(
+      directory,
+      io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW,
+    );
+    try { io.fsyncSync(descriptor); } finally { io.closeSync(descriptor); }
+  };
+  const normalizePartialAuthority = (authority) => {
+    if (!isPlainRecord(authority) || !hasExactKeys(authority, [
+      "action", "phaseId", "requestId", "requestSha256",
+    ]) || !isLogicalLeaseId(authority.phaseId)
+      || !/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(String(authority.action ?? ""))
+      || typeof authority.requestId !== "string" || authority.requestId.length < 1
+      || authority.requestId.length > 256
+      || !/^[a-f0-9]{64}$/.test(String(authority.requestSha256 ?? ""))) {
+      throw new TypeError("helper-results partial cleanup authority is invalid");
+    }
+    return authority;
+  };
+
+  return Object.freeze({
+    async seal(value, authority) {
+      if (!isPlainRecord(value) || !isPlainRecord(authority)
+        || !hasExactKeys(authority, [
+          "action", "phaseId", "requestId", "requestSha256", "volumeId", "volumeInspect",
+        ])
+        || value.schema !== "platform.docker-helper-results/v1"
+        || value.action !== authority.action || value.phaseId !== authority.phaseId
+        || value.requestId !== authority.requestId
+        || value.requestSha256 !== authority.requestSha256
+        || !Array.isArray(value.helpers)
+        || !isLogicalLeaseId(authority.phaseId)
+        || !/^[a-f0-9]{64}$/.test(String(authority.requestSha256 ?? ""))
+        || authority.volumeId !== "broker.state"
+        || !isPlainRecord(authority.volumeInspect)
+        || typeof authority.volumeInspect.Mountpoint !== "string"
+        || !path.isAbsolute(authority.volumeInspect.Mountpoint)
+        || typeof authority.volumeInspect.Name !== "string") {
+        throw new TypeError("helper-results snapshot authority is invalid");
+      }
+      const bytes = Buffer.from(`${canonicalJson(value)}\n`);
+      if (bytes.length < 2 || bytes.length > 512 * 1024) {
+        throw new TypeError("helper-results snapshot size is invalid");
+      }
+      ensureBase();
+      const requestDirectory = path.join(base, authority.requestSha256);
+      const phaseDirectory = path.join(requestDirectory, authority.phaseId);
+      createChild(base, requestDirectory, "helper-results request directory");
+      let phaseCreated = false;
+      let descriptor;
+      const leaf = path.join(phaseDirectory, "results.json");
+      try {
+        createChild(requestDirectory, phaseDirectory, "helper-results phase directory");
+        phaseCreated = true;
+        descriptor = io.openSync(
+          leaf,
+          io.constants.O_WRONLY | io.constants.O_CREAT | io.constants.O_EXCL | io.constants.O_NOFOLLOW,
+          0o400,
+        );
+        assertSnapshotLeafStat(io.fstatSync(descriptor, { bigint: true }), expectedUid, expectedGid, 0);
+        writeSnapshotBytes(io, descriptor, bytes);
+        io.fsyncSync(descriptor);
+        io.closeSync(descriptor);
+        descriptor = undefined;
+        const phaseDescriptor = io.openSync(
+          phaseDirectory,
+          io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW,
+        );
+        try {
+          io.fsyncSync(phaseDescriptor);
+        } finally {
+          io.closeSync(phaseDescriptor);
+        }
+        assertSnapshotLeafStat(io.lstatSync(leaf, { bigint: true }), expectedUid, expectedGid, bytes.length);
+        if (canonicalJson(io.readdirSync(phaseDirectory).map(String).sort()) !== canonicalJson(["results.json"])) {
+          throw new Error("helper-results phase inventory is not exact");
+        }
+        const relativePath = `helper-results/${authority.requestSha256}/${authority.phaseId}/results.json`;
+        return Object.freeze({
+          action: authority.action,
+          containerPath: "/run/platform/helper-results/results.json",
+          hostPath: path.join(authority.volumeInspect.Mountpoint, ...relativePath.split("/")),
+          phaseId: authority.phaseId,
+          relativePath,
+          requestId: authority.requestId,
+          requestSha256: authority.requestSha256,
+          schema: "platform.docker-helper-results.snapshot/v1",
+          sha256: sha256(bytes),
+          sizeBytes: bytes.length,
+          volumeId: authority.volumeId,
+          volumeName: authority.volumeInspect.Name,
+        });
+      } catch (error) {
+        if (descriptor !== undefined) {
+          try { io.closeSync(descriptor); } catch {}
+        }
+        if (io.existsSync(leaf)) io.unlinkSync(leaf);
+        if (phaseCreated && io.existsSync(phaseDirectory)
+          && io.readdirSync(phaseDirectory).length === 0) io.rmdirSync(phaseDirectory);
+        if (io.existsSync(requestDirectory)
+          && io.readdirSync(requestDirectory).length === 0) io.rmdirSync(requestDirectory);
+        if (error && typeof error === "object") error.preserveLease = true;
+        throw error;
+      }
+    },
+
+    async cleanupPartial(value) {
+      const authority = normalizePartialAuthority(value);
+      validateRoot(root, "helper-results storage root");
+      if (!io.existsSync(base)) return Object.freeze({ status: "absent" });
+      validateRoot(base, "helper-results directory");
+      const requestDirectory = path.join(base, authority.requestSha256);
+      const phaseDirectory = path.join(requestDirectory, authority.phaseId);
+      const leaf = path.join(phaseDirectory, "results.json");
+      if (!io.existsSync(requestDirectory)) return Object.freeze({ status: "absent" });
+      validateRoot(requestDirectory, "helper-results partial request directory");
+      const requestInventory = io.readdirSync(requestDirectory).map(String).sort();
+      if (canonicalJson(requestInventory) !== canonicalJson([])
+        && canonicalJson(requestInventory) !== canonicalJson([authority.phaseId])) {
+        throw new Error("helper-results partial request inventory is not exact");
+      }
+      if (io.existsSync(phaseDirectory)) {
+        validateRoot(phaseDirectory, "helper-results partial phase directory");
+        const phaseInventory = io.readdirSync(phaseDirectory).map(String).sort();
+        if (canonicalJson(phaseInventory) !== canonicalJson([])
+          && canonicalJson(phaseInventory) !== canonicalJson(["results.json"])) {
+          throw new Error("helper-results partial phase inventory is not exact");
+        }
+        if (io.existsSync(leaf)) {
+          const leafStat = io.lstatSync(leaf, { bigint: true });
+          assertSnapshotLeafStat(leafStat, expectedUid, expectedGid);
+          if (leafStat.size > 512n * 1024n
+            || path.resolve(String(io.realpathSync(leaf))) !== leaf) {
+            throw new Error("helper-results partial leaf size or realpath is unsafe");
+          }
+          io.unlinkSync(leaf);
+          syncDirectory(phaseDirectory);
+        }
+        if (io.readdirSync(phaseDirectory).length !== 0) {
+          throw new Error("helper-results partial phase inventory changed during cleanup");
+        }
+        io.rmdirSync(phaseDirectory);
+        syncDirectory(requestDirectory);
+      }
+      if (io.readdirSync(requestDirectory).length !== 0) {
+        throw new Error("helper-results partial request inventory changed during cleanup");
+      }
+      io.rmdirSync(requestDirectory);
+      syncDirectory(base);
+      return Object.freeze({ status: "cleaned" });
+    },
+
+    async cleanup(value) {
+      if (!isPlainRecord(value) || !hasExactKeys(value, [
+        "action", "containerPath", "hostPath", "phaseId", "relativePath", "requestId",
+        "requestSha256", "schema", "sha256", "sizeBytes", "volumeId", "volumeName",
+      ]) || value.schema !== "platform.docker-helper-results.snapshot/v1"
+        || value.containerPath !== "/run/platform/helper-results/results.json"
+        || value.volumeId !== "broker.state"
+        || value.relativePath !== `helper-results/${value.requestSha256}/${value.phaseId}/results.json`
+        || !/^[a-f0-9]{64}$/.test(String(value.requestSha256 ?? ""))
+        || !/^[a-f0-9]{64}$/.test(String(value.sha256 ?? ""))
+        || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 2) {
+        throw new TypeError("sealed helper-results snapshot is invalid");
+      }
+      const requestDirectory = path.join(base, value.requestSha256);
+      const phaseDirectory = path.join(requestDirectory, value.phaseId);
+      const leaf = path.join(phaseDirectory, "results.json");
+      validateRoot(requestDirectory, "helper-results request directory");
+      validateRoot(phaseDirectory, "helper-results phase directory");
+      const leafStat = io.lstatSync(leaf, { bigint: true });
+      assertSnapshotLeafStat(leafStat, expectedUid, expectedGid, value.sizeBytes);
+      const descriptor = io.openSync(leaf, io.constants.O_RDONLY | io.constants.O_NOFOLLOW);
+      try {
+        const opened = io.fstatSync(descriptor, { bigint: true });
+        assertSnapshotLeafStat(opened, expectedUid, expectedGid, value.sizeBytes);
+        const bytes = readDescriptorWithIo(io, descriptor, value.sizeBytes);
+        if (sha256(bytes) !== value.sha256) throw new Error("helper-results snapshot digest changed before cleanup");
+      } finally {
+        io.closeSync(descriptor);
+      }
+      io.unlinkSync(leaf);
+      const phaseDescriptor = io.openSync(phaseDirectory, io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW);
+      try { io.fsyncSync(phaseDescriptor); } finally { io.closeSync(phaseDescriptor); }
+      io.rmdirSync(phaseDirectory);
+      const requestDescriptor = io.openSync(requestDirectory, io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW);
+      try { io.fsyncSync(requestDescriptor); } finally { io.closeSync(requestDescriptor); }
+      if (io.readdirSync(requestDirectory).length === 0) io.rmdirSync(requestDirectory);
+      syncDirectory(base);
+      return Object.freeze({ status: "cleaned" });
+    },
+  });
+}
+
+function normalizeHelperResultsSnapshot(value) {
+  if (!isPlainRecord(value) || !hasExactKeys(value, [
+    "action", "containerPath", "hostPath", "phaseId", "relativePath", "requestId",
+    "requestSha256", "schema", "sha256", "sizeBytes", "volumeId", "volumeName",
+  ]) || value.schema !== "platform.docker-helper-results.snapshot/v1"
+    || value.containerPath !== "/run/platform/helper-results/results.json"
+    || value.volumeId !== "broker.state"
+    || !isLogicalLeaseId(value.phaseId)
+    || !/^[a-f0-9]{64}$/.test(String(value.requestSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(value.sha256 ?? ""))
+    || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 2
+    || value.relativePath !== `helper-results/${value.requestSha256}/${value.phaseId}/results.json`
+    || typeof value.hostPath !== "string" || !path.isAbsolute(value.hostPath)) {
+    throw new TypeError("sealed helper-results snapshot is invalid");
+  }
+  return value;
+}
+
 function normalizeSnapshotInput(value) {
   if (isPlainRecord(value) && Object.hasOwn(value, "hostPath")) {
     throw new TypeError("claimed snapshot host path is not caller-controlled authority");
@@ -2215,69 +3149,2051 @@ async function defaultCapabilityProvider(action, contract) {
   return readProtectedFile(contract.capabilityFile);
 }
 
-export async function executeFixedWorkerAction(action, contract, context, {
-  transport,
-  randomBytes,
+export function createSemanticActionExecutor({
+  transport = new FixedDockerEngineTransport(),
+  randomBytes = crypto.randomBytes,
   cleanupTimeoutMs = CLEANUP_TIMEOUT_MS,
-}) {
-  if (action !== "backup.prune.plan" || contract.workerCommand !== "backup-prune-plan") {
-    throw brokerError(422, "worker action is not modeled");
+  claimedJobSnapshotProvider = defaultClaimedJobSnapshotProvider,
+  snapshotFileStore = createSnapshotFileStore(),
+} = {}) {
+  if (!Number.isInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 60_000
+    || typeof randomBytes !== "function" || typeof claimedJobSnapshotProvider !== "function"
+    || !transport || typeof transport !== "object" || !snapshotFileStore
+    || typeof snapshotFileStore !== "object") {
+    throw new TypeError("semantic action executor policy is invalid");
   }
-  const receipt = context.trusted.receipt;
-  const mount = receipt.resources.mounts["backup.root"];
-  if (!mount || mount.access !== "ro" || mount.containerPath !== "/data/backups") {
-    throw brokerError(403, "active receipt is missing the exact read-only backup root");
-  }
-  const hostPath = mount.hostPath;
-  const worker = receipt.resources.workerImage;
-  const name = `platform-action-prune-plan-${randomBytes(12).toString("hex")}`;
-  const body = workerCreateBody({
-    action,
-    command: contract.workerCommand,
-    imageRef: worker.imageRef,
-    hostPath,
-    intentId: context.trusted.intent.intentId,
-    receiptDigest: context.trusted.receiptDigest,
-    mountAttestation: mount,
+
+  const executePhaseInternal = async (action, phaseId, context) => {
+    const admission = normalizeSemanticExecution(action, context);
+    const plannedPhaseIds = semanticPhaseIds(admission);
+    if (!plannedPhaseIds.includes(phaseId)) {
+      throw brokerError(403, "semantic phase identity is not owned by the admitted action");
+    }
+    return executeSemanticWorkerPhase({
+      admission,
+      claimedJobSnapshotProvider,
+      cleanupTimeoutMs,
+      phaseId,
+      randomBytes,
+      snapshotFileStore,
+      transport,
+    });
+  };
+
+  return Object.freeze({
+    async execute(action, context) {
+      const contract = ACTIONS[action];
+      if (!contract?.modeled) throw brokerError(422, "action is not modeled");
+      const admission = normalizeSemanticExecution(action, context);
+      if (contract.engineAction === "runtimeSnapshot") {
+        return executeSemanticRuntimeSnapshot(admission, transport);
+      }
+      const phases = [];
+      for (const phaseId of semanticPhaseIds(admission)) {
+        phases.push(await executeSemanticWorkerPhase({
+          admission,
+          claimedJobSnapshotProvider,
+          cleanupTimeoutMs,
+          phaseId,
+          randomBytes,
+          snapshotFileStore,
+          transport,
+        }));
+      }
+      const result = semanticActionResult(admission, phases);
+      recordSemanticCompletion(admission, result);
+      return result;
+    },
+
+    async executePhase(action, phaseId, context) {
+      const phase = await executePhaseInternal(action, phaseId, context);
+      const admission = normalizeSemanticExecution(action, context);
+      const result = semanticActionResult(admission, [phase]);
+      recordSemanticCompletion(admission, result);
+      return result;
+    },
+
+    async recoverLease(record, signal) {
+      return recoverSemanticLease({
+        cleanupTimeoutMs,
+        record,
+        signal,
+        snapshotFileStore,
+        transport,
+      });
+    },
   });
-  let id = "";
-  let createAttempted = false;
-  context.lease.recordWorker({ resourceName: name, body, imageId: worker.imageId, hostPath });
+}
+
+export function createSemanticHelperActionExecutor({
+  transport = new FixedDockerEngineTransport(),
+  randomBytes = crypto.randomBytes,
+  cleanupTimeoutMs = CLEANUP_TIMEOUT_MS,
+  claimedJobSnapshotProvider = defaultClaimedJobSnapshotProvider,
+  helperResultsFileStore,
+  readinessWait = defaultReadinessWait,
+  snapshotFileStore = createSnapshotFileStore(),
+} = {}) {
+  if (!Number.isInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 60_000
+    || typeof randomBytes !== "function" || typeof claimedJobSnapshotProvider !== "function"
+    || typeof readinessWait !== "function" || !transport || typeof transport !== "object"
+    || !snapshotFileStore || typeof snapshotFileStore !== "object"
+    || !helperResultsFileStore || typeof helperResultsFileStore !== "object"
+    || typeof helperResultsFileStore.seal !== "function"
+    || typeof helperResultsFileStore.cleanup !== "function"
+    || typeof helperResultsFileStore.cleanupPartial !== "function") {
+    throw new TypeError("semantic helper action executor policy is invalid");
+  }
+  return Object.freeze({
+    async execute(action, context) {
+      const contract = ACTIONS[action];
+      if (!contract?.modeled) throw brokerError(422, "action is not modeled");
+      const admission = normalizeSemanticExecution(action, context);
+      if (contract.engineAction === "runtimeSnapshot") {
+        return executeSemanticRuntimeSnapshot(admission, transport);
+      }
+      const phases = [];
+      let priorBinding = null;
+      for (const phaseId of semanticPhaseIds(admission)) {
+        const phase = await executeSemanticHelperPhase({
+          admission,
+          claimedJobSnapshotProvider,
+          cleanupTimeoutMs,
+          helperResultsFileStore,
+          phaseId,
+          priorBinding,
+          randomBytes,
+          readinessWait,
+          snapshotFileStore,
+          transport,
+        });
+        phases.push(phase);
+        if (phase.output?.artifactBinding) priorBinding = phase.output.artifactBinding;
+      }
+      const result = semanticActionResult(admission, phases);
+      recordSemanticCompletion(admission, result);
+      return result;
+    },
+
+    async recoverLease(record, signal) {
+      return recoverSemanticHelperLease({
+        cleanupTimeoutMs,
+        helperResultsFileStore,
+        randomBytes,
+        readinessWait,
+        record,
+        signal,
+        snapshotFileStore,
+        transport,
+      });
+    },
+  });
+}
+
+async function executeSemanticHelperPhase({
+  admission,
+  claimedJobSnapshotProvider,
+  cleanupTimeoutMs,
+  helperResultsFileStore,
+  phaseId,
+  priorBinding,
+  randomBytes,
+  readinessWait,
+  snapshotFileStore,
+  transport,
+}) {
+  const { action, context, parameters, request, requestId, requestSha256, trusted } = admission;
+  const receipt = trusted.receipt;
+  const phase = receipt.resources.phaseProfiles[phaseId];
+  const sourceId = admission.actionProfile.claimedJobSourceId;
+  let claimedBackupResources = null;
+  let capturedSnapshot = null;
+  let sealedSnapshot = null;
+  let helperResultsSnapshot = null;
+  let binding = priorBinding;
+  const materializedScratch = new Set();
+  let localMutationAttempt = null;
+  let journalStarted = false;
+  let failure = null;
+  let phaseOutput = null;
+
   try {
-    createAttempted = true;
-    const created = await transport.createWorker(name, body, context.signal);
-    id = String(created?.Id ?? "");
-    assertEngineId(id);
-    const inspect = await transport.inspectContainer(id, context.signal);
-    assertExactWorkerInspect(inspect, { id, name, body, imageId: worker.imageId, hostPath });
-    await transport.startContainer(id, context.signal);
-    const waited = await transport.waitContainer(id, context.signal);
-    const statusCode = Number(waited?.StatusCode);
-    const logs = await transport.logsContainer(id, context.signal);
-    if (statusCode !== 0) throw brokerError(500, `fixed worker failed (${Number.isInteger(statusCode) ? statusCode : "invalid"})`);
-    return parseWorkerOutput(logs, contract.workerCommand);
-  } finally {
-    if (createAttempted) {
+    if (sourceId !== null) {
+      const source = receipt.resources.claimedJobSources[sourceId];
+      capturedSnapshot = await claimedJobSnapshotProvider({
+        parameters: cloneCanonicalValue(parameters),
+        source,
+        sourceId,
+      });
+      claimedBackupResources = admitClaimedJobResources(capturedSnapshot, parameters, receipt);
+    }
+    const authority = semanticPhaseAuthority(
+      receipt,
+      action,
+      phaseId,
+      claimedBackupResources ?? undefined,
+      { includeHelperResultsStorage: true },
+    );
+    const preflight = await preflightSemanticPhase({
+      action,
+      authority,
+      phase,
+      receipt,
+      signal: context.signal,
+      transport,
+    });
+    if (sourceId !== null) {
+      const source = receipt.resources.claimedJobSources[sourceId];
+      const predicted = semanticSnapshotRecord(capturedSnapshot, {
+        requestSha256,
+        source,
+        volumeInspect: preflight.volumes[source.snapshotVolumeId],
+      });
+      if (typeof context.lease.recordRecoveryIntent === "function") {
+        context.lease.recordRecoveryIntent({ phaseId, snapshot: predicted });
+        journalStarted = true;
+      }
+      const observed = await snapshotFileStore.seal(capturedSnapshot, {
+        request,
+        requestId,
+        requestSha256,
+        source,
+        volumeInspect: preflight.volumes[source.snapshotVolumeId],
+      });
+      if (canonicalJson(observed) !== canonicalJson(predicted)) {
+        throw snapshotPreserveError("sealed snapshot identity differs from its admitted recovery intent");
+      }
+      sealedSnapshot = observed;
+      context.lease.recordEvent({ event: "snapshot-materialized", phaseId, requestSha256, snapshot: sealedSnapshot });
+      journalStarted = true;
+    }
+
+    if (["job.restore.verify", "offsite.sync"].includes(phaseId)) {
+      binding = (await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "artifact-resolver",
+        scratchEngine: null,
+        sealedSnapshot,
+        transport,
+      })).output;
+      journalStarted = true;
+    }
+    const plan = buildSemanticHelperPlan({
+      claimedBackupResources,
+      phaseId,
+      priorBinding: binding,
+      receipt,
+      requestSha256,
+    });
+    const helperPlanSha256 = sha256(canonicalJson(plan));
+
+    if (plan.helpers.length > 0) {
+      await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "helper-preparer",
+        scratchEngine: null,
+        sealedSnapshot,
+        transport,
+      });
+      journalStarted = true;
+    }
+
+    const scratchEngines = [...new Set(
+      plan.helpers.filter((helper) => helper.paths.scratchRelativePath !== null).map((helper) => helper.engine),
+    )].sort();
+    for (const engine of scratchEngines) {
+      await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "scratch-preparer",
+        scratchEngine: engine,
+        sealedSnapshot,
+        transport,
+      });
+      const relativePath = `requests/${requestSha256}/${phaseId}/${engine}`;
+      context.lease.recordEvent({ event: "scratch-materialized", engine, phaseId, relativePath, requestSha256 });
+      materializedScratch.add(engine);
+      journalStarted = true;
+    }
+
+    const helperResults = await executeSemanticHelpers({
+      admission,
+      artifactBinding: binding,
+      cleanupTimeoutMs,
+      claimedBackupResources,
+      helperPlanSha256,
+      plan,
+      readinessWait,
+      sealedSnapshot,
+      transport,
+    });
+    journalStarted ||= plan.helpers.length > 0;
+
+    for (const engine of [...materializedScratch].reverse()) {
+      await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "scratch-cleaner",
+        scratchEngine: engine,
+        sealedSnapshot,
+        transport,
+      });
+      const relativePath = `requests/${requestSha256}/${phaseId}/${engine}`;
+      context.lease.recordEvent({ event: "scratch-cleaned", engine, phaseId, relativePath, requestSha256 });
+      materializedScratch.delete(engine);
+    }
+
+    if (phaseId === "prune.plan" || phaseId === "prune.apply") {
+      phaseOutput = (await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "standalone",
+        scratchEngine: null,
+        sealedSnapshot,
+        transport,
+      })).output;
+    } else {
+      const aggregate = {
+        action,
+        helpers: helperResults,
+        phaseId,
+        requestId,
+        requestSha256,
+        schema: "platform.docker-helper-results/v1",
+      };
+      const brokerStateInspect = preflight.volumes["broker.state"];
+      if (!brokerStateInspect) throw brokerError(409, "helper-results storage volume was not preflighted");
+      context.lease.recordEvent({
+        event: "helper-results-seal-intent",
+        phaseId,
+        requestSha256,
+      });
+      journalStarted = true;
+      helperResultsSnapshot = await helperResultsFileStore.seal(aggregate, {
+        action,
+        phaseId,
+        requestId,
+        requestSha256,
+        volumeId: "broker.state",
+        volumeInspect: brokerStateInspect,
+      });
+      context.lease.recordEvent({
+        event: "helper-results-materialized",
+        helperResultsSnapshot,
+        phaseId,
+        requestSha256,
+      });
+      phaseOutput = (await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: binding,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot,
+        phaseId,
+        randomBytes,
+        role: "evidence-finalizer",
+        scratchEngine: null,
+        sealedSnapshot,
+        transport,
+      })).output;
+      await helperResultsFileStore.cleanup(helperResultsSnapshot);
+      context.lease.recordEvent({
+        event: "helper-results-cleaned",
+        helperResultsSnapshot,
+        phaseId,
+        requestSha256,
+      });
+      helperResultsSnapshot = null;
+    }
+  } catch (error) {
+    failure = error;
+  }
+
+  let cleanupFailure = null;
+  for (const engine of [...materializedScratch].reverse()) {
+    try {
+      await executeSemanticRoleWorker({
+        admission,
+        onLocalMutationAttempt: (attempt) => { localMutationAttempt = attempt; },
+        artifactBinding: null,
+        claimedBackupResources,
+        cleanupTimeoutMs,
+        helperResultsSnapshot: null,
+        phaseId,
+        randomBytes,
+        role: "scratch-cleaner",
+        scratchEngine: engine,
+        sealedSnapshot,
+        transport,
+      });
+      const relativePath = `requests/${requestSha256}/${phaseId}/${engine}`;
+      context.lease.recordEvent({ event: "scratch-cleaned", engine, phaseId, relativePath, requestSha256 });
+      materializedScratch.delete(engine);
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (helperResultsSnapshot) {
+    try {
+      await helperResultsFileStore.cleanup(helperResultsSnapshot);
+      context.lease.recordEvent({ event: "helper-results-cleaned", helperResultsSnapshot, phaseId, requestSha256 });
+      helperResultsSnapshot = null;
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (sealedSnapshot) {
+    try {
+      await snapshotFileStore.cleanup(sealedSnapshot);
+      context.lease.recordEvent({ event: "snapshot-cleaned", phaseId, requestSha256, snapshot: sealedSnapshot });
+      sealedSnapshot = null;
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (cleanupFailure) {
+    cleanupFailure.preserveLease = true;
+    throw cleanupFailure;
+  }
+  if (failure) {
+    if (journalStarted || localMutationAttempt) failure.preserveLease = true;
+    if (localMutationAttempt?.cleanupComplete) {
       try {
-        await withTimeout(async (signal) => {
-          if (id) {
-            await transport.deleteContainer(id, signal);
-            return;
-          }
-          const inspect = await transport.inspectContainerForRecovery(name, signal);
-          if (!inspect) return;
-          assertExactWorkerInspect(inspect, { id: inspect.Id, name, body, imageId: worker.imageId, hostPath });
-          await transport.deleteContainer(inspect.Id, signal);
-        }, cleanupTimeoutMs, "worker cleanup timed out");
-      } catch (error) {
-        error.preserveLease = true;
-        throw error;
+        context.lease.recordEvent({
+          event: "local-effect-unknown",
+          phaseId: localMutationAttempt.phaseId,
+          resourceName: localMutationAttempt.resourceName,
+          workerId: localMutationAttempt.workerId,
+        });
+        failure.localEffectUnknown = true;
+      } catch (terminalError) {
+        terminalError.preserveLease = true;
+        throw terminalError;
       }
     }
+    throw failure;
+  }
+  return {
+    output: phaseOutput,
+    outputSchema: phase.outputSchema,
+    outputSha256: sha256(canonicalJson(phaseOutput)),
+    phaseId,
+    status: "completed",
+  };
+}
+
+function semanticClaimedJournalFields(claimedBackupResources, sealedSnapshot) {
+  return claimedBackupResources
+    ? { claimedBackupResources, snapshot: sealedSnapshot }
+    : {};
+}
+
+async function executeSemanticRoleWorker({
+  admission,
+  artifactBinding,
+  claimedBackupResources,
+  cleanupTimeoutMs,
+  helperResultsSnapshot,
+  onLocalMutationAttempt = null,
+  phaseId,
+  randomBytes,
+  role,
+  scratchEngine,
+  sealedSnapshot,
+  transport,
+}) {
+  const { action, context, parameters, request, requestId, requestSha256, trusted } = admission;
+  const phase = trusted.receipt.resources.phaseProfiles[phaseId];
+  const body = workerCreateBody({
+    action,
+    artifactBinding: artifactBinding ?? undefined,
+    claimedBackupResources: claimedBackupResources ?? undefined,
+    claimedJobSnapshot: sealedSnapshot ?? undefined,
+    helperResultsSnapshot: helperResultsSnapshot ?? undefined,
+    parameters,
+    phaseId,
+    request,
+    requestId,
+    requestSha256,
+    scratchEngine: scratchEngine ?? undefined,
+    trusted,
+    workerRole: role,
+  });
+  const entropy = randomBytes(12);
+  if (!Buffer.isBuffer(entropy) || entropy.length !== 12) {
+    throw new TypeError("semantic role worker name entropy is invalid");
+  }
+  const engineSlug = scratchEngine ? `-${scratchEngine}` : "";
+  const resourceName = `platform-role-${phaseId.replaceAll(".", "-")}-${role}${engineSlug}-${entropy.toString("hex")}`;
+  if (resourceName.length > 127) throw new TypeError("semantic role worker name is oversized");
+  const scratchRole = role === "scratch-preparer" || role === "scratch-cleaner";
+  const eventPrefix = scratchRole ? "scratch-bootstrap" : "role-worker";
+  const record = {
+    action,
+    event: `${eventPrefix}-recorded`,
+    phaseId,
+    phaseProfileSha256: phase.phaseSha256,
+    receiptDigest: trusted.receiptDigest,
+    requestSha256,
+    resourceName,
+    workerRole: role,
+    ...(scratchRole ? { engine: scratchEngine } : {}),
+    ...semanticClaimedJournalFields(claimedBackupResources, sealedSnapshot),
+    ...(!scratchRole && artifactBinding ? { artifactBinding } : {}),
+    ...(!scratchRole && helperResultsSnapshot ? { helperResultsSnapshot } : {}),
+  };
+  context.lease.recordEvent(record);
+  let createAttempted = false;
+  const mutationClass = ["artifact-resolver", "evidence-finalizer"].includes(role)
+    || (phaseId === "prune.apply" && role === "standalone")
+    ? "local-nonidempotent"
+    : "none";
+  let startAttempted = false;
+  let localMutationAttempt = null;
+  let workerId = "";
+  let result;
+  let failure = null;
+  try {
+    requireSemanticTransport(transport, "createWorker");
+    createAttempted = true;
+    const created = await transport.createWorker(resourceName, body, context.signal);
+    workerId = String(created?.Id ?? "");
+    assertSemanticWorkerId(workerId);
+    context.lease.recordEvent({
+      event: `${eventPrefix}-created`,
+      phaseId,
+      resourceName,
+      workerId,
+      workerRole: role,
+      ...(scratchRole ? { engine: scratchEngine } : {}),
+    });
+    requireSemanticTransport(transport, "inspectContainer");
+    const inspect = await transport.inspectContainer(workerId, context.signal);
+    assertExactSemanticWorkerInspect(inspect, {
+      body,
+      id: workerId,
+      name: resourceName,
+      phase,
+      receipt: trusted.receipt,
+      sealedSnapshot,
+    });
+    context.lease.recordEvent({
+      event: `${eventPrefix}-start-attempted`,
+      ...(scratchRole ? { engine: scratchEngine } : { mutationClass }),
+      phaseId,
+      resourceName,
+      workerId,
+      workerRole: role,
+    });
+    startAttempted = true;
+    localMutationAttempt = mutationClass === "local-nonidempotent"
+      ? { cleanupComplete: false, phaseId, resourceName, workerId }
+      : null;
+    if (localMutationAttempt && typeof onLocalMutationAttempt === "function") {
+      onLocalMutationAttempt(localMutationAttempt);
+    }
+    requireSemanticTransport(transport, "startContainer");
+    await transport.startContainer(workerId, context.signal);
+    requireSemanticTransport(transport, "waitContainer");
+    const waited = await transport.waitContainer(workerId, context.signal);
+    if (!Number.isSafeInteger(Number(waited?.StatusCode)) || Number(waited.StatusCode) !== 0) {
+      throw brokerError(500, `${role} worker failed`);
+    }
+    requireSemanticTransport(transport, "logsContainer");
+    const logs = await transport.logsContainer(workerId, context.signal);
+    result = parseSemanticWorkerOutput(logs, {
+      action,
+      parameters,
+      phase,
+      phaseId,
+      requestId,
+      requestSha256,
+      workerRole: role,
+    });
+    context.lease.recordEvent({
+      event: `${eventPrefix}-result-recorded`,
+      phaseId,
+      resourceName,
+      workerId,
+      workerResultSha256: sha256(canonicalJson(result)),
+      workerRole: role,
+      ...(scratchRole ? { engine: scratchEngine } : {}),
+    });
+  } catch (error) {
+    failure = error;
+  }
+  let cleanupFailure = null;
+  if (createAttempted) {
+    try {
+      const deletedId = await withTimeout(async (signal) => {
+        let id = workerId;
+        if (!id) {
+          requireSemanticTransport(transport, "inspectContainerForRecovery");
+          const inspect = await transport.inspectContainerForRecovery(resourceName, signal);
+          if (!inspect) return null;
+          id = String(inspect.Id ?? "");
+          assertSemanticWorkerId(id);
+          assertExactSemanticWorkerInspect(inspect, {
+            body,
+            id,
+            name: resourceName,
+            phase,
+            receipt: trusted.receipt,
+            sealedSnapshot,
+          });
+        }
+        requireSemanticTransport(transport, "deleteContainer");
+        await transport.deleteContainer(id, signal);
+        return id;
+      }, cleanupTimeoutMs, `${role} worker cleanup timed out`);
+      if (deletedId) {
+        context.lease.recordEvent({
+          event: `${eventPrefix}-deleted`,
+          phaseId,
+          resourceName,
+          workerId: deletedId,
+          workerRole: role,
+          ...(scratchRole ? { engine: scratchEngine } : {}),
+        });
+        if (localMutationAttempt) localMutationAttempt.cleanupComplete = true;
+      }
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+  if (cleanupFailure) {
+    cleanupFailure.preserveLease = true;
+    throw cleanupFailure;
+  }
+  if (failure) {
+    if (mutationClass === "local-nonidempotent" && startAttempted) {
+      failure.localEffectUnknown = true;
+    }
+    failure.preserveLease = true;
+    throw failure;
+  }
+  return result;
+}
+
+async function executeSemanticHelpers({
+  admission,
+  artifactBinding,
+  cleanupTimeoutMs,
+  claimedBackupResources,
+  helperPlanSha256,
+  plan,
+  readinessWait,
+  sealedSnapshot,
+  transport,
+}) {
+  const { action, context, requestSha256, trusted } = admission;
+  const phaseId = plan.phaseId;
+  const phase = trusted.receipt.resources.phaseProfiles[phaseId];
+  const active = [];
+  const createdByProfile = new Map();
+  const results = [];
+  let failure = null;
+  let remoteUnknown = null;
+  try {
+    for (const planned of plan.helpers) {
+      requireSemanticTransport(transport, "inspectHelperImage");
+      const imageInspect = await transport.inspectHelperImage(planned.imageId, context.signal);
+      const bound = bindSemanticHelperImageInspect(planned, imageInspect);
+      const helper = resolveDeferredSemanticHelper(bound, createdByProfile);
+      const { bodySha256, imageRuntimeConfigSha256 } = helper;
+      context.lease.recordEvent({
+        action,
+        ...(artifactBinding ? { artifactBinding } : {}),
+        bodySha256,
+        event: "helper-recorded",
+        helperPlanSha256,
+        helperProfileId: helper.helperProfileId,
+        imageRuntimeConfigSha256,
+        ordinal: helper.ordinal,
+        phaseId,
+        phaseProfileSha256: phase.phaseSha256,
+        receiptDigest: trusted.receiptDigest,
+        requestSha256,
+        resourceName: helper.name,
+        ...semanticClaimedJournalFields(claimedBackupResources, sealedSnapshot),
+      });
+      const state = {
+        createAttempted: false,
+        helper,
+        remoteAttempted: false,
+        workerId: "",
+      };
+      active.push(state);
+      requireSemanticTransport(transport, "createHelper");
+      state.createAttempted = true;
+      const created = await transport.createHelper(helper.name, helper.body, context.signal);
+      const workerId = String(created?.Id ?? "");
+      assertSemanticWorkerId(workerId);
+      state.workerId = workerId;
+      createdByProfile.set(helper.helperProfileId, workerId);
+      context.lease.recordEvent({
+        event: "helper-created",
+        helperProfileId: helper.helperProfileId,
+        phaseId,
+        resourceName: helper.name,
+        workerId,
+      });
+      requireSemanticTransport(transport, "inspectHelper");
+      const inspect = await transport.inspectHelper(workerId, context.signal);
+      assertExactSemanticHelperInspect(inspect, { ...helper, body: helper.body });
+      const remoteAttempt = helper.lifecycle.remoteEffect === "ambiguous-preserve-lease-no-retry";
+      context.lease.recordEvent({
+        event: "helper-start-attempted",
+        helperProfileId: helper.helperProfileId,
+        phaseId,
+        remoteAttempt,
+        resourceName: helper.name,
+        workerId,
+      });
+      state.remoteAttempted = remoteAttempt;
+      requireSemanticTransport(transport, "startHelper");
+      await transport.startHelper(workerId, context.signal);
+      context.lease.recordEvent({
+        event: "helper-started",
+        helperProfileId: helper.helperProfileId,
+        phaseId,
+        resourceName: helper.name,
+        workerId,
+      });
+      let helperResult;
+      if (helper.lifecycle.waitForExit === false) {
+        await waitForSemanticHelperReadiness({
+          helper,
+          readinessWait,
+          signal: context.signal,
+          transport,
+          workerId,
+        });
+        context.lease.recordEvent({
+          event: "helper-ready",
+          helperProfileId: helper.helperProfileId,
+          phaseId,
+          resourceName: helper.name,
+          workerId,
+        });
+        helperResult = normalizeSemanticHelperResult({ helper, logs: Buffer.alloc(0), statusCode: 0 });
+      } else {
+        requireSemanticTransport(transport, "waitHelper");
+        const waited = await transport.waitHelper(workerId, context.signal);
+        const statusCode = Number(waited?.StatusCode);
+        requireSemanticTransport(transport, "logsHelper");
+        const logs = await transport.logsHelper(workerId, context.signal);
+        helperResult = normalizeSemanticHelperResult({ helper, logs, statusCode });
+      }
+      context.lease.recordEvent({
+        event: "helper-result-recorded",
+        helperProfileId: helper.helperProfileId,
+        phaseId,
+        resourceName: helper.name,
+        workerId,
+        workerResultSha256: sha256(canonicalJson(helperResult)),
+      });
+      results.push(helperResult);
+    }
+  } catch (error) {
+    failure = error;
+    remoteUnknown = [...active].reverse().find(({ remoteAttempted }) => remoteAttempted) ?? null;
+  }
+
+  let cleanupFailure = null;
+  for (const state of [...active].reverse()) {
+    try {
+      const deletedId = await withTimeout(async (signal) => {
+        let id = state.workerId;
+        let inspect;
+        if (id) {
+          requireSemanticTransport(transport, "inspectHelper");
+          inspect = await transport.inspectHelper(id, signal);
+        } else {
+          requireSemanticTransport(transport, "inspectHelperForRecovery");
+          inspect = await transport.inspectHelperForRecovery(state.helper.name, signal);
+          if (!inspect) return null;
+          id = String(inspect.Id ?? "");
+          assertSemanticWorkerId(id);
+          context.lease.recordEvent({
+            event: "helper-created",
+            helperProfileId: state.helper.helperProfileId,
+            phaseId,
+            resourceName: state.helper.name,
+            workerId: id,
+          });
+        }
+        assertExactSemanticHelperInspect(inspect, { ...state.helper, body: state.helper.body });
+        requireSemanticTransport(transport, "deleteHelper");
+        await transport.deleteHelper(id, signal);
+        return id;
+      }, cleanupTimeoutMs, "semantic helper cleanup timed out");
+      if (deletedId) {
+        state.workerId = deletedId;
+        context.lease.recordEvent({
+          event: "helper-deleted",
+          helperProfileId: state.helper.helperProfileId,
+          phaseId,
+          resourceName: state.helper.name,
+          workerId: deletedId,
+        });
+      }
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (remoteUnknown && !cleanupFailure) {
+    try {
+      context.lease.recordEvent({
+        event: "remote-effect-unknown",
+        phaseId,
+        resourceName: remoteUnknown.helper.name,
+        workerId: remoteUnknown.workerId,
+      });
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+  if (cleanupFailure) {
+    cleanupFailure.preserveLease = true;
+    throw cleanupFailure;
+  }
+  if (failure) {
+    if (remoteUnknown) failure.remoteEffectUnknown = true;
+    failure.preserveLease = true;
+    throw failure;
+  }
+  return results;
+}
+
+function resolveDeferredSemanticHelper(helper, createdByProfile) {
+  if (helper.body) return helper;
+  const deferred = helper.deferredBody;
+  const requiredProfile = deferred?.requires?.helperProfileId;
+  const workerId = createdByProfile.get(requiredProfile);
+  if (!isPlainRecord(deferred) || deferred.networkModePrefix !== "container:"
+    || deferred.requires?.value !== "containerId"
+    || !/^[a-f0-9]{64}$/.test(String(workerId ?? ""))) {
+    throw brokerError(409, "deferred semantic helper dependency is unresolved");
+  }
+  const body = cloneCanonicalValue(deferred.baseBody);
+  body.HostConfig.NetworkMode = `container:${workerId}`;
+  return Object.freeze({
+    ...helper,
+    body: freezeCanonicalValue(body),
+    bodySha256: sha256(canonicalJson(body)),
+    expectedInspect: freezeCanonicalValue(deferred.expectedInspect),
+  });
+}
+
+async function waitForSemanticHelperReadiness({ helper, readinessWait, signal, transport, workerId }) {
+  const policy = helper.lifecycle.readiness;
+  if (!isPlainRecord(policy) || policy.kind !== "container-health"
+    || policy.expectedHealth !== "healthy" || !Number.isSafeInteger(policy.maximumAttempts)
+    || policy.maximumAttempts < 1 || policy.maximumAttempts > 120
+    || !Number.isSafeInteger(policy.intervalMs) || policy.intervalMs < 1 || policy.intervalMs > 10_000) {
+    throw brokerError(409, "semantic helper readiness policy is invalid");
+  }
+  for (let attempt = 0; attempt < policy.maximumAttempts; attempt += 1) {
+    requireSemanticTransport(transport, "inspectHelper");
+    const inspect = await transport.inspectHelper(workerId, signal);
+    assertExactSemanticHelperInspect(inspect, { ...helper, body: helper.body });
+    if (inspect.State?.Health?.Status === "healthy") return;
+    if (["unhealthy", "exited", "dead"].includes(inspect.State?.Health?.Status)
+      || inspect.State?.Running === false) {
+      throw brokerError(500, `${helper.helperProfileId} readiness failed`);
+    }
+    if (attempt + 1 < policy.maximumAttempts) {
+      await readinessWait(policy.intervalMs, signal);
+    }
+  }
+  throw brokerError(504, `${helper.helperProfileId} readiness timed out`);
+}
+
+function defaultReadinessWait(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(resolve, milliseconds);
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(brokerError(504, "semantic helper readiness was aborted"));
+    };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener?.("abort", abort, { once: true });
+  });
+}
+
+async function recoverSemanticHelperLease({
+  cleanupTimeoutMs,
+  helperResultsFileStore,
+  randomBytes,
+  readinessWait,
+  record,
+  signal,
+  snapshotFileStore,
+  transport,
+}) {
+  const newEvents = new Set([
+    "helper-created", "helper-deleted", "helper-recorded", "helper-ready",
+    "helper-result-recorded", "helper-results-cleaned", "helper-results-intent-cleaned",
+    "helper-results-materialized", "helper-results-seal-intent",
+    "helper-start-attempted", "helper-started", "role-worker-created", "role-worker-deleted",
+    "role-worker-recorded", "role-worker-result-recorded", "role-worker-start-attempted", "scratch-bootstrap-created",
+    "scratch-bootstrap-deleted", "scratch-bootstrap-recorded", "scratch-bootstrap-result-recorded",
+    "scratch-bootstrap-start-attempted", "scratch-cleaned", "scratch-materialized",
+  ]);
+  if (!record?.journalEntries?.some((entry) => newEvents.has(entry.event))) {
+    return recoverSemanticLease({
+      cleanupTimeoutMs,
+      record,
+      signal,
+      snapshotFileStore,
+      transport,
+    });
+  }
+  if (!isPlainRecord(record) || !isPlainRecord(record.request)
+    || !isPlainRecord(record.trusted) || !Array.isArray(record.journalEntries)
+    || typeof record.recordEvent !== "function") {
+    throw new Error("semantic helper recovery lease lineage is invalid");
+  }
+  const admission = Object.freeze({
+    action: record.action,
+    actionProfile: record.trusted.receipt.resources.actionProfiles[record.action],
+    context: {
+      lease: { recordEvent: record.recordEvent },
+      signal,
+    },
+    parameters: record.request.parameters,
+    request: record.request,
+    requestId: record.requestId,
+    requestSha256: record.requestSha256,
+    trusted: record.trusted,
+  });
+  const roleWorkers = new Map();
+  const helpers = new Map();
+  const helperCreatedIds = new Map();
+  const scratchWorkers = new Map();
+  const scratchOutstanding = new Map();
+  const helperSnapshots = new Map();
+  const helperResultIntents = new Set();
+  const claimedSnapshots = new Map();
+  const cleanedScratchKeys = new Set();
+  let localAttempt = null;
+  let remoteAttempt = null;
+  for (const entry of record.journalEntries) {
+    if (entry.event === "snapshot-materialized") claimedSnapshots.set(entry.phaseId, entry.snapshot);
+    if (entry.event === "snapshot-cleaned") claimedSnapshots.delete(entry.phaseId);
+    if (entry.event === "helper-results-seal-intent") helperResultIntents.add(entry.phaseId);
+    if (entry.event === "helper-results-materialized") helperSnapshots.set(entry.phaseId, entry.helperResultsSnapshot);
+    if (entry.event === "helper-results-cleaned") {
+      helperSnapshots.delete(entry.phaseId);
+      helperResultIntents.delete(entry.phaseId);
+    }
+    if (entry.event === "helper-results-intent-cleaned") helperResultIntents.delete(entry.phaseId);
+    if (entry.event === "scratch-materialized") scratchOutstanding.set(`${entry.phaseId}\0${entry.engine}`, entry);
+    if (entry.event === "scratch-cleaned") {
+      const key = `${entry.phaseId}\0${entry.engine}`;
+      cleanedScratchKeys.add(key);
+      scratchOutstanding.delete(key);
+    }
+    if (entry.event === "role-worker-recorded") {
+      roleWorkers.set(entry.resourceName, {
+        deleted: false,
+        entry,
+        mutationClass: null,
+        resultRecorded: false,
+        startAttempted: false,
+        workerId: null,
+      });
+    } else if (entry.event === "role-worker-created") {
+      const state = roleWorkers.get(entry.resourceName);
+      if (state) state.workerId = entry.workerId;
+    } else if (entry.event === "role-worker-start-attempted") {
+      const state = roleWorkers.get(entry.resourceName);
+      if (state) {
+        state.startAttempted = true;
+        state.mutationClass = entry.mutationClass;
+      }
+    } else if (entry.event === "role-worker-result-recorded") {
+      const state = roleWorkers.get(entry.resourceName);
+      if (state) state.resultRecorded = true;
+    } else if (entry.event === "role-worker-deleted") {
+      const state = roleWorkers.get(entry.resourceName);
+      if (state) state.deleted = true;
+    }
+    if (entry.event === "scratch-bootstrap-recorded") {
+      scratchWorkers.set(entry.resourceName, {
+        deleted: false,
+        entry,
+        startAttempted: false,
+        workerId: null,
+      });
+    } else if (entry.event === "scratch-bootstrap-created") {
+      const state = scratchWorkers.get(entry.resourceName);
+      if (state) state.workerId = entry.workerId;
+    } else if (entry.event === "scratch-bootstrap-start-attempted") {
+      const state = scratchWorkers.get(entry.resourceName);
+      if (state) state.startAttempted = true;
+    } else if (entry.event === "scratch-bootstrap-deleted") {
+      const state = scratchWorkers.get(entry.resourceName);
+      if (state) state.deleted = true;
+    }
+    if (entry.event === "helper-recorded") {
+      helpers.set(entry.resourceName, { deleted: false, entry, workerId: null });
+    } else if (entry.event === "helper-created") {
+      const state = helpers.get(entry.resourceName);
+      if (state) {
+        state.workerId = entry.workerId;
+        helperCreatedIds.set(entry.helperProfileId, entry.workerId);
+      }
+    } else if (entry.event === "helper-deleted") {
+      const state = helpers.get(entry.resourceName);
+      if (state) state.deleted = true;
+    } else if (entry.event === "helper-start-attempted" && entry.remoteAttempt) {
+      remoteAttempt = { resourceName: entry.resourceName, workerId: entry.workerId, phaseId: entry.phaseId };
+    }
+  }
+  for (const state of roleWorkers.values()) {
+    if (state.startAttempted && state.mutationClass === "local-nonidempotent") {
+      localAttempt = {
+        phaseId: state.entry.phaseId,
+        resourceName: state.entry.resourceName,
+        workerId: state.workerId,
+      };
+    }
+  }
+  for (const state of scratchWorkers.values()) {
+    if (state.entry.workerRole !== "scratch-preparer") continue;
+    const key = `${state.entry.phaseId}\0${state.entry.engine}`;
+    if (cleanedScratchKeys.has(key)) continue;
+    scratchOutstanding.set(key, {
+      engine: state.entry.engine,
+      phaseId: state.entry.phaseId,
+      relativePath: `requests/${record.requestSha256}/${state.entry.phaseId}/${state.entry.engine}`,
+      requestSha256: record.requestSha256,
+    });
+  }
+
+  const pending = [];
+  for (const state of roleWorkers.values()) {
+    if (state.deleted) continue;
+    const entry = state.entry;
+    const phase = record.trusted.receipt.resources.phaseProfiles[entry.phaseId];
+    const body = workerCreateBody({
+      action: record.action,
+      artifactBinding: entry.artifactBinding,
+      claimedBackupResources: entry.claimedBackupResources,
+      claimedJobSnapshot: entry.snapshot,
+      helperResultsSnapshot: entry.helperResultsSnapshot,
+      parameters: record.request.parameters,
+      phaseId: entry.phaseId,
+      request: record.request,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+      trusted: record.trusted,
+      workerRole: entry.workerRole,
+    });
+    requireSemanticTransport(transport, "inspectContainerForRecovery");
+    const inspect = await transport.inspectContainerForRecovery(entry.resourceName, signal);
+    if (!inspect) {
+      if (state.workerId) throw new Error("semantic role worker recovery inspect is missing");
+      continue;
+    }
+    const id = String(inspect.Id ?? "");
+    if (state.workerId && state.workerId !== id) throw new Error("semantic role worker recovery ID differs from journal");
+    assertExactSemanticWorkerInspect(inspect, {
+      body, id, name: entry.resourceName, phase, receipt: record.trusted.receipt, sealedSnapshot: entry.snapshot,
+    });
+    pending.push({
+      deleteMethod: "deleteContainer",
+      event: { event: "role-worker-deleted", phaseId: entry.phaseId, resourceName: entry.resourceName, workerId: id, workerRole: entry.workerRole },
+      id,
+    });
+  }
+  for (const state of scratchWorkers.values()) {
+    if (state.deleted) continue;
+    const entry = state.entry;
+    const phase = record.trusted.receipt.resources.phaseProfiles[entry.phaseId];
+    const body = workerCreateBody({
+      action: record.action,
+      claimedBackupResources: entry.claimedBackupResources,
+      claimedJobSnapshot: entry.snapshot,
+      parameters: record.request.parameters,
+      phaseId: entry.phaseId,
+      request: record.request,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+      scratchEngine: entry.engine,
+      trusted: record.trusted,
+      workerRole: entry.workerRole,
+    });
+    requireSemanticTransport(transport, "inspectContainerForRecovery");
+    const inspect = await transport.inspectContainerForRecovery(entry.resourceName, signal);
+    if (!inspect) {
+      if (state.workerId) throw new Error("scratch bootstrap recovery inspect is missing");
+      continue;
+    }
+    const id = String(inspect.Id ?? "");
+    if (state.workerId && state.workerId !== id) throw new Error("scratch bootstrap recovery ID differs from journal");
+    assertExactSemanticWorkerInspect(inspect, {
+      body, id, name: entry.resourceName, phase, receipt: record.trusted.receipt, sealedSnapshot: entry.snapshot,
+    });
+    pending.push({
+      deleteMethod: "deleteContainer",
+      event: { engine: entry.engine, event: "scratch-bootstrap-deleted", phaseId: entry.phaseId, resourceName: entry.resourceName, workerId: id, workerRole: entry.workerRole },
+      id,
+    });
+  }
+  for (const state of helpers.values()) {
+    if (state.deleted) continue;
+    const entry = state.entry;
+    const plan = buildSemanticHelperPlan({
+      claimedBackupResources: entry.claimedBackupResources ?? null,
+      phaseId: entry.phaseId,
+      priorBinding: entry.artifactBinding ?? null,
+      receipt: record.trusted.receipt,
+      requestSha256: record.requestSha256,
+    });
+    if (sha256(canonicalJson(plan)) !== entry.helperPlanSha256) throw new Error("semantic helper recovery plan digest differs from journal");
+    const planned = plan.helpers.find((helper) => helper.helperProfileId === entry.helperProfileId && helper.ordinal === entry.ordinal);
+    if (!planned || planned.name !== entry.resourceName) throw new Error("semantic helper recovery plan identity differs from journal");
+    requireSemanticTransport(transport, "inspectHelperImage");
+    const imageInspect = await transport.inspectHelperImage(planned.imageId, signal);
+    const bound = bindSemanticHelperImageInspect(planned, imageInspect);
+    if (bound.imageRuntimeConfigSha256 !== entry.imageRuntimeConfigSha256) {
+      throw new Error("semantic helper recovery image runtime config differs from journal");
+    }
+    const helper = resolveDeferredSemanticHelper(bound, helperCreatedIds);
+    if (helper.bodySha256 !== entry.bodySha256) throw new Error("semantic helper recovery body digest differs from journal");
+    requireSemanticTransport(transport, "inspectHelperForRecovery");
+    const inspect = await transport.inspectHelperForRecovery(entry.resourceName, signal);
+    if (!inspect) {
+      if (state.workerId) throw new Error("semantic helper recovery inspect is missing");
+      continue;
+    }
+    const id = String(inspect.Id ?? "");
+    if (state.workerId && state.workerId !== id) throw new Error("semantic helper recovery ID differs from journal");
+    assertExactSemanticHelperInspect(inspect, { ...helper, body: helper.body });
+    pending.push({
+      deleteMethod: "deleteHelper",
+      event: { event: "helper-deleted", helperProfileId: helper.helperProfileId, phaseId: entry.phaseId, resourceName: entry.resourceName, workerId: id },
+      id,
+    });
+  }
+  for (const item of pending.reverse()) {
+    requireSemanticTransport(transport, item.deleteMethod);
+    await transport[item.deleteMethod](item.id, signal);
+    record.recordEvent(item.event);
+  }
+
+  for (const entry of [...scratchOutstanding.values()].reverse()) {
+    const source = [...scratchWorkers.values()].find((state) => (
+      state.entry.phaseId === entry.phaseId && state.entry.engine === entry.engine
+    ))?.entry;
+    await executeSemanticRoleWorker({
+      admission,
+      artifactBinding: null,
+      claimedBackupResources: source?.claimedBackupResources ?? null,
+      cleanupTimeoutMs,
+      helperResultsSnapshot: null,
+      phaseId: entry.phaseId,
+      randomBytes,
+      role: "scratch-cleaner",
+      scratchEngine: entry.engine,
+      sealedSnapshot: source?.snapshot ?? claimedSnapshots.get(entry.phaseId) ?? null,
+      transport,
+    });
+    record.recordEvent({
+      engine: entry.engine,
+      event: "scratch-cleaned",
+      phaseId: entry.phaseId,
+      relativePath: entry.relativePath,
+      requestSha256: record.requestSha256,
+    });
+  }
+  for (const [phaseId, snapshot] of helperSnapshots) {
+    await helperResultsFileStore.cleanup(snapshot);
+    record.recordEvent({ event: "helper-results-cleaned", helperResultsSnapshot: snapshot, phaseId, requestSha256: record.requestSha256 });
+    helperResultIntents.delete(phaseId);
+  }
+  for (const phaseId of helperResultIntents) {
+    await helperResultsFileStore.cleanupPartial({
+      action: record.action,
+      phaseId,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+    });
+    record.recordEvent({
+      event: "helper-results-intent-cleaned",
+      phaseId,
+      requestSha256: record.requestSha256,
+    });
+  }
+  for (const [phaseId, snapshot] of claimedSnapshots) {
+    await snapshotFileStore.cleanup(snapshot);
+    record.recordEvent({ event: "snapshot-cleaned", phaseId, requestSha256: record.requestSha256, snapshot });
+  }
+  if (remoteAttempt) {
+    record.recordEvent({ event: "remote-effect-unknown", ...remoteAttempt });
+    throw new Error("remote effect is unknown and requires manual reconciliation");
+  }
+  if (localAttempt) {
+    record.recordEvent({ event: "local-effect-unknown", ...localAttempt });
+    throw new Error("local effect is unknown and requires manual reconciliation");
+  }
+  return Object.freeze({ status: "recovered" });
+}
+
+async function defaultClaimedJobSnapshotProvider({ parameters, source, sourceId }) {
+  return readClaimedJobSnapshot({
+    parameters,
+    policy: {
+      expectedGid: 0,
+      expectedMode: 0o600,
+      expectedUid: 0,
+      maximumBytes: source.maximumBytes,
+      parentRoot: source.brokerRoot,
+    },
+    source,
+    sourceId,
+  });
+}
+
+function normalizeSemanticExecution(action, context) {
+  if (!isPlainRecord(context) || !isPlainRecord(context.request)
+    || !isPlainRecord(context.parameters) || !isPlainRecord(context.trusted)
+    || !isPlainRecord(context.trusted.intent) || !isPlainRecord(context.trusted.receipt)
+    || !context.lease || typeof context.lease !== "object"
+    || typeof context.lease.recordEvent !== "function"
+    || typeof context.lease.recordWorker !== "function") {
+    throw brokerError(403, "semantic request, trust or lease lineage is invalid");
+  }
+  if (canonicalJson(context.parameters) !== canonicalJson(context.request.parameters)) {
+    throw brokerError(403, "semantic caller parameters do not match the signed request");
+  }
+  if (context.request.action !== action
+    || context.requestId !== context.request.requestId
+    || context.requestSha256 !== sha256(canonicalJson(context.request))
+    || context.request.runtimeIntentId !== context.trusted.intent.intentId
+    || context.request.activeReceiptSha256 !== context.trusted.receiptDigest
+    || context.trusted.receiptDigest !== sha256(canonicalJson(context.trusted.receipt))) {
+    throw brokerError(403, "semantic request, trust or lease lineage is invalid");
+  }
+  const contract = ACTIONS[action];
+  const actionProfile = context.trusted.receipt.resources?.actionProfiles?.[action];
+  const runtimeEvidence = contract?.engineAction === "runtimeSnapshot";
+  if (!contract
+    || (runtimeEvidence && actionProfile !== undefined)
+    || (!runtimeEvidence && (!isPlainRecord(actionProfile)
+      || actionProfile.profileId !== contract.profileId))) {
+    throw brokerError(403, "semantic action profile identity is invalid");
+  }
+  if (context.lease.lineage !== undefined) {
+    const expectedLineage = {
+      action,
+      intentId: context.trusted.intent.intentId,
+      receiptDigest: context.trusted.receiptDigest,
+      request: context.request,
+      requestId: context.requestId,
+      requestSha256: context.requestSha256,
+    };
+    if (canonicalJson(context.lease.lineage) !== canonicalJson(expectedLineage)) {
+      throw brokerError(403, "semantic lease does not bind the full signed request");
+    }
+  }
+  return Object.freeze({
+    action,
+    actionProfile: runtimeEvidence ? null : actionProfile,
+    context,
+    parameters: context.parameters,
+    request: context.request,
+    requestId: context.requestId,
+    requestSha256: context.requestSha256,
+    trusted: context.trusted,
+  });
+}
+
+function semanticPhaseIds(admission) {
+  const { action, actionProfile, parameters } = admission;
+  const phaseIds = action === "backup.job.execute"
+    ? actionProfile.operationPhaseIds?.[parameters.jobOperation]
+    : actionProfile.phaseIds;
+  if (!Array.isArray(phaseIds) || phaseIds.length < 1
+    || phaseIds.some((phaseId) => typeof phaseId !== "string"
+      || !admission.trusted.receipt.resources.phaseProfiles?.[phaseId])) {
+    throw brokerError(403, "semantic action phase plan is invalid");
+  }
+  return [...phaseIds];
+}
+
+function semanticActionResult(admission, phases) {
+  return {
+    schema: "platform.docker-action.result/v2",
+    action: admission.action,
+    job: admission.action === "backup.job.execute"
+      ? cloneCanonicalValue(admission.parameters)
+      : null,
+    phases: phases.map((phase) => cloneCanonicalValue(phase)),
+    status: "completed",
+  };
+}
+
+async function executeSemanticRuntimeSnapshot(admission, transport) {
+  const output = await runtimeSnapshot(
+    admission.trusted.receipt.resources.containers,
+    transport,
+    admission.context.signal,
+  );
+  const encodedOutput = canonicalJson(output);
+  if (!isPlainRecord(output)
+    || output.schema !== "platform.docker-runtime-snapshot/v2"
+    || !isPlainRecord(output.resources)
+    || Buffer.byteLength(encodedOutput) > MAX_PHASE_OUTPUT_BYTES) {
+    throw brokerError(502, "runtime snapshot output schema or size is invalid");
+  }
+  const result = semanticActionResult(admission, [{
+    output,
+    outputSchema: "platform.docker-runtime-snapshot/v2",
+    outputSha256: sha256(encodedOutput),
+    phaseId: "evidence.runtime.snapshot",
+    status: "completed",
+  }]);
+  recordSemanticCompletion(admission, result);
+  return result;
+}
+
+function recordSemanticCompletion(admission, result) {
+  try {
+    admission.context.lease.recordEvent({
+      event: "action-completed",
+      requestSha256: admission.requestSha256,
+      resultSha256: sha256(canonicalJson(result)),
+    });
+  } catch (error) {
+    error.preserveLease = true;
+    throw error;
   }
 }
 
-export function workerCreateBody({ action, command, imageRef, hostPath, intentId, receiptDigest, mountAttestation }) {
+async function executeSemanticWorkerPhase({
+  admission,
+  claimedJobSnapshotProvider,
+  cleanupTimeoutMs,
+  phaseId,
+  randomBytes,
+  snapshotFileStore,
+  transport,
+}) {
+  const { action, context, parameters, request, requestId, requestSha256, trusted } = admission;
+  const receipt = trusted.receipt;
+  const phase = receipt.resources.phaseProfiles[phaseId];
+  const sourceId = admission.actionProfile.claimedJobSourceId;
+  let capturedSnapshot = null;
+  let claimedBackupResources = null;
+  if (sourceId !== null) {
+    const source = receipt.resources.claimedJobSources[sourceId];
+    capturedSnapshot = await claimedJobSnapshotProvider({
+      parameters: cloneCanonicalValue(parameters),
+      source,
+      sourceId,
+    });
+    claimedBackupResources = admitClaimedJobResources(
+      capturedSnapshot,
+      parameters,
+      receipt,
+    );
+  }
+  const effectiveAuthority = semanticPhaseAuthority(
+    receipt,
+    action,
+    phaseId,
+    claimedBackupResources ?? undefined,
+  );
+  const preflight = await preflightSemanticPhase({
+    action,
+    authority: effectiveAuthority,
+    phase,
+    receipt,
+    signal: context.signal,
+    transport,
+  });
+  let sealedSnapshot = null;
+  let snapshotMayExist = false;
+  let createAttempted = false;
+  let workerId = "";
+  let resourceName = "";
+  let body;
+  let phaseResult;
+  let failure = null;
+  let journalStarted = false;
+
+  try {
+    if (sourceId !== null) {
+      const source = receipt.resources.claimedJobSources[sourceId];
+      const predicted = semanticSnapshotRecord(capturedSnapshot, {
+        requestSha256,
+        source,
+        volumeInspect: preflight.volumes[source.snapshotVolumeId],
+      });
+      if (typeof context.lease.recordRecoveryIntent === "function") {
+        context.lease.recordRecoveryIntent({ phaseId, snapshot: predicted });
+        journalStarted = true;
+      }
+      sealedSnapshot = predicted;
+      snapshotMayExist = true;
+      const observed = await snapshotFileStore.seal(capturedSnapshot, {
+        request,
+        requestId,
+        requestSha256,
+        source,
+        volumeInspect: preflight.volumes[source.snapshotVolumeId],
+      });
+      if (canonicalJson(observed) !== canonicalJson(predicted)) {
+        throw snapshotPreserveError("sealed snapshot identity differs from its admitted recovery intent");
+      }
+      context.lease.recordEvent({
+        event: "snapshot-materialized",
+        phaseId,
+        requestSha256,
+        snapshot: sealedSnapshot,
+      });
+      journalStarted = true;
+    }
+
+    body = workerCreateBody({
+      action,
+      claimedBackupResources: claimedBackupResources ?? undefined,
+      claimedJobSnapshot: sealedSnapshot ?? undefined,
+      parameters,
+      phaseId,
+      request,
+      requestId,
+      requestSha256,
+      trusted,
+    });
+    const entropy = randomBytes(12);
+    if (!Buffer.isBuffer(entropy) || entropy.length !== 12) {
+      throw new TypeError("semantic worker name entropy is invalid");
+    }
+    resourceName = `platform-action-${phaseId.replaceAll(".", "-")}-${entropy.toString("hex")}`;
+    context.lease.recordWorker({
+      action,
+      phaseId,
+      phaseProfileSha256: phase.phaseSha256,
+      receiptDigest: trusted.receiptDigest,
+      requestSha256,
+      resourceName,
+      ...(claimedBackupResources ? { claimedBackupResources } : {}),
+      ...(sealedSnapshot ? { snapshot: sealedSnapshot } : {}),
+    });
+    journalStarted = true;
+
+    requireSemanticTransport(transport, "createWorker");
+    createAttempted = true;
+    const created = await transport.createWorker(resourceName, body, context.signal);
+    workerId = String(created?.Id ?? "");
+    assertSemanticWorkerId(workerId);
+    context.lease.recordEvent({
+      event: "worker-created",
+      phaseId,
+      resourceName,
+      workerId,
+    });
+
+    requireSemanticTransport(transport, "inspectContainer");
+    const inspect = await transport.inspectContainer(workerId, context.signal);
+    assertExactSemanticWorkerInspect(inspect, {
+      body,
+      id: workerId,
+      name: resourceName,
+      phase,
+      receipt,
+      sealedSnapshot,
+    });
+    requireSemanticTransport(transport, "startContainer");
+    await transport.startContainer(workerId, context.signal);
+    requireSemanticTransport(transport, "waitContainer");
+    const waited = await transport.waitContainer(workerId, context.signal);
+    const statusCode = Number(waited?.StatusCode);
+    if (!Number.isSafeInteger(statusCode) || statusCode !== 0) {
+      throw brokerError(500, `${phaseId} worker failed with status ${Number.isSafeInteger(statusCode) ? statusCode : "invalid"}`);
+    }
+    requireSemanticTransport(transport, "logsContainer");
+    const logs = await transport.logsContainer(workerId, context.signal);
+    const workerResult = parseSemanticWorkerOutput(logs, {
+      action,
+      parameters,
+      phase,
+      phaseId,
+      requestId,
+    });
+    context.lease.recordEvent({
+      event: "worker-result-recorded",
+      phaseId,
+      resourceName,
+      workerId,
+      workerResultSha256: sha256(canonicalJson(workerResult)),
+    });
+    phaseResult = {
+      output: workerResult.output,
+      outputSchema: phase.outputSchema,
+      outputSha256: sha256(canonicalJson(workerResult.output)),
+      phaseId,
+      status: "completed",
+    };
+  } catch (error) {
+    failure = error;
+  }
+
+  let cleanupFailure = null;
+  let deletedWorkerId = null;
+  if (createAttempted) {
+    try {
+      deletedWorkerId = await withTimeout(async (cleanupSignal) => {
+        requireSemanticTransport(transport, "deleteContainer");
+        if (workerId) {
+          await transport.deleteContainer(workerId, cleanupSignal);
+          return workerId;
+        }
+        requireSemanticTransport(transport, "inspectContainerForRecovery");
+        const inspect = await transport.inspectContainerForRecovery(resourceName, cleanupSignal);
+        if (!inspect) return null;
+        const recoveredId = String(inspect.Id ?? "");
+        assertSemanticWorkerId(recoveredId);
+        assertExactSemanticWorkerInspect(inspect, {
+          body,
+          id: recoveredId,
+          name: resourceName,
+          phase,
+          receipt,
+          sealedSnapshot,
+        });
+        await transport.deleteContainer(recoveredId, cleanupSignal);
+        return recoveredId;
+      }, cleanupTimeoutMs, "semantic worker cleanup timed out");
+      if (deletedWorkerId) {
+        context.lease.recordEvent({
+          event: "worker-deleted",
+          phaseId,
+          resourceName,
+          workerId: deletedWorkerId,
+        });
+      }
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+
+  if (snapshotMayExist && !cleanupFailure) {
+    try {
+      if (typeof snapshotFileStore.cleanup !== "function") {
+        throw new TypeError("semantic snapshot cleanup dependency is incomplete");
+      }
+      await withTimeout(
+        () => snapshotFileStore.cleanup(sealedSnapshot),
+        cleanupTimeoutMs,
+        "semantic snapshot cleanup timed out",
+      );
+      context.lease.recordEvent({
+        event: "snapshot-cleaned",
+        phaseId,
+        requestSha256,
+        snapshot: sealedSnapshot,
+      });
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+
+  if (failure?.remoteEffectUnknown === true && !cleanupFailure && deletedWorkerId) {
+    try {
+      context.lease.recordEvent({
+        event: "remote-effect-unknown",
+        phaseId,
+        resourceName,
+        workerId: deletedWorkerId,
+      });
+    } catch (error) {
+      cleanupFailure = error;
+    }
+  }
+  if (cleanupFailure) {
+    cleanupFailure.preserveLease = true;
+    throw cleanupFailure;
+  }
+  if (failure) {
+    if (journalStarted || createAttempted) failure.preserveLease = true;
+    throw failure;
+  }
+  return phaseResult;
+}
+
+async function preflightSemanticPhase({ action, authority, phase, receipt, signal, transport }) {
+  if (!isPlainRecord(phase) || phase.phaseId !== String(phase.phaseId ?? "")) {
+    throw brokerError(403, "semantic phase profile is invalid");
+  }
+  const networks = {};
+  for (const logicalId of authority.effectiveNetworkIds) {
+    const authority = receipt.resources.networks[logicalId];
+    requireSemanticTransport(transport, "inspectNetwork");
+    networks[logicalId] = await transport.inspectNetwork(authority.engineId, signal);
+  }
+  const volumeIds = [
+    ...Object.keys(authority.resources.volumes),
+    ...phase.workerSecretSetIds.map(
+      (secretSetId) => receipt.resources.workerSecretSets[secretSetId].volumeId,
+    ),
+    ...authority.effectiveHelperSecretSetIds.map(
+      (secretSetId) => receipt.resources.workerSecretSets[secretSetId].volumeId,
+    ),
+    ...phase.scratchVolumeIds,
+  ];
+  const actionProfile = receipt.resources.actionProfiles[action];
+  if (actionProfile.claimedJobSourceId !== null) {
+    const source = receipt.resources.claimedJobSources[actionProfile.claimedJobSourceId];
+    volumeIds.unshift(source.volumeId, source.snapshotVolumeId);
+  }
+  const volumes = {};
+  for (const logicalId of [...new Set(volumeIds)]) {
+    const authority = receipt.resources.volumes[logicalId];
+    requireSemanticTransport(transport, "inspectVolume");
+    volumes[logicalId] = await transport.inspectVolume(authority.engineName, signal);
+  }
+  for (const logicalId of authority.effectiveNetworkIds) {
+    assertExactNetworkInspect(
+      networks[logicalId],
+      receipt.resources.networks[logicalId],
+      logicalId,
+    );
+  }
+  for (const logicalId of [...new Set(volumeIds)]) {
+    assertExactVolumeInspect(
+      volumes[logicalId],
+      receipt.resources.volumes[logicalId],
+      logicalId,
+    );
+  }
+  return Object.freeze({ networks: Object.freeze(networks), volumes: Object.freeze(volumes) });
+}
+
+function requireSemanticTransport(transport, method) {
+  if (typeof transport?.[method] !== "function") {
+    throw new TypeError(`semantic Engine transport is missing ${method}`);
+  }
+}
+
+async function recoverSemanticLease({ record, signal, snapshotFileStore, transport }) {
+  if (!isPlainRecord(record) || !isPlainRecord(record.request)
+    || !isPlainRecord(record.trusted) || !Array.isArray(record.journalEntries)
+    || typeof record.recordEvent !== "function"
+    || record.action !== record.request.action
+    || record.requestSha256 !== sha256(canonicalJson(record.request))
+    || record.receiptDigest !== record.trusted.receiptDigest
+    || record.receiptDigest !== sha256(canonicalJson(record.trusted.receipt))) {
+    throw new Error("semantic recovery lease lineage is invalid");
+  }
+  const admission = Object.freeze({
+    action: record.action,
+    actionProfile: record.trusted.receipt.resources.actionProfiles[record.action],
+    parameters: record.request.parameters,
+    request: record.request,
+    requestId: record.requestId,
+    requestSha256: record.requestSha256,
+    trusted: record.trusted,
+  });
+  const allowedPhaseIds = new Set(semanticPhaseIds(admission));
+  const workers = new Map();
+  const snapshots = new Map();
+  const cleanedSnapshots = new Set();
+  const snapshotKey = (value) => canonicalJson(value);
+  for (const entry of record.journalEntries) {
+    if (!allowedPhaseIds.has(entry.phaseId) && entry.event !== "action-completed") {
+      throw new Error("semantic recovery journal contains an unowned phase");
+    }
+    if (entry.event === "snapshot-materialized") snapshots.set(snapshotKey(entry.snapshot), entry.snapshot);
+    if (entry.event === "snapshot-cleaned") cleanedSnapshots.add(snapshotKey(entry.snapshot));
+    if (entry.event === "worker-recorded") {
+      workers.set(entry.resourceName, {
+        createdId: null,
+        deleted: false,
+        entry,
+      });
+    } else if (entry.event === "worker-created") {
+      const worker = workers.get(entry.resourceName);
+      if (!worker) throw new Error("semantic recovery worker journal is incomplete");
+      worker.createdId = entry.workerId;
+    } else if (entry.event === "worker-deleted") {
+      const worker = workers.get(entry.resourceName);
+      if (!worker) throw new Error("semantic recovery worker deletion is orphaned");
+      worker.deleted = true;
+    }
+  }
+  if (record.recoveryIntent) {
+    if (!allowedPhaseIds.has(record.recoveryIntent.phaseId)) {
+      throw new Error("semantic recovery snapshot phase is not owned by the action");
+    }
+    validateSemanticSnapshotForRequest(
+      record.recoveryIntent.snapshot,
+      admission,
+      record.recoveryIntent.phaseId,
+    );
+    snapshots.set(snapshotKey(record.recoveryIntent.snapshot), record.recoveryIntent.snapshot);
+  }
+
+  const pendingWorkers = [...workers.values()].filter(({ deleted }) => !deleted).reverse();
+  const inspected = [];
+  for (const worker of pendingWorkers) {
+    const { entry } = worker;
+    const phase = record.trusted.receipt.resources.phaseProfiles[entry.phaseId];
+    if (!phase || phase.phaseSha256 !== entry.phaseProfileSha256
+      || entry.receiptDigest !== record.receiptDigest
+      || entry.requestSha256 !== record.requestSha256) {
+      throw new Error("semantic recovery worker lineage is invalid");
+    }
+    const sealedSnapshot = entry.snapshot ?? null;
+    if (sealedSnapshot) validateSemanticSnapshotForRequest(sealedSnapshot, admission, entry.phaseId);
+    const body = workerCreateBody({
+      action: record.action,
+      claimedBackupResources: entry.claimedBackupResources,
+      claimedJobSnapshot: sealedSnapshot ?? undefined,
+      parameters: record.request.parameters,
+      phaseId: entry.phaseId,
+      request: record.request,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+      trusted: record.trusted,
+    });
+    requireSemanticTransport(transport, "inspectContainerForRecovery");
+    const inspect = await transport.inspectContainerForRecovery(entry.resourceName, signal);
+    if (!inspect) throw new Error("semantic recovery worker inspect is missing");
+    const observedId = String(inspect.Id ?? "");
+    assertSemanticWorkerId(observedId);
+    if (worker.createdId && worker.createdId !== observedId) {
+      throw new Error("semantic recovery worker identity does not match its journal");
+    }
+    assertExactSemanticWorkerInspect(inspect, {
+      body,
+      id: observedId,
+      name: entry.resourceName,
+      phase,
+      receipt: record.trusted.receipt,
+      sealedSnapshot,
+    });
+    inspected.push({ entry, id: observedId });
+  }
+
+  for (const worker of inspected) {
+    requireSemanticTransport(transport, "deleteContainer");
+    await transport.deleteContainer(worker.id, signal);
+    record.recordEvent({
+      event: "worker-deleted",
+      phaseId: worker.entry.phaseId,
+      resourceName: worker.entry.resourceName,
+      workerId: worker.id,
+    });
+  }
+  for (const [key, snapshot] of snapshots) {
+    if (cleanedSnapshots.has(key)) continue;
+    if (typeof snapshotFileStore.cleanup !== "function") {
+      throw new TypeError("semantic snapshot cleanup dependency is incomplete");
+    }
+    await snapshotFileStore.cleanup(snapshot);
+    const phaseId = record.recoveryIntent?.snapshot
+      && snapshotKey(record.recoveryIntent.snapshot) === key
+      ? record.recoveryIntent.phaseId
+      : record.journalEntries.find(
+          (entry) => entry.event === "snapshot-materialized"
+            && snapshotKey(entry.snapshot) === key,
+        )?.phaseId;
+    if (!phaseId) throw new Error("semantic recovery snapshot phase is missing");
+    record.recordEvent({
+      event: "snapshot-cleaned",
+      phaseId,
+      requestSha256: record.requestSha256,
+      snapshot,
+    });
+  }
+  return Object.freeze({ status: "recovered" });
+}
+
+export function workerCreateBody(input) {
+  if (isPlainRecord(input) && Object.hasOwn(input, "phaseId")) {
+    return semanticWorkerCreateBody(input);
+  }
+  return legacyWorkerCreateBody(input ?? {});
+}
+
+function semanticWorkerCreateBody({
+  action,
+  artifactBinding,
+  claimedBackupResources,
+  claimedJobSnapshot,
+  helperResultsSnapshot,
+  parameters,
+  phaseId,
+  request,
+  requestId,
+  requestSha256,
+  scratchEngine,
+  trusted,
+  workerRole,
+}) {
+  if (!isPlainRecord(request) || !isPlainRecord(parameters) || !isPlainRecord(trusted)
+    || !isPlainRecord(trusted.intent) || !isPlainRecord(trusted.receipt)
+    || request.action !== action || request.requestId !== requestId
+    || requestSha256 !== sha256(canonicalJson(request))
+    || canonicalJson(parameters) !== canonicalJson(request.parameters)
+    || request.runtimeIntentId !== trusted.intent.intentId
+    || request.activeReceiptSha256 !== trusted.receiptDigest
+    || trusted.receiptDigest !== sha256(canonicalJson(trusted.receipt))) {
+    throw brokerError(403, "semantic worker request authority is invalid");
+  }
+  const receipt = trusted.receipt;
+  const actionProfile = receipt.resources?.actionProfiles?.[action];
+  const phase = receipt.resources?.phaseProfiles?.[phaseId];
+  if (!isPlainRecord(actionProfile) || !isPlainRecord(phase)
+    || phase.phaseId !== phaseId || !semanticProfileOwnsPhase(actionProfile, phaseId, parameters)) {
+    throw brokerError(403, "semantic worker phase authority is invalid");
+  }
+  const roleAware = workerRole !== undefined;
+  if (roleAware && !SEMANTIC_WORKER_ROLES_BY_PHASE[phaseId]?.includes(workerRole)) {
+    throw brokerError(403, "semantic worker role is outside phase authority");
+  }
+  const requiresSnapshot = actionProfile.claimedJobSourceId !== null;
+  if (requiresSnapshot !== Boolean(claimedJobSnapshot)) {
+    throw brokerError(403, "semantic worker claimed-job snapshot ownership is invalid");
+  }
+  if (claimedJobSnapshot) {
+    validateSemanticSnapshotForRequest(claimedJobSnapshot, {
+      action,
+      actionProfile,
+      parameters,
+      request,
+      requestId,
+      requestSha256,
+      trusted,
+    }, phaseId);
+  }
+
+  const authority = semanticPhaseAuthority(
+    receipt,
+    action,
+    phaseId,
+    claimedBackupResources,
+    { includeHelperResultsStorage: roleAware },
+  );
+  const authorityJson = canonicalJson(authority);
+  const env = [
+    "HOME=/tmp",
+    "LANG=C.UTF-8",
+    "NODE_ENV=production",
+    `PLATFORM_DOCKER_ACTION=${action}`,
+    `PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64=${Buffer.from(authorityJson).toString("base64url")}`,
+    `PLATFORM_DOCKER_PHASE_AUTHORITY_SHA256=${sha256(authorityJson)}`,
+    `PLATFORM_DOCKER_PHASE_ID=${phaseId}`,
+    `PLATFORM_DOCKER_REQUEST_ID=${requestId}`,
+  ];
+  if (roleAware) {
+    env.push(
+      `PLATFORM_DOCKER_REQUEST_SHA256=${requestSha256}`,
+      `PLATFORM_DOCKER_WORKER_ROLE=${workerRole}`,
+    );
+    const requiresHelperResults = workerRole === "evidence-finalizer";
+    if (requiresHelperResults !== Boolean(helperResultsSnapshot)
+      || (helperResultsSnapshot && (
+        helperResultsSnapshot.schema !== "platform.docker-helper-results.snapshot/v1"
+        || helperResultsSnapshot.action !== action
+        || helperResultsSnapshot.phaseId !== phaseId
+        || helperResultsSnapshot.requestId !== requestId
+        || helperResultsSnapshot.requestSha256 !== requestSha256
+        || helperResultsSnapshot.containerPath !== "/run/platform/helper-results/results.json"
+        || !/^[a-f0-9]{64}$/.test(String(helperResultsSnapshot.sha256 ?? ""))
+      ))) {
+      throw brokerError(403, "semantic worker helper-results snapshot authority is invalid");
+    }
+    if (helperResultsSnapshot) {
+      env.push(
+        `PLATFORM_DOCKER_HELPER_RESULTS_PATH=${helperResultsSnapshot.containerPath}`,
+        `PLATFORM_DOCKER_HELPER_RESULTS_SHA256=${helperResultsSnapshot.sha256}`,
+      );
+    }
+    const requiresBinding = workerRole === "evidence-finalizer"
+      && ["job.restore.verify", "restore.verify", "offsite.sync"].includes(phaseId);
+    if (requiresBinding !== Boolean(artifactBinding) || (artifactBinding && !isPlainRecord(artifactBinding))) {
+      throw brokerError(403, "semantic worker artifact binding authority is invalid");
+    }
+    if (artifactBinding) {
+      const bindingJson = canonicalJson(artifactBinding);
+      env.push(
+        `PLATFORM_DOCKER_ARTIFACT_BINDING_BASE64=${Buffer.from(bindingJson).toString("base64url")}`,
+        `PLATFORM_DOCKER_ARTIFACT_BINDING_SHA256=${sha256(bindingJson)}`,
+      );
+    }
+    const requiresScratchEngine = workerRole === "scratch-preparer" || workerRole === "scratch-cleaner";
+    if (requiresScratchEngine !== Boolean(scratchEngine)
+      || (scratchEngine && !["mariadb", "minio", "postgres"].includes(scratchEngine))) {
+      throw brokerError(403, "semantic worker scratch engine authority is invalid");
+    }
+    if (scratchEngine) env.push(`PLATFORM_DOCKER_SCRATCH_ENGINE=${scratchEngine}`);
+    if (workerRole === "evidence-finalizer"
+      && ["catalog.capture", "job.backup.capture", "restore.capture"].includes(phaseId)) {
+      env.push(`PLATFORM_DOCKER_REQUEST_ISSUED_AT=${request.issuedAt}`);
+    }
+  }
+  if (claimedJobSnapshot) {
+    env.push(
+      `PLATFORM_CLAIMED_JOB_FILE_NAME=${claimedJobSnapshot.jobFileName}`,
+      `PLATFORM_CLAIMED_JOB_ID=${claimedJobSnapshot.jobId}`,
+      `PLATFORM_CLAIMED_JOB_OPERATION=${claimedJobSnapshot.jobOperation}`,
+      `PLATFORM_CLAIMED_JOB_PATH=${claimedJobSnapshot.containerPath}`,
+      `PLATFORM_CLAIMED_JOB_SHA256=${claimedJobSnapshot.jobSha256}`,
+      `PLATFORM_CLAIMED_JOB_SOURCE_ID=${claimedJobSnapshot.sourceId}`,
+    );
+  }
+  if (phase.writableSubpathIds.includes("backup.quarantine")) {
+    env.push("PLATFORM_BACKUP_QUARANTINE_RELATIVE_PATH=.quarantine");
+  }
+  assertSemanticEnvironmentBounds(env);
+
+  const roleMountIds = !roleAware || ["evidence-finalizer", "standalone"].includes(workerRole)
+    ? phase.mountIds
+    : workerRole === "artifact-resolver"
+      ? phase.mountIds.filter((mountId) => ["backup.root.ro", "report.root.rw"].includes(mountId))
+      : workerRole === "helper-preparer"
+        ? phase.mountIds.filter((mountId) => ["backup.root.rw", "report.root.rw"].includes(mountId))
+        : [];
+  const binds = roleMountIds.map((mountId) => {
+    const mount = receipt.resources.mounts[mountId];
+    return `${mount.canonicalPath}:${mount.containerPath}:${mount.access}`;
+  });
+  if (claimedJobSnapshot) {
+    binds.push(`${claimedJobSnapshot.hostPath}:${claimedJobSnapshot.containerPath}:ro`);
+  }
+  if (helperResultsSnapshot) {
+    binds.push(`${helperResultsSnapshot.hostPath}:${helperResultsSnapshot.containerPath}:ro`);
+  }
+  const baseHostConfig = legacyWorkerCreateBody({
+    action: "backup.prune.plan",
+    command: "backup-prune-plan",
+    hostPath: "/srv/platform/backups",
+    imageRef: `worker@sha256:${"0".repeat(64)}`,
+    intentId: "semantic-base",
+    mountAttestation: {
+      access: "ro",
+      containerPath: "/data/backups",
+      device: 1,
+      hostPath: "/srv/platform/backups",
+      inode: 1,
+      kind: "directory",
+      mode: 0o700,
+      ownerGid: 0,
+      ownerUid: 0,
+      symlinkFree: true,
+    },
+    receiptDigest: "0".repeat(64),
+  }).HostConfig;
+  const namedMounts = [
+    ...(["artifact-resolver", "evidence-finalizer", "standalone"].includes(workerRole)
+      || !roleAware ? phase.workerSecretSetIds : []).map((secretSetId) => {
+      const secretSet = receipt.resources.workerSecretSets[secretSetId];
+      return {
+        Type: "volume",
+        Source: receipt.resources.volumes[secretSet.volumeId].engineName,
+        Target: secretSet.containerRoot,
+        ReadOnly: true,
+        VolumeOptions: { NoCopy: true },
+      };
+    }),
+    ...(["scratch-preparer", "scratch-cleaner"].includes(workerRole)
+      ? phase.scratchVolumeIds : !roleAware ? phase.scratchVolumeIds : []).map((volumeId) => ({
+      Type: "volume",
+      Source: receipt.resources.volumes[volumeId].engineName,
+      Target: receipt.resources.volumes[volumeId].containerPath,
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: true },
+    })),
+  ];
+  return {
+    Image: phase.workerImageRef,
+    Entrypoint: roleAware
+      ? ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"]
+      : [
+          "node",
+          "--import",
+          "/opt/platform-docker-worker/docker-action-worker-runtime-guard.mjs",
+          "/opt/platform-docker-worker/docker-action-worker.mjs",
+        ],
+    Cmd: [phase.command],
+    Env: env,
+    User: "0:0",
+    WorkingDir: "/opt/platform-docker-worker",
+    NetworkDisabled: true,
+    AttachStdin: false,
+    AttachStdout: false,
+    AttachStderr: false,
+    OpenStdin: false,
+    StdinOnce: false,
+    Tty: false,
+    Labels: {
+      "com.platform.active-receipt-sha256": trusted.receiptDigest,
+      "com.platform.docker-action": action,
+      "com.platform.docker-action-profile": actionProfile.profileId,
+      "com.platform.docker-action-profile-sha256": actionProfile.profileSha256,
+      "com.platform.docker-phase": phaseId,
+      "com.platform.docker-phase-sha256": phase.phaseSha256,
+      "com.platform.runtime-intent": trusted.intent.intentId,
+      ...(roleAware ? { "com.platform.docker-worker-role": workerRole } : {}),
+    },
+    HostConfig: {
+      ...baseHostConfig,
+      Binds: binds,
+      CapAdd: workerRole === "scratch-preparer"
+        ? ["CHOWN"]
+        : workerRole === "scratch-cleaner"
+          ? ["DAC_OVERRIDE"]
+          : [],
+      Mounts: namedMounts,
+      NetworkMode: "none",
+    },
+    NetworkingConfig: {
+      EndpointsConfig: {},
+    },
+  };
+}
+
+function legacyWorkerCreateBody({ action, command, imageRef, hostPath, intentId, receiptDigest, mountAttestation }) {
   if (action !== "backup.prune.plan" || command !== "backup-prune-plan") throw brokerError(500, "worker policy mismatch");
   if (!mountAttestation || mountAttestation.hostPath !== hostPath || mountAttestation.access !== "ro"
     || mountAttestation.containerPath !== "/data/backups" || mountAttestation.ownerUid !== 0
@@ -2387,6 +5303,480 @@ export function workerCreateBody({ action, command, imageRef, hostPath, intentId
   };
 }
 
+function semanticProfileOwnsPhase(actionProfile, phaseId, parameters) {
+  if (actionProfile.phaseIds?.includes(phaseId)) return true;
+  return Array.isArray(actionProfile.operationPhaseIds?.[parameters?.jobOperation])
+    && actionProfile.operationPhaseIds[parameters.jobOperation].includes(phaseId);
+}
+
+function semanticPhaseAuthority(
+  receipt,
+  action,
+  phaseId,
+  claimedBackupResources,
+  { includeHelperResultsStorage = false } = {},
+) {
+  const resources = receipt?.resources;
+  const actionProfile = resources?.actionProfiles?.[action];
+  const phase = resources?.phaseProfiles?.[phaseId];
+  if (!isPlainRecord(resources) || !isPlainRecord(actionProfile) || !isPlainRecord(phase)
+    || !semanticProfileOwnsPhase(actionProfile, phaseId, {
+      jobOperation: action === "backup.job.execute"
+        ? Object.entries(actionProfile.operationPhaseIds ?? {})
+          .find(([, ids]) => Array.isArray(ids) && ids.includes(phaseId))?.[0]
+        : undefined,
+    })) {
+    throw brokerError(403, "semantic effective phase authority is not owned by the receipt");
+  }
+
+  let backupResourceIds;
+  if (action === "backup.job.execute") {
+    if (!isPlainRecord(claimedBackupResources)
+      || Object.keys(claimedBackupResources).length < 1) {
+      throw brokerError(403, "claimed-job effective resource authority is missing");
+    }
+    backupResourceIds = Object.keys(claimedBackupResources);
+    for (const id of backupResourceIds) {
+      if (!isPlainRecord(resources.backupResources?.[id])
+        || canonicalJson(claimedBackupResources[id])
+          !== canonicalJson(resources.backupResources[id])) {
+        throw brokerError(403, `claimed-job effective resource ${id} is not receipt-bound`);
+      }
+    }
+  } else if (action === "backup.catalog" || action === "restore.drill.full") {
+    backupResourceIds = Object.keys(resources.backupResources ?? {});
+  } else if (action === "backup.prune.plan" || action === "backup.prune.apply"
+    || action === "backup.offsite.sync") {
+    backupResourceIds = [];
+  } else {
+    throw brokerError(403, "semantic effective resource policy is not modeled");
+  }
+  const backupResourceIdSet = new Set(backupResourceIds);
+  const backupResources = Object.fromEntries(backupResourceIds.map(
+    (id) => [id, cloneCanonicalValue(resources.backupResources[id])],
+  ));
+
+  const effectiveEndpointIds = [];
+  for (const id of phase.endpointIds) {
+    const endpoint = resources.serviceEndpoints?.[id];
+    if (!isPlainRecord(endpoint) || endpoint.endpointId !== id) {
+      throw brokerError(403, `semantic service endpoint ${id} is dangling`);
+    }
+    if (endpoint.backupResourceId === null) {
+      if (action === "backup.offsite.sync") effectiveEndpointIds.push(id);
+    } else if (backupResourceIdSet.has(endpoint.backupResourceId)) {
+      effectiveEndpointIds.push(id);
+    }
+  }
+  const serviceEndpoints = Object.fromEntries(effectiveEndpointIds.map(
+    (id) => [id, cloneCanonicalValue(resources.serviceEndpoints[id])],
+  ));
+
+  const selectedBackupResources = Object.values(backupResources);
+  const effectiveHelperProfileIds = [];
+  for (const id of phase.helperProfileIds) {
+    const helper = resources.helperProfiles?.[id];
+    if (!isPlainRecord(helper) || helper.helperProfileId !== id) {
+      throw brokerError(403, `semantic helper profile ${id} is dangling`);
+    }
+    const selected = helper.resourceKind === null
+      ? action === "backup.offsite.sync"
+      : selectedBackupResources.some((resource) => (
+        resource.kind === helper.resourceKind
+          && (resource.engine ?? resource.externalId) === helper.engine
+      ));
+    if (selected) effectiveHelperProfileIds.push(id);
+  }
+  const helperProfiles = Object.fromEntries(effectiveHelperProfileIds.map(
+    (id) => [id, cloneCanonicalValue(resources.helperProfiles[id])],
+  ));
+
+  const referencedNetworkIds = new Set();
+  for (const endpoint of Object.values(serviceEndpoints)) {
+    if (endpoint.networkId !== null) referencedNetworkIds.add(endpoint.networkId);
+  }
+  for (const helper of Object.values(helperProfiles)) {
+    if (helper.networkId !== null) referencedNetworkIds.add(helper.networkId);
+  }
+  for (const id of referencedNetworkIds) {
+    if (!phase.networkIds.includes(id) || !isPlainRecord(resources.networks?.[id])) {
+      throw brokerError(403, `semantic effective network ${id} is not phase-bound`);
+    }
+  }
+  const effectiveNetworkIds = phase.networkIds.filter((id) => referencedNetworkIds.has(id));
+
+  const effectiveHelperSecretSetIds = [];
+  for (const value of [
+    ...effectiveHelperProfileIds.map((id) => resources.helperProfiles[id].secretSetId),
+    ...effectiveEndpointIds.map((id) => resources.serviceEndpoints[id].secretSetId),
+  ]) {
+    if (value !== null && !effectiveHelperSecretSetIds.includes(value)) {
+      effectiveHelperSecretSetIds.push(value);
+    }
+  }
+  const workerSecretSetIdSet = new Set(phase.workerSecretSetIds);
+  for (const id of effectiveHelperSecretSetIds) {
+    if (workerSecretSetIdSet.has(id) || !isPlainRecord(resources.workerSecretSets?.[id])) {
+      throw brokerError(403, `semantic helper secret set ${id} overlaps or is dangling`);
+    }
+  }
+  for (const id of phase.workerSecretSetIds) {
+    if (!isPlainRecord(resources.workerSecretSets?.[id])) {
+      throw brokerError(403, `semantic worker secret set ${id} is dangling`);
+    }
+  }
+
+  const workerSecretSets = Object.fromEntries(phase.workerSecretSetIds.map(
+    (id) => [id, cloneCanonicalValue(resources.workerSecretSets[id])],
+  ));
+  const helperSecretSets = Object.fromEntries(effectiveHelperSecretSetIds.map(
+    (id) => [id, cloneCanonicalValue(resources.workerSecretSets[id])],
+  ));
+  const volumeIds = [
+    ...phase.workerSecretSetIds.map((id) => resources.workerSecretSets[id].volumeId),
+    ...effectiveHelperSecretSetIds.map((id) => resources.workerSecretSets[id].volumeId),
+    ...phase.scratchVolumeIds,
+    ...(includeHelperResultsStorage && effectiveHelperProfileIds.length > 0
+      ? ["broker.state"]
+      : []),
+  ];
+  if (includeHelperResultsStorage && effectiveHelperProfileIds.length > 0
+    && !isPlainRecord(resources.volumes?.["broker.state"])) {
+    throw brokerError(403, "semantic helper-results storage volume is missing");
+  }
+  return {
+    schema: "platform.docker-worker.phase-authority/v2",
+    action,
+    actionProfile: cloneCanonicalValue(actionProfile),
+    effectiveEndpointIds,
+    effectiveHelperProfileIds,
+    effectiveHelperSecretSetIds,
+    effectiveNetworkIds,
+    phaseProfile: cloneCanonicalValue(phase),
+    resources: {
+      backupResources,
+      helperProfiles,
+      helperSecretSets,
+      mounts: Object.fromEntries(
+        phase.mountIds.map((id) => [id, cloneCanonicalValue(resources.mounts[id])]),
+      ),
+      networks: Object.fromEntries(
+        effectiveNetworkIds.map((id) => [id, cloneCanonicalValue(resources.networks[id])]),
+      ),
+      serviceEndpoints,
+      volumes: Object.fromEntries(
+        [...new Set(volumeIds)].map(
+          (id) => [id, cloneCanonicalValue(resources.volumes[id])],
+        ),
+      ),
+      workerSecretSets,
+      writableSubpaths: Object.fromEntries(
+        phase.writableSubpathIds.map(
+          (id) => [id, cloneCanonicalValue(resources.writableSubpaths[id])],
+        ),
+      ),
+    },
+  };
+}
+
+function assertSemanticEnvironmentBounds(entries) {
+  const sizes = entries.map((entry) => Buffer.byteLength(String(entry)) + 1);
+  if (sizes.some((size) => size > MAX_WORKER_ENV_ENTRY_BYTES)
+    || sizes.reduce((sum, size) => sum + size, 0) > MAX_WORKER_ENV_TOTAL_BYTES) {
+    throw brokerError(413, "semantic worker environment entry is oversized");
+  }
+}
+
+function semanticSnapshotRecord(value, { requestSha256, source, volumeInspect }) {
+  const snapshot = normalizeSnapshotInput(value);
+  if (!isPlainRecord(source) || !isPlainRecord(volumeInspect)
+    || snapshot.sourceId !== "jobs.running"
+    || source.snapshotVolumeId !== "broker.state"
+    || source.snapshotVolumeSubpath !== "claimed-jobs"
+    || source.snapshotContainerPath !== "/run/platform/claimed-job/job.json") {
+    throw new TypeError("semantic claimed-job snapshot authority is invalid");
+  }
+  const record = {
+    containerPath: source.snapshotContainerPath,
+    hostPath: path.join(
+      volumeInspect.Mountpoint,
+      source.snapshotVolumeSubpath,
+      requestSha256,
+      "job.json",
+    ),
+    jobFileName: snapshot.jobFileName,
+    jobId: snapshot.jobId,
+    jobOperation: snapshot.jobOperation,
+    jobSha256: snapshot.jobSha256,
+    requestSha256,
+    snapshotVolumeId: source.snapshotVolumeId,
+    snapshotVolumeMountpoint: volumeInspect.Mountpoint,
+    snapshotVolumeName: volumeInspect.Name,
+    snapshotVolumeSubpath: source.snapshotVolumeSubpath,
+    sourceId: snapshot.sourceId,
+  };
+  return freezeCanonicalValue(normalizeSealedSnapshot(record));
+}
+
+function admitClaimedJobResources(value, parameters, receipt) {
+  const snapshot = normalizeSnapshotInput(value);
+  if (!isPlainRecord(parameters)
+    || canonicalJson(parameters) !== canonicalJson({
+      jobFileName: snapshot.jobFileName,
+      jobId: snapshot.jobId,
+      jobOperation: snapshot.jobOperation,
+      jobSha256: snapshot.jobSha256,
+    })) {
+    throw brokerError(403, "claimed-job resource authority does not match the exact request");
+  }
+  let document;
+  try {
+    document = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes),
+    );
+    assertClaimedJobDocument(document, parameters);
+  } catch {
+    throw brokerError(403, "claimed-job resource document is not canonical typed authority");
+  }
+  if (document.status !== "running") {
+    throw brokerError(403, "claimed-job resource document is not in the running state");
+  }
+  const admitted = receipt?.resources?.backupResources;
+  if (!isPlainRecord(admitted)) {
+    throw brokerError(403, "active receipt has no claimed-job resource authority");
+  }
+  const projected = {};
+  for (const resource of document.resources) {
+    const receiptResource = admitted[resource.id];
+    if (!isPlainRecord(receiptResource)
+      || canonicalJson(resource) !== canonicalJson({
+        id: resource.id,
+        ...receiptResource,
+      })) {
+      throw brokerError(403, `claimed-job resource ${resource.id} does not exactly match the active receipt`);
+    }
+    projected[resource.id] = cloneCanonicalValue(receiptResource);
+  }
+  return freezeCanonicalValue(projected);
+}
+
+function validateSemanticSnapshotForRequest(value, admission, phaseId) {
+  const snapshot = normalizeSealedSnapshot(value);
+  const sourceId = admission.actionProfile?.claimedJobSourceId;
+  const source = admission.trusted.receipt.resources.claimedJobSources?.[sourceId];
+  const volume = admission.trusted.receipt.resources.volumes?.[source?.snapshotVolumeId];
+  const expectedParameters = {
+    jobFileName: snapshot.jobFileName,
+    jobId: snapshot.jobId,
+    jobOperation: snapshot.jobOperation,
+    jobSha256: snapshot.jobSha256,
+  };
+  const expectedHostPath = path.join(
+    snapshot.snapshotVolumeMountpoint,
+    snapshot.snapshotVolumeSubpath,
+    snapshot.requestSha256,
+    "job.json",
+  );
+  if (admission.action !== "backup.job.execute"
+    || !semanticProfileOwnsPhase(admission.actionProfile, phaseId, admission.parameters)
+    || !source || !volume || sourceId !== "jobs.running"
+    || snapshot.sourceId !== sourceId
+    || snapshot.snapshotVolumeId !== source.snapshotVolumeId
+    || snapshot.snapshotVolumeSubpath !== source.snapshotVolumeSubpath
+    || snapshot.snapshotVolumeName !== volume.engineName
+    || snapshot.containerPath !== source.snapshotContainerPath
+    || snapshot.requestSha256 !== admission.requestSha256
+    || snapshot.hostPath !== expectedHostPath
+    || path.dirname(path.dirname(snapshot.hostPath))
+      !== path.join(snapshot.snapshotVolumeMountpoint, snapshot.snapshotVolumeSubpath)
+    || canonicalJson(expectedParameters) !== canonicalJson(admission.parameters)) {
+    throw snapshotPreserveError("semantic claimed-job snapshot does not match its exact request authority");
+  }
+  return snapshot;
+}
+
+function assertExactNetworkInspect(inspect, authority, logicalId) {
+  if (!isPlainRecord(inspect)
+    || !hasExactKeys(inspect, [
+      "Containers",
+      "Driver",
+      "IPAM",
+      "Id",
+      "Internal",
+      "Labels",
+      "Name",
+      "Options",
+      "Scope",
+    ])
+    || inspect.Id !== authority.engineId
+    || inspect.Name !== authority.engineName
+    || inspect.Driver !== authority.driver
+    || inspect.Scope !== authority.scope
+    || inspect.Internal !== authority.internal
+    || sha256(canonicalJson(inspect.Labels)) !== authority.labelsSha256
+    || sha256(canonicalJson(inspect.Options)) !== authority.optionsSha256
+    || sha256(canonicalJson(inspect.IPAM)) !== authority.subnetSha256
+    || sha256(canonicalJson(inspect.Containers)) !== authority.membershipSha256) {
+    throw brokerError(409, `network inspect identity is not exact for ${logicalId}`);
+  }
+}
+
+function assertExactVolumeInspect(inspect, authority, logicalId) {
+  if (!isPlainRecord(inspect)
+    || !hasExactKeys(inspect, ["Driver", "Labels", "Mountpoint", "Name", "Options", "Scope"])
+    || inspect.Name !== authority.engineName
+    || inspect.Driver !== authority.driver
+    || inspect.Scope !== authority.scope
+    || sha256(canonicalJson(inspect.Labels)) !== authority.labelsSha256
+    || sha256(canonicalJson(inspect.Options)) !== authority.optionsSha256
+    || typeof inspect.Mountpoint !== "string" || inspect.Mountpoint.includes("\0")
+    || !path.isAbsolute(inspect.Mountpoint)
+    || path.normalize(inspect.Mountpoint) !== inspect.Mountpoint) {
+    throw brokerError(409, `volume inspect identity is not exact for ${logicalId}`);
+  }
+}
+
+function expectedSemanticInspectMounts(receipt, phase, sealedSnapshot) {
+  const binds = phase.mountIds.map((mountId) => {
+    const mount = receipt.resources.mounts[mountId];
+    return {
+      Type: "bind",
+      Source: mount.canonicalPath,
+      Destination: mount.containerPath,
+      Mode: mount.access,
+      RW: mount.access !== "ro",
+      Propagation: "rprivate",
+    };
+  });
+  if (sealedSnapshot) {
+    binds.push({
+      Type: "bind",
+      Source: sealedSnapshot.hostPath,
+      Destination: sealedSnapshot.containerPath,
+      Mode: "ro",
+      RW: false,
+      Propagation: "rprivate",
+    });
+  }
+  const volumes = [
+    ...phase.workerSecretSetIds.map((secretSetId) => {
+      const secretSet = receipt.resources.workerSecretSets[secretSetId];
+      const volume = receipt.resources.volumes[secretSet.volumeId];
+      return {
+        Type: "volume",
+        Name: volume.engineName,
+        Source: `/var/lib/docker/volumes/${volume.engineName}/_data`,
+        Destination: secretSet.containerRoot,
+        Driver: "local",
+        Mode: "",
+        RW: false,
+        Propagation: "",
+      };
+    }),
+    ...phase.scratchVolumeIds.map((volumeId) => {
+      const volume = receipt.resources.volumes[volumeId];
+      return {
+        Type: "volume",
+        Name: volume.engineName,
+        Source: `/var/lib/docker/volumes/${volume.engineName}/_data`,
+        Destination: volume.containerPath,
+        Driver: "local",
+        Mode: "",
+        RW: true,
+        Propagation: "",
+      };
+    }),
+  ];
+  return [...binds, ...volumes];
+}
+
+function expectedSemanticInspectMountsForBody(receipt, body) {
+  const binds = body.HostConfig.Binds.map((entry) => {
+    const separator = entry.lastIndexOf(":");
+    const sourceAndTarget = entry.slice(0, separator);
+    const mode = entry.slice(separator + 1);
+    const targetSeparator = sourceAndTarget.lastIndexOf(":");
+    const source = sourceAndTarget.slice(0, targetSeparator);
+    const destination = sourceAndTarget.slice(targetSeparator + 1);
+    return {
+      Type: "bind",
+      Source: source,
+      Destination: destination,
+      Mode: mode,
+      RW: mode !== "ro",
+      Propagation: "rprivate",
+    };
+  });
+  const volumeByName = Object.fromEntries(
+    Object.values(receipt.resources.volumes).map((volume) => [volume.engineName, volume]),
+  );
+  const volumes = body.HostConfig.Mounts.map((mount) => {
+    const volume = volumeByName[mount.Source];
+    if (!volume || mount.Type !== "volume") {
+      throw brokerError(409, "semantic worker body contains an unowned named mount");
+    }
+    return {
+      Type: "volume",
+      Name: mount.Source,
+      Source: `/var/lib/docker/volumes/${mount.Source}/_data`,
+      Destination: mount.Target,
+      Driver: "local",
+      Mode: "",
+      RW: mount.ReadOnly !== true,
+      Propagation: "",
+    };
+  });
+  return [...binds, ...volumes];
+}
+
+function assertExactSemanticWorkerInspect(inspect, {
+  body,
+  id,
+  name,
+  phase,
+  receipt,
+  sealedSnapshot,
+}) {
+  const config = inspect?.Config ?? {};
+  const observedName = String(inspect?.Name ?? "").replace(/^\//, "");
+  if (inspect?.Id !== id || observedName !== name || inspect?.Image !== phase.workerImageId
+    || config.Image !== body.Image
+    || canonicalJson(config.Entrypoint) !== canonicalJson(body.Entrypoint)
+    || canonicalJson(config.Cmd) !== canonicalJson(body.Cmd)
+    || canonicalJson(config.Env) !== canonicalJson(body.Env)
+    || config.User !== body.User || config.WorkingDir !== body.WorkingDir
+    || config.NetworkDisabled !== body.NetworkDisabled
+    || config.AttachStdin !== false || config.AttachStdout !== false
+    || config.AttachStderr !== false || config.OpenStdin !== false
+    || config.StdinOnce !== false || config.Tty !== false
+    || canonicalJson(config.Labels) !== canonicalJson(body.Labels)) {
+    throw brokerError(409, "semantic worker inspect identity is not exact");
+  }
+  if (canonicalJson(Object.keys(inspect?.HostConfig ?? {}).sort())
+      !== canonicalJson(Object.keys(body.HostConfig).sort())
+    || canonicalJson(inspect.HostConfig) !== canonicalJson(body.HostConfig)) {
+    throw brokerError(409, "semantic worker HostConfig was widened, omitted or normalized");
+  }
+  if (Object.keys(config.Volumes ?? {}).length || Object.keys(config.ExposedPorts ?? {}).length
+    || config.Healthcheck || (config.OnBuild ?? []).length) {
+    throw brokerError(409, "semantic worker image configuration exposes an unmodeled surface");
+  }
+  const expectedMounts = expectedSemanticInspectMountsForBody(receipt, body);
+  if (canonicalJson(inspect?.Mounts ?? []) !== canonicalJson(expectedMounts)) {
+    throw brokerError(409, "semantic worker inspect mounts are not exact");
+  }
+  const expectedNetworks = {};
+  if (canonicalJson(inspect?.NetworkSettings?.Networks ?? {}) !== canonicalJson(expectedNetworks)) {
+    throw brokerError(409, "semantic worker inspect network authority is not exact");
+  }
+}
+
+function assertSemanticWorkerId(value) {
+  if (!/^[a-f0-9]{64}$/.test(String(value ?? ""))) {
+    throw brokerError(502, "semantic Engine returned an invalid worker ID");
+  }
+}
+
 export function assertExactWorkerInspect(inspect, { id, name, body, imageId, hostPath }) {
   const observedName = String(inspect?.Name ?? "").replace(/^\//, "");
   const config = inspect?.Config ?? {};
@@ -2441,17 +5831,20 @@ async function runtimeSnapshot(containers, transport, signal) {
       throw brokerError(409, `runtime resource ${logicalId} does not match the active receipt`);
     }
     observed[logicalId] = {
+      authoritySha256: sha256(canonicalJson(authority)),
       containerId,
-      name: expected.name,
-      imageRef,
-      imageId,
-      labels: expected.labels,
-      authority,
-      state,
       health,
+      imageId,
+      imageRef,
+      labelsSha256: sha256(canonicalJson(expected.labels)),
+      name: expected.name,
+      state,
     };
   }
-  return { resources: observed };
+  return {
+    schema: "platform.docker-runtime-snapshot/v2",
+    resources: observed,
+  };
 }
 
 function observedContainerAuthority(inspect) {
@@ -2527,7 +5920,7 @@ function observedContainerAuthority(inspect) {
 
 export function parseWorkerOutput(bytes, command) {
   if (command !== "backup-prune-plan") throw brokerError(500, "worker output policy mismatch");
-  const decoded = decodeDockerLogFrames(bytes);
+  const decoded = decodeDockerLogFrames(bytes, 64 * 1024);
   if (decoded.stderr.length || decoded.stdout.length < 2 || decoded.stdout.length > 64 * 1024) {
     throw brokerError(502, "worker output is missing, oversized or contains stderr");
   }
@@ -2565,10 +5958,348 @@ export function parseWorkerOutput(bytes, command) {
   return value;
 }
 
-function decodeDockerLogFrames(value) {
-  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value ?? "");
+function parseSemanticWorkerOutput(bytes, {
+  action,
+  parameters,
+  phase,
+  phaseId,
+  requestId,
+  requestSha256,
+  workerRole,
+}) {
+  const decoded = decodeDockerLogFrames(bytes, MAX_PHASE_OUTPUT_BYTES);
+  if (decoded.stderr.length || decoded.stdout.length < 2
+    || decoded.stdout.length > MAX_PHASE_OUTPUT_BYTES
+    || decoded.stdout.at(-1) !== 0x0a
+    || decoded.stdout.subarray(0, -1).includes(0x0a)
+    || decoded.stdout.subarray(0, -1).includes(0x0d)) {
+    throw brokerError(502, "semantic worker output is missing, oversized or contains stderr");
+  }
+  let value;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true })
+      .decode(decoded.stdout.subarray(0, -1));
+    value = JSON.parse(text);
+  } catch {
+    throw brokerError(502, "semantic worker result is malformed");
+  }
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, [
+      "action",
+      "command",
+      "job",
+      "output",
+      "phaseId",
+      "requestId",
+      "schema",
+      "status",
+    ])
+    || value.schema !== SEMANTIC_WORKER_RESULT_SCHEMA
+    || value.status !== "completed"
+    || value.requestId !== requestId
+    || value.action !== action
+    || value.phaseId !== phaseId
+    || value.command !== phase.command) {
+    throw brokerError(502, "semantic worker result identity is invalid");
+  }
+  const expectedJob = action === "backup.job.execute"
+    ? {
+        jobFileName: parameters.jobFileName,
+        jobId: parameters.jobId,
+        jobOperation: parameters.jobOperation,
+        jobSha256: parameters.jobSha256,
+      }
+    : null;
+  if (canonicalJson(value.job) !== canonicalJson(expectedJob)) {
+    throw brokerError(502, "semantic worker result job identity is invalid");
+  }
+  if (workerRole === "artifact-resolver") {
+    validateBrokerArtifactBinding(value.output, {
+      consumerRequestSha256: requestSha256,
+      verificationKind: "verified-manifest",
+    });
+  } else if (workerRole === "helper-preparer") {
+    if (!isPlainRecord(value.output)
+      || !hasExactKeys(value.output, [
+        "mutationPerformed", "phaseId", "preparedRelativePaths", "requestSha256", "schema", "status",
+      ])
+      || value.output.schema !== "platform.docker-worker.helper-preparation/v1"
+      || value.output.status !== "completed" || value.output.mutationPerformed !== true
+      || value.output.phaseId !== phaseId || value.output.requestSha256 !== requestSha256
+      || !Array.isArray(value.output.preparedRelativePaths)
+      || value.output.preparedRelativePaths.some((entry) => typeof entry !== "string")
+      || canonicalJson(value.output.preparedRelativePaths)
+        !== canonicalJson([...value.output.preparedRelativePaths].sort())) {
+      throw brokerError(502, "helper preparer result is invalid");
+    }
+  } else if (["scratch-preparer", "scratch-cleaner"].includes(workerRole)) {
+    if (!isPlainRecord(value.output)
+      || !hasExactKeys(value.output, [
+        "engine", "mutationPerformed", "phaseId", "relativePath", "requestSha256", "role", "schema", "status",
+      ])
+      || value.output.schema !== "platform.docker-worker.scratch-result/v1"
+      || value.output.status !== "completed" || value.output.mutationPerformed !== true
+      || value.output.phaseId !== phaseId || value.output.requestSha256 !== requestSha256
+      || value.output.role !== workerRole
+      || !["mariadb", "minio", "postgres"].includes(value.output.engine)
+      || value.output.relativePath
+        !== `requests/${requestSha256}/${phaseId}/${value.output.engine}`) {
+      throw brokerError(502, "scratch worker result is invalid");
+    }
+  } else {
+    normalizeSemanticPhaseOutput(value.output, {
+      allowArtifactBinding: workerRole === "evidence-finalizer",
+      outputSchema: phase.outputSchema,
+      parameters,
+      phaseId,
+      requestSha256,
+    });
+  }
+  if (Buffer.byteLength(canonicalJson(value)) > MAX_PHASE_OUTPUT_BYTES) {
+    throw brokerError(502, "semantic worker result exceeds the bounded output contract");
+  }
+  return cloneCanonicalValue(value);
+}
+
+function normalizeSemanticPhaseOutput(value, {
+  allowArtifactBinding = false,
+  outputSchema,
+  parameters,
+  phaseId,
+  requestSha256,
+}) {
+  if (!isPlainRecord(value) || value.schema !== outputSchema
+    || Buffer.byteLength(canonicalJson(value)) > MAX_PHASE_OUTPUT_BYTES) {
+    throw brokerError(502, "semantic worker output schema or size is invalid");
+  }
+  if (phaseId === "prune.plan") {
+    const keys = [
+      "completeManifestCount",
+      "expiredManifestIds",
+      "keepCompleteManifests",
+      "mode",
+      "mutationPerformed",
+      "retainedManifestIds",
+      "schema",
+    ];
+    if (!hasExactKeys(value, keys)
+      || value.mode !== "plan" || value.keepCompleteManifests !== 42
+      || value.mutationPerformed !== false
+      || !Number.isSafeInteger(value.completeManifestCount) || value.completeManifestCount < 0
+      || !Array.isArray(value.retainedManifestIds) || !Array.isArray(value.expiredManifestIds)) {
+      throw brokerError(502, "semantic prune result violates its exact schema");
+    }
+    const ids = [...value.retainedManifestIds, ...value.expiredManifestIds];
+    if (ids.length !== value.completeManifestCount || new Set(ids).size !== ids.length
+      || ids.some((id) => !/^[a-z0-9](?:[a-z0-9._:-]{0,158}[a-z0-9])?$/.test(String(id)))) {
+      throw brokerError(502, "semantic prune result inventory is invalid");
+    }
+    return value;
+  }
+  const expectedKeys = ["evidenceSha256", "mutationPerformed", "schema", "status"];
+  if (allowArtifactBinding
+    && ["catalog.capture", "job.backup.capture", "restore.capture"].includes(phaseId)) {
+    expectedKeys.push("artifactBinding");
+  }
+  if (["job.backup.capture", "job.restore.verify"].includes(phaseId)) {
+    expectedKeys.push("jobId", "jobOperation");
+  }
+  if (phaseId === "offsite.sync") expectedKeys.push("repositoryOffsite");
+  if (!hasExactKeys(value, expectedKeys)
+    || value.status !== "passed"
+    || !/^[a-f0-9]{64}$/.test(String(value.evidenceSha256 ?? ""))
+    || value.mutationPerformed !== true
+    || containsArray(value)) {
+    throw brokerError(502, "semantic worker output contains an unsupported field, array or digest");
+  }
+  if (["job.backup.capture", "job.restore.verify"].includes(phaseId)
+    && (value.jobId !== parameters.jobId || value.jobOperation !== parameters.jobOperation)) {
+    throw brokerError(502, "semantic worker output job identity is invalid");
+  }
+  if (phaseId === "offsite.sync" && value.repositoryOffsite !== true) {
+    throw brokerError(502, "semantic offsite output identity is invalid");
+  }
+  if (Object.hasOwn(value, "artifactBinding")) {
+    validateBrokerArtifactBinding(value.artifactBinding, {
+      consumerRequestSha256: requestSha256,
+      producerPhaseId: phaseId,
+      producerRequestSha256: requestSha256,
+      verificationKind: "journaled-phase-result",
+    });
+    if (value.artifactBinding.verification.evidenceSha256 !== value.evidenceSha256) {
+      throw brokerError(502, "semantic capture binding evidence lineage is invalid");
+    }
+  }
+  return value;
+}
+
+function validateBrokerArtifactBinding(value, {
+  consumerRequestSha256,
+  producerPhaseId,
+  producerRequestSha256,
+  verificationKind,
+}) {
+  if (!isPlainRecord(value) || !hasExactKeys(value, [
+    "artifactSetSha256", "artifacts", "consumerRequestSha256", "manifestRelativePath",
+    "manifestSha256", "producerPhaseId", "producerRequestSha256", "schema", "verification",
+  ]) || value.schema !== "platform.docker-action.artifact-binding/v1"
+    || value.consumerRequestSha256 !== consumerRequestSha256
+    || (producerPhaseId !== undefined && value.producerPhaseId !== producerPhaseId)
+    || (producerRequestSha256 !== undefined && value.producerRequestSha256 !== producerRequestSha256)
+    || !/^[a-f0-9]{64}$/.test(String(value.producerRequestSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(value.manifestSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(value.artifactSetSha256 ?? ""))
+    || value.manifestRelativePath
+      !== `requests/${value.producerRequestSha256}/manifests/${value.producerPhaseId}.json`
+    || !isPlainRecord(value.artifacts) || Object.keys(value.artifacts).length < 1
+    || value.artifactSetSha256 !== sha256(canonicalJson(value.artifacts))
+    || !isPlainRecord(value.verification)
+    || !hasExactKeys(value.verification, ["authoritySha256", "evidenceSha256", "kind", "source"])
+    || value.verification.kind !== verificationKind
+    || !/^[a-f0-9]{64}$/.test(String(value.verification.authoritySha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(value.verification.evidenceSha256 ?? ""))) {
+    throw brokerError(502, "artifact binding identity or provenance is invalid");
+  }
+  for (const [resourceId, artifact] of Object.entries(value.artifacts)) {
+    if (!isPlainRecord(artifact)
+      || !hasExactKeys(artifact, ["relativePath", "resourceId", "sha256"])
+      || artifact.resourceId !== resourceId
+      || !/^[a-f0-9]{64}$/.test(String(artifact.sha256 ?? ""))
+      || !isExactRelativeBackupPath(artifact.relativePath)) {
+      throw brokerError(502, "artifact binding resource entry is invalid");
+    }
+  }
+  return value;
+}
+
+function containsArray(value) {
+  if (Array.isArray(value)) return true;
+  return isPlainRecord(value) && Object.values(value).some(containsArray);
+}
+
+export function normalizeSemanticHelperResult({ helper, logs, statusCode }) {
+  if (!isPlainRecord(helper) || !Number.isSafeInteger(statusCode)
+    || statusCode !== 0 || typeof helper.helperProfileId !== "string"
+    || !/^sha256:[a-f0-9]{64}$/.test(String(helper.imageId ?? ""))
+    || !isPlainRecord(helper.outputPolicy) || !isPlainRecord(helper.paths)) {
+    throw brokerError(502, "semantic helper result identity or exit status is invalid");
+  }
+  const maximum = Number(helper.outputPolicy.maximumRawBytes
+    ?? helper.outputPolicy.maximumSourceBytes
+    ?? helper.outputPolicy.maximumReportBytes ?? 64 * 1024);
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 1024 * 1024) {
+    throw brokerError(502, "semantic helper output is oversized");
+  }
+  const decoded = decodeDockerLogFrames(logs, maximum);
+  if (decoded.stderr.length !== 0) {
+    throw brokerError(502, "semantic helper emitted unsupported stderr");
+  }
+  const outputMode = String(helper.outputPolicy.kind ?? "");
+  let artifactRelativePath = null;
+  let stdoutBase64 = "";
+  if (outputMode === "artifact") {
+    if (decoded.stdout.length !== 0
+      || !isExactRelativeBackupPath(helper.paths.artifactRelativePath)) {
+      throw brokerError(502, "semantic artifact helper emitted unsupported stdout or path");
+    }
+    artifactRelativePath = helper.paths.artifactRelativePath;
+  } else if (outputMode === "none") {
+    if (decoded.stdout.length !== 0) {
+      throw brokerError(502, "semantic no-output helper emitted unsupported stdout");
+    }
+  } else if (outputMode === "json") {
+    const normalized = normalizeSemanticHelperJson(helper.helperProfileId, decoded.stdout);
+    stdoutBase64 = Buffer.from(canonicalJson(normalized)).toString("base64url");
+  } else {
+    throw brokerError(502, "semantic helper output mode is unsupported");
+  }
+  return Object.freeze({
+    artifactRelativePath,
+    exitCode: 0,
+    helperProfileId: helper.helperProfileId,
+    imageId: helper.imageId,
+    outputMode,
+    status: "completed",
+    stderrSha256: sha256(decoded.stderr),
+    stdoutBase64,
+  });
+}
+
+function normalizeSemanticHelperJson(helperProfileId, bytes) {
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw brokerError(502, "semantic helper JSON is not valid UTF-8");
+  }
+  const exactEngineStatus = (engine, source) => {
+    let value;
+    try { value = JSON.parse(source); } catch { throw brokerError(502, "semantic helper JSON is malformed"); }
+    if (!isPlainRecord(value) || !hasExactKeys(value, ["engine", "status"])
+      || value.engine !== engine || value.status !== "passed") {
+      throw brokerError(502, "semantic helper verification JSON is not exact");
+    }
+    return { engine, status: "passed" };
+  };
+  if (helperProfileId === "helper.restore.mariadb.verify") {
+    if (!text.endsWith("\n") || text.endsWith("\n\n") || text.slice(0, -1).includes("\r")) {
+      throw brokerError(502, "MariaDB verification output framing is invalid");
+    }
+    return exactEngineStatus("mariadb", text.slice(0, -1));
+  }
+  if (helperProfileId === "helper.restore.postgres.verify") {
+    const trimmed = text.replace(/^[\x09\x0a\x0b\x0c\x0d\x20]+|[\x09\x0a\x0b\x0c\x0d\x20]+$/g, "");
+    if (!trimmed) throw brokerError(502, "PostgreSQL verification output is empty");
+    return exactEngineStatus("postgres", trimmed);
+  }
+  if (helperProfileId === "helper.restore.minio.verify") {
+    if (bytes.length !== 0) throw brokerError(502, "MinIO diff reported an object difference");
+    return { differences: 0, engine: "minio", status: "passed" };
+  }
+  if (helperProfileId === "helper.offsite.restic") {
+    if (!text.endsWith("\n")) throw brokerError(502, "Restic NDJSON lacks its terminal LF");
+    const lines = text.slice(0, -1).split("\n");
+    if (!lines.length || lines.some((line) => line.length < 2 || line.includes("\r"))) {
+      throw brokerError(502, "Restic NDJSON framing is invalid");
+    }
+    let summary = null;
+    for (const [index, line] of lines.entries()) {
+      let event;
+      try { event = JSON.parse(line); } catch { throw brokerError(502, "Restic NDJSON event is malformed"); }
+      if (!isPlainRecord(event) || typeof event.message_type !== "string") {
+        throw brokerError(502, "Restic NDJSON event identity is invalid");
+      }
+      if (event.message_type === "summary") {
+        if (summary || index !== lines.length - 1
+          || !/^[a-f0-9]{64}$/.test(String(event.snapshot_id ?? ""))) {
+          throw brokerError(502, "Restic terminal summary is duplicated, reordered or invalid");
+        }
+        summary = event;
+      } else if (summary) {
+        throw brokerError(502, "Restic emitted an event after its terminal summary");
+      }
+    }
+    if (!summary) throw brokerError(502, "Restic terminal summary is missing");
+    return { messageType: "summary", snapshotId: summary.snapshot_id, status: "passed" };
+  }
+  throw brokerError(502, "semantic helper JSON normalizer is unsupported");
+}
+
+function decodeDockerLogFrames(value, maximumPayloadBytes = MAX_ENGINE_RESPONSE_BYTES) {
+  if (!Buffer.isBuffer(value)) throw brokerError(502, "worker log stream is not a Buffer");
+  if (!Number.isSafeInteger(maximumPayloadBytes) || maximumPayloadBytes < 0
+    || maximumPayloadBytes > MAX_ENGINE_RESPONSE_BYTES) {
+    throw brokerError(502, "worker log stream bound is invalid");
+  }
+  const bytes = value;
+  if (bytes.length > MAX_ENGINE_RESPONSE_BYTES) {
+    throw brokerError(502, "worker log stream is oversized");
+  }
   const stdout = [];
   const stderr = [];
+  let stdoutLength = 0;
+  let stderrLength = 0;
+  let payloadLength = 0;
   let offset = 0;
   while (offset < bytes.length) {
     if (bytes.length - offset < 8) throw brokerError(502, "worker log frame is truncated");
@@ -2578,8 +6309,20 @@ function decodeDockerLogFrames(value) {
     }
     const length = bytes.readUInt32BE(offset + 4);
     offset += 8;
-    if (length > 64 * 1024 || offset + length > bytes.length) throw brokerError(502, "worker log frame length is invalid");
-    (stream === 1 ? stdout : stderr).push(bytes.subarray(offset, offset + length));
+    if (length > MAX_ENGINE_RESPONSE_BYTES || length > bytes.length - offset) {
+      throw brokerError(502, "worker log frame length is invalid");
+    }
+    payloadLength += length;
+    if (payloadLength > maximumPayloadBytes) throw brokerError(502, "worker log payload is oversized");
+    if (stream === 1) {
+      stdoutLength += length;
+      if (stdoutLength > MAX_ENGINE_RESPONSE_BYTES) throw brokerError(502, "worker stdout is oversized");
+      stdout.push(bytes.subarray(offset, offset + length));
+    } else {
+      stderrLength += length;
+      if (stderrLength > MAX_ENGINE_RESPONSE_BYTES) throw brokerError(502, "worker stderr is oversized");
+      stderr.push(bytes.subarray(offset, offset + length));
+    }
     offset += length;
   }
   return { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
@@ -2609,11 +6352,20 @@ function assertEngineId(id) {
   }
 }
 
-function serveConnection(connection, core) {
+export function serveBrokerConnection(connection, core) {
   let chunks = [];
   let length = 0;
   let complete = false;
-  connection.setTimeout(5000, () => connection.destroy());
+  const peerState = { delivery: null, lost: false };
+  const markPeerLost = () => {
+    peerState.lost = true;
+    if (peerState.delivery) {
+      try { peerState.delivery.undelivered(); } catch {}
+    }
+  };
+  connection.setTimeout(5000, () => {
+    if (!complete) connection.destroy();
+  });
   connection.on("data", async (chunk) => {
     if (complete) return;
     length += chunk.length;
@@ -2626,17 +6378,39 @@ function serveConnection(connection, core) {
     const newline = frame.indexOf(0x0a);
     if (newline === -1) return;
     complete = true;
+    connection.setTimeout(0);
     if (newline !== frame.length - 1) return respond(connection, 400, "exactly one request frame is required");
     try {
-      const response = await core.handle(frame.subarray(0, newline));
-      writeResponse(connection, response.statusCode, response.body);
+      const response = await core.handle(frame.subarray(0, newline), {
+        deliveryMode: "explicit",
+        peerState,
+      });
+      peerState.delivery = response.delivery ?? null;
+      if (peerState.lost) {
+        peerState.delivery?.undelivered();
+        return;
+      }
+      try {
+        writeResponse(connection, response.statusCode, response.body, () => {
+          try {
+            if (peerState.lost) peerState.delivery?.undelivered();
+            else peerState.delivery?.delivered();
+          } catch {
+            connection.destroy();
+          }
+        });
+      } catch {
+        markPeerLost();
+        connection.destroy();
+      }
     } catch (error) {
       respond(connection, Number(error?.statusCode) || 500, String(error?.message ?? "request failed"));
     } finally {
       chunks = [];
     }
   });
-  connection.on("error", () => {});
+  connection.on("close", () => { if (complete) markPeerLost(); });
+  connection.on("error", () => { if (complete) markPeerLost(); });
 }
 
 function respond(connection, statusCode, message) {
@@ -2647,8 +6421,8 @@ function respond(connection, statusCode, message) {
   });
 }
 
-function writeResponse(connection, statusCode, body) {
-  connection.end(encodeActionResponseFrame({ statusCode, ...body }));
+function writeResponse(connection, statusCode, body, callback) {
+  connection.end(encodeActionResponseFrame({ statusCode, ...body }), callback);
 }
 
 function sanitizeResult(value) {

@@ -5643,6 +5643,9 @@ async function realBrokerAssembly(t, {
         preserve() {
           replayEvents.push("preserve");
         },
+        recordEvent(event) {
+          replayEvents.push(`event:${String(event?.event ?? "unknown")}`);
+        },
         recordWorker() {},
         release() {
           replayEvents.push("release");

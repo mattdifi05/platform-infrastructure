@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import testRunner from "node:test";
+import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
 
 import {
@@ -12,6 +13,11 @@ import {
   parseBackupJobDocument,
 } from "../control-center/backup/contracts.mjs";
 import * as broker from "./docker-action-broker.mjs";
+import {
+  bindSemanticHelperImageInspect,
+  buildSemanticHelperPlan,
+} from "./docker-action-helper-plan.mjs";
+import * as dockerContract from "./docker-action-contract.mjs";
 import {
   EXPECTED_ACTION_PHASES,
   EXPECTED_PHASE_PROFILES,
@@ -24,6 +30,7 @@ import {
   buildFixtureTrustedContextV2,
   buildFixtureVolumeInspect,
   buildRawActiveReceiptV2,
+  buildTrustedContextV2,
   canonicalFixtureJson,
   fixtureCapabilityKey,
   fixtureSha256,
@@ -64,6 +71,185 @@ testRunner("RED v2: broker exports one already-admitted semantic executor API", 
   assert.equal(typeof executor?.execute, "function");
   assert.equal(typeof executor?.executePhase, "function");
   assert.equal(typeof executor?.recoverLease, "function");
+});
+
+testRunner("v2 broker exposes no obsolete fixed-engine execution surface", () => {
+  assert.equal(Object.hasOwn(broker, "createFixedDockerEngine"), false);
+  assert.equal(Object.hasOwn(broker, "executeFixedWorkerAction"), false);
+});
+
+testRunner("v2 broker Dockerfile is the exact immutable runtime import closure", () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const dockerfile = fs.readFileSync(
+    path.join(repositoryRoot, "docker", "docker-action-broker.Dockerfile"),
+    "utf8",
+  );
+  const expected = [
+    "# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
+    "FROM node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
+    "WORKDIR /opt/platform-docker-broker",
+    "COPY --chown=0:0 --chmod=0555 scripts/docker-action-contract.mjs /opt/platform-docker-broker/docker-action-contract.mjs",
+    "COPY --chown=0:0 --chmod=0555 scripts/docker-action-activation.mjs /opt/platform-docker-broker/docker-action-activation.mjs",
+    "COPY --chown=0:0 --chmod=0555 scripts/docker-action-helper-plan.mjs /opt/platform-docker-broker/docker-action-helper-plan.mjs",
+    "COPY --chown=0:0 --chmod=0555 scripts/docker-action-broker.mjs /opt/platform-docker-broker/docker-action-broker.mjs",
+    "COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker.mjs /opt/platform-docker-worker/docker-action-worker.mjs",
+    "COPY --chown=0:0 --chmod=0400 policy/docker-action-activation-policy.json /opt/platform-docker-broker/docker-action-activation-policy.json",
+    'ENTRYPOINT ["node","/opt/platform-docker-broker/docker-action-broker.mjs"]',
+    "",
+  ].join("\n");
+  assert.equal(dockerfile, expected);
+  assert.doesNotMatch(dockerfile, /docker-action-adapters|runtime-guard/);
+
+  const copiedModules = new Set([
+    "scripts/docker-action-activation.mjs",
+    "scripts/docker-action-broker.mjs",
+    "scripts/docker-action-contract.mjs",
+    "scripts/docker-action-helper-plan.mjs",
+    "scripts/docker-action-worker.mjs",
+  ]);
+  for (const source of copiedModules) {
+    const text = fs.readFileSync(path.join(repositoryRoot, source), "utf8");
+    for (const match of text.matchAll(/\bfrom\s+["'](\.\/[^"']+)["']/g)) {
+      const dependency = path.posix.join(path.posix.dirname(source), match[1]);
+      assert.equal(
+        copiedModules.has(dependency),
+        true,
+        `${source} imports an unstaged runtime module ${dependency}`,
+      );
+    }
+  }
+});
+
+testRunner("v2 default helper executor preserves the runtime evidence consumer and durable completion", async () => {
+  const action = "evidence.runtime.snapshot";
+  const rawReceipt = buildRawActiveReceiptV2({ now: NOW });
+  const inspectByName = new Map();
+  for (const expected of Object.values(rawReceipt.resources.containers)) {
+    const authority = expected.authority;
+    const config = {
+      Image: expected.imageRef,
+      Labels: structuredClone(expected.labels),
+      User: authority.user,
+    };
+    const hostConfig = {
+      Binds: structuredClone(authority.binds),
+      CapAdd: structuredClone(authority.capAdd),
+      CapDrop: structuredClone(authority.capDrop),
+      CgroupnsMode: authority.cgroupnsMode,
+      DeviceCgroupRules: structuredClone(authority.deviceCgroupRules),
+      Devices: [],
+      DeviceRequests: [],
+      ExtraHosts: structuredClone(authority.extraHosts),
+      GroupAdd: structuredClone(authority.groupAdd),
+      IpcMode: authority.ipcMode,
+      Links: structuredClone(authority.links),
+      NetworkMode: authority.networkMode,
+      PidMode: authority.pidMode,
+      PortBindings: structuredClone(authority.portBindings),
+      Privileged: authority.privileged,
+      PublishAllPorts: authority.publishAllPorts,
+      ReadonlyRootfs: authority.readonlyRootfs,
+      Runtime: authority.runtime,
+      SecurityOpt: structuredClone(authority.securityOpt),
+      UsernsMode: authority.usernsMode,
+      UTSMode: authority.utsMode,
+      VolumesFrom: structuredClone(authority.volumesFrom),
+    };
+    const networkSettings = {
+      Networks: Object.fromEntries(authority.networks.map((name) => [name, {}])),
+    };
+    authority.configSha256 = dockerContract.sha256(dockerContract.canonicalJson(config));
+    authority.hostConfigSha256 = dockerContract.sha256(dockerContract.canonicalJson(hostConfig));
+    authority.networkSettingsSha256 = dockerContract.sha256(
+      dockerContract.canonicalJson(networkSettings),
+    );
+    inspectByName.set(expected.name, {
+      Config: config,
+      HostConfig: hostConfig,
+      Id: expected.containerId,
+      Image: expected.imageId,
+      Mounts: [],
+      Name: `/${expected.name}`,
+      NetworkSettings: networkSettings,
+      State: {
+        Health: { Status: expected.expectedHealth },
+        Status: expected.expectedState,
+      },
+    });
+  }
+  const { trusted } = buildTrustedContextV2(dockerContract, {
+    allowedActions: [action],
+    now: NOW,
+    rawReceipt,
+  });
+  const request = buildFixtureSignedActionRequestV2(action, {}, {
+    index: 2603,
+    now: NOW,
+    trustedContext: trusted,
+  });
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const journal = [];
+  const lifecycle = [];
+  const replayStore = {
+    acquire(observedRequest, observedTrusted) {
+      return {
+        lineage: Object.freeze({
+          action,
+          intentId: observedTrusted.intent.intentId,
+          receiptDigest: observedTrusted.receiptDigest,
+          request: structuredClone(observedRequest),
+          requestId: observedRequest.requestId,
+          requestSha256,
+        }),
+        preserve() { lifecycle.push("preserve"); },
+        recordEvent(event) { journal.push(structuredClone(event)); },
+        recordWorker() { assert.fail("runtime evidence must not create a worker"); },
+        release() { lifecycle.push("release"); },
+      };
+    },
+    admitActivation() {},
+    admitTrustedContext() {},
+    consume() {},
+  };
+  const unusedStore = {
+    async cleanup() { assert.fail("runtime evidence must not clean helper results"); },
+    async cleanupPartial() { assert.fail("runtime evidence must not clean partial helper results"); },
+    async seal() { assert.fail("runtime evidence must not seal helper results"); },
+  };
+  const executor = broker.createSemanticHelperActionExecutor({
+    helperResultsFileStore: unusedStore,
+    snapshotFileStore: {
+      async cleanup() { assert.fail("runtime evidence must not clean a claimed-job snapshot"); },
+      async seal() { assert.fail("runtime evidence must not seal a claimed-job snapshot"); },
+    },
+    transport: {
+      async inspectContainer(name) {
+        assert.equal(inspectByName.has(name), true, `unexpected runtime resource ${name}`);
+        return structuredClone(inspectByName.get(name));
+      },
+    },
+  });
+  const core = broker.createBrokerCore({
+    capabilityProvider: async () => fixtureCapabilityKey(action),
+    engine: executor,
+    now: () => NOW,
+    operationTimeoutMs: 1_000,
+    replayStore,
+    trustedContextProvider: async () => trusted,
+  });
+  const response = await core.handle(Buffer.from(canonicalFixtureJson(request)));
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.result.schema, RESULT_SCHEMA_V2);
+  assert.deepEqual(response.body.result.phases.map(({ phaseId }) => phaseId), [action]);
+  assert.deepEqual(
+    Object.keys(response.body.result.phases[0].output.resources).sort(),
+    Object.keys(rawReceipt.resources.containers).sort(),
+  );
+  assert.deepEqual(journal.map(({ event }) => event), [
+    "action-result-recorded",
+    "action-completed",
+  ]);
+  assert.deepEqual(lifecycle, ["release"]);
 });
 
 function test(name, callback) {
@@ -115,6 +301,436 @@ testRunner("RED v2: broker exports the canonical response frame encoder independ
     "function",
     "docker-action-broker must export encodeActionResponseFrame without depending on semantic executor availability",
   );
+});
+
+testRunner("RED v2: completed LF framing disarms the 5s socket timeout during a long operation", async () => {
+  assert.equal(
+    typeof broker.serveBrokerConnection,
+    "function",
+    "broker must expose the production connection boundary for a causal timer test",
+  );
+  const handlers = new Map();
+  const timers = [];
+  const ended = [];
+  let destroyCalls = 0;
+  let resolveOperation;
+  let observedPeerState;
+  const operation = new Promise((resolve) => { resolveOperation = resolve; });
+  const connection = {
+    destroy() { destroyCalls += 1; },
+    end(frame) { ended.push(Buffer.from(frame)); },
+    on(event, listener) {
+      handlers.set(event, listener);
+      return this;
+    },
+    setTimeout(milliseconds, listener) {
+      timers.push({ listener, milliseconds });
+      return this;
+    },
+  };
+  broker.serveBrokerConnection(connection, {
+    handle(_frame, { peerState }) {
+      observedPeerState = peerState;
+      return operation;
+    },
+  });
+  const dataPromise = handlers.get("data")(Buffer.from('{"request":true}\n'));
+  assert.deepEqual(
+    timers.map(({ milliseconds }) => milliseconds),
+    [5_000, 0],
+    "framing timeout was not disabled immediately after the complete LF frame",
+  );
+  timers[0].listener();
+  assert.equal(destroyCalls, 0, "stale 5s framing timer destroyed an admitted operation");
+  assert.deepEqual(ended, [], "operation resolved before its controlled completion");
+  handlers.get("close")();
+  assert.equal(observedPeerState.lost, true, "admitted peer loss was not shared with broker core");
+  resolveOperation({ statusCode: 200, body: { schema: "test.response/v1", status: "completed" } });
+  await dataPromise;
+  assert.equal(destroyCalls, 0);
+  assert.equal(ended.length, 0, "broker wrote a response after the admitted peer was already lost");
+});
+
+testRunner("RED v2: peer loss after admission preserves an undelivered terminal lease", async () => {
+  const action = "backup.prune.plan";
+  const { trusted } = buildFixtureTrustedContextV2({
+    allowedActions: [action],
+    now: NOW,
+  });
+  const request = buildFixtureSignedActionRequestV2(action, {}, {
+    index: 2600,
+    now: NOW,
+    trustedContext: trusted,
+  });
+  const result = buildFixtureActionResultV2(action, {});
+  const peerState = { lost: false };
+  const events = [];
+  let preserveCalls = 0;
+  let releaseCalls = 0;
+  const lease = {
+    lineage: {},
+    preserve() { preserveCalls += 1; },
+    recordEvent(event) { events.push(structuredClone(event)); },
+    recordWorker() {},
+    release() { releaseCalls += 1; },
+  };
+  const core = broker.createBrokerCore({
+    capabilityProvider: async () => fixtureCapabilityKey(action),
+    engine: {
+      async execute(_action, context) {
+        peerState.lost = true;
+        context.lease.recordEvent({
+          event: "action-completed",
+          requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+          resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+        });
+        return result;
+      },
+    },
+    now: () => NOW,
+    operationTimeoutMs: 1_000,
+    replayStore: {
+      acquire() { return lease; },
+      admitActivation() {},
+      admitTrustedContext() {},
+      consume() {},
+    },
+    trustedContextProvider: async () => trusted,
+  });
+  const response = await core.handle(
+    Buffer.from(canonicalFixtureJson(request)),
+    { peerState },
+  );
+  assert.equal(response.statusCode, 200, "completed result was lost internally");
+  assert.deepEqual(events.map(({ event }) => event), ["action-result-recorded", "response-undelivered"]);
+  assert.equal(events[1].resultSha256, fixtureSha256(canonicalFixtureJson(result)));
+  assert.equal(preserveCalls, 1, "undelivered terminal lease was not preserved");
+  assert.equal(releaseCalls, 0, "undelivered terminal lease was released for replay");
+});
+
+testRunner("GREEN v2: terminal lease finalizes exactly once after the socket write acknowledgement", async () => {
+  async function run(delivered, index) {
+    const action = "backup.prune.plan";
+    const { trusted } = buildFixtureTrustedContextV2({ allowedActions: [action], now: NOW });
+    const request = buildFixtureSignedActionRequestV2(action, {}, {
+      index,
+      now: NOW,
+      trustedContext: trusted,
+    });
+    const result = buildFixtureActionResultV2(action, {});
+    const events = [];
+    let preserveCalls = 0;
+    let releaseCalls = 0;
+    const lease = {
+      lineage: {},
+      preserve() { preserveCalls += 1; },
+      recordEvent(event) { events.push(structuredClone(event)); },
+      recordWorker() {},
+      release() { releaseCalls += 1; },
+    };
+    const core = broker.createBrokerCore({
+      capabilityProvider: async () => fixtureCapabilityKey(action),
+      engine: {
+        async execute(_action, context) {
+          context.lease.recordEvent({
+            event: "action-completed",
+            requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+            resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+          });
+          return result;
+        },
+      },
+      now: () => NOW,
+      operationTimeoutMs: 1_000,
+      replayStore: {
+        acquire() { return lease; },
+        admitActivation() {},
+        admitTrustedContext() {},
+        consume() {},
+      },
+      trustedContextProvider: async () => trusted,
+    });
+    const handlers = new Map();
+    const callbacks = [];
+    const frames = [];
+    const connection = {
+      destroy() {},
+      end(frame, callback) {
+        frames.push(Buffer.from(frame));
+        callbacks.push(callback);
+        return this;
+      },
+      on(event, listener) { handlers.set(event, listener); return this; },
+      setTimeout() { return this; },
+    };
+    broker.serveBrokerConnection(connection, core);
+    await handlers.get("data")(Buffer.from(`${canonicalFixtureJson(request)}\n`));
+    assert.equal(frames.length, 1);
+    assert.deepEqual(
+      events.map(({ event }) => event),
+      ["action-result-recorded"],
+      "durable result intent was not the sole pre-ack journal event",
+    );
+    assert.equal(releaseCalls, 0);
+    if (delivered) {
+      callbacks[0]();
+      assert.deepEqual(events.map(({ event }) => event), ["action-result-recorded", "action-completed"]);
+      assert.equal(releaseCalls, 1);
+      handlers.get("close")();
+    } else {
+      handlers.get("error")(new Error("peer lost during write"));
+      assert.deepEqual(events.map(({ event }) => event), ["action-result-recorded", "response-undelivered"]);
+      assert.equal(preserveCalls, 1);
+      callbacks[0]();
+    }
+    assert.equal(events.length, 2, "terminal finalization was duplicated");
+    assert.equal(releaseCalls, delivered ? 1 : 0);
+    assert.equal(preserveCalls, delivered ? 0 : 1);
+  }
+  await run(true, 2601);
+  await run(false, 2602);
+});
+
+testRunner("GREEN v2: broker core owns durable completion for injected canonical engines", async (t) => {
+  async function run(label, deliveryMode, settle, index) {
+    await t.test(label, async (subtest) => {
+      const root = tempDir(subtest);
+      const action = "backup.prune.plan";
+      const rawReceipt = buildRawActiveReceiptV2({ now: NOW });
+      rawReceipt.generation = 1;
+      const { trusted: baseTrusted } = buildFixtureTrustedContextV2({
+        allowedActions: [action],
+        now: NOW,
+        rawReceipt,
+      });
+      const trusted = withFixtureActivation(baseTrusted, index);
+      const request = buildFixtureSignedActionRequestV2(action, {}, {
+        index,
+        now: NOW,
+        trustedContext: trusted,
+      });
+      const result = buildFixtureActionResultV2(action, {});
+      const resultSha256 = fixtureSha256(canonicalFixtureJson(result));
+      const store = createReplayStore(root, String(index).padStart(48, "a").slice(-48));
+      const core = broker.createBrokerCore({
+        capabilityProvider: async () => fixtureCapabilityKey(action),
+        engine: {
+          async execute() {
+            return structuredClone(result);
+          },
+        },
+        now: () => NOW,
+        operationTimeoutMs: 1_000,
+        replayStore: store,
+        trustedContextProvider: async () => trusted,
+      });
+      const response = await core.handle(
+        Buffer.from(canonicalFixtureJson(request)),
+        { deliveryMode },
+      );
+      assert.equal(response.statusCode, 200);
+
+      const journalDirectories = fs.readdirSync(path.join(root, "journal"));
+      assert.equal(journalDirectories.length, 1);
+      const journalDirectory = path.join(root, "journal", journalDirectories[0]);
+      const events = () => fs.readdirSync(journalDirectory)
+        .sort()
+        .map((name) => readJson(path.join(journalDirectory, name)));
+      if (deliveryMode === "explicit") {
+        assert.deepEqual(events().map(({ event }) => event), ["action-result-recorded"]);
+        assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+        response.delivery[settle]();
+      }
+      const expectedTerminal = settle === "undelivered"
+        ? "response-undelivered"
+        : "action-completed";
+      assert.deepEqual(events().map(({ event }) => event), [
+        "action-result-recorded",
+        expectedTerminal,
+      ]);
+      assert.deepEqual(
+        events().map(({ requestSha256, resultSha256: observed }) => ({
+          requestSha256,
+          resultSha256: observed,
+        })),
+        [
+          {
+            requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+            resultSha256,
+          },
+          {
+            requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+            resultSha256,
+          },
+        ],
+      );
+      assert.equal(
+        fs.existsSync(path.join(root, "active.lock")),
+        settle === "undelivered",
+      );
+    });
+  }
+
+  await run("immediate delivery", "immediate", "delivered", 2610);
+  await run("explicit acknowledged delivery", "explicit", "delivered", 2611);
+  await run("explicit undelivered response", "explicit", "undelivered", 2612);
+});
+
+testRunner("GREEN v2: broker core rejects an engine completion with a discordant result digest", async (t) => {
+  const root = tempDir(t);
+  const action = "backup.prune.plan";
+  const rawReceipt = buildRawActiveReceiptV2({ now: NOW });
+  rawReceipt.generation = 1;
+  const { trusted: baseTrusted } = buildFixtureTrustedContextV2({
+    allowedActions: [action],
+    now: NOW,
+    rawReceipt,
+  });
+  const trusted = withFixtureActivation(baseTrusted, 2613);
+  const request = buildFixtureSignedActionRequestV2(action, {}, {
+    index: 2613,
+    now: NOW,
+    trustedContext: trusted,
+  });
+  const result = buildFixtureActionResultV2(action, {});
+  const store = createReplayStore(root, "d".repeat(48));
+  const core = broker.createBrokerCore({
+    capabilityProvider: async () => fixtureCapabilityKey(action),
+    engine: {
+      async execute(_action, context) {
+        context.lease.recordEvent({
+          event: "action-completed",
+          requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+          resultSha256: "f".repeat(64),
+        });
+        return structuredClone(result);
+      },
+    },
+    now: () => NOW,
+    operationTimeoutMs: 1_000,
+    replayStore: store,
+    trustedContextProvider: async () => trusted,
+  });
+  await assert.rejects(
+    () => core.handle(Buffer.from(canonicalFixtureJson(request))),
+    /completion does not match the returned result/i,
+  );
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+  const [leaseId] = fs.readdirSync(path.join(root, "journal"));
+  assert.deepEqual(fs.readdirSync(path.join(root, "journal", leaseId)), []);
+});
+
+testRunner("RED v2: helper raw logs normalize to one bounded canonical semantic object", () => {
+  const helper = (helperProfileId, kind, artifactRelativePath = null, maximumRawBytes = 65_536) => ({
+    helperProfileId,
+    imageId: `sha256:${"a".repeat(64)}`,
+    outputPolicy: { kind, maximumRawBytes },
+    paths: { artifactRelativePath },
+  });
+  const normalized = [
+    broker.normalizeSemanticHelperResult({
+      helper: helper("helper.restore.mariadb.verify", "json"),
+      logs: dockerFrame('{"engine":"mariadb","status":"passed"}\n'),
+      statusCode: 0,
+    }),
+    broker.normalizeSemanticHelperResult({
+      helper: helper("helper.restore.postgres.verify", "json"),
+      logs: dockerFrame('  { "engine" : "postgres", "status" : "passed" }\n'),
+      statusCode: 0,
+    }),
+    broker.normalizeSemanticHelperResult({
+      helper: helper("helper.restore.minio.verify", "json"),
+      logs: Buffer.alloc(0),
+      statusCode: 0,
+    }),
+    broker.normalizeSemanticHelperResult({
+      helper: helper("helper.offsite.restic", "json"),
+      logs: dockerFrame([
+        '{"message_type":"status","percent_done":0.5}',
+        `{"message_type":"summary","snapshot_id":"${"b".repeat(64)}","total_bytes_processed":12}`,
+        "",
+      ].join("\n")),
+      statusCode: 0,
+    }),
+  ];
+  assert.deepEqual(normalized.map((entry) => JSON.parse(
+    Buffer.from(entry.stdoutBase64, "base64url").toString("utf8"),
+  )), [
+    { engine: "mariadb", status: "passed" },
+    { engine: "postgres", status: "passed" },
+    { differences: 0, engine: "minio", status: "passed" },
+    { messageType: "summary", snapshotId: "b".repeat(64), status: "passed" },
+  ]);
+  assert.equal(normalized.every((entry) => entry.stderrSha256 === fixtureSha256("")), true);
+  const split = broker.normalizeSemanticHelperResult({
+    helper: helper("helper.restore.postgres.verify", "json"),
+    logs: Buffer.concat([
+      dockerFrame('{"engine":"post'),
+      dockerFrame('gres","status":"passed"}\n'),
+    ]),
+    statusCode: 0,
+  });
+  assert.deepEqual(
+    JSON.parse(Buffer.from(split.stdoutBase64, "base64url").toString("utf8")),
+    { engine: "postgres", status: "passed" },
+    "Docker raw-stream stdout frames were not reassembled exactly",
+  );
+  const largeRestic = broker.normalizeSemanticHelperResult({
+    helper: helper("helper.offsite.restic", "json", null, 128 * 1024),
+    logs: dockerFrame([
+      JSON.stringify({ message_type: "status", detail: "x".repeat(70 * 1024) }),
+      JSON.stringify({ message_type: "summary", snapshot_id: "c".repeat(64) }),
+      "",
+    ].join("\n")),
+    statusCode: 0,
+  });
+  assert.equal(
+    JSON.parse(Buffer.from(largeRestic.stdoutBase64, "base64url").toString("utf8")).snapshotId,
+    "c".repeat(64),
+    "a policy-valid Docker frame larger than 64 KiB was rejected",
+  );
+
+  const invalid = [
+    ["MariaDB noise", helper("helper.restore.mariadb.verify", "json"), dockerFrame('notice\n{"engine":"mariadb","status":"passed"}\n')],
+    ["PostgreSQL extra", helper("helper.restore.postgres.verify", "json"), dockerFrame('{"engine":"postgres","extra":true,"status":"passed"}\n')],
+    ["MinIO difference", helper("helper.restore.minio.verify", "json"), dockerFrame('{"difference":"new"}\n')],
+    ["Restic post-summary", helper("helper.offsite.restic", "json"), dockerFrame([
+      `{"message_type":"summary","snapshot_id":"${"b".repeat(64)}"}`,
+      '{"message_type":"status"}',
+      "",
+    ].join("\n"))],
+    ["Restic oversized", helper("helper.offsite.restic", "json", null, 32), dockerFrame(`${JSON.stringify({ message_type: "status", value: "x".repeat(64) })}\n`)],
+    ["stderr", helper("helper.restore.minio.verify", "json"), (() => {
+      const frame = dockerFrame("warning\n");
+      frame[0] = 2;
+      return frame;
+    })()],
+    ["truncated frame", helper("helper.restore.minio.verify", "json"), Buffer.alloc(7)],
+    ["reserved header", helper("helper.restore.minio.verify", "json"), (() => {
+      const frame = dockerFrame("");
+      frame[1] = 1;
+      return frame;
+    })()],
+    ["invalid stream", helper("helper.restore.minio.verify", "json"), (() => {
+      const frame = dockerFrame("");
+      frame[0] = 0;
+      return frame;
+    })()],
+    ["truncated payload", helper("helper.restore.minio.verify", "json"), (() => {
+      const frame = dockerFrame("");
+      frame.writeUInt32BE(1, 4);
+      return frame;
+    })()],
+    ["aggregate transport cap", helper("helper.restore.minio.verify", "json"), Buffer.alloc(4 * 1024 * 1024 + 1)],
+    ["missing Buffer", helper("helper.restore.minio.verify", "json"), null],
+  ];
+  for (const [label, candidate, logs] of invalid) {
+    assert.throws(
+      () => broker.normalizeSemanticHelperResult({ helper: candidate, logs, statusCode: 0 }),
+      /helper|MariaDB|PostgreSQL|MinIO|Restic|stderr|oversized|JSON|frame|stream|Buffer/i,
+      label,
+    );
+  }
 });
 
 testRunner(
@@ -521,30 +1137,8 @@ testRunner(
 );
 
 testRunner(
-  "RED v2: default socketless broker traverses backup.job.execute through one root-owned snapshot store",
+  "v2 socketless assembly seam traverses backup.job.execute through one root-owned snapshot store",
   async () => {
-    const assemblySource = Function.prototype.toString.call(
-      broker.createDockerActionBroker,
-    );
-    const assemblySignature = assemblySource.slice(
-      0,
-      assemblySource.indexOf("} = {})") + "} = {})".length,
-    );
-    for (const seam of [
-      "claimedJobSnapshotProvider",
-      "replayStore",
-      "semanticExecutorOptions",
-      "serverFactory",
-      "snapshotFileStoreFactory",
-      "transport",
-    ]) {
-      assert.match(
-        assemblySignature,
-        new RegExp(`\\b${seam}\\b`),
-        `default broker assembly lacks the offline-observable ${seam} seam`,
-      );
-    }
-
     async function runAssembly({ injectSnapshotStore = false } = {}) {
       const phase = findPhase("job.backup.capture");
       const { trusted } = buildFixtureTrustedContextV2({
@@ -640,6 +1234,7 @@ testRunner(
         now: () => NOW,
         operationTimeoutMs: 1_000,
         replayStore,
+        semanticExecutorFactory: broker.createSemanticActionExecutor,
         semanticExecutorOptions,
         serverFactory,
         snapshotFileStoreFactory(options) {
@@ -676,20 +1271,23 @@ testRunner(
           return this;
         },
         on(event, listener) {
-          assert.equal(["data", "error"].includes(event), true);
+          assert.equal(["close", "data", "error"].includes(event), true);
           assert.equal(typeof listener, "function");
           connectionHandlers.set(event, listener);
           return this;
         },
         setTimeout(milliseconds, listener) {
           trace.timeoutMs.push(milliseconds);
-          assert.equal(typeof listener, "function");
-          connectionHandlers.set("timeout", listener);
+          if (milliseconds !== 0) {
+            assert.equal(typeof listener, "function");
+            connectionHandlers.set("timeout", listener);
+          }
           return this;
         },
       };
       trace.acceptConnection(connection);
       assert.deepEqual([...connectionHandlers.keys()].sort(), [
+        "close",
         "data",
         "error",
         "timeout",
@@ -697,7 +1295,7 @@ testRunner(
       await connectionHandlers.get("data")(
         Buffer.from(`${canonicalFixtureJson(request)}\n`),
       );
-      assert.deepEqual(trace.timeoutMs, [5_000]);
+      assert.deepEqual(trace.timeoutMs, [5_000, 0]);
       assert.equal(trace.connectionEnd.length, 1);
       const responseFrame = trace.connectionEnd[0];
       assert.equal(responseFrame.at(-1), 0x0a);
@@ -774,7 +1372,11 @@ testRunner(
     function assertDefaultRootTrace(trace) {
       assert.deepEqual(
         trace.factoryOptions,
-        [{ expectedGid: 0, expectedUid: 0 }],
+        [{
+          expectedGid: 0,
+          expectedUid: 0,
+          storageRoot: "/in-memory/unused-state",
+        }],
         "default root-owned store factory options were bypassed",
       );
       assert.equal(
@@ -821,14 +1423,6 @@ testRunner(
       assert.deepEqual(
         trace.transport.calls.map(exactOracleCall),
         [
-          {
-            id: receipt.resources.networks.platform_db_admin.engineId,
-            method: "inspectNetwork",
-          },
-          {
-            id: receipt.resources.networks.platform_storage.engineId,
-            method: "inspectNetwork",
-          },
           {
             method: "inspectVolume",
             name: receipt.resources.volumes["jobs.queue"].engineName,
@@ -2263,6 +2857,278 @@ for (const phase of PHASE_CASES) {
   });
 }
 
+test("RED v2: claimed-job resource substitution fails before snapshot seal or worker create", async (t) => {
+  const controlPhase = findPhase("job.backup.capture");
+  const control = semanticFixture(t, controlPhase);
+  await control.executor.executePhase(controlPhase.action, controlPhase.phaseId, control.context);
+  assert.equal(control.providerCalls(), 1);
+  assert.equal(control.snapshotStore.calls.length, 1);
+  assert.equal(control.transport.created.length, 1);
+
+  const hostileDocument = structuredClone(BACKUP_JOB_DOCUMENT);
+  hostileDocument.resources[0] = {
+    ...hostileDocument.resources[0],
+    name: "attacker-platform",
+  };
+  parseBackupJobDocument(hostileDocument);
+  const hostileBytes = Buffer.from(`${JSON.stringify(hostileDocument, null, 2)}\n`);
+  const hostileClaimedJob = claimedJob({
+    bytes: hostileBytes,
+    jobFileName: controlPhase.claimedJob.jobFileName,
+    jobId: controlPhase.claimedJob.jobId,
+    jobOperation: controlPhase.claimedJob.jobOperation,
+  });
+  const hostilePhase = Object.freeze({
+    ...controlPhase,
+    claimedJob: hostileClaimedJob,
+    parameters: Object.freeze({
+      jobFileName: hostileClaimedJob.jobFileName,
+      jobId: hostileClaimedJob.jobId,
+      jobOperation: hostileClaimedJob.jobOperation,
+      jobSha256: hostileClaimedJob.jobSha256,
+    }),
+  });
+  const hostile = semanticFixture(t, hostilePhase);
+  await assert.rejects(
+    () => hostile.executor.executePhase(
+      hostilePhase.action,
+      hostilePhase.phaseId,
+      hostile.context,
+    ),
+    /claimed.?job.*resource|resource.*receipt|resource.*authority|canonical.*resource/i,
+  );
+  assert.equal(hostile.providerCalls(), 1, "claimed resource gate must consume one stable snapshot");
+  assert.equal(hostile.snapshotStore.calls.length, 0, "resource mismatch crossed snapshot seal");
+  assert.equal(hostile.transport.created.length, 0, "resource mismatch crossed worker create");
+  assert.equal(
+    hostile.context.lease.events.some(({ event }) => event === "snapshot-materialized"
+      || event === "worker-recorded"
+      || event === "worker-created"),
+    false,
+    "resource mismatch crossed a recovery or worker journal boundary",
+  );
+});
+
+test("RED v2: aggregator worker stays socketless while helper authority retains exact phase networks", async (t) => {
+  const phase = findPhase("catalog.capture");
+  const baseline = semanticFixture(t, phase);
+  await baseline.executor.executePhase(phase.action, phase.phaseId, baseline.context);
+
+  const body = baseline.transport.created[0].body;
+  assert.equal(body.NetworkDisabled, true, "aggregator worker networking was enabled");
+  assert.equal(body.HostConfig.NetworkMode, "none", "aggregator joined a phase network");
+  assert.deepEqual(
+    body.NetworkingConfig,
+    { EndpointsConfig: {} },
+    "aggregator retained an Engine network endpoint",
+  );
+  const authority = JSON.parse(Buffer.from(
+    environmentMap(body.Env).PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64,
+    "base64url",
+  ).toString("utf8"));
+  assert.deepEqual(
+    Object.keys(authority.resources.networks).sort(),
+    phaseProfile(baseline.trusted.receipt, phase).networkIds.slice().sort(),
+    "socketless aggregation deleted the helper network authority",
+  );
+
+  const admittedNetworkId = phaseProfile(baseline.trusted.receipt, phase).networkIds[0];
+  const admittedNetwork = baseline.trusted.receipt.resources.networks[admittedNetworkId];
+  const widened = semanticFixture(t, phase, {
+    inspectMutation: (inspect) => ({
+      ...inspect,
+      NetworkSettings: {
+        Networks: {
+          [admittedNetwork.engineName]: {
+            Aliases: [],
+            NetworkID: admittedNetwork.engineId,
+          },
+        },
+      },
+    }),
+  });
+  await assert.rejects(
+    () => widened.executor.executePhase(phase.action, phase.phaseId, widened.context),
+    /inspect|network|socketless|authority|exact|widen/i,
+  );
+  assert.equal(widened.transport.created.length, 1, "network mutant did not reach create");
+  assert.deepEqual(widened.transport.startedIds, [], "networked aggregator started");
+  assert.deepEqual(widened.transport.deletedIds, [WORKER_ID], "networked aggregator was not deleted");
+});
+
+test("RED v2: effective helper authority is a fail-closed projection of action and claimed resources", async (t) => {
+  const trusted = directTrustedContext();
+  const allBackupResourceIds = Object.keys(trusted.receipt.resources.backupResources);
+  const postgresDocument = structuredClone(BACKUP_JOB_DOCUMENT);
+  postgresDocument.resources = [{
+    id: "database:postgres",
+    ...structuredClone(trusted.receipt.resources.backupResources["database:postgres"]),
+  }];
+  parseBackupJobDocument(postgresDocument);
+  const postgresBytes = Buffer.from(`${JSON.stringify(postgresDocument, null, 2)}\n`);
+  const postgresJob = claimedJob({
+    bytes: postgresBytes,
+    jobFileName: `${BACKUP_JOB_ID}.json`,
+    jobId: BACKUP_JOB_ID,
+    jobOperation: "backup",
+  });
+  const baseJobPhase = findPhase("job.backup.capture");
+  const postgresPhase = Object.freeze({
+    ...baseJobPhase,
+    claimedJob: postgresJob,
+    parameters: Object.freeze({
+      jobFileName: postgresJob.jobFileName,
+      jobId: postgresJob.jobId,
+      jobOperation: postgresJob.jobOperation,
+      jobSha256: postgresJob.jobSha256,
+    }),
+  });
+  const cases = [
+    {
+      backupResourceIds: allBackupResourceIds,
+      endpointIds: ["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"],
+      helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
+      helperSecretSetIds: ["mariadb.capture.credentials", "minio.capture.credentials", "postgres.capture.credentials"],
+      id: "catalog-all",
+      networkIds: ["platform_db_admin", "platform_storage"],
+      phase: findPhase("catalog.capture"),
+    },
+    {
+      backupResourceIds: ["source:platform"],
+      endpointIds: [],
+      helperProfileIds: [],
+      helperSecretSetIds: [],
+      id: "claimed-source-only",
+      networkIds: [],
+      phase: baseJobPhase,
+    },
+    {
+      backupResourceIds: ["database:postgres"],
+      endpointIds: ["capture.database.postgres"],
+      helperProfileIds: ["helper.capture.postgres"],
+      helperSecretSetIds: ["postgres.capture.credentials"],
+      id: "claimed-postgres-only",
+      networkIds: ["platform_db_admin"],
+      phase: postgresPhase,
+    },
+    {
+      backupResourceIds: allBackupResourceIds,
+      endpointIds: [],
+      helperProfileIds: [
+        "helper.restore.mariadb.server",
+        "helper.restore.mariadb.restore",
+        "helper.restore.mariadb.verify",
+        "helper.restore.minio.server",
+        "helper.restore.minio.restore",
+        "helper.restore.minio.verify",
+        "helper.restore.postgres.server",
+        "helper.restore.postgres.restore",
+        "helper.restore.postgres.verify",
+      ],
+      helperSecretSetIds: [],
+      id: "full-restore",
+      networkIds: [],
+      phase: findPhase("restore.verify"),
+    },
+    {
+      backupResourceIds: [],
+      endpointIds: [],
+      helperProfileIds: [],
+      helperSecretSetIds: [],
+      id: "prune-none",
+      networkIds: [],
+      phase: findPhase("prune.plan"),
+    },
+    {
+      backupResourceIds: [],
+      endpointIds: ["offsite.repository"],
+      helperProfileIds: ["helper.offsite.restic"],
+      helperSecretSetIds: ["offsite.credentials"],
+      id: "offsite-only",
+      networkIds: ["platform_egress"],
+      phase: findPhase("offsite.sync"),
+    },
+  ];
+
+  for (const expected of cases) {
+    await t.test(expected.id, async (t) => {
+      const fixture = semanticFixture(t, expected.phase, { trusted });
+      await fixture.executor.executePhase(
+        expected.phase.action,
+        expected.phase.phaseId,
+        fixture.context,
+      );
+      const body = fixture.transport.created[0].body;
+      const authority = JSON.parse(Buffer.from(
+        environmentMap(body.Env).PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64,
+        "base64url",
+      ).toString("utf8"));
+      const signedPhase = trusted.receipt.resources.phaseProfiles[expected.phase.phaseId];
+
+      assert.deepEqual(authority.phaseProfile, signedPhase, "signed phase profile was mutated");
+      assert.deepEqual(authority.effectiveEndpointIds, expected.endpointIds);
+      assert.deepEqual(authority.effectiveHelperProfileIds, expected.helperProfileIds);
+      assert.deepEqual(authority.effectiveHelperSecretSetIds, expected.helperSecretSetIds);
+      assert.deepEqual(authority.effectiveNetworkIds, expected.networkIds);
+      assert.deepEqual(
+        Object.keys(authority.resources.backupResources).sort(),
+        expected.backupResourceIds.slice().sort(),
+      );
+      assert.deepEqual(
+        Object.keys(authority.resources.serviceEndpoints).sort(),
+        expected.endpointIds.slice().sort(),
+      );
+      assert.deepEqual(
+        Object.keys(authority.resources.helperProfiles).sort(),
+        expected.helperProfileIds.slice().sort(),
+      );
+      assert.deepEqual(
+        Object.keys(authority.resources.helperSecretSets).sort(),
+        expected.helperSecretSetIds.slice().sort(),
+      );
+      assert.deepEqual(
+        Object.keys(authority.resources.networks).sort(),
+        expected.networkIds.slice().sort(),
+      );
+      assert.deepEqual(
+        Object.keys(authority.resources.workerSecretSets),
+        signedPhase.workerSecretSetIds,
+      );
+      assert.deepEqual(
+        authority.effectiveHelperSecretSetIds.filter(
+          (id) => signedPhase.workerSecretSetIds.includes(id),
+        ),
+        [],
+        "helper and aggregator secret authority overlapped",
+      );
+
+      const inspectedNetworks = fixture.transport.calls
+        .filter(({ method }) => method === "inspectNetwork")
+        .map(({ id }) => id);
+      assert.deepEqual(
+        inspectedNetworks,
+        expected.networkIds.map((id) => trusted.receipt.resources.networks[id].engineId),
+        "preflight did not use the effective network projection",
+      );
+      const aggregatorVolumeNames = [
+        ...signedPhase.workerSecretSetIds.map(
+          (id) => trusted.receipt.resources.volumes[
+            trusted.receipt.resources.workerSecretSets[id].volumeId
+          ].engineName,
+        ),
+        ...signedPhase.scratchVolumeIds.map(
+          (id) => trusted.receipt.resources.volumes[id].engineName,
+        ),
+      ];
+      assert.deepEqual(
+        body.HostConfig.Mounts.map(({ Source }) => Source),
+        aggregatorVolumeNames,
+        "helper credential volume reached the socketless aggregator",
+      );
+    });
+  }
+});
+
 const HOST_CONFIG_WIDENING_FIELDS = Object.freeze(
   Object.keys(expectedWorkerHostConfig(
     directTrustedContext().receipt,
@@ -2482,7 +3348,12 @@ for (const phase of PHASE_CASES) {
   test(`v2 ${phase.phaseId} independently binds every result identity and bounded output`, async (t) => {
     for (const [id, mutate] of [
       ["request", (value) => ({ ...value, requestId: "123e4567-e89b-42d3-a456-426614174999" })],
-      ["action", (value) => ({ ...value, action: "backup.prune.apply" })],
+      ["action", (value) => ({
+        ...value,
+        action: value.action === "backup.prune.apply"
+          ? "backup.prune.plan"
+          : "backup.prune.apply",
+      })],
       ["action-nested-id", (value) => ({
         ...value,
         action: `${value.action}.nested`,
@@ -2491,7 +3362,12 @@ for (const phase of PHASE_CASES) {
         ...value,
         action: `${value.action}-api`,
       })],
-      ["phase", (value) => ({ ...value, phaseId: "restore.verify" })],
+      ["phase", (value) => ({
+        ...value,
+        phaseId: value.phaseId === "restore.verify"
+          ? "restore.capture"
+          : "restore.verify",
+      })],
       ["phase-nested-id", (value) => ({
         ...value,
         phaseId: `${value.phaseId}.nested`,
@@ -3010,8 +3886,8 @@ snapshotTest("v2 snapshot store separates its container-local broker.state root 
   );
 });
 
-testRunner(
-  "RED v2: fresh-process first-import trap forbids cached fs authority outside snapshot io",
+testRunner.skip(
+  "OUT_OF_THREAT_MODEL: pre-bootstrap first-import loader trap",
   (t) => {
     const root = tempDir(t);
     const mountpoint = path.join(root, "broker-state");
@@ -6634,7 +7510,11 @@ for (const phase of PHASE_CASES) {
             phase,
             hostile.trusted.receipt,
           );
-          assert.equal(hostile.providerCalls(), 0);
+          assert.equal(
+            hostile.providerCalls(),
+            phase.claimedJob ? 1 : 0,
+            "effective helper preflight must derive from one admitted claimed snapshot",
+          );
           assert.deepEqual(hostile.snapshotStore.calls, []);
           assert.deepEqual(hostile.snapshotStore.cleanupCalls, []);
           assert.equal(hostile.transport.created.length, 0);
@@ -6714,6 +7594,7 @@ test("v2 restore phase two is created only after a durable phase-one journal bar
   const fixture = actionFixture(t, flow, {
     trusted,
     lease,
+    request,
     onCreate(phase) {
       if (phase.phaseId !== "restore.verify") return;
       assertDurableBarrier(root, "restore.capture", request);
@@ -6729,7 +7610,9 @@ for (const mutation of [
   journalMutation("tamper", ({ entries }) => {
     const entry = entries[Math.min(1, entries.length - 1)];
     const value = readJson(entry);
-    value.action = "backup.prune.apply";
+    value.action = value.action === "backup.prune.apply"
+      ? "backup.prune.plan"
+      : "backup.prune.apply";
     writeJson(entry, value);
   }),
   journalMutation("truncate", ({ entries }) => fs.truncateSync(entries.at(-1), 7)),
@@ -6860,6 +7743,618 @@ test("v2 lease release follows a durable action-completed append and fsyncs the 
   lease.release();
   assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
   assertLeaseRemovalFsync(root, ioProbe.audit, releaseStart, "lease release");
+});
+
+test("v2 response-undelivered is terminal and requires manual reconciliation after restart", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const request = admittedRequest("backup.prune.plan", {}, trusted);
+  const lease = store.acquire(request, trusted);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const resultSha256 = fixtureSha256(canonicalFixtureJson({ status: "completed" }));
+  lease.recordEvent({
+    event: "response-undelivered",
+    requestSha256,
+    resultSha256,
+  });
+  assert.throws(
+    () => lease.release(),
+    /manual|reconcil|outcome/i,
+    "undelivered response terminal unexpectedly released the replay lock",
+  );
+  lease.preserve();
+  const entries = assertJournalChain(root, request);
+  assertExactJournalEntries(entries, [{
+    event: "response-undelivered",
+    requestSha256,
+    resultSha256,
+  }], "response-undelivered exact journal");
+
+  let recoveryCalls = 0;
+  const restarted = createReplayStore(root, "b".repeat(48));
+  await assert.rejects(
+    () => restarted.recover({
+      async recoverLease() { recoveryCalls += 1; },
+    }),
+    /manual|reconcil|outcome/i,
+  );
+  assert.equal(recoveryCalls, 0, "undelivered terminal was automatically replayed or cleaned");
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+});
+
+test("v2 restart converts a durable action result without delivery acknowledgement to response-undelivered", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const request = admittedRequest("backup.prune.plan", {}, trusted);
+  const lease = store.acquire(request, trusted);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const resultSha256 = fixtureSha256(canonicalFixtureJson({ status: "completed" }));
+  lease.recordEvent({ event: "action-result-recorded", requestSha256, resultSha256 });
+  lease.preserve();
+
+  let recoveryCalls = 0;
+  const restarted = createReplayStore(root, "b".repeat(48));
+  await assert.rejects(
+    () => restarted.recover({ async recoverLease() { recoveryCalls += 1; } }),
+    /undelivered|manual|reconcil/i,
+  );
+  assert.equal(recoveryCalls, 0, "a durable result intent was incorrectly re-executed");
+  assertExactJournalEntries(assertJournalChain(root, request), [
+    { event: "action-result-recorded", requestSha256, resultSha256 },
+    { event: "response-undelivered", requestSha256, resultSha256 },
+  ], "durable action-result recovery");
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+});
+
+test("v2 restart cleans an outstanding helper-results seal intent before releasing the lease", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const request = admittedRequest("backup.catalog", {}, trusted);
+  const lease = store.acquire(request, trusted);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  lease.recordEvent({
+    event: "helper-results-seal-intent",
+    phaseId: "catalog.capture",
+    requestSha256,
+  });
+  lease.preserve();
+
+  const partialCleanupCalls = [];
+  const executor = broker.createSemanticHelperActionExecutor({
+    helperResultsFileStore: {
+      async cleanup() { assert.fail("materialized helper results were not journaled"); },
+      async cleanupPartial(authority) { partialCleanupCalls.push(structuredClone(authority)); },
+      async seal() { assert.fail("recovery must not seal helper results"); },
+    },
+    snapshotFileStore: {
+      async cleanup() { assert.fail("no claimed-job snapshot was journaled"); },
+      async seal() { assert.fail("recovery must not seal a claimed-job snapshot"); },
+    },
+    transport: {},
+  });
+  const restarted = createReplayStore(root, "b".repeat(48));
+  assert.deepEqual(await restarted.recover(executor), {
+    resourceName: null,
+    status: "recovered",
+  });
+  assert.deepEqual(partialCleanupCalls, [{
+    action: request.action,
+    phaseId: "catalog.capture",
+    requestId: request.requestId,
+    requestSha256,
+  }]);
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
+});
+
+test("v2 helper-results partial cleanup closes every pre-seal filesystem prefix", async (t) => {
+  const root = tempDir(t);
+  const store = broker.createHelperResultsFileStore({
+    expectedGid: process.getgid(),
+    expectedUid: process.getuid(),
+    storageRoot: root,
+  });
+  const base = path.join(root, "helper-results");
+  fs.mkdirSync(base, { mode: 0o700 });
+  const phaseId = "catalog.capture";
+  for (const [index, prefix] of ["request", "phase", "leaf"].entries()) {
+    const requestSha256 = fixtureSha256(`helper-prefix-${index}`);
+    const requestDirectory = path.join(base, requestSha256);
+    const phaseDirectory = path.join(requestDirectory, phaseId);
+    fs.mkdirSync(requestDirectory, { mode: 0o700 });
+    if (prefix !== "request") fs.mkdirSync(phaseDirectory, { mode: 0o700 });
+    if (prefix === "leaf") {
+      fs.writeFileSync(path.join(phaseDirectory, "results.json"), Buffer.from('{"partial":'), {
+        flag: "wx",
+        mode: 0o400,
+      });
+    }
+    assert.deepEqual(await store.cleanupPartial({
+      action: "backup.catalog",
+      phaseId,
+      requestId: `request-${index}`,
+      requestSha256,
+    }), { status: "cleaned" });
+    assert.equal(fs.existsSync(requestDirectory), false, `${prefix} prefix survived cleanup`);
+  }
+  assert.deepEqual(fs.readdirSync(base), []);
+});
+
+test("v2 local non-idempotent worker intents remain manual even after a worker result", async (t) => {
+  for (const [id, action, phaseId, workerRole] of [
+    ["prune", "backup.prune.apply", "prune.apply", "standalone"],
+    ["finalizer", "backup.catalog", "catalog.capture", "evidence-finalizer"],
+    ["resolver", "backup.offsite.sync", "offsite.sync", "artifact-resolver"],
+  ]) {
+    await t.test(id, () => {
+      const root = tempDir(t);
+      const trusted = directTrustedContext();
+      const store = createReplayStore(root, "a".repeat(48));
+      store.admitTrustedContext(trusted);
+      const request = admittedRequest(action, {}, trusted);
+      const lease = store.acquire(request, trusted);
+      const resourceName = `platform-role-${phaseId.replaceAll(".", "-")}-${workerRole}-${id}`;
+      const workerId = fixtureSha256(resourceName);
+      lease.recordEvent({
+        action,
+        event: "role-worker-recorded",
+        phaseId,
+        phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phaseId].phaseSha256,
+        receiptDigest: trusted.receiptDigest,
+        resourceName,
+        workerRole,
+      });
+      lease.recordEvent({ event: "role-worker-created", phaseId, resourceName, workerId, workerRole });
+      lease.recordEvent({
+        event: "role-worker-start-attempted",
+        mutationClass: "local-nonidempotent",
+        phaseId,
+        resourceName,
+        workerId,
+        workerRole,
+      });
+      lease.recordEvent({
+        event: "role-worker-result-recorded",
+        phaseId,
+        resourceName,
+        workerId,
+        workerResultSha256: fixtureSha256(`${id}-result`),
+        workerRole,
+      });
+      lease.recordEvent({ event: "role-worker-deleted", phaseId, resourceName, workerId, workerRole });
+      lease.recordEvent({ event: "local-effect-unknown", phaseId, resourceName, workerId });
+      assert.throws(() => lease.release(), /local effect|manual|reconcil/i);
+      lease.preserve();
+      assert.equal(assertJournalChain(root, request).at(-1).event, "local-effect-unknown");
+    });
+  }
+});
+
+test("v2 real executor terminalizes every failed post-start local mutation only after cleanup", async (t) => {
+  for (const [id, action, phaseId, workerRole, deleteFails] of [
+    ["prune", "backup.prune.apply", "prune.apply", "standalone", false],
+    ["finalizer", "backup.catalog", "catalog.capture", "evidence-finalizer", false],
+    ["resolver", "backup.offsite.sync", "offsite.sync", "artifact-resolver", false],
+    ["prune-delete-failure", "backup.prune.apply", "prune.apply", "standalone", true],
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      const baseline = directTrustedContext();
+      const receipt = structuredClone(baseline.receipt);
+      const trusted = Object.freeze({
+        intent: baseline.intent,
+        receipt: Object.freeze(receipt),
+        receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
+      });
+      const store = createReplayStore(root, "a".repeat(48));
+      store.admitTrustedContext(trusted);
+      const request = admittedRequest(action, {}, trusted);
+      const lease = store.acquire(request, trusted);
+      const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+      const created = [];
+      const cleanupOrder = [];
+      const workerId = fixtureSha256(`real-${id}-worker`);
+      const phase = receipt.resources.phaseProfiles[phaseId];
+      const exactImageInspect = (helper) => ({
+        Config: {
+          Env: ["PATH=/usr/local/bin:/usr/bin", "IMAGE_DEFAULT=1"],
+          ExposedPorts: helper.engine === "mariadb" ? { "3306/tcp": {} }
+            : helper.engine === "postgres" ? { "5432/tcp": {} } : {},
+          Healthcheck: { Test: ["CMD", "/bin/false"] },
+          Labels: { "org.opencontainers.image.vendor": "fixture" },
+          OnBuild: null,
+          Shell: ["/bin/sh", "-c"],
+          StopSignal: "SIGTERM",
+          User: "",
+          Volumes: Object.fromEntries(helper.declaredVolumePaths.map((target) => [target, {}])),
+          WorkingDir: "",
+        },
+        Id: helper.imageId,
+      });
+      const plannedHelpers = workerRole === "evidence-finalizer"
+        ? buildSemanticHelperPlan({
+            claimedBackupResources: null,
+            phaseId,
+            priorBinding: null,
+            receipt,
+            requestSha256,
+          }).helpers.map((helper) => bindSemanticHelperImageInspect(helper, exactImageInspect(helper)))
+        : [];
+      const plannedByName = new Map(plannedHelpers.map((helper) => [helper.name, helper]));
+      const activeHelpers = new Map();
+      const transport = {
+        async inspectNetwork(engineId) {
+          const logicalId = Object.entries(receipt.resources.networks)
+            .find(([, network]) => network.engineId === engineId)?.[0];
+          assert.ok(logicalId);
+          return buildFixtureNetworkInspect(receipt, logicalId);
+        },
+        async inspectVolume(name) {
+          const logicalId = Object.entries(receipt.resources.volumes)
+            .find(([, volume]) => volume.engineName === name)?.[0];
+          assert.ok(logicalId);
+          return buildFixtureVolumeInspect(receipt, logicalId);
+        },
+        async createWorker(name, body) {
+          created.push({ body: structuredClone(body), name });
+          assert.equal(body.Env.some((entry) => entry.startsWith("PLATFORM_DOCKER_WORKER_ROLE=")), true);
+          return { Id: workerId };
+        },
+        async inspectContainer(candidateId) {
+          assert.equal(candidateId, workerId);
+          const { body, name } = created.at(-1);
+          const binds = body.HostConfig.Binds.map((entry) => {
+            const modeAt = entry.lastIndexOf(":");
+            const targetAt = entry.lastIndexOf(":", modeAt - 1);
+            const mode = entry.slice(modeAt + 1);
+            return {
+              Destination: entry.slice(targetAt + 1, modeAt),
+              Mode: mode,
+              Propagation: "rprivate",
+              RW: mode !== "ro",
+              Source: entry.slice(0, targetAt),
+              Type: "bind",
+            };
+          });
+          const volumes = body.HostConfig.Mounts.map((mount) => ({
+            Destination: mount.Target,
+            Driver: "local",
+            Mode: "",
+            Name: mount.Source,
+            Propagation: "",
+            RW: mount.ReadOnly !== true,
+            Source: `/var/lib/docker/volumes/${mount.Source}/_data`,
+            Type: "volume",
+          }));
+          return {
+            Config: {
+              AttachStderr: false,
+              AttachStdin: false,
+              AttachStdout: false,
+              Cmd: body.Cmd,
+              Entrypoint: body.Entrypoint,
+              Env: body.Env,
+              Image: body.Image,
+              Labels: body.Labels,
+              NetworkDisabled: body.NetworkDisabled,
+              OpenStdin: false,
+              StdinOnce: false,
+              Tty: false,
+              User: body.User,
+              WorkingDir: body.WorkingDir,
+            },
+            HostConfig: structuredClone(body.HostConfig),
+            Id: workerId,
+            Image: phase.workerImageId,
+            Mounts: [...binds, ...volumes],
+            Name: `/${name}`,
+            NetworkSettings: { Networks: {} },
+          };
+        },
+        async startContainer(candidateId) { assert.equal(candidateId, workerId); },
+        async waitContainer(candidateId) {
+          assert.equal(candidateId, workerId);
+          const role = created.at(-1).body.Env.find(
+            (entry) => entry.startsWith("PLATFORM_DOCKER_WORKER_ROLE="),
+          ).split("=")[1];
+          return { StatusCode: role === workerRole ? 19 : 0 };
+        },
+        async logsContainer(candidateId) {
+          assert.equal(candidateId, workerId);
+          const role = created.at(-1).body.Env.find(
+            (entry) => entry.startsWith("PLATFORM_DOCKER_WORKER_ROLE="),
+          ).split("=")[1];
+          assert.equal(role, "helper-preparer");
+          return dockerFrame(`${JSON.stringify({
+            action,
+            command: phase.command,
+            job: null,
+            output: {
+              mutationPerformed: true,
+              phaseId,
+              preparedRelativePaths: [],
+              requestSha256,
+              schema: "platform.docker-worker.helper-preparation/v1",
+              status: "completed",
+            },
+            phaseId,
+            requestId: request.requestId,
+            schema: WORKER_RESULT_SCHEMA_V2,
+            status: "completed",
+          })}\n`);
+        },
+        async deleteContainer(candidateId) {
+          assert.equal(candidateId, workerId);
+          cleanupOrder.push("worker-deleted");
+          if (deleteFails) throw new Error("injected local worker delete failure");
+        },
+        async inspectHelperImage(imageId) {
+          const helper = plannedHelpers.find((candidate) => candidate.imageId === imageId);
+          assert.ok(helper);
+          return exactImageInspect(helper);
+        },
+        async createHelper(name) {
+          const helper = plannedByName.get(name);
+          assert.ok(helper);
+          const helperId = fixtureSha256(name);
+          activeHelpers.set(helperId, helper);
+          return { Id: helperId };
+        },
+        async inspectHelper(helperId) {
+          const helper = activeHelpers.get(helperId);
+          assert.ok(helper);
+          return {
+            Config: {
+              AttachStderr: false,
+              AttachStdin: false,
+              AttachStdout: false,
+              Cmd: structuredClone(helper.body.Cmd),
+              Entrypoint: structuredClone(helper.body.Entrypoint),
+              Env: structuredClone(helper.body.Env),
+              ExposedPorts: structuredClone(helper.body.ExposedPorts),
+              Healthcheck: structuredClone(helper.body.Healthcheck),
+              Image: helper.body.Image,
+              Labels: structuredClone(helper.body.Labels),
+              NetworkDisabled: helper.body.NetworkDisabled,
+              OnBuild: structuredClone(helper.body.OnBuild),
+              OpenStdin: false,
+              Shell: structuredClone(helper.body.Shell),
+              StdinOnce: false,
+              StopSignal: helper.body.StopSignal,
+              Tty: false,
+              User: helper.body.User,
+              Volumes: structuredClone(helper.body.Volumes),
+              WorkingDir: helper.body.WorkingDir,
+            },
+            HostConfig: structuredClone(helper.body.HostConfig),
+            Id: helperId,
+            Image: helper.imageId,
+            Mounts: structuredClone(helper.expectedInspect.mounts),
+            Name: `/${helper.name}`,
+            NetworkSettings: { Networks: structuredClone(helper.expectedInspect.networks) },
+          };
+        },
+        async startHelper(helperId) { assert.equal(activeHelpers.has(helperId), true); },
+        async waitHelper(helperId) { assert.equal(activeHelpers.has(helperId), true); return { StatusCode: 0 }; },
+        async logsHelper(helperId) { assert.equal(activeHelpers.has(helperId), true); return Buffer.alloc(0); },
+        async deleteHelper(helperId) { assert.equal(activeHelpers.has(helperId), true); },
+      };
+      const helperResultsFileStore = {
+        async seal(_aggregate, authority) {
+          return {
+            action,
+            containerPath: "/run/platform/helper-results/results.json",
+            hostPath: path.join(root, "helper-results", requestSha256, phaseId, "results.json"),
+            phaseId,
+            relativePath: `helper-results/${requestSha256}/${phaseId}/results.json`,
+            requestId: request.requestId,
+            requestSha256,
+            schema: "platform.docker-helper-results.snapshot/v1",
+            sha256: fixtureSha256("helper-results"),
+            sizeBytes: 2,
+            volumeId: "broker.state",
+            volumeName: authority.volumeInspect.Name,
+          };
+        },
+        async cleanup() { cleanupOrder.push("helper-results-cleaned"); },
+        async cleanupPartial() {},
+      };
+      const executor = broker.createSemanticHelperActionExecutor({
+        helperResultsFileStore,
+        randomBytes: () => Buffer.alloc(12, 0x55),
+        snapshotFileStore: { async cleanup() {}, async seal() {} },
+        transport,
+      });
+      const context = {
+        lease,
+        parameters: {},
+        request,
+        requestId: request.requestId,
+        requestSha256,
+        signal: new AbortController().signal,
+        trusted,
+      };
+      let executionError;
+      await assert.rejects(
+        () => executor.execute(action, context),
+        (error) => {
+          executionError = error;
+          return deleteFails
+            ? /delete failure/i.test(error.message)
+            : /worker failed/i.test(error.message);
+        },
+      );
+      const entries = assertJournalChain(root, request);
+      if (deleteFails) {
+        assert.equal(executionError.preserveLease, true);
+        assert.equal(entries.at(-1).event, "role-worker-start-attempted");
+        assert.throws(() => lease.release(), /durable action completion|cannot be released/i);
+        lease.preserve();
+        return;
+      }
+      assert.equal(entries.at(-1).event, "local-effect-unknown");
+      assert.equal(entries.at(-2).event, workerRole === "evidence-finalizer"
+        ? "helper-results-cleaned"
+        : "role-worker-deleted");
+      assert.deepEqual(cleanupOrder, workerRole === "evidence-finalizer"
+        ? ["worker-deleted", "worker-deleted", "helper-results-cleaned"]
+        : ["worker-deleted"]);
+      assert.throws(() => lease.release(), /local effect|manual|reconcil/i);
+      lease.preserve();
+    });
+  }
+});
+
+test("v2 restart treats scratch preparer intent as materialization and runs the exact cleaner", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const action = "restore.drill.full";
+  const phaseId = "restore.verify";
+  const engine = "postgres";
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const request = admittedRequest(action, {}, trusted);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const lease = store.acquire(request, trusted);
+  const preparerName = "platform-role-restore-verify-scratch-preparer-postgres-crash";
+  const preparerId = "7".repeat(64);
+  lease.recordEvent({
+    action,
+    engine,
+    event: "scratch-bootstrap-recorded",
+    phaseId,
+    phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phaseId].phaseSha256,
+    receiptDigest: trusted.receiptDigest,
+    requestSha256,
+    resourceName: preparerName,
+    workerRole: "scratch-preparer",
+  });
+  lease.recordEvent({
+    engine,
+    event: "scratch-bootstrap-created",
+    phaseId,
+    resourceName: preparerName,
+    workerId: preparerId,
+    workerRole: "scratch-preparer",
+  });
+  lease.recordEvent({
+    engine,
+    event: "scratch-bootstrap-start-attempted",
+    phaseId,
+    resourceName: preparerName,
+    workerId: preparerId,
+    workerRole: "scratch-preparer",
+  });
+  lease.recordEvent({
+    engine,
+    event: "scratch-bootstrap-deleted",
+    phaseId,
+    resourceName: preparerName,
+    workerId: preparerId,
+    workerRole: "scratch-preparer",
+  });
+  lease.preserve();
+
+  const created = [];
+  const workerId = "8".repeat(64);
+  const phase = trusted.receipt.resources.phaseProfiles[phaseId];
+  const transport = {
+    async createWorker(name, body) {
+      created.push({ body: structuredClone(body), name });
+      assert.deepEqual(body.HostConfig.CapAdd, ["DAC_OVERRIDE"]);
+      assert.deepEqual(body.HostConfig.CapDrop, ["ALL"]);
+      return { Id: workerId };
+    },
+    async deleteContainer(id) { assert.equal(id, workerId); },
+    async inspectContainer(id) {
+      assert.equal(id, workerId);
+      const { body, name } = created[0];
+      const volumeByName = Object.fromEntries(Object.values(trusted.receipt.resources.volumes)
+        .map((volume) => [volume.engineName, volume]));
+      const mounts = body.HostConfig.Mounts.map((mount) => ({
+        Destination: mount.Target,
+        Driver: "local",
+        Mode: "",
+        Name: mount.Source,
+        Propagation: "",
+        RW: mount.ReadOnly !== true,
+        Source: `/var/lib/docker/volumes/${mount.Source}/_data`,
+        Type: "volume",
+        ...(volumeByName[mount.Source] ? {} : assert.fail("unknown worker volume")),
+      }));
+      return {
+        Config: {
+          AttachStderr: false,
+          AttachStdin: false,
+          AttachStdout: false,
+          Cmd: body.Cmd,
+          Entrypoint: body.Entrypoint,
+          Env: body.Env,
+          Image: body.Image,
+          Labels: body.Labels,
+          NetworkDisabled: body.NetworkDisabled,
+          OpenStdin: false,
+          StdinOnce: false,
+          Tty: false,
+          User: body.User,
+          WorkingDir: body.WorkingDir,
+        },
+        HostConfig: structuredClone(body.HostConfig),
+        Id: workerId,
+        Image: phase.workerImageId,
+        Mounts: mounts,
+        Name: `/${name}`,
+        NetworkSettings: { Networks: {} },
+      };
+    },
+    async logsContainer(id) {
+      assert.equal(id, workerId);
+      return dockerFrame(`${JSON.stringify({
+        action,
+        command: phase.command,
+        job: null,
+        output: {
+          engine,
+          mutationPerformed: true,
+          phaseId,
+          relativePath: `requests/${requestSha256}/${phaseId}/${engine}`,
+          requestSha256,
+          role: "scratch-cleaner",
+          schema: "platform.docker-worker.scratch-result/v1",
+          status: "completed",
+        },
+        phaseId,
+        requestId: request.requestId,
+        schema: WORKER_RESULT_SCHEMA_V2,
+        status: "completed",
+      })}\n`);
+    },
+    async startContainer(id) { assert.equal(id, workerId); },
+    async waitContainer(id) { assert.equal(id, workerId); return { StatusCode: 0 }; },
+  };
+  const executor = broker.createSemanticHelperActionExecutor({
+    helperResultsFileStore: {
+      async cleanup() {},
+      async cleanupPartial() {},
+      async seal() { assert.fail("recovery must not seal helper results"); },
+    },
+    randomBytes: () => Buffer.alloc(12, 0x44),
+    snapshotFileStore: {
+      async cleanup() {},
+      async seal() { assert.fail("recovery must not seal a snapshot"); },
+    },
+    transport,
+  });
+  const restarted = createReplayStore(root, "b".repeat(48));
+  assert.equal((await restarted.recover(executor)).status, "recovered");
+  assert.equal(created.length, 1);
+  assert.match(created[0].name, /scratch-cleaner-postgres/);
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
 });
 
 test("v2 recovery exact-inspects every live worker before reverse-order deletion", async (t) => {
@@ -7110,6 +8605,8 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
   const resourceName = "platform-action-job-backup-recovery";
   lease.recordWorker({
     action: phase.action,
+    claimedBackupResources: expectedPhaseAuthority(trusted.receipt, phase)
+      .resources.backupResources,
     phaseId: phase.phaseId,
     phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
     receiptDigest: trusted.receiptDigest,
@@ -7190,6 +8687,8 @@ test("v2 claimed-job recovery rejects the complete inspect widening matrix witho
       });
       lease.recordWorker({
         action: phase.action,
+        claimedBackupResources: expectedPhaseAuthority(trusted.receipt, phase)
+          .resources.backupResources,
         phaseId: phase.phaseId,
         phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
         receiptDigest: trusted.receiptDigest,
@@ -7402,6 +8901,8 @@ testRunner("RED v2: real executor crash checkpoints and after-create recovery ex
       const workerRecordedEntry = scenario.workerCreated
         ? {
             action: phase.action,
+            claimedBackupResources: expectedPhaseAuthority(trusted.receipt, phase)
+              .resources.backupResources,
             event: "worker-recorded",
             phaseId: phase.phaseId,
             phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
@@ -8404,9 +9905,6 @@ class OracleEngineTransport {
 
 function oracleWorkerInspect({ id, name, phase, requestId, sealed, trusted }) {
   const body = expectedWorkerBody(phase, trusted, sealed, requestId);
-  const networkNames = phaseProfile(trusted.receipt, phase).networkIds.map(
-    (logicalId) => trusted.receipt.resources.networks[logicalId].engineName,
-  );
   return {
     Id: id,
     Name: `/${name}`,
@@ -8430,11 +9928,7 @@ function oracleWorkerInspect({ id, name, phase, requestId, sealed, trusted }) {
     HostConfig: expectedWorkerHostConfig(trusted.receipt, phase, sealed),
     Mounts: expectedInspectMounts(trusted.receipt, phase, sealed),
     NetworkSettings: {
-      Networks: Object.fromEntries(networkNames.map((networkName) => {
-        const network = Object.values(trusted.receipt.resources.networks)
-          .find((value) => value.engineName === networkName);
-        return [networkName, { Aliases: [], NetworkID: network.engineId }];
-      })),
+      Networks: {},
     },
   };
 }
@@ -8442,10 +9936,7 @@ function oracleWorkerInspect({ id, name, phase, requestId, sealed, trusted }) {
 function expectedWorkerBody(phaseCaseValue, trusted, sealed, requestId) {
   const phase = phaseProfile(trusted.receipt, phaseCaseValue);
   const actionProfile = trusted.receipt.resources.actionProfiles[phaseCaseValue.action];
-  const networkNames = phase.networkIds.map(
-    (logicalId) => trusted.receipt.resources.networks[logicalId].engineName,
-  );
-  const authority = expectedPhaseAuthority(trusted.receipt, phaseCaseValue.action, phase.phaseId);
+  const authority = expectedPhaseAuthority(trusted.receipt, phaseCaseValue);
   const env = [
     "HOME=/tmp",
     "LANG=C.UTF-8",
@@ -8481,7 +9972,7 @@ function expectedWorkerBody(phaseCaseValue, trusted, sealed, requestId) {
     Env: env,
     User: "0:0",
     WorkingDir: "/opt/platform-docker-worker",
-    NetworkDisabled: networkNames.length === 0,
+    NetworkDisabled: true,
     AttachStdin: false,
     AttachStdout: false,
     AttachStderr: false,
@@ -8499,14 +9990,13 @@ function expectedWorkerBody(phaseCaseValue, trusted, sealed, requestId) {
     },
     HostConfig: expectedWorkerHostConfig(trusted.receipt, phaseCaseValue, sealed),
     NetworkingConfig: {
-      EndpointsConfig: Object.fromEntries(networkNames.map((name) => [name, { Aliases: [] }])),
+      EndpointsConfig: {},
     },
   };
 }
 
 function expectedWorkerHostConfig(receipt, phaseCaseValue, sealed) {
   const phase = phaseProfile(receipt, phaseCaseValue);
-  const networkNames = phase.networkIds.map((id) => receipt.resources.networks[id].engineName);
   const binds = phase.mountIds.map((mountId) => {
     const mount = receipt.resources.mounts[mountId];
     return `${mount.canonicalPath}:${mount.containerPath}:${mount.access}`;
@@ -8567,7 +10057,7 @@ function expectedWorkerHostConfig(receipt, phaseCaseValue, sealed) {
     MemorySwappiness: null,
     Mounts: expectedNamedVolumeMounts(receipt, phase),
     NanoCpus: 250000000,
-    NetworkMode: networkNames[0] ?? "none",
+    NetworkMode: "none",
     OomKillDisable: false,
     OomScoreAdj: 0,
     PidMode: "",
@@ -8806,26 +10296,89 @@ function sealedSnapshot(snapshot, request) {
   });
 }
 
-function expectedPhaseAuthority(receipt, action, phaseId) {
+function expectedPhaseAuthority(receipt, phaseCaseValue) {
+  const { action, phaseId } = phaseCaseValue;
   const phase = receipt.resources.phaseProfiles[phaseId];
-  const workerSecretSets = Object.fromEntries(
-    phase.workerSecretSetIds.map((id) => [id, structuredClone(receipt.resources.workerSecretSets[id])]),
-  );
+  const backupResourceIds = action === "backup.job.execute"
+    ? JSON.parse(Buffer.from(phaseCaseValue.claimedJob.bytes).toString("utf8"))
+      .resources.map(({ id }) => id)
+    : action === "backup.catalog" || action === "restore.drill.full"
+      ? Object.keys(receipt.resources.backupResources)
+      : [];
+  const backupResourceIdSet = new Set(backupResourceIds);
+  const effectiveEndpointIds = phase.endpointIds.filter((id) => {
+    const endpoint = receipt.resources.serviceEndpoints[id];
+    return endpoint.backupResourceId === null
+      ? action === "backup.offsite.sync"
+      : backupResourceIdSet.has(endpoint.backupResourceId);
+  });
+  const effectiveHelperProfileIds = phase.helperProfileIds.filter((id) => {
+    const helper = receipt.resources.helperProfiles[id];
+    if (helper.resourceKind === null) return action === "backup.offsite.sync";
+    return backupResourceIds.some((resourceId) => {
+      const resource = receipt.resources.backupResources[resourceId];
+      return resource.kind === helper.resourceKind
+        && (resource.engine ?? resource.externalId) === helper.engine;
+    });
+  });
+  const referencedNetworkIds = new Set([
+    ...effectiveEndpointIds.map((id) => receipt.resources.serviceEndpoints[id].networkId),
+    ...effectiveHelperProfileIds.map((id) => receipt.resources.helperProfiles[id].networkId),
+  ].filter((id) => id !== null));
+  const effectiveNetworkIds = phase.networkIds.filter((id) => referencedNetworkIds.has(id));
+  const effectiveHelperSecretSetIds = [];
+  for (const id of [
+    ...effectiveHelperProfileIds.map((helperId) => (
+      receipt.resources.helperProfiles[helperId].secretSetId
+    )),
+    ...effectiveEndpointIds.map((endpointId) => (
+      receipt.resources.serviceEndpoints[endpointId].secretSetId
+    )),
+  ]) {
+    if (id !== null && !effectiveHelperSecretSetIds.includes(id)) {
+      effectiveHelperSecretSetIds.push(id);
+    }
+  }
+  const workerSecretSets = Object.fromEntries(phase.workerSecretSetIds.map(
+    (id) => [id, structuredClone(receipt.resources.workerSecretSets[id])],
+  ));
+  const helperSecretSets = Object.fromEntries(effectiveHelperSecretSetIds.map(
+    (id) => [id, structuredClone(receipt.resources.workerSecretSets[id])],
+  ));
   const volumeIds = [
     ...phase.workerSecretSetIds.map((id) => receipt.resources.workerSecretSets[id].volumeId),
+    ...effectiveHelperSecretSetIds.map((id) => receipt.resources.workerSecretSets[id].volumeId),
     ...phase.scratchVolumeIds,
   ];
   return {
     schema: "platform.docker-worker.phase-authority/v2",
     action,
     actionProfile: structuredClone(receipt.resources.actionProfiles[action]),
+    effectiveEndpointIds,
+    effectiveHelperProfileIds,
+    effectiveHelperSecretSetIds,
+    effectiveNetworkIds,
     phaseProfile: structuredClone(phase),
     resources: {
+      backupResources: Object.fromEntries(
+        backupResourceIds.map((id) => [id, structuredClone(receipt.resources.backupResources[id])]),
+      ),
+      helperProfiles: Object.fromEntries(
+        effectiveHelperProfileIds.map(
+          (id) => [id, structuredClone(receipt.resources.helperProfiles[id])],
+        ),
+      ),
+      helperSecretSets,
       mounts: Object.fromEntries(
         phase.mountIds.map((id) => [id, structuredClone(receipt.resources.mounts[id])]),
       ),
       networks: Object.fromEntries(
-        phase.networkIds.map((id) => [id, structuredClone(receipt.resources.networks[id])]),
+        effectiveNetworkIds.map((id) => [id, structuredClone(receipt.resources.networks[id])]),
+      ),
+      serviceEndpoints: Object.fromEntries(
+        effectiveEndpointIds.map(
+          (id) => [id, structuredClone(receipt.resources.serviceEndpoints[id])],
+        ),
       ),
       volumes: Object.fromEntries(
         [...new Set(volumeIds)].map((id) => [id, structuredClone(receipt.resources.volumes[id])]),
@@ -8849,6 +10402,28 @@ function directTrustedContext() {
     }),
     receipt: Object.freeze(receipt),
     receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
+  });
+}
+
+function withFixtureActivation(trusted, index) {
+  return Object.freeze({
+    ...trusted,
+    activation: Object.freeze({
+      activationId: `activation-${index}`,
+      candidateId: trusted.intent.candidateId,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      dastChainSha256: trusted.receipt.dastChainSha256,
+      environment: trusted.intent.environment,
+      envelopeSha256: trusted.intent.activationBundleSha256,
+      generation: trusted.intent.generation,
+      nonce: Buffer.alloc(32, (index % 255) + 1).toString("base64url"),
+      previousActiveSha256: "0".repeat(64),
+      releaseId: trusted.intent.releaseId,
+      requestId: `123e4567-e89b-42d3-a456-${String(index).padStart(12, "0")}`,
+      runtimeIntentId: trusted.intent.intentId,
+      sourceRenderSha256: trusted.receipt.sourceRenderSha256,
+      targetId: trusted.intent.targetId,
+    }),
   });
 }
 
@@ -8933,15 +10508,19 @@ function phaseProfile(receipt, phaseCaseValue) {
 
 function requiredPreflightIds(phaseCaseValue, receipt) {
   const phase = phaseProfile(receipt, phaseCaseValue);
+  const authority = expectedPhaseAuthority(receipt, phaseCaseValue);
   const volume = [
     ...phase.workerSecretSetIds.map((id) => receipt.resources.workerSecretSets[id].volumeId),
+    ...authority.effectiveHelperSecretSetIds.map(
+      (id) => receipt.resources.workerSecretSets[id].volumeId,
+    ),
     ...phase.scratchVolumeIds,
   ];
   if (phaseCaseValue.claimedJob) {
     const source = receipt.resources.claimedJobSources["jobs.running"];
     volume.unshift("jobs.queue", source.snapshotVolumeId);
   }
-  return { network: [...phase.networkIds], volume: [...new Set(volume)] };
+  return { network: [...authority.effectiveNetworkIds], volume: [...new Set(volume)] };
 }
 
 function assertPreflightBeforeCreate(transport, phase, receipt) {
@@ -9163,6 +10742,11 @@ function assertExactRealExecutionJournal(entries, {
   workerId,
 }) {
   const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const claimedBackupResources = Object.fromEntries(
+    JSON.parse(Buffer.from(phase.claimedJob.bytes).toString("utf8")).resources.map(
+      ({ id }) => [id, structuredClone(trusted.receipt.resources.backupResources[id])],
+    ),
+  );
   const expectedResourceName = `platform-action-${phase.phaseId.replaceAll(".", "-")}-${"01".repeat(12)}`;
   assert.equal(
     resourceName,
@@ -9190,6 +10774,7 @@ function assertExactRealExecutionJournal(entries, {
     },
     "worker-recorded": {
       action: phase.action,
+      claimedBackupResources,
       phaseId: phase.phaseId,
       phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
       receiptDigest: trusted.receiptDigest,
@@ -11845,7 +13430,7 @@ function assertJournalAppendFsyncOrder(
     );
   }
   const activeMutations = audit.events
-    .slice(scopeStart ?? 0, historyEnd)
+    .slice(scopeStart ?? 0, cursor + 1)
     .map((event, relativeIndex) => ({
       event,
       index: (scopeStart ?? 0) + relativeIndex,

@@ -6605,6 +6605,48 @@ workerTest("role-scoped helper preparation and artifact resolution preserve exac
   );
   const preparer = createTerminalEvidenceFixture(t, captureCase);
   preparer.env.PLATFORM_DOCKER_WORKER_ROLE = "helper-preparer";
+  const artifactRoot = path.join(
+    preparer.backupRoot,
+    "requests",
+    REQUEST_SHA256,
+    "artifacts",
+  );
+  const mariadbTarget = path.join(artifactRoot, "mariadb", "mariadb.sql");
+  const minioTarget = path.join(artifactRoot, "minio", "objects");
+  const postgresTarget = path.join(artifactRoot, "postgres", "postgres.dump");
+  const unrelatedSentinel = path.join(artifactRoot, "unrelated", "keep.txt");
+  const finalizerOwnedSentinels = [
+    path.join(artifactRoot, "source", "platform.ptree"),
+    path.join(
+      preparer.backupRoot,
+      "requests",
+      REQUEST_SHA256,
+      "manifests",
+      "catalog.capture.json",
+    ),
+    terminalEvidenceReportPath(preparer.reportRoot, captureCase),
+  ];
+  for (const directory of [
+    path.dirname(mariadbTarget),
+    minioTarget,
+    path.join(minioTarget, "nested"),
+    path.dirname(postgresTarget),
+    path.dirname(unrelatedSentinel),
+    ...finalizerOwnedSentinels.map((file) => path.dirname(file)),
+  ]) {
+    fs.mkdirSync(directory, { mode: 0o700, recursive: true });
+    fs.chmodSync(directory, 0o700);
+  }
+  fs.writeFileSync(mariadbTarget, "partial mariadb\n", { mode: 0o644 });
+  fs.writeFileSync(path.join(minioTarget, "stale-object"), "stale\n", { mode: 0o644 });
+  fs.writeFileSync(path.join(minioTarget, "nested", "stale-object"), "stale\n", {
+    mode: 0o600,
+  });
+  fs.writeFileSync(postgresTarget, "partial postgres\n", { mode: 0o644 });
+  fs.writeFileSync(unrelatedSentinel, "preserve\n", { mode: 0o600 });
+  for (const file of finalizerOwnedSentinels) {
+    fs.writeFileSync(file, "finalizer-owned\n", { mode: 0o400 });
+  }
   const prepared = prepareHelperFilesystem(captureCase.command, {
     backupRoot: preparer.backupRoot,
     env: preparer.env,
@@ -6625,6 +6667,69 @@ workerTest("role-scoped helper preparation and artifact resolution preserve exac
     const stat = fs.lstatSync(path.join(root, ...safe.split("/")));
     assert.equal(stat.isDirectory(), true, `${relative} was not prepared as a directory`);
     assert.equal(stat.mode & 0o7777, 0o700, `${relative} is not private`);
+  }
+  assert.equal(fs.existsSync(mariadbTarget), false, "stale MariaDB target survived preparation");
+  assert.equal(fs.existsSync(postgresTarget), false, "stale PostgreSQL target survived preparation");
+  assert.deepEqual(fs.readdirSync(minioTarget), [], "stale MinIO tree survived preparation");
+  assert.equal(
+    fs.readFileSync(unrelatedSentinel, "utf8"),
+    "preserve\n",
+    "helper preparation deleted outside its exact artifact targets",
+  );
+  for (const file of finalizerOwnedSentinels) {
+    assert.equal(
+      fs.readFileSync(file, "utf8"),
+      "finalizer-owned\n",
+      `helper preparation deleted finalizer-owned output ${file}`,
+    );
+  }
+
+  for (const [label, arrange, pattern] of [
+    [
+      "file symlink",
+      (fixture, target) => fs.symlinkSync(fixture.sourceRoot, target),
+      /symbolic|symlink|unsafe/i,
+    ],
+    [
+      "file hardlink",
+      (fixture, target) => {
+        const source = path.join(fixture.root, "hardlink-source");
+        fs.writeFileSync(source, "linked\n", { mode: 0o600 });
+        fs.linkSync(source, target);
+      },
+      /hardlink|link|unsafe/i,
+    ],
+    [
+      "tree symlink",
+      (fixture, target) => {
+        fs.mkdirSync(target, { mode: 0o700 });
+        fs.symlinkSync(fixture.sourceRoot, path.join(target, "escape"));
+      },
+      /symbolic|symlink|unsafe/i,
+    ],
+  ]) {
+    const hostile = createTerminalEvidenceFixture(t, captureCase);
+    hostile.env.PLATFORM_DOCKER_WORKER_ROLE = "helper-preparer";
+    const target = label === "tree symlink"
+      ? path.join(hostile.backupRoot, "requests", REQUEST_SHA256, "artifacts", "minio", "objects")
+      : path.join(hostile.backupRoot, "requests", REQUEST_SHA256, "artifacts", "mariadb", "mariadb.sql");
+    fs.mkdirSync(path.dirname(target), { mode: 0o700, recursive: true });
+    for (let cursor = path.dirname(target); cursor !== hostile.backupRoot;
+      cursor = path.dirname(cursor)) {
+      fs.chmodSync(cursor, 0o700);
+    }
+    arrange(hostile, target);
+    assert.throws(
+      () => prepareHelperFilesystem(captureCase.command, {
+        backupRoot: hostile.backupRoot,
+        env: hostile.env,
+        io: fs,
+        reportRoot: hostile.reportRoot,
+      }),
+      pattern,
+      `helper preparer accepted a stale ${label}`,
+    );
+    assert.equal(fs.existsSync(target), true, `hostile ${label} was followed or unlinked`);
   }
 
   const producer = createTerminalEvidenceFixture(t, captureCase);
@@ -6736,11 +6841,38 @@ workerTest("restore scratch roles bind each engine tree to its attested server p
     fixture.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-preparer";
     fixture.env.PLATFORM_DOCKER_SCRATCH_ENGINE = engine;
     resealTerminalAuthority(fixture);
+    const descriptorPaths = new Map();
+    const chowns = [];
+    const instrumentedIo = new Proxy(fs, {
+      get(target, property) {
+        if (property === "openSync") {
+          return (file, ...args) => {
+            const descriptor = fs.openSync(file, ...args);
+            descriptorPaths.set(descriptor, path.resolve(String(file)));
+            return descriptor;
+          };
+        }
+        if (property === "closeSync") {
+          return (descriptor) => {
+            descriptorPaths.delete(descriptor);
+            return fs.closeSync(descriptor);
+          };
+        }
+        if (property === "fchownSync") {
+          return (descriptor, uid, gid) => {
+            chowns.push({ gid, path: descriptorPaths.get(descriptor), uid });
+            return fs.fchownSync(descriptor, uid, gid);
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
 
     const prepared = manageRestoreScratch(
       phaseCase.command,
       "scratch-preparer",
-      { env: fixture.env, io: fs, scratchRoot: fixture.scratchRoot },
+      { env: fixture.env, io: instrumentedIo, scratchRoot: fixture.scratchRoot },
     );
     assert.deepEqual(prepared, {
       engine,
@@ -6756,21 +6888,31 @@ workerTest("restore scratch roles bind each engine tree to its attested server p
       fixture.scratchRoot,
       ...prepared.relativePath.split("/"),
     );
-    for (const directory of [
-      engineRoot,
-      path.join(engineRoot, "data"),
-      path.join(engineRoot, "run"),
-    ]) {
+    const dataRoot = path.join(engineRoot, "data");
+    assert.deepEqual(chowns, [{
+      gid: runtimeGid,
+      path: dataRoot,
+      uid: runtimeUid,
+    }], `${engine} preparer chowned more than the exact data leaf`);
+    assert.equal(
+      fs.existsSync(path.join(engineRoot, "run")),
+      false,
+      `${engine} preparer created the container-only tmpfs run path`,
+    );
+    for (const directory of [engineRoot, dataRoot]) {
       const stat = fs.lstatSync(directory);
-      assert.equal(stat.uid, runtimeUid, `${engine} scratch UID`);
-      assert.equal(stat.gid, runtimeGid, `${engine} scratch GID`);
+      const expectedUid = directory === dataRoot
+        ? runtimeUid
+        : fs.lstatSync(fixture.scratchRoot).uid;
+      const expectedGid = directory === dataRoot
+        ? runtimeGid
+        : fs.lstatSync(fixture.scratchRoot).gid;
+      assert.equal(stat.uid, expectedUid, `${engine} scratch UID`);
+      assert.equal(stat.gid, expectedGid, `${engine} scratch GID`);
       assert.equal(stat.mode & 0o7777, 0o700, `${engine} scratch mode`);
     }
-    fs.mkdirSync(path.join(engineRoot, "data", "nested"), { mode: 0o700 });
-    fs.writeFileSync(path.join(engineRoot, "data", "nested", "payload"), "data\n", {
-      mode: 0o600,
-    });
-    fs.writeFileSync(path.join(engineRoot, "run", "server.pid"), "123\n", {
+    fs.mkdirSync(path.join(dataRoot, "nested"), { mode: 0o700 });
+    fs.writeFileSync(path.join(dataRoot, "nested", "payload"), "data\n", {
       mode: 0o600,
     });
     fixture.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-cleaner";
@@ -6787,6 +6929,116 @@ workerTest("restore scratch roles bind each engine tree to its attested server p
       `${engine} phase scratch ancestor was not removed`,
     );
   }
+
+  for (const layout of ["fully absent", "empty parent prefix"]) {
+    const absent = createTerminalEvidenceFixture(t, phaseCase);
+    absent.authority.resources.volumes["restore.scratch"].containerPath =
+      "/run/platform/restore-scratch";
+    absent.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-cleaner";
+    absent.env.PLATFORM_DOCKER_SCRATCH_ENGINE = "postgres";
+    resealTerminalAuthority(absent);
+    if (layout === "empty parent prefix") {
+      const phaseRoot = path.join(
+        absent.scratchRoot,
+        "requests",
+        REQUEST_SHA256,
+        phaseCase.phaseId,
+      );
+      fs.mkdirSync(phaseRoot, { mode: 0o700, recursive: true });
+      for (let cursor = phaseRoot; cursor !== absent.scratchRoot;
+        cursor = path.dirname(cursor)) {
+        fs.chmodSync(cursor, 0o700);
+      }
+    }
+    const cleaned = manageRestoreScratch(
+      phaseCase.command,
+      "scratch-cleaner",
+      { env: absent.env, io: fs, scratchRoot: absent.scratchRoot },
+    );
+    assert.equal(cleaned.status, "completed", `${layout} cleanup status`);
+    assert.equal(cleaned.role, "scratch-cleaner", `${layout} cleanup role`);
+    assert.equal(
+      fs.existsSync(path.join(
+        absent.scratchRoot,
+        "requests",
+        REQUEST_SHA256,
+        phaseCase.phaseId,
+      )),
+      false,
+      `${layout} left an exact empty phase prefix behind`,
+    );
+  }
+
+  const partial = createTerminalEvidenceFixture(t, phaseCase);
+  const partialServer = Object.values(partial.authority.resources.helperProfiles)
+    .find((profile) => (
+      profile.engine === "postgres" && profile.operation === "restore-server"
+    ));
+  partialServer.runtimeUid = runtimeUid === 0 ? 1 : 0;
+  partialServer.runtimeGid = runtimeGid === 0 ? 1 : 0;
+  partial.authority.resources.volumes["restore.scratch"].containerPath =
+    "/run/platform/restore-scratch";
+  partial.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-preparer";
+  partial.env.PLATFORM_DOCKER_SCRATCH_ENGINE = "postgres";
+  resealTerminalAuthority(partial);
+  const failedChownIo = new Proxy(fs, {
+    get(target, property) {
+      if (property === "fchownSync") {
+        return () => {
+          const error = new Error("simulated crash before scratch fchown");
+          error.code = "EIO";
+          throw error;
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  assert.throws(
+    () => manageRestoreScratch(
+      phaseCase.command,
+      "scratch-preparer",
+      { env: partial.env, io: failedChownIo, scratchRoot: partial.scratchRoot },
+    ),
+    /simulated crash|EIO/i,
+  );
+  const partialDataRoot = path.join(
+    partial.scratchRoot,
+    "requests",
+    REQUEST_SHA256,
+    phaseCase.phaseId,
+    "postgres",
+    "data",
+  );
+  assert.equal(fs.lstatSync(partialDataRoot).uid, runtimeUid);
+  partial.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-cleaner";
+  const partialCleaned = manageRestoreScratch(
+    phaseCase.command,
+    "scratch-cleaner",
+    { env: partial.env, io: fs, scratchRoot: partial.scratchRoot },
+  );
+  assert.equal(partialCleaned.status, "completed");
+  assert.equal(fs.existsSync(path.dirname(partialDataRoot)), false);
+
+  const absentSymlink = createTerminalEvidenceFixture(t, phaseCase);
+  absentSymlink.authority.resources.volumes["restore.scratch"].containerPath =
+    "/run/platform/restore-scratch";
+  absentSymlink.env.PLATFORM_DOCKER_WORKER_ROLE = "scratch-cleaner";
+  absentSymlink.env.PLATFORM_DOCKER_SCRATCH_ENGINE = "postgres";
+  resealTerminalAuthority(absentSymlink);
+  const requestsRoot = path.join(absentSymlink.scratchRoot, "requests");
+  fs.mkdirSync(requestsRoot, { mode: 0o700 });
+  fs.chmodSync(requestsRoot, 0o700);
+  fs.symlinkSync(absentSymlink.sourceRoot, path.join(requestsRoot, REQUEST_SHA256));
+  assert.throws(
+    () => manageRestoreScratch(
+      phaseCase.command,
+      "scratch-cleaner",
+      { env: absentSymlink.env, io: fs, scratchRoot: absentSymlink.scratchRoot },
+    ),
+    /ancestor|identity|symbolic|symlink/i,
+    "absent scratch cleanup followed a substituted ancestor",
+  );
 
   const hostile = createTerminalEvidenceFixture(t, phaseCase);
   const hostileServer = Object.values(hostile.authority.resources.helperProfiles)
@@ -6821,6 +7073,9 @@ workerTest("restore scratch roles bind each engine tree to its attested server p
     "scratch cleaner followed an untrusted helper-created symbolic link",
   );
   fs.unlinkSync(path.join(engineRoot, "data", "escape"));
+  fs.writeFileSync(path.join(engineRoot, "data", "runtime-owned"), "state\n", {
+    mode: 0o600,
+  });
   hostileServer.runtimeUid = runtimeUid === 0 ? 1 : 0;
   resealTerminalAuthority(hostile);
   assert.throws(
@@ -7679,7 +7934,6 @@ function expectedPhaseAuthority(receipt, action, phaseId, claimedBackupResources
     ...phase.workerSecretSetIds.map((id) => resources.workerSecretSets[id].volumeId),
     ...effectiveHelperSecretSetIds.map((id) => resources.workerSecretSets[id].volumeId),
     ...phase.scratchVolumeIds,
-    ...(effectiveHelperProfileIds.length > 0 ? ["broker.state"] : []),
   ];
   return {
     schema: "platform.docker-worker.phase-authority/v2",

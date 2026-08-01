@@ -1003,12 +1003,23 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.deepEqual(response.result, result);
   assertResponseBoundToSignedRequestAndResult(response, request);
   assert.equal(response.mac, responseMac(omit(response, "mac"), key));
-  assert.deepEqual(calls.journal, [{
-    event: "action-completed",
-    requestSha256,
-    resultSha256,
-  }]);
-  assert.deepEqual(calls.lifecycle, ["journal:action-completed", "release"]);
+  assert.deepEqual(calls.journal, [
+    {
+      event: "action-result-recorded",
+      requestSha256,
+      resultSha256,
+    },
+    {
+      event: "action-completed",
+      requestSha256,
+      resultSha256,
+    },
+  ]);
+  assert.deepEqual(calls.lifecycle, [
+    "journal:action-result-recorded",
+    "journal:action-completed",
+    "release",
+  ]);
 
   const truncated = admittedRequestShape(request);
   assert.throws(
@@ -1079,7 +1090,12 @@ test("RED v2: evidence output is bounded before the broker releases its replay l
     const wire = await harness.core.handle(Buffer.from(canonicalFixtureJson(request)));
     assert.equal(wire.statusCode, 200);
     assert.equal(harness.executeCount(), 1);
-    assert.deepEqual(harness.leaseEvents, ["acquire", "release"]);
+    assert.deepEqual(harness.leaseEvents, [
+      "acquire",
+      "journal:action-result-recorded",
+      "journal:action-completed",
+      "release",
+    ]);
     assertResponseBoundToSignedRequestAndResult(wire.body, request);
   });
 
@@ -1115,7 +1131,7 @@ test("RED v2: evidence output is bounded before the broker releases its replay l
     assert.equal(harness.executeCount(), 1);
     assert.deepEqual(
       harness.leaseEvents,
-      ["acquire", "preserve"],
+      ["acquire", "journal:response-undelivered", "preserve"],
       "post-execution result rejection must fail closed without consuming the replay lease",
     );
   });
@@ -2483,6 +2499,9 @@ function evidenceBrokerHarness({ key, result, trusted }) {
         preserve() {
           leaseEvents.push("preserve");
         },
+        recordEvent(event) {
+          leaseEvents.push(`journal:${String(event?.event ?? "unknown")}`);
+        },
         recordWorker() {},
         release() {
           leaseEvents.push("release");
@@ -2497,8 +2516,13 @@ function evidenceBrokerHarness({ key, result, trusted }) {
     trustedContextProvider: async () => trusted,
     capabilityProvider: async () => key,
     engine: {
-      async execute() {
+      async execute(_action, context) {
         executions += 1;
+        context.lease.recordEvent({
+          event: "action-completed",
+          requestSha256: context.requestSha256,
+          resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+        });
         return structuredClone(result);
       },
     },
