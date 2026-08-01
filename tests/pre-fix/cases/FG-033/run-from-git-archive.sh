@@ -27,7 +27,7 @@ if [ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]; then
   exit 1
 fi
 
-ARCHIVE_ROOT=$(mktemp -d)
+ARCHIVE_ROOT=$(mktemp -d "${TMPDIR:?TMPDIR is required}/fg033-edge-evidence-authenticity.XXXXXX")
 cleanup() {
   rm -rf -- "$ARCHIVE_ROOT"
 }

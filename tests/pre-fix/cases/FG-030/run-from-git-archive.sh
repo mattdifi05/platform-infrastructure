@@ -27,7 +27,7 @@ if [ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]; then
   exit 1
 fi
 
-ARCHIVE_ROOT=$(mktemp -d)
+ARCHIVE_ROOT=$(mktemp -d "${TMPDIR:?TMPDIR is required}/fg030-hosted-secret-ownership.XXXXXX")
 cleanup() {
   rm -rf -- "$ARCHIVE_ROOT"
 }

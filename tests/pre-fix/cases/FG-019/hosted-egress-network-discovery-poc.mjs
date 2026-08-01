@@ -207,12 +207,20 @@ try {
     "exit 97",
   ].join("\n") + "\n";
 
+  const scratchMktemp = [
+    "#!/bin/sh",
+    "set -eu",
+    "[ \"$#\" -eq 0 ] || { printf '%s\\n' 'unexpected mktemp arguments' >&2; exit 93; }",
+    "exec /usr/bin/mktemp \"${TMPDIR:?}/fg019-firewall-subnets.XXXXXXXX\"",
+  ].join("\n") + "\n";
+
   fs.writeFileSync(path.join(fakeBin, "docker"), fakeDocker, { mode: 0o755 });
   fs.writeFileSync(
     path.join(fakeBin, "iptables"),
     fakeIptables,
     { mode: 0o755 },
   );
+  fs.writeFileSync(path.join(fakeBin, "mktemp"), scratchMktemp, { mode: 0o755 });
 
   const plan = spawnSync(
     "/bin/sh",

@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -312,6 +313,35 @@ export async function computeSeedTreeSha256(caseDirectory) {
   return sha256(entries.map((entry) => `${entry.path}\0${entry.mode}\0${entry.sha256}\n`).join(""));
 }
 
+export async function materializeEphemeralCaseSeed(definition, {
+  repositoryRoot = REPOSITORY_ROOT,
+  scratchRoot,
+} = {}) {
+  validateDefinition(definition);
+  if (definition.entrypoint.kind !== "make") fail(`${definition.case_id} does not require an ephemeral case seed`);
+  if (typeof scratchRoot !== "string" || !path.isAbsolute(scratchRoot)) {
+    fail(`${definition.case_id} ephemeral scratch root must be absolute`);
+  }
+  await mkdir(scratchRoot, { recursive: true, mode: 0o700 });
+  const canonicalScratchRoot = await realpath(scratchRoot);
+  const source = path.resolve(repositoryRoot, definition.entrypoint.cwd);
+  const expectedSource = path.resolve(repositoryRoot, `tests/pre-fix/cases/${definition.case_id}`);
+  if (source !== expectedSource) fail(`${definition.case_id} tracked seed source is not case-confined`);
+  const target = path.join(canonicalScratchRoot, "case-seed");
+  await cp(source, target, {
+    recursive: true,
+    force: false,
+    errorOnExist: true,
+    dereference: false,
+    verbatimSymlinks: true,
+  });
+  const copiedDigest = await computeSeedTreeSha256(target);
+  if (copiedDigest !== definition.seed_tree_sha256) {
+    fail(`${definition.case_id} ephemeral case seed digest mismatch`);
+  }
+  return { root: await realpath(target), sha256: copiedDigest };
+}
+
 async function runCommand(command, args, { cwd, env, timeoutMs = 30_000, maxOutputBytes = MAX_CASE_OUTPUT_BYTES } = {}) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -516,14 +546,15 @@ function replacePlaceholder(argument, replacements) {
 export function createCaseInvocation(definition, {
   baselineRoot,
   repositoryRoot = REPOSITORY_ROOT,
+  ephemeralCaseDirectory,
   nodePath = process.execPath,
   makePath = "/usr/bin/make",
   toolPathDirectories = [],
 }) {
   validateDefinition(definition);
-  const cwd = path.resolve(repositoryRoot, definition.entrypoint.cwd);
+  const trackedCwd = path.resolve(repositoryRoot, definition.entrypoint.cwd);
   const expectedCwd = path.resolve(repositoryRoot, `tests/pre-fix/cases/${definition.case_id}`);
-  if (cwd !== expectedCwd) fail(`${definition.case_id} resolved cwd escapes its tracked case directory`);
+  if (trackedCwd !== expectedCwd) fail(`${definition.case_id} resolved cwd escapes its tracked case directory`);
   const commonMakeVariables = [
     `SOURCE_REPO=${baselineRoot}`,
     `SOURCE_ROOT=${baselineRoot}`,
@@ -536,6 +567,7 @@ export function createCaseInvocation(definition, {
     `CASE_ID=${definition.case_id}`,
   ];
   if (definition.entrypoint.kind === "make") {
+    const cwd = ephemeralCaseDirectory === undefined ? trackedCwd : path.resolve(ephemeralCaseDirectory);
     return {
       command: makePath,
       args: ["--no-print-directory", "-s", definition.entrypoint.target, ...commonMakeVariables],
@@ -552,7 +584,7 @@ export function createCaseInvocation(definition, {
   return {
     command: nodePath,
     args: [script, ...definition.entrypoint.args.map((argument) => replacePlaceholder(argument, replacements))],
-    cwd,
+    cwd: trackedCwd,
     toolPathDirectories,
   };
 }
@@ -721,14 +753,22 @@ function stableSemanticResult(result) {
   };
 }
 
-function normalizeEvidenceText(value, volatilePaths) {
+export function normalizeEvidenceText(value, volatilePaths) {
   let normalized = value.replaceAll("\r\n", "\n");
   for (const [label, volatilePath] of volatilePaths) {
     normalized = normalized.replaceAll(volatilePath, `<${label}>`);
     normalized = normalized.replaceAll(volatilePath.replace(/^\/private/, ""), `<${label}>`);
   }
-  normalized = normalized.replaceAll(/\/var\/folders\/[^\s'"`]+/g, "<SYSTEM_TEMP_PATH>");
   normalized = normalized.replaceAll(/\/private\/var\/folders\/[^\s'"`]+/g, "<SYSTEM_TEMP_PATH>");
+  normalized = normalized.replaceAll(/\/var\/folders\/[^\s'"`]+/g, "<SYSTEM_TEMP_PATH>");
+  normalized = normalized.replaceAll(/\((?:[0-9]+(?:\.[0-9]+)?)ms\)/g, "(<VOLATILE_DURATION_MS>)");
+  normalized = normalized.replaceAll(/(\bduration_ms )[0-9]+(?:\.[0-9]+)?/g, "$1<VOLATILE_DURATION_MS>");
+  normalized = normalized.replaceAll(/\b(wall_ms|cpu_ms|elapsed_ms|parse_ms)=[0-9]+(?:\.[0-9]+)?/g, "$1=<VOLATILE_DURATION_MS>");
+  normalized = normalized.replaceAll(/\bheap_delta_bytes=-?[0-9]+/g, "heap_delta_bytes=<VOLATILE_BYTES>");
+  normalized = normalized.replaceAll(/\bsha_changed=[0-9a-f]{12}->[0-9a-f]{12}\b/g, "sha_changed=<VOLATILE_SHA>-><VOLATILE_SHA>");
+  normalized = normalized.replaceAll(/\bgenerated_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z\b/g, "generated_at=<VOLATILE_TIMESTAMP>");
+  normalized = normalized.replaceAll(/(\[RECEIPT\][^\n]*\bsha256=)[0-9a-f]{64}\b/g, "$1<VOLATILE_SHA256>");
+  normalized = normalized.replaceAll(/\bdevice_inode=[0-9]+:[0-9]+\b/g, "device_inode=<VOLATILE_DEVICE_INODE>");
   return normalized;
 }
 
@@ -777,17 +817,23 @@ async function executeReplayOnBaseline({
     const caseArtifacts = path.join(outputRoot, definition.case_id);
     const scratchRoot = path.join(caseArtifacts, "scratch");
     await mkdir(caseArtifacts, { recursive: true, mode: 0o700 });
-    const invocation = createCaseInvocation(definition, {
-      baselineRoot: baselineIdentity.root,
-      repositoryRoot,
-      makePath,
-      toolPathDirectories,
-    });
     const startedAt = new Date().toISOString();
     const started = process.hrtime.bigint();
-    const primaryExecutable = await executableDescriptor(invocation.command);
+    let invocation;
+    let primaryExecutable;
     let execution;
     try {
+      const ephemeralSeed = definition.entrypoint.kind === "make"
+        ? await materializeEphemeralCaseSeed(definition, { repositoryRoot, scratchRoot })
+        : null;
+      invocation = createCaseInvocation(definition, {
+        baselineRoot: baselineIdentity.root,
+        repositoryRoot,
+        ephemeralCaseDirectory: ephemeralSeed?.root,
+        makePath,
+        toolPathDirectories,
+      });
+      primaryExecutable = await executableDescriptor(invocation.command);
       execution = await runSandboxedCommand(invocation, {
         scratchRoot,
         caseId: definition.case_id,

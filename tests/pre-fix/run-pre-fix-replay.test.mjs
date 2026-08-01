@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +17,8 @@ import {
   loadRegistry,
   loadSandboxProfile,
   materializeDetachedBaselineClone,
+  materializeEphemeralCaseSeed,
+  normalizeEvidenceText,
   runReplay,
   runSandboxedCommand,
   sha256,
@@ -99,6 +101,46 @@ test("entrypoints are case-confined and produce distinct FG argv", async () => {
   }
 });
 
+test("make seeds execute from a byte-identical ephemeral scratch copy", async () => {
+  const definitions = await loadRegistry();
+  const definition = definitions.find((candidate) => candidate.case_id === "FG-026");
+  const root = await mkdtemp(path.join(tmpdir(), "pre-fix-seed-copy-test-"));
+  try {
+    const materialized = await materializeEphemeralCaseSeed(definition, { scratchRoot: root });
+    assert.ok(materialized.root.startsWith(`${await realpath(root)}${path.sep}`));
+    assert.equal(materialized.sha256, definition.seed_tree_sha256);
+    const invocation = createCaseInvocation(definition, {
+      baselineRoot: "/tmp/example-detached-baseline",
+      ephemeralCaseDirectory: materialized.root,
+    });
+    assert.equal(invocation.cwd, materialized.root);
+    assert.equal(await computeSeedTreeSha256(materialized.root), definition.seed_tree_sha256);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("semantic normalization removes only declared volatile telemetry", () => {
+  const first = [
+    "ok (12.34ms)",
+    "duration_ms 98.7",
+    "wall_ms=1.2 cpu_ms=3 elapsed_ms=4.5 parse_ms=6 heap_delta_bytes=-44",
+    "sha_changed=aaaaaaaaaaaa->bbbbbbbbbbbb",
+    "[RECEIPT] generated_at=2026-08-01T19:38:53.569Z sha256=" + "c".repeat(64),
+    "device_inode=16777231:57725522",
+  ].join("\n");
+  const second = [
+    "ok (99ms)",
+    "duration_ms 1",
+    "wall_ms=7 cpu_ms=8.9 elapsed_ms=10 parse_ms=11.2 heap_delta_bytes=55",
+    "sha_changed=dddddddddddd->eeeeeeeeeeee",
+    "[RECEIPT] generated_at=2027-01-02T03:04:05.006Z sha256=" + "f".repeat(64),
+    "device_inode=1:2",
+  ].join("\n");
+  assert.equal(normalizeEvidenceText(first, []), normalizeEvidenceText(second, []));
+  assert.match(normalizeEvidenceText(first, []), /<VOLATILE_DURATION_MS>/);
+});
+
 test("sandbox profile denies network and target writes while declaring ephemeral writes", async () => {
   const profile = await loadSandboxProfile();
   assert.equal(validateSandboxProfile(profile), profile);
@@ -173,7 +215,7 @@ test("two committed representative replays have identical semantic evidence", {
   skip: process.env.PREFIX_RUN_COMMITTED_REPLAY_INTEGRATION !== "1",
 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "pre-fix-determinism-test-"));
-  const selectedCaseIds = ["FG-001", "FG-004", "FG-005"];
+  const selectedCaseIds = ["FG-001", "FG-004", "FG-005", "FG-026", "FG-030"];
   try {
     const first = await runReplay({
       baselineSource: REPOSITORY_ROOT,

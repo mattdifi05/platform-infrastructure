@@ -109,6 +109,7 @@ try {
       env: {
         HOME: process.env.HOME || "",
         PATH: process.env.PATH || "",
+        TMPDIR: process.env.TMPDIR || os.tmpdir(),
         NODE_NO_WARNINGS: "1",
       },
     },
