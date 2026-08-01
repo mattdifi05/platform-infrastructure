@@ -2940,6 +2940,76 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   );
 });
 
+snapshotTest("v2 snapshot store separates its container-local broker.state root from the exact Engine host bind path", async (t) => {
+  const root = tempDir(t);
+  const storageRoot = path.join(root, "container-local-broker-state");
+  const engineMountpoint = path.join(root, "engine-host-only", "_data");
+  fs.mkdirSync(storageRoot, { mode: 0o700 });
+  const owner = fs.statSync(storageRoot);
+  const { audit, io } = filesystemHistoryProbe();
+  const receipt = buildRawActiveReceiptV2();
+  const source = receipt.resources.claimedJobSources["jobs.running"];
+  const phase = findPhase("job.backup.capture");
+  const trusted = directTrustedContext();
+  const request = admittedRequest(
+    phase.action,
+    phase.parameters,
+    trusted,
+    2088,
+  );
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const store = broker.createSnapshotFileStore({
+    expectedGid: owner.gid,
+    expectedUid: owner.uid,
+    io,
+    storageRoot,
+  });
+  const sealed = await store.seal({
+    ...phase.claimedJob,
+    bytes: Buffer.from(phase.claimedJob.bytes),
+  }, {
+    request,
+    requestId: request.requestId,
+    requestSha256,
+    source,
+    volumeInspect: {
+      ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+      Mountpoint: engineMountpoint,
+    },
+  });
+  const localLeaf = path.join(
+    storageRoot,
+    source.snapshotVolumeSubpath,
+    requestSha256,
+    "job.json",
+  );
+  assert.equal(
+    sealed.hostPath,
+    path.join(
+      engineMountpoint,
+      source.snapshotVolumeSubpath,
+      requestSha256,
+      "job.json",
+    ),
+  );
+  assert.deepEqual(fs.readFileSync(localLeaf), phase.claimedJob.bytes);
+  assert.equal(fs.existsSync(sealed.hostPath), false);
+  assert.equal(
+    audit.events.some((event) => [event.file, event.from, event.to]
+      .some((candidate) => typeof candidate === "string"
+        && pathIsSameOrAncestor(engineMountpoint, candidate))),
+    false,
+    "container-local snapshot I/O reached the Engine host namespace",
+  );
+  await store.cleanup(sealed);
+  assert.equal(fs.existsSync(localLeaf), false);
+  assert.equal(
+    fs.existsSync(path.dirname(localLeaf)),
+    false,
+    "cleanup did not remove the exact local request directory",
+  );
+});
+
 testRunner(
   "RED v2: fresh-process first-import trap forbids cached fs authority outside snapshot io",
   (t) => {
@@ -4539,6 +4609,9 @@ for (const [attackIndex, attackCase] of [
       let hookCount = 0;
       let injectionEventIndex = -1;
       let exactSettledTimestampAliases = null;
+      const metadataOnly =
+        attackCase.mutationKind === "mtime-and-ctime-change"
+        || attackCase.mutationKind === "ctime-change";
       const timestampIsolationObservations = [];
       const { audit, io: recordedIo } = filesystemHistoryProbe({
         onEvent(event) {
@@ -4836,9 +4909,6 @@ for (const [attackIndex, attackCase] of [
       assert.notEqual(attackProof.processId, process.pid);
       assert.equal(attackProof.target, attackTarget);
       assert.equal(attackProof.mutationKind, attackCase.mutationKind);
-      const metadataOnly =
-        attackCase.mutationKind === "mtime-and-ctime-change"
-        || attackCase.mutationKind === "ctime-change";
       for (const field of [
         "beforeTargetAtimeNs",
         "beforeTargetAtimeMs",
@@ -9547,8 +9617,12 @@ function statIdentityIo(io, { uid, gid }) {
     if (!stat || typeof stat !== "object") return stat;
     return new Proxy(stat, {
       get(target, property) {
-        if (property === "uid") return uid;
-        if (property === "gid") return gid;
+        if (property === "uid") {
+          return typeof target.uid === "bigint" ? BigInt(uid) : uid;
+        }
+        if (property === "gid") {
+          return typeof target.gid === "bigint" ? BigInt(gid) : gid;
+        }
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -9582,14 +9656,30 @@ function pathStatMutationIo(io, {
     const mutation = normalizeMutations.get(candidate) ?? {};
     return new Proxy(stat, {
       get(target, property) {
-        if (property === "uid" && mutation.uid !== undefined) return mutation.uid;
-        if (property === "uid" && defaultUid !== undefined) return defaultUid;
-        if (property === "gid" && mutation.gid !== undefined) return mutation.gid;
-        if (property === "gid" && defaultGid !== undefined) return defaultGid;
-        if (property === "mode" && mutation.permissions !== undefined) {
-          return (target.mode & ~0o777) | mutation.permissions;
+        if (property === "uid" && mutation.uid !== undefined) {
+          return typeof target.uid === "bigint" ? BigInt(mutation.uid) : mutation.uid;
         }
-        if (property === "nlink" && mutation.nlink !== undefined) return mutation.nlink;
+        if (property === "uid" && defaultUid !== undefined) {
+          return typeof target.uid === "bigint" ? BigInt(defaultUid) : defaultUid;
+        }
+        if (property === "gid" && mutation.gid !== undefined) {
+          return typeof target.gid === "bigint" ? BigInt(mutation.gid) : mutation.gid;
+        }
+        if (property === "gid" && defaultGid !== undefined) {
+          return typeof target.gid === "bigint" ? BigInt(defaultGid) : defaultGid;
+        }
+        if (property === "mode" && mutation.permissions !== undefined) {
+          const mask = typeof target.mode === "bigint" ? 0o777n : 0o777;
+          const permissions = typeof target.mode === "bigint"
+            ? BigInt(mutation.permissions)
+            : mutation.permissions;
+          return (target.mode & ~mask) | permissions;
+        }
+        if (property === "nlink" && mutation.nlink !== undefined) {
+          return typeof target.nlink === "bigint"
+            ? BigInt(mutation.nlink)
+            : mutation.nlink;
+        }
         if (property === "isFile" && mutation.kind) {
           return () => mutation.kind === "file";
         }
@@ -11275,7 +11365,9 @@ function assertSnapshotLeafSealHistory(events, {
   );
   const finalStat = finalLeafStat ?? fs.lstatSync(file, { bigint: true });
   assertFsyncMatchesFinalRegularLeaf(leafFsync.event, finalStat, label);
-  assert.equal(finalStat.mode & 0o777, 0o400, `${label} final mode must be 0400`);
+  const modeMask = typeof finalStat.mode === "bigint" ? 0o777n : 0o777;
+  const expectedMode = typeof finalStat.mode === "bigint" ? 0o400n : 0o400;
+  assert.equal(finalStat.mode & modeMask, expectedMode, `${label} final mode must be 0400`);
   if (finalDirectoryInventory === undefined) {
     assertExactDirectoryInventory(
       path.dirname(file),
@@ -11829,5 +11921,5 @@ function tempDir(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-broker-v2-"));
   fs.chmodSync(root, 0o700);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return root;
+  return fs.realpathSync(root);
 }
