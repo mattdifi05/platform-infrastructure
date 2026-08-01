@@ -9,9 +9,13 @@ import { pathToFileURL } from "node:url";
 import {
   ACTIONS,
   MAX_REQUEST_BYTES,
+  RESPONSE_SCHEMA,
   canonicalJson,
   normalizeActionRequest,
+  normalizeActionResponse,
   normalizeTrustedContext,
+  sha256,
+  signActionResponse,
 } from "./docker-action-contract.mjs";
 import {
   normalizeActivationPolicy,
@@ -336,6 +340,10 @@ export function createDockerActionBroker({
   return server;
 }
 
+export function encodeActionResponseFrame(body) {
+  return Buffer.from(`${canonicalJson(body)}\n`);
+}
+
 export function createBrokerCore({
   trustedContextProvider,
   capabilityProvider,
@@ -358,40 +366,70 @@ export function createBrokerCore({
         if (error?.statusCode) throw error;
         throw brokerError(400, "request is not valid JSON");
       }
+      if (!frame.equals(Buffer.from(canonicalJson(parsed)))) {
+        throw brokerError(400, "request wire frame is not canonical JSON");
+      }
+
+      const action = typeof parsed?.action === "string" ? parsed.action : "";
+      if (!/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(action)) {
+        throw brokerError(403, "action grammar is invalid");
+      }
+      const contract = ACTIONS[action];
+      if (!contract) throw brokerError(403, "action is not authorized");
 
       // No Engine method is reachable before the complete trust, schema,
       // action-capability and MAC admission sequence below succeeds.
       const trusted = await trustedContextProvider({ now: now() });
       replayStore.admitActivation(trusted.activation, trusted);
       replayStore.admitTrustedContext(trusted);
-      const action = typeof parsed?.action === "string" ? parsed.action : "";
-      const contract = ACTIONS[action];
-      if (!contract) throw brokerError(403, "action is not authorized");
       const capabilityKey = await capabilityProvider(action, contract);
-      const request = normalizeActionRequest(parsed, trusted, capabilityKey, { now: now() });
+      normalizeActionRequest(parsed, trusted, capabilityKey, { now: now() });
+      const request = parsed;
+      const requestSha256 = sha256(canonicalJson(request));
       replayStore.consume(request);
       const lease = replayStore.acquire(request, trusted);
       const controller = new AbortController();
       let timeout;
       const operation = Promise.resolve().then(async () => {
+        let executionCompleted = false;
         try {
-          const result = await engine.execute(request.action, {
-            parameters: request.parameters,
-            trusted,
-            signal: controller.signal,
+          const engineResult = await engine.execute(request.action, {
             lease,
+            parameters: request.parameters,
+            request,
+            requestId: request.requestId,
+            requestSha256,
+            signal: controller.signal,
+            trusted,
           });
+          executionCompleted = true;
+          const result = sanitizeResult(engineResult);
+          const response = normalizeActionResponse(signActionResponse({
+            action: request.action,
+            errorCode: null,
+            requestId: request.requestId,
+            requestSha256,
+            result,
+            resultSha256: sha256(canonicalJson(result)),
+            schema: RESPONSE_SCHEMA,
+            status: "completed",
+            statusCode: 200,
+          }, capabilityKey), request, capabilityKey);
+          encodeActionResponseFrame(response);
           lease.release();
-          return result;
+          return {
+            statusCode: 200,
+            body: response,
+          };
         } catch (error) {
-          if (error?.preserveLease) lease.preserve();
+          if (executionCompleted || error?.preserveLease) lease.preserve();
           else lease.release();
           throw error;
         }
       });
       operation.catch(() => {});
       try {
-        const result = await Promise.race([
+        return await Promise.race([
           operation,
           new Promise((_, reject) => {
             timeout = setTimeout(() => {
@@ -400,16 +438,6 @@ export function createBrokerCore({
             }, operationTimeoutMs);
           }),
         ]);
-        return {
-          statusCode: 200,
-          body: {
-            schema: "platform.docker-action.response/v1",
-            status: "completed",
-            action: request.action,
-            requestId: request.requestId,
-            result: sanitizeResult(result),
-          },
-        };
       } finally {
         clearTimeout(timeout);
       }
@@ -1044,7 +1072,7 @@ function respond(connection, statusCode, message) {
 }
 
 function writeResponse(connection, statusCode, body) {
-  connection.end(`${JSON.stringify({ statusCode, ...body })}\n`);
+  connection.end(encodeActionResponseFrame({ statusCode, ...body }));
 }
 
 function sanitizeResult(value) {
