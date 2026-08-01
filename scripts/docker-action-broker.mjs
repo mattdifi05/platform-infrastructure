@@ -733,7 +733,7 @@ function assertClaimedJobDocument(document, parameters) {
     || document.operation !== parameters.jobOperation
     || !isExactText(document.requestedBy, /^[A-Za-z0-9@._:+/-]+$/, 200)
     || !isExactText(document.environment, /^[a-z0-9-]+$/, 32)
-    || !["queued", "running", "done", "failed"].includes(document.status)
+    || document.status !== "running"
     || !isExactIsoTime(document.createdAt) || !isExactIsoTime(document.updatedAt)
     || !isNullableExactIsoTime(document.startedAt) || !isNullableExactIsoTime(document.finishedAt)
     || typeof document.resultSummary !== "string" || document.resultSummary.length > 500
