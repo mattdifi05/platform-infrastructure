@@ -1,63 +1,78 @@
 import crypto from "node:crypto";
 
-export const REQUEST_SCHEMA = "platform.docker-action.request/v1";
+export const REQUEST_SCHEMA = "platform.docker-action.request/v2";
 export const RUNTIME_INTENT_SCHEMA = "platform.docker-runtime-intent/v1";
-export const ACTIVE_RECEIPT_SCHEMA = "platform.docker-active-receipt/v1";
+export const ACTIVE_RECEIPT_SCHEMA = "platform.docker-active-receipt/v2";
+export const RESPONSE_SCHEMA = "platform.docker-action.response/v2";
+export const RESULT_SCHEMA = "platform.docker-action.result/v2";
 export const MAX_REQUEST_BYTES = 16 * 1024;
 export const MAX_CLOCK_SKEW_MS = 30_000;
 export const MAX_REQUEST_LIFETIME_MS = 60_000;
+export const MAX_PHASE_OUTPUT_BYTES = 4096;
 
-export const ACTIONS = Object.freeze({
+export const SCHEDULER_ACTIONS = deepFreeze({
   "backup.catalog": Object.freeze({
-    capabilityId: "backup.catalog.v1",
+    capabilityId: "backup.catalog.v2",
     capabilityFile: "/run/secrets/docker_action_backup_catalog",
-    modeled: false,
-    unsupportedReason: "dedicated socketless database and state backup worker is not implemented",
+    profileId: "scheduler.backup.catalog.v2",
+    modeled: true,
+    workerCommand: "backup-catalog",
     parameters: Object.freeze([]),
   }),
   "backup.job.execute": Object.freeze({
-    capabilityId: "backup.job.execute.v1",
+    capabilityId: "backup.job.execute.v2",
     capabilityFile: "/run/secrets/docker_action_backup_job_execute",
-    modeled: false,
-    unsupportedReason: "dedicated socketless typed backup worker is not implemented",
-    parameters: Object.freeze(["jobId"]),
+    profileId: "scheduler.backup.job.execute.v2",
+    modeled: true,
+    workerCommand: "backup-job",
+    parameters: Object.freeze(["jobFileName", "jobId", "jobOperation", "jobSha256"]),
   }),
   "backup.prune.plan": Object.freeze({
-    capabilityId: "backup.prune.plan.v1",
+    capabilityId: "backup.prune.plan.v2",
     capabilityFile: "/run/secrets/docker_action_backup_prune_plan",
+    profileId: "scheduler.backup.prune.plan.v2",
     modeled: true,
     workerCommand: "backup-prune-plan",
     parameters: Object.freeze([]),
   }),
   "backup.prune.apply": Object.freeze({
-    capabilityId: "backup.prune.apply.v1",
+    capabilityId: "backup.prune.apply.v2",
     capabilityFile: "/run/secrets/docker_action_backup_prune_apply",
-    modeled: false,
-    unsupportedReason: "authenticated deletion worker is not implemented",
+    profileId: "scheduler.backup.prune.apply.v2",
+    modeled: true,
+    workerCommand: "backup-prune-apply",
     parameters: Object.freeze([]),
   }),
   "restore.drill.full": Object.freeze({
-    capabilityId: "restore.drill.full.v1",
+    capabilityId: "restore.drill.full.v2",
     capabilityFile: "/run/secrets/docker_action_restore_drill_full",
-    modeled: false,
-    unsupportedReason: "dedicated disposable restore workers are not implemented",
+    profileId: "scheduler.restore.drill.full.v2",
+    modeled: true,
+    workerCommand: "restore-drill-full",
     parameters: Object.freeze([]),
   }),
   "backup.offsite.sync": Object.freeze({
-    capabilityId: "backup.offsite.sync.v1",
+    capabilityId: "backup.offsite.sync.v2",
     capabilityFile: "/run/secrets/docker_action_backup_offsite_sync",
-    modeled: false,
-    unsupportedReason: "dedicated egress-constrained offsite worker is not implemented",
+    profileId: "scheduler.backup.offsite.sync.v2",
+    modeled: true,
+    workerCommand: "backup-offsite-sync",
     parameters: Object.freeze([]),
   }),
+});
+
+export const EVIDENCE_ACTIONS = deepFreeze({
   "evidence.runtime.snapshot": Object.freeze({
-    capabilityId: "evidence.runtime.snapshot.v1",
+    capabilityId: "evidence.runtime.snapshot.v2",
     capabilityFile: "/run/secrets/docker_action_evidence_runtime_snapshot",
+    profileId: "evidence.runtime.snapshot.v2",
     engineAction: "runtimeSnapshot",
     modeled: true,
     parameters: Object.freeze([]),
   }),
 });
+
+export const ACTIONS = Object.freeze({ ...SCHEDULER_ACTIONS, ...EVIDENCE_ACTIONS });
 
 export const CLI_ACTIONS = Object.freeze({
   "backup-platform-catalog": "backup.catalog",
@@ -81,9 +96,153 @@ const ALLOWED_CONTAINER_PATHS = new Set([
   "/opt/platform-infrastructure/backups",
   "/opt/platform-infrastructure/reports",
   "/data/backups",
+  "/data/reports",
+  "/data/source",
+  "/data/state",
   "/project",
+  "/run/platform/claimed-job/job.json",
+  "/run/platform/restore-scratch",
+  "/run/platform/worker-secrets/manifest-signing",
+  "/run/platform/worker-secrets/manifest-verification",
+  "/run/platform/worker-secrets/offsite",
   "/var/www/project-state",
 ]);
+
+const ACTION_PROFILE_KEYS = Object.freeze([
+  "capabilityFileId",
+  "claimedJobSourceId",
+  "jobOperations",
+  "operationPhaseIds",
+  "phaseIds",
+  "profileId",
+  "profileSha256",
+]);
+const PHASE_PROFILE_KEYS = Object.freeze([
+  "command",
+  "mountIds",
+  "mutationPolicy",
+  "networkIds",
+  "outputSchema",
+  "phaseId",
+  "phaseSha256",
+  "scratchVolumeIds",
+  "workerImageId",
+  "workerImageRef",
+  "workerSecretSetIds",
+  "writableSubpathIds",
+]);
+
+const ACTION_PLANS = deepFreeze({
+  "backup.catalog": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["catalog.capture"],
+  },
+  "backup.job.execute": {
+    claimedJobSourceId: "jobs.running",
+    jobOperations: ["backup", "restore-drill"],
+    operationPhaseIds: {
+      backup: ["job.backup.capture"],
+      "restore-drill": ["job.restore.verify"],
+    },
+    phaseIds: [],
+  },
+  "backup.prune.plan": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["prune.plan"],
+  },
+  "backup.prune.apply": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["prune.apply"],
+  },
+  "restore.drill.full": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["restore.capture", "restore.verify"],
+  },
+  "backup.offsite.sync": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["offsite.sync"],
+  },
+});
+
+const PHASE_PLANS = deepFreeze({
+  "catalog.capture": phasePlan({
+    command: "backup-catalog",
+    mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
+    mutationPolicy: "backup-write",
+    networkIds: ["platform_db_admin", "platform_storage"],
+    outputSchema: "platform.backup-catalog/v1",
+    workerSecretSetIds: ["manifest.signing"],
+  }),
+  "job.backup.capture": phasePlan({
+    command: "backup-job",
+    mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
+    mutationPolicy: "backup-write",
+    networkIds: ["platform_db_admin", "platform_storage"],
+    outputSchema: "platform.backup-job-result/v1",
+    workerSecretSetIds: ["manifest.signing"],
+  }),
+  "job.restore.verify": phasePlan({
+    command: "restore-job",
+    mountIds: ["backup.root.ro", "report.root.rw"],
+    mutationPolicy: "restore-disposable",
+    networkIds: [],
+    outputSchema: "platform.backup-job-result/v1",
+    scratchVolumeIds: ["restore.scratch"],
+    workerSecretSetIds: ["manifest.verification"],
+  }),
+  "prune.plan": phasePlan({
+    command: "backup-prune-plan",
+    mountIds: ["backup.root.ro", "report.root.rw"],
+    mutationPolicy: "report-only",
+    networkIds: [],
+    outputSchema: "platform.backup-prune-plan/v1",
+    workerSecretSetIds: ["manifest.verification"],
+  }),
+  "prune.apply": phasePlan({
+    command: "backup-prune-apply",
+    mountIds: ["backup.root.rw", "report.root.rw"],
+    mutationPolicy: "retention-apply",
+    networkIds: [],
+    outputSchema: "platform.backup-prune-apply/v1",
+    workerSecretSetIds: ["manifest.verification"],
+    writableSubpathIds: ["backup.quarantine"],
+  }),
+  "restore.capture": phasePlan({
+    command: "backup-catalog",
+    mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
+    mutationPolicy: "backup-write",
+    networkIds: ["platform_db_admin", "platform_storage"],
+    outputSchema: "platform.backup-catalog/v1",
+    workerSecretSetIds: ["manifest.signing"],
+  }),
+  "restore.verify": phasePlan({
+    command: "restore-drill-full",
+    mountIds: ["backup.root.ro", "report.root.rw"],
+    mutationPolicy: "restore-disposable",
+    networkIds: [],
+    outputSchema: "platform.restore-drill/v1",
+    scratchVolumeIds: ["restore.scratch"],
+    workerSecretSetIds: ["manifest.verification"],
+  }),
+  "offsite.sync": phasePlan({
+    command: "backup-offsite-sync",
+    mountIds: ["backup.root.ro", "report.root.rw"],
+    mutationPolicy: "offsite-write",
+    networkIds: ["platform_egress"],
+    outputSchema: "platform.offsite-backup-receipt/v1",
+    workerSecretSetIds: ["manifest.verification", "offsite.credentials"],
+  }),
+});
 
 export function canonicalJson(value) {
   return JSON.stringify(canonicalValue(value));
@@ -97,6 +256,14 @@ export function hmac(value, key) {
   return crypto.createHmac("sha256", normalizeKey(key)).update(canonicalJson(value)).digest("hex");
 }
 
+function domainHmac(schema, value, key) {
+  return crypto
+    .createHmac("sha256", normalizeKey(key))
+    .update(`${schema}\0`)
+    .update(canonicalJson(value))
+    .digest("hex");
+}
+
 export function signRuntimeIntent(intent, trustKey) {
   const unsigned = withoutKey(intent, "mac");
   return { ...unsigned, mac: hmac(unsigned, trustKey) };
@@ -104,7 +271,12 @@ export function signRuntimeIntent(intent, trustKey) {
 
 export function signActionRequest(request, capabilityKey) {
   const unsigned = withoutKey(request, "mac");
-  return { ...unsigned, mac: hmac(unsigned, capabilityKey) };
+  return { ...unsigned, mac: domainHmac(REQUEST_SCHEMA, unsigned, capabilityKey) };
+}
+
+export function signActionResponse(response, capabilityKey) {
+  const unsigned = withoutKey(response, "mac");
+  return { ...unsigned, mac: domainHmac(RESPONSE_SCHEMA, unsigned, capabilityKey) };
 }
 
 export function normalizeTrustedContext(intentValue, receiptValue, trustKey, { now = Date.now() } = {}) {
@@ -233,6 +405,9 @@ export function normalizeActionRequest(value, trusted, capabilityKey, { now = Da
   if (Math.abs(now - issuedAt) > MAX_CLOCK_SKEW_MS) fail(401, "request timestamp is outside the accepted window");
 
   const action = String(request.action ?? "");
+  if (!/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(action)) {
+    fail(403, "action grammar is invalid");
+  }
   const contract = ACTIONS[action];
   if (!contract) fail(403, "action is not authorized");
   if (!trusted.intent.allowedActions.includes(action)) fail(403, "action is not enabled by runtime intent");
@@ -242,8 +417,14 @@ export function normalizeActionRequest(value, trusted, capabilityKey, { now = Da
   if (!constantEqual(String(request.combinedRenderSha256 ?? ""), trusted.receipt.combinedRenderSha256)) {
     fail(403, "request combined render digest does not match");
   }
+  const capabilityFile = trusted.receipt?.resources?.capabilityFiles?.[`capability.${action}`];
+  if (!capabilityFile
+    || !constantEqual(capabilityFile.brokerPath, contract.capabilityFile)
+    || !constantEqual(capabilityFile.sha256, sha256(normalizeKey(capabilityKey)))) {
+    fail(403, "capability file digest or action binding does not match loaded capability bytes");
+  }
   const parameters = normalizeParameters(action, request.parameters, trusted.receipt.resources);
-  verifyMac(request, capabilityKey, "request");
+  verifyDomainMac(request, capabilityKey, REQUEST_SCHEMA, "request");
   return Object.freeze({
     action,
     capabilityId: contract.capabilityId,
@@ -275,19 +456,176 @@ export function buildUnsignedRequest(action, parameters, trusted, { now = Date.n
   };
 }
 
+export function normalizeActionResponse(value, requestValue, capabilityKey) {
+  const response = assertPlainObject(value, "response");
+  const request = assertPlainObject(requestValue, "signed request");
+  assertExactKeys(request, [
+    "action",
+    "activeReceiptSha256",
+    "capabilityId",
+    "combinedRenderSha256",
+    "expiresAt",
+    "issuedAt",
+    "mac",
+    "nonce",
+    "parameters",
+    "requestId",
+    "runtimeIntentId",
+    "schema",
+  ], "signed request");
+  if (request.schema !== REQUEST_SCHEMA || !SHA256.test(String(request.mac ?? ""))) {
+    fail(400, "signed request schema or authentication envelope is invalid");
+  }
+  assertExactKeys(response, [
+    "action",
+    "errorCode",
+    "mac",
+    "requestId",
+    "requestSha256",
+    "result",
+    "resultSha256",
+    "schema",
+    "status",
+    "statusCode",
+  ], "response");
+  if (response.schema !== RESPONSE_SCHEMA) fail(400, "unsupported response schema");
+  verifyDomainMac(response, capabilityKey, RESPONSE_SCHEMA, "response");
+
+  const action = String(response.action ?? "");
+  if (!/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(action)) {
+    fail(403, "response action grammar is invalid");
+  }
+  if (!Object.hasOwn(ACTIONS, action) || action !== request.action) {
+    fail(403, "response action identity does not exactly match the request binding");
+  }
+  if (response.requestId !== request.requestId) fail(403, "response request identity does not match");
+  const expectedRequestSha256 = sha256(canonicalJson(request));
+  if (!SHA256.test(String(response.requestSha256 ?? ""))
+    || !constantEqual(response.requestSha256, expectedRequestSha256)) {
+    fail(403, "response signed-request digest binding does not match");
+  }
+  if (!SHA256.test(String(response.resultSha256 ?? ""))
+    || !constantEqual(response.resultSha256, sha256(canonicalJson(response.result)))) {
+    fail(403, "response result digest binding does not match");
+  }
+
+  if (response.status === "completed") {
+    if (response.statusCode !== 200 || response.errorCode !== null || response.result === null) {
+      fail(403, "completed response status contract is invalid");
+    }
+    normalizeActionResult(response.result, request);
+  } else if (response.status === "rejected") {
+    if (!Number.isSafeInteger(response.statusCode) || response.statusCode < 400 || response.statusCode > 599
+      || !/^[A-Z][A-Z0-9_]{2,63}$/.test(String(response.errorCode ?? ""))
+      || response.result !== null) {
+      fail(403, "rejected response status contract is invalid");
+    }
+  } else {
+    fail(403, "response status is invalid");
+  }
+  return deepFreeze(structuredClone(response));
+}
+
+function normalizeActionResult(value, request) {
+  const result = assertPlainObject(value, "action result");
+  assertExactKeys(result, ["action", "job", "phases", "schema", "status"], "action result");
+  if (result.schema !== RESULT_SCHEMA || result.status !== "completed") {
+    fail(403, "action result schema or status is invalid");
+  }
+  if (result.action !== request.action || !Object.hasOwn(ACTIONS, result.action)) {
+    fail(403, "action result identity does not exactly match the request binding");
+  }
+
+  const isEvidence = result.action === "evidence.runtime.snapshot";
+  const isJob = result.action === "backup.job.execute";
+  if (isJob) {
+    const job = assertPlainObject(result.job, "action result job");
+    assertExactKeys(job, ["jobFileName", "jobId", "jobOperation", "jobSha256"], "action result job");
+    if (canonicalJson(job) !== canonicalJson(request.parameters)) {
+      fail(403, "action result job identity or operation does not exactly match the request binding");
+    }
+  } else if (result.job !== null) {
+    fail(403, "fixed action result must not contain a job identity");
+  }
+
+  const expectedPhaseIds = isEvidence
+    ? ["evidence.runtime.snapshot"]
+    : isJob
+      ? ACTION_PLANS[result.action].operationPhaseIds[request.parameters.jobOperation]
+      : ACTION_PLANS[result.action].phaseIds;
+  if (!Array.isArray(result.phases)
+    || canonicalJson(result.phases.map((phase) => phase?.phaseId)) !== canonicalJson(expectedPhaseIds)) {
+    fail(403, "action result phase plan does not exactly match the request binding");
+  }
+  for (const [index, phaseValue] of result.phases.entries()) {
+    const phase = assertPlainObject(phaseValue, `action result phase ${index}`);
+    assertExactKeys(phase, [
+      "output",
+      "outputSchema",
+      "outputSha256",
+      "phaseId",
+      "status",
+    ], `action result phase ${index}`);
+    const expectedPhaseId = expectedPhaseIds[index];
+    const expectedOutputSchema = isEvidence
+      ? "platform.docker-runtime-snapshot/v2"
+      : PHASE_PLANS[expectedPhaseId].outputSchema;
+    if (phase.phaseId !== expectedPhaseId || phase.status !== "completed"
+      || phase.outputSchema !== expectedOutputSchema) {
+      fail(403, `action result phase ${index} identity, status or output schema is invalid`);
+    }
+    const output = assertPlainObject(phase.output, `action result phase ${phase.phaseId} output`);
+    if (output.schema !== expectedOutputSchema) {
+      fail(403, `action result phase ${phase.phaseId} output schema binding is invalid`);
+    }
+    const encodedOutput = canonicalJson(output);
+    if (Buffer.byteLength(encodedOutput) > MAX_PHASE_OUTPUT_BYTES) {
+      fail(403, `action result phase ${phase.phaseId} output exceeds the bounded contract`);
+    }
+    if (!SHA256.test(String(phase.outputSha256 ?? ""))
+      || !constantEqual(phase.outputSha256, sha256(encodedOutput))) {
+      fail(403, `action result phase ${phase.phaseId} output digest binding is invalid`);
+    }
+    if (isJob && (output.jobId !== request.parameters.jobId
+      || output.jobOperation !== request.parameters.jobOperation)) {
+      fail(403, `action result phase ${phase.phaseId} job identity or operation binding is invalid`);
+    }
+  }
+  return result;
+}
+
 function normalizeParameters(action, value, resources) {
   const parameters = assertPlainObject(value, "parameters");
   assertExactKeys(parameters, ACTIONS[action].parameters, "parameters");
   if (action !== "backup.job.execute") return Object.freeze({});
-  const jobId = String(parameters.jobId ?? "").toLowerCase();
-  if (!UUID_V4.test(jobId)) fail(400, "jobId must be a UUID v4");
+  const jobId = String(parameters.jobId ?? "");
+  const jobFileName = String(parameters.jobFileName ?? "");
+  const jobOperation = String(parameters.jobOperation ?? "");
+  const jobSha256 = String(parameters.jobSha256 ?? "");
+  if (!/^[a-z0-9][a-z0-9-]{15,127}$/.test(jobId)) fail(400, "job identity is invalid");
+  if (jobFileName !== `${jobId}.json`) fail(400, "job file name does not exactly match job identity");
+  if (!["backup", "restore-drill"].includes(jobOperation)) fail(400, "job operation is invalid");
+  if (!SHA256.test(jobSha256)) fail(400, "job digest is invalid");
   if (!Object.keys(resources.backupResources).length) fail(403, "active receipt contains no admitted backup resources");
-  return Object.freeze({ jobId });
+  return Object.freeze({ jobFileName, jobId, jobOperation, jobSha256 });
 }
 
 function normalizeResources(value) {
   const resources = assertPlainObject(value, "active receipt resources");
-  assertExactKeys(resources, ["backupResources", "containers", "mounts", "workerImage"], "active receipt resources");
+  assertExactKeys(resources, [
+    "actionProfiles",
+    "backupResources",
+    "capabilityFiles",
+    "claimedJobSources",
+    "containers",
+    "mounts",
+    "networks",
+    "phaseProfiles",
+    "volumes",
+    "workerSecretSets",
+    "writableSubpaths",
+  ], "active receipt resources");
+
   const backupResources = normalizeMap(resources.backupResources, "backupResources", normalizeBackupResource, BACKUP_RESOURCE_ID);
   const containers = normalizeMap(resources.containers, "containers", (entry, logicalId) => {
     assertExactKeys(entry, ["authority", "containerId", "expectedHealth", "expectedState", "imageId", "imageRef", "labels", "name"], `container ${logicalId}`);
@@ -310,7 +648,79 @@ function normalizeResources(value) {
       expectedHealth: entry.expectedHealth,
     });
   });
-  const mounts = normalizeMap(resources.mounts, "mounts", (entry, logicalId) => {
+
+  const capabilityFiles = normalizeExactMap(
+    resources.capabilityFiles,
+    Object.keys(ACTIONS).map((action) => `capability.${action}`),
+    "capabilityFiles",
+    (entry, fileId) => {
+      assertExactKeys(entry, [
+        "brokerPath",
+        "device",
+        "inode",
+        "mode",
+        "ownerGid",
+        "ownerUid",
+        "sha256",
+        "symlinkFree",
+      ], `capability file ${fileId}`);
+      const action = fileId.slice("capability.".length);
+      const binding = ACTIONS[action];
+      if (!binding || entry.brokerPath !== binding.capabilityFile) {
+        fail(403, `capability file ${fileId} action binding is invalid`);
+      }
+      assertProtectedFile(entry, `capability file ${fileId}`);
+      return Object.freeze({ ...entry });
+    },
+  );
+
+  const claimedJobSources = normalizeExactMap(
+    resources.claimedJobSources,
+    ["jobs.running"],
+    "claimedJobSources",
+    (entry, sourceId) => {
+      assertExactKeys(entry, [
+        "brokerRoot",
+        "maximumBytes",
+        "snapshotContainerPath",
+        "snapshotVolumeId",
+        "snapshotVolumeSubpath",
+        "volumeId",
+        "volumeSubpath",
+      ], `claimed-job source ${sourceId}`);
+      if (entry.brokerRoot !== "/run/platform/backup-jobs/running"
+        || entry.volumeId !== "jobs.queue"
+        || entry.volumeSubpath !== "running"
+        || entry.snapshotVolumeId !== "broker.state"
+        || entry.snapshotContainerPath !== "/run/platform/claimed-job/job.json"
+        || entry.snapshotVolumeSubpath !== "claimed-jobs"
+        || !Number.isSafeInteger(entry.maximumBytes)
+        || entry.maximumBytes < 1
+        || entry.maximumBytes > 1024 * 1024) {
+        fail(403, `claimed-job source ${sourceId} canonical binding is invalid`);
+      }
+      for (const pathValue of [entry.brokerRoot, entry.snapshotContainerPath]) {
+        if (pathValue.includes("/../") || pathValue.includes("/./") || pathValue.includes("\0")) {
+          fail(403, `claimed-job source ${sourceId} path is invalid`);
+        }
+      }
+      for (const subpath of [entry.volumeSubpath, entry.snapshotVolumeSubpath]) {
+        if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(subpath)) {
+          fail(403, `claimed-job source ${sourceId} subpath is invalid`);
+        }
+      }
+      return Object.freeze({ ...entry });
+    },
+  );
+
+  const expectedMounts = {
+    "backup.root.ro": ["ro", "/srv/platform/backups", "/data/backups"],
+    "backup.root.rw": ["rw", "/srv/platform/backups", "/data/backups"],
+    "report.root.rw": ["rw", "/srv/platform/reports", "/data/reports"],
+    "source.root.ro": ["ro", "/srv/platform/project-sources", "/data/source"],
+    "state.catalog.ro": ["ro", "/srv/platform/project-state", "/data/state"],
+  };
+  const mounts = normalizeExactMap(resources.mounts, Object.keys(expectedMounts), "mounts", (entry, logicalId) => {
     assertExactKeys(entry, [
       "access",
       "canonicalPath",
@@ -329,37 +739,274 @@ function normalizeResources(value) {
       fail(403, `mount ${logicalId} host path is outside the fixed platform root`);
     }
     if (!ALLOWED_CONTAINER_PATHS.has(containerPath)) fail(403, `mount ${logicalId} container path is not policy approved`);
-    if (!["ro", "rw"].includes(entry.access)) fail(403, `mount ${logicalId} access is invalid`);
-    if (entry.kind !== "directory" || entry.symlinkFree !== true || entry.ownerUid !== 0 || entry.ownerGid !== 0
+    const expected = expectedMounts[logicalId];
+    if (!expected || entry.access !== expected[0] || hostPath !== expected[1] || containerPath !== expected[2]) {
+      fail(403, `mount ${logicalId} canonical identity is invalid`);
+    }
+    if (entry.kind !== "host-directory" || entry.symlinkFree !== true || entry.ownerUid !== 0 || entry.ownerGid !== 0
       || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode < 1
-      || !Number.isSafeInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o7777 || (entry.mode & 0o022) !== 0) {
+      || !Number.isSafeInteger(entry.mode) || entry.mode !== 0o700) {
       fail(403, `mount ${logicalId} attestation is invalid`);
     }
-    return Object.freeze({
-      access: entry.access,
-      containerPath,
-      hostPath,
-      device: entry.device,
-      inode: entry.inode,
-      kind: entry.kind,
-      mode: entry.mode,
-      ownerUid: entry.ownerUid,
-      ownerGid: entry.ownerGid,
-      symlinkFree: true,
-    });
+    return Object.freeze({ ...entry });
   });
-  const workerImage = assertPlainObject(resources.workerImage, "worker image");
-  assertExactKeys(workerImage, ["imageId", "imageRef"], "worker image");
-  if (!DIGEST_IMAGE.test(String(workerImage.imageRef ?? "")) || !/^sha256:[a-f0-9]{64}$/.test(String(workerImage.imageId ?? ""))) {
-    fail(403, "worker image reference and image ID must be digest pinned");
-  }
+
+  const networkIdentity = {
+    platform_db_admin: ["platform_db_admin", true, false],
+    platform_storage: ["platform_storage", true, false],
+    platform_egress: ["platform_egress", false, true],
+  };
+  const networks = normalizeExactMap(resources.networks, Object.keys(networkIdentity), "networks", (entry, logicalId) => {
+    assertExactKeys(entry, [
+      "driver",
+      "engineId",
+      "engineName",
+      "externalEgress",
+      "internal",
+      "labelsSha256",
+      "membershipSha256",
+      "optionsSha256",
+      "scope",
+      "subnetSha256",
+    ], `network ${logicalId}`);
+    const [engineName, internal, externalEgress] = networkIdentity[logicalId];
+    if (entry.engineName !== engineName || entry.driver !== "bridge" || entry.scope !== "local"
+      || entry.internal !== internal || entry.externalEgress !== externalEgress
+      || !SHA256.test(String(entry.engineId ?? ""))) {
+      fail(403, `network ${logicalId} canonical identity is invalid`);
+    }
+    for (const key of ["labelsSha256", "membershipSha256", "optionsSha256", "subnetSha256"]) {
+      if (!SHA256.test(String(entry[key] ?? ""))) fail(403, `network ${logicalId} ${key} is invalid`);
+    }
+    return Object.freeze({ ...entry });
+  });
+
+  const volumeIdentity = {
+    "broker.state": ["platform_infra_vps_docker_action_broker_state", null],
+    "jobs.queue": ["platform_infra_vps_backup_scheduler_jobs", null],
+    "restore.scratch": ["platform_docker_action_restore_scratch", "/run/platform/restore-scratch"],
+    "worker.input.manifest-signing": ["platform_docker_action_manifest_signing", null],
+    "worker.input.manifest-verification": ["platform_docker_action_manifest_verification", null],
+    "worker.input.offsite": ["platform_docker_action_offsite_credentials", null],
+  };
+  const volumes = normalizeExactMap(resources.volumes, Object.keys(volumeIdentity), "volumes", (entry, logicalId) => {
+    assertExactKeys(entry, [
+      "containerPath",
+      "driver",
+      "engineName",
+      "labelsSha256",
+      "optionsSha256",
+      "scope",
+    ], `volume ${logicalId}`);
+    const [engineName, containerPath] = volumeIdentity[logicalId];
+    if (entry.engineName !== engineName || entry.containerPath !== containerPath
+      || entry.driver !== "local" || entry.scope !== "local"
+      || !SHA256.test(String(entry.labelsSha256 ?? ""))
+      || !SHA256.test(String(entry.optionsSha256 ?? ""))) {
+      fail(403, `volume ${logicalId} canonical identity is invalid`);
+    }
+    return Object.freeze({ ...entry });
+  });
+
+  const secretSetIdentity = {
+    "manifest.signing": [
+      "/run/platform/worker-secrets/manifest-signing",
+      "worker.input.manifest-signing",
+      { key: "signing.key" },
+    ],
+    "manifest.verification": [
+      "/run/platform/worker-secrets/manifest-verification",
+      "worker.input.manifest-verification",
+      { key: "verification.pub" },
+    ],
+    "offsite.credentials": [
+      "/run/platform/worker-secrets/offsite",
+      "worker.input.offsite",
+      { password: "password", repository: "repository" },
+    ],
+  };
+  const workerSecretSets = normalizeExactMap(
+    resources.workerSecretSets,
+    Object.keys(secretSetIdentity),
+    "workerSecretSets",
+    (entry, logicalId) => {
+      assertExactKeys(entry, ["containerRoot", "files", "volumeId"], `worker secret set ${logicalId}`);
+      const [containerRoot, volumeId, expectedFiles] = secretSetIdentity[logicalId];
+      if (entry.containerRoot !== containerRoot || entry.volumeId !== volumeId || !volumes[volumeId]) {
+        fail(403, `worker secret set ${logicalId} canonical volume binding is invalid`);
+      }
+      const files = normalizeExactMap(entry.files, Object.keys(expectedFiles), `worker secret set ${logicalId} files`, (file, fileId) => {
+        assertExactKeys(file, [
+          "device",
+          "inode",
+          "mode",
+          "ownerGid",
+          "ownerUid",
+          "relativePath",
+          "sha256",
+          "symlinkFree",
+        ], `worker secret ${logicalId}.${fileId}`);
+        assertProtectedFile(file, `worker secret ${logicalId}.${fileId}`);
+        if (file.relativePath !== expectedFiles[fileId]) {
+          fail(403, `worker secret ${logicalId}.${fileId} relative path is invalid`);
+        }
+        return Object.freeze({ ...file });
+      });
+      return Object.freeze({ ...entry, files });
+    },
+  );
+
+  const writableSubpaths = normalizeExactMap(
+    resources.writableSubpaths,
+    ["backup.quarantine"],
+    "writableSubpaths",
+    (entry, logicalId) => {
+      assertExactKeys(entry, ["device", "mountId", "relativePath"], `writable subpath ${logicalId}`);
+      const mount = mounts[entry.mountId];
+      if (entry.mountId !== "backup.root.rw" || entry.relativePath !== ".quarantine"
+        || !mount || mount.access !== "rw" || entry.device !== mount.device) {
+        fail(403, `writable subpath ${logicalId} canonical mount binding is invalid`);
+      }
+      return Object.freeze({ ...entry });
+    },
+  );
+
+  const actionProfiles = normalizeActionProfiles(resources.actionProfiles, {
+    capabilityFiles,
+    claimedJobSources,
+  });
+  const phaseProfiles = normalizePhaseProfiles(resources.phaseProfiles, {
+    mounts,
+    networks,
+    volumes,
+    workerSecretSets,
+    writableSubpaths,
+  });
+
   validateContainerMountAuthority(containers, mounts);
-  return Object.freeze({
+  return deepFreeze({
+    actionProfiles,
     backupResources,
+    capabilityFiles,
+    claimedJobSources,
     containers,
     mounts,
-    workerImage: Object.freeze({ imageRef: workerImage.imageRef, imageId: workerImage.imageId }),
+    networks,
+    phaseProfiles,
+    volumes,
+    workerSecretSets,
+    writableSubpaths,
   });
+}
+
+function normalizeActionProfiles(value, { capabilityFiles, claimedJobSources }) {
+  return normalizeExactMap(value, Object.keys(SCHEDULER_ACTIONS), "actionProfiles", (entry, action) => {
+    assertExactKeys(entry, ACTION_PROFILE_KEYS, `action profile ${action}`);
+    const plan = ACTION_PLANS[action];
+    const expected = {
+      capabilityFileId: `capability.${action}`,
+      claimedJobSourceId: plan.claimedJobSourceId,
+      jobOperations: plan.jobOperations,
+      operationPhaseIds: plan.operationPhaseIds,
+      phaseIds: plan.phaseIds,
+      profileId: ACTIONS[action].profileId,
+    };
+    const unsigned = withoutKey(entry, "profileSha256");
+    if (!SHA256.test(String(entry.profileSha256 ?? ""))
+      || !constantEqual(entry.profileSha256, sha256(canonicalJson(unsigned)))) {
+      fail(403, `action profile ${action} digest is invalid`);
+    }
+    if (canonicalJson(unsigned) !== canonicalJson(expected)) {
+      fail(403, `action profile ${action} canonical identity or phase binding is invalid`);
+    }
+    if (!capabilityFiles[entry.capabilityFileId]) {
+      fail(403, `action profile ${action} capability file binding is missing`);
+    }
+    if (entry.claimedJobSourceId !== null && !claimedJobSources[entry.claimedJobSourceId]) {
+      fail(403, `action profile ${action} claimed-job source binding is missing`);
+    }
+    return deepFreeze(structuredClone(entry));
+  });
+}
+
+function normalizePhaseProfiles(value, {
+  mounts,
+  networks,
+  volumes,
+  workerSecretSets,
+  writableSubpaths,
+}) {
+  return normalizeExactMap(value, Object.keys(PHASE_PLANS), "phaseProfiles", (entry, phaseId) => {
+    assertExactKeys(entry, PHASE_PROFILE_KEYS, `phase profile ${phaseId}`);
+    if (entry.phaseId !== phaseId) fail(403, `phase profile ${phaseId} identity is invalid`);
+    const unsigned = withoutKey(entry, "phaseSha256");
+    if (!SHA256.test(String(entry.phaseSha256 ?? ""))
+      || !constantEqual(entry.phaseSha256, sha256(canonicalJson(unsigned)))) {
+      fail(403, `phase profile ${phaseId} digest is invalid`);
+    }
+    const expected = PHASE_PLANS[phaseId];
+    for (const field of [
+      "command",
+      "mountIds",
+      "mutationPolicy",
+      "networkIds",
+      "outputSchema",
+      "scratchVolumeIds",
+      "workerSecretSetIds",
+      "writableSubpathIds",
+    ]) {
+      if (canonicalJson(entry[field]) !== canonicalJson(expected[field])) {
+        fail(403, `phase profile ${phaseId} canonical ${field} binding is invalid`);
+      }
+    }
+    if (!/^sha256:[a-f0-9]{64}$/.test(String(entry.workerImageId ?? ""))
+      || !DIGEST_IMAGE.test(String(entry.workerImageRef ?? ""))
+      || !entry.workerImageRef.endsWith(`@${entry.workerImageId}`)) {
+      fail(403, `phase profile ${phaseId} worker image binding is invalid`);
+    }
+    for (const mountId of entry.mountIds) {
+      if (!mounts[mountId]) fail(403, `phase profile ${phaseId} has a dangling mount binding`);
+    }
+    for (const networkId of entry.networkIds) {
+      if (!networks[networkId]) fail(403, `phase profile ${phaseId} has a dangling network binding`);
+    }
+    for (const volumeId of entry.scratchVolumeIds) {
+      if (!volumes[volumeId]) fail(403, `phase profile ${phaseId} has a dangling scratch volume binding`);
+    }
+    for (const secretSetId of entry.workerSecretSetIds) {
+      if (secretSetId.startsWith("capability.") || !workerSecretSets[secretSetId]) {
+        fail(403, `phase profile ${phaseId} has a dangling worker secret-set binding`);
+      }
+    }
+    for (const subpathId of entry.writableSubpathIds) {
+      if (!writableSubpaths[subpathId]) fail(403, `phase profile ${phaseId} has a dangling writable-subpath binding`);
+    }
+    if (entry.mountIds.includes("backup.root.ro") && entry.mountIds.includes("backup.root.rw")) {
+      fail(403, `phase profile ${phaseId} mixes read-only and writable backup roots`);
+    }
+    return deepFreeze(structuredClone(entry));
+  });
+}
+
+function normalizeExactMap(value, expectedIds, label, normalize) {
+  const map = assertPlainObject(value, label);
+  if (canonicalJson(Object.keys(map).sort()) !== canonicalJson([...expectedIds].sort())) {
+    fail(403, `${label} contains a missing or unsupported canonical identity`);
+  }
+  const out = {};
+  for (const logicalId of Object.keys(map).sort()) {
+    out[logicalId] = normalize(assertPlainObject(map[logicalId], `${label} ${logicalId}`), logicalId);
+  }
+  return Object.freeze(out);
+}
+
+function assertProtectedFile(entry, label) {
+  if (entry.symlinkFree !== true || entry.ownerUid !== 0 || entry.ownerGid !== 0
+    || entry.mode !== 0o400 || !Number.isSafeInteger(entry.device) || entry.device < 0
+    || !Number.isSafeInteger(entry.inode) || entry.inode < 1
+    || !SHA256.test(String(entry.sha256 ?? ""))) {
+    fail(403, `${label} ownership, identity or digest attestation is invalid`);
+  }
 }
 
 function normalizeMap(value, label, normalize, idPattern = LOGICAL_ID) {
@@ -382,7 +1029,7 @@ function normalizeBackupResource(entry, logicalId) {
     fail(403, `backup resource ${logicalId} ownership is invalid`);
   }
   if (!CONTAINER_NAME.test(String(entry.name ?? ""))) fail(403, `backup resource ${logicalId} name is invalid`);
-  const normalized = { id: logicalId, externalId: entry.externalId, kind, projectId: entry.projectId, name: entry.name };
+  const normalized = { externalId: entry.externalId, kind, name: entry.name, projectId: entry.projectId };
   if (kind === "database") {
     if (!["postgres", "mariadb"].includes(entry.engine)) fail(403, `backup resource ${logicalId} engine is invalid`);
     normalized.engine = entry.engine;
@@ -531,7 +1178,7 @@ function normalizeContainerAuthority(value, logicalId) {
 
 function validateContainerMountAuthority(containers, mounts) {
   const attestations = new Set(Object.values(mounts).map((mount) => canonicalJson({
-    source: mount.hostPath,
+    source: mount.canonicalPath,
     destination: mount.containerPath,
     access: mount.access,
   })));
@@ -565,6 +1212,13 @@ function verifyMac(document, key, label) {
   const actual = String(document.mac ?? "");
   if (!SHA256.test(actual)) fail(401, `${label} authentication failed`);
   const expected = hmac(withoutKey(document, "mac"), key);
+  if (!constantEqual(actual, expected)) fail(401, `${label} authentication failed`);
+}
+
+function verifyDomainMac(document, key, schema, label) {
+  const actual = String(document.mac ?? "");
+  if (!SHA256.test(actual)) fail(401, `${label} authentication failed`);
+  const expected = domainHmac(schema, withoutKey(document, "mac"), key);
   if (!constantEqual(actual, expected)) fail(401, `${label} authentication failed`);
 }
 
@@ -609,6 +1263,34 @@ function constantEqual(left, right) {
   const actual = Buffer.from(String(left));
   const expected = Buffer.from(String(right));
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function phasePlan({
+  command,
+  mountIds,
+  mutationPolicy,
+  networkIds,
+  outputSchema,
+  scratchVolumeIds = [],
+  workerSecretSetIds = [],
+  writableSubpathIds = [],
+}) {
+  return {
+    command,
+    mountIds,
+    mutationPolicy,
+    networkIds,
+    outputSchema,
+    scratchVolumeIds,
+    workerSecretSetIds,
+    writableSubpathIds,
+  };
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
 }
 
 function fail(statusCode, message) {
