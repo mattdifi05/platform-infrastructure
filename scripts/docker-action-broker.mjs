@@ -567,6 +567,316 @@ export function loadProtectedJson(file, maximumBytes = MAX_TRUST_DOCUMENT_BYTES)
   return JSON.parse(readProtectedFile(file, maximumBytes).toString("utf8"));
 }
 
+export function readClaimedJobSnapshot(input, { io } = {}) {
+  if (!isPlainRecord(input) || !hasExactKeys(input, ["parameters", "policy", "source", "sourceId"])) {
+    throw new TypeError("claimed job reader input is invalid");
+  }
+  const { parameters, policy, source, sourceId } = input;
+  if (!isPlainRecord(parameters)
+    || !hasExactKeys(parameters, ["jobFileName", "jobId", "jobOperation", "jobSha256"])
+    || typeof parameters.jobId !== "string"
+    || !/^[a-z0-9][a-z0-9-]{15,127}$/.test(parameters.jobId)
+    || typeof parameters.jobFileName !== "string"
+    || parameters.jobFileName !== `${parameters.jobId}.json`
+    || path.basename(parameters.jobFileName) !== parameters.jobFileName
+    || typeof parameters.jobOperation !== "string"
+    || !["backup", "restore-drill"].includes(parameters.jobOperation)
+    || typeof parameters.jobSha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(parameters.jobSha256)) {
+    throw new TypeError("claimed job filename, identity, operation or digest is invalid");
+  }
+  if (sourceId !== "jobs.running" || !isPlainRecord(source)
+    || !hasExactKeys(source, [
+      "brokerRoot",
+      "maximumBytes",
+      "snapshotContainerPath",
+      "snapshotVolumeId",
+      "snapshotVolumeSubpath",
+      "volumeId",
+      "volumeSubpath",
+    ])
+    || source.volumeId !== "jobs.queue"
+    || source.volumeSubpath !== "running"
+    || source.snapshotVolumeId !== "broker.state"
+    || source.snapshotVolumeSubpath !== "claimed-jobs"
+    || source.snapshotContainerPath !== "/run/platform/claimed-job/job.json"
+    || !Number.isSafeInteger(source.maximumBytes)
+    || source.maximumBytes < 1
+    || source.maximumBytes > 1024 * 1024) {
+    throw new TypeError("claimed job source policy is invalid");
+  }
+  const brokerRoot = source.brokerRoot;
+  if (typeof brokerRoot !== "string" || brokerRoot.includes("\0")
+    || !path.isAbsolute(brokerRoot) || path.resolve(brokerRoot) !== brokerRoot
+    || path.normalize(brokerRoot) !== brokerRoot) {
+    throw new TypeError("claimed job source root is not an exact canonical path");
+  }
+  if (!isPlainRecord(policy)
+    || !hasExactKeys(policy, [
+      "expectedMode",
+      "maximumBytes",
+      "parentRoot",
+    ], ["expectedGid", "expectedUid"])
+    || policy.parentRoot !== brokerRoot
+    || policy.maximumBytes !== source.maximumBytes
+    || policy.expectedMode !== 0o600) {
+    throw new TypeError("claimed job reader policy does not match its source root");
+  }
+  const expectedUid = policy.expectedUid ?? 0;
+  const expectedGid = policy.expectedGid ?? 0;
+  if (!isUnixIdentity(expectedUid) || !isUnixIdentity(expectedGid)) {
+    throw new TypeError("claimed job owner policy is invalid");
+  }
+  if (!io || typeof io !== "object"
+    || !["closeSync", "fstatSync", "lstatSync", "openSync", "readSync"]
+      .every((method) => typeof io[method] === "function")
+    || !Number.isInteger(io.constants?.O_RDONLY)
+    || !Number.isInteger(io.constants?.O_NOFOLLOW)
+    || io.constants.O_NOFOLLOW === 0) {
+    throw new TypeError("claimed job reader requires an injected no-follow filesystem interface");
+  }
+
+  const rootStat = io.lstatSync(brokerRoot, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
+    || statInteger(rootStat.uid) !== expectedUid || statInteger(rootStat.gid) !== expectedGid
+    || (statInteger(rootStat.mode) & 0o777) !== 0o700) {
+    throw new Error("claimed job root directory owner or private mode is unsafe");
+  }
+
+  const leaf = path.join(brokerRoot, parameters.jobFileName);
+  if (path.dirname(leaf) !== brokerRoot || path.basename(leaf) !== parameters.jobFileName) {
+    throw new Error("claimed job filename is not an exact leaf basename");
+  }
+  let descriptor;
+  let bytes;
+  try {
+    descriptor = io.openSync(
+      leaf,
+      io.constants.O_RDONLY | io.constants.O_NOFOLLOW,
+    );
+    const before = io.fstatSync(descriptor, { bigint: true });
+    const size = statInteger(before.size);
+    if (!before.isFile() || before.isSymbolicLink()
+      || statInteger(before.nlink) !== 1
+      || statInteger(before.uid) !== expectedUid || statInteger(before.gid) !== expectedGid
+      || (statInteger(before.mode) & 0o777) !== policy.expectedMode
+      || size < 1 || size > policy.maximumBytes
+      || !hasNanosecondTimestamps(before)) {
+      throw new Error("claimed job leaf owner, private mode, link count, type or size is invalid");
+    }
+    const first = readClaimedJobDescriptor(io, descriptor, size);
+    const second = readClaimedJobDescriptor(io, descriptor, size);
+    const after = io.fstatSync(descriptor, { bigint: true });
+    if (!sameClaimedJobMetadata(before, after)) {
+      throw new Error("claimed job descriptor metadata changed while being read");
+    }
+    if (first.length !== second.length || !crypto.timingSafeEqual(first, second)) {
+      throw new Error("claimed job content changed between descriptor reads");
+    }
+    bytes = first;
+  } finally {
+    if (descriptor !== undefined) io.closeSync(descriptor);
+  }
+
+  let document;
+  try {
+    document = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    assertClaimedJobDocument(document, parameters);
+  } catch {
+    throw new Error("claimed job bytes are not a valid typed JSON job document");
+  }
+  if (sha256(bytes) !== parameters.jobSha256) {
+    throw new Error("claimed job byte sha256 does not exactly match the request");
+  }
+  return Object.freeze({
+    bytes,
+    jobFileName: parameters.jobFileName,
+    jobId: parameters.jobId,
+    jobOperation: parameters.jobOperation,
+    jobSha256: parameters.jobSha256,
+    sourceId,
+  });
+}
+
+function assertClaimedJobDocument(document, parameters) {
+  const requiredKeys = [
+    "createdAt",
+    "environment",
+    "finishedAt",
+    "id",
+    "operation",
+    "reportPaths",
+    "requestedBy",
+    "resources",
+    "resultSummary",
+    "schema",
+    "scope",
+    "startedAt",
+    "status",
+    "updatedAt",
+  ];
+  if (!isPlainRecord(document)
+    || !hasExactKeys(document, requiredKeys, ["manifestPath", "sourceManifestPath"])
+    || document.schema !== "platform.backup-job/v1"
+    || document.id !== parameters.jobId
+    || document.operation !== parameters.jobOperation
+    || !isExactText(document.requestedBy, /^[A-Za-z0-9@._:+/-]+$/, 200)
+    || !isExactText(document.environment, /^[a-z0-9-]+$/, 32)
+    || !["queued", "running", "done", "failed"].includes(document.status)
+    || !isExactIsoTime(document.createdAt) || !isExactIsoTime(document.updatedAt)
+    || !isNullableExactIsoTime(document.startedAt) || !isNullableExactIsoTime(document.finishedAt)
+    || typeof document.resultSummary !== "string" || document.resultSummary.length > 500
+    || !Array.isArray(document.reportPaths) || document.reportPaths.length > 32
+    || document.reportPaths.some((candidate) => !isExactRelativeBackupPath(candidate))) {
+    throw new Error("claimed job typed schema, identity, operation, status or timestamps are invalid");
+  }
+  if (!isPlainRecord(document.scope)
+    || !hasExactKeys(document.scope, ["id", "kind"])
+    || !["application", "platform"].includes(document.scope.kind)
+    || (document.scope.kind === "platform"
+      ? document.scope.id !== "platform"
+      : !isProjectIdentifier(document.scope.id))) {
+    throw new Error("claimed job scope is invalid");
+  }
+  if (!Array.isArray(document.resources) || document.resources.length < 1
+    || document.resources.length > 256) {
+    throw new Error("claimed job resources are invalid");
+  }
+  const resourceIds = new Set();
+  for (const resource of document.resources) {
+    assertClaimedJobResource(resource, document.scope);
+    if (resourceIds.has(resource.id)) throw new Error("claimed job contains a duplicate resource");
+    resourceIds.add(resource.id);
+  }
+  if (document.operation === "restore-drill") {
+    if (!isExactRelativeBackupPath(document.sourceManifestPath)
+      || !document.sourceManifestPath.startsWith("manifests/")) {
+      throw new Error("claimed restore job source manifest is invalid");
+    }
+  } else if (Object.hasOwn(document, "sourceManifestPath")) {
+    throw new Error("claimed backup job contains a restore source manifest");
+  }
+  if (Object.hasOwn(document, "manifestPath")
+    && !isExactRelativeBackupPath(document.manifestPath)) {
+    throw new Error("claimed job manifest path is invalid");
+  }
+}
+
+function assertClaimedJobResource(resource, scope) {
+  if (!isPlainRecord(resource) || typeof resource.kind !== "string") {
+    throw new Error("claimed job resource is invalid");
+  }
+  const kindKeys = {
+    database: ["engine", "externalId", "id", "kind", "name", "projectId"],
+    source: ["externalId", "id", "kind", "name", "projectId", "sourceDirectory"],
+    storage: ["externalId", "id", "kind", "name", "projectId"],
+    "platform-state": ["externalId", "id", "kind", "name", "projectId"],
+  }[resource.kind];
+  if (!kindKeys || !hasExactKeys(resource, kindKeys)
+    || !isGeneralIdentifier(resource.externalId)
+    || resource.id !== `${resource.kind}:${resource.externalId}`
+    || !isProjectIdentifier(resource.projectId)
+    || !isExactText(resource.name, /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/, 128)
+    || (scope.kind === "application" && resource.projectId !== scope.id)
+    || (resource.kind === "platform-state" && resource.projectId !== "platform")
+    || (resource.kind === "database" && !["postgres", "mariadb"].includes(resource.engine))
+    || (resource.kind === "source"
+      && !isExactText(resource.sourceDirectory, /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/, 128))) {
+    throw new Error("claimed job resource identity is invalid");
+  }
+}
+
+function isGeneralIdentifier(value) {
+  return isExactText(value, /^[a-z0-9](?:[a-z0-9._:-]{0,158}[a-z0-9])?$/, 160);
+}
+
+function isProjectIdentifier(value) {
+  return isExactText(value, /^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/, 80);
+}
+
+function isExactText(value, pattern, maximumLength) {
+  return typeof value === "string" && value.length > 0 && value.length <= maximumLength
+    && value.trim() === value && pattern.test(value);
+}
+
+function isExactIsoTime(value) {
+  if (typeof value !== "string") return false;
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) && time.toISOString() === value;
+}
+
+function isNullableExactIsoTime(value) {
+  return value === null || isExactIsoTime(value);
+}
+
+function isExactRelativeBackupPath(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512
+    && value.trim() === value && !value.includes("\0") && !value.includes("\\")
+    && !value.startsWith("/")
+    && value.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+function readClaimedJobDescriptor(io, descriptor, size) {
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = io.readSync(descriptor, bytes, offset, size - offset, offset);
+    if (!Number.isInteger(count) || count < 1 || count > size - offset) {
+      throw new Error("claimed job changed before a complete descriptor read");
+    }
+    offset += count;
+  }
+  return bytes;
+}
+
+function sameClaimedJobMetadata(before, after) {
+  try {
+    return [
+      "dev",
+      "ino",
+      "mode",
+      "uid",
+      "gid",
+      "nlink",
+      "size",
+      "mtimeNs",
+      "ctimeNs",
+      "birthtimeNs",
+    ].every((field) => before[field] === after[field]);
+  } catch {
+    return false;
+  }
+}
+
+function hasNanosecondTimestamps(stat) {
+  return ["mtimeNs", "ctimeNs", "birthtimeNs"]
+    .every((field) => typeof stat[field] === "bigint");
+}
+
+function statInteger(value) {
+  const number = typeof value === "bigint" ? Number(value) : value;
+  return Number.isSafeInteger(number) ? number : Number.NaN;
+}
+
+function isUnixIdentity(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff;
+}
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(value, required, optional = []) {
+  const keys = Object.keys(value).sort();
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => allowed.has(key))
+    && keys.length >= required.length
+    && keys.length <= required.length + optional.length;
+}
+
 export function readProtectedFile(file, maximumBytes = 4096, { expectedUid = 0, expectedGid = 0, parentRoot = "/" } = {}) {
   const resolved = path.resolve(file);
   assertProtectedParentChain(path.dirname(resolved), { expectedUid, expectedGid, parentRoot });
