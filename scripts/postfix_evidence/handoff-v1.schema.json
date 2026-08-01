@@ -8,7 +8,8 @@
     "schema_version",
     "evidence_cutoff_at",
     "candidate_final_commit",
-    "files"
+    "files",
+    "cohort_handoffs"
   ],
   "properties": {
     "schema_version": {"const": 1},
@@ -28,6 +29,7 @@
         "fix_group_ledger",
         "test_receipt_registry",
         "pre_fix_negative_receipt",
+        "pre_fix_test_definition_registry",
         "local_condition_closure",
         "documentation_alignment_receipt",
         "semantic_completion_receipt",
@@ -40,12 +42,33 @@
         "fix_group_ledger": {"$ref": "#/$defs/file"},
         "test_receipt_registry": {"$ref": "#/$defs/file"},
         "pre_fix_negative_receipt": {"$ref": "#/$defs/file"},
+        "pre_fix_test_definition_registry": {"$ref": "#/$defs/file"},
         "local_condition_closure": {"$ref": "#/$defs/file"},
         "documentation_alignment_receipt": {"$ref": "#/$defs/file"},
         "semantic_completion_receipt": {"$ref": "#/$defs/file"},
         "required_matrices": {"$ref": "#/$defs/file"},
         "four_verdicts": {"$ref": "#/$defs/file"},
         "provider_live_residuals": {"$ref": "#/$defs/file"}
+      }
+    },
+    "cohort_handoffs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_auth",
+        "control_services",
+        "hosted",
+        "runtime",
+        "backup_evidence",
+        "release"
+      ],
+      "properties": {
+        "control_auth": {"$ref": "#/$defs/file"},
+        "control_services": {"$ref": "#/$defs/file"},
+        "hosted": {"$ref": "#/$defs/file"},
+        "runtime": {"$ref": "#/$defs/file"},
+        "backup_evidence": {"$ref": "#/$defs/file"},
+        "release": {"$ref": "#/$defs/file"}
       }
     }
   },

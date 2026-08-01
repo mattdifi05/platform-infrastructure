@@ -5,20 +5,23 @@ from __future__ import annotations
 
 import argparse
 import copy
+import ctypes
+import errno
 import json
 import os
-import shutil
+import secrets
+import stat
 import sys
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from scripts.postfix_evidence.common import (
     ContractError,
     canonical_json_bytes,
-    read_regular_bytes,
     scan_secret_bytes,
     sha256_bytes,
+    run_process_bounded,
     tree_index,
     write_bytes,
     write_json,
@@ -27,18 +30,30 @@ from scripts.postfix_evidence.common import (
 )
 from scripts.postfix_evidence.validate_postfix_package import (
     BASELINE_MANIFEST_ARCHIVE_PATH,
+    COHORT_HANDOFF_ARCHIVE_PATHS,
     GROUP_MAP_ARCHIVE_PATH,
     HANDOFF_ARCHIVE_PATHS,
     HANDOFF_MANIFEST_ARCHIVE_PATH,
+    REPLAY_RECEIPT_PATHS,
     TOOL_SOURCE_NAMES,
     TOOL_SOURCE_PACKAGE_PATHS,
     ValidatedInputs,
     _derive_finding_map,
     expected_package_payload_paths,
     expected_baseline_binding,
-    validate_package,
-    validate_source_inputs,
+    replay_source_snapshot_sha256,
+    revalidate_candidate_final_state,
 )
+
+
+WORKER_STDOUT_MAX_BYTES = 4 * 1024 * 1024
+WORKER_STDERR_MAX_BYTES = 1 * 1024 * 1024
+WORKER_OUTPUT_TOTAL_MAX_BYTES = (
+    WORKER_STDOUT_MAX_BYTES + WORKER_STDERR_MAX_BYTES
+)
+WORKER_STDIN_MAX_BYTES = 1024
+CLEANUP_MAX_ENTRIES = 10_000
+CLEANUP_MAX_DEPTH = 128
 
 
 def _copy_verified_log(payload: bytes, expected_sha256: str, destination: Path) -> None:
@@ -124,6 +139,8 @@ def _render_core(
     write_bytes(destination / HANDOFF_MANIFEST_ARCHIVE_PATH, data.handoff_bytes)
     for key, relative in HANDOFF_ARCHIVE_PATHS.items():
         write_bytes(destination / relative, data.handoff_file_bytes[key])
+    for key, relative in COHORT_HANDOFF_ARCHIVE_PATHS.items():
+        write_bytes(destination / relative, data.cohort_handoff_bytes[key])
     for name, relative in TOOL_SOURCE_PACKAGE_PATHS.items():
         write_bytes(destination / relative, tool_sources[name])
 
@@ -178,39 +195,448 @@ def _render_core(
     )
 
 
-def _tool_source_snapshots() -> dict[str, bytes]:
-    root = Path(__file__).parent
+def _validated_input_hashes(data: ValidatedInputs) -> dict[str, str]:
     return {
-        name: read_regular_bytes(root / name, label=f"tool source {name}")
-        for name in TOOL_SOURCE_NAMES
+        "baseline_manifest": data.baseline.manifest_sha256,
+        "security_fix_group_map": data.group_map_sha256,
+        "handoff_manifest": data.handoff_sha256,
+        **{
+            f"handoff:{key}": value
+            for key, value in sorted(data.handoff_file_sha256.items())
+        },
+        **{
+            f"cohort_handoff:{key}": value
+            for key, value in sorted(data.cohort_handoff_sha256.items())
+        },
+    }
+
+
+def _scan_validated_inputs(data: ValidatedInputs) -> None:
+    scan_secret_bytes(data.handoff_bytes, label="handoff manifest")
+    for key, payload in sorted(data.handoff_file_bytes.items()):
+        scan_secret_bytes(payload, label=f"handoff input {key}")
+    for key, payload in sorted(data.cohort_handoff_bytes.items()):
+        scan_secret_bytes(payload, label=f"raw cohort handoff {key}")
+    for receipt_id, payload in sorted(data.test_log_bytes.items()):
+        scan_secret_bytes(payload, label=f"test log {receipt_id}")
+    for group_id, payload in sorted(data.pre_fix_log_bytes.items()):
+        scan_secret_bytes(payload, label=f"pre-fix log {group_id}")
+
+
+def _replay_attestation(
+    data: ValidatedInputs,
+    *,
+    semantic_receipt_sha256: str,
+    core_index: dict[str, dict[str, Any]],
+    tool_sources: dict[str, bytes],
+) -> dict[str, Any]:
+    input_hashes = _validated_input_hashes(data)
+    tool_hashes = {
+        name: sha256_bytes(payload)
+        for name, payload in sorted(tool_sources.items())
+    }
+    source_snapshot = replay_source_snapshot_sha256(
+        candidate_final_commit=data.candidate_final_commit,
+        candidate_final_tree=data.candidate_final_tree,
+        evidence_cutoff_at=data.evidence_cutoff_at,
+        semantic_receipt_sha256=semantic_receipt_sha256,
+        input_sha256=input_hashes,
+        tool_source_sha256=tool_hashes,
+    )
+    return {
+        "schema_version": 1,
+        "candidate_final_commit": data.candidate_final_commit,
+        "candidate_final_tree": data.candidate_final_tree,
+        "evidence_cutoff_at": data.evidence_cutoff_at,
+        "semantic_receipt_sha256": semantic_receipt_sha256,
+        "source_snapshot_sha256": source_snapshot,
+        "core_index_sha256": sha256_bytes(canonical_json_bytes(core_index)),
+        "core_entry_count": len(core_index),
+        "counts": data.counts,
+        "input_sha256": input_hashes,
+        "tool_source_sha256": tool_hashes,
+        "expected_payload_paths": sorted(
+            expected_package_payload_paths(
+                data.test_receipt_rows,
+                data.pre_fix_receipt,
+            )
+        ),
     }
 
 
 def _build_receipt(
-    data: ValidatedInputs,
-    core_hash: str,
-    semantic_sha256: str,
-    tool_sources: dict[str, bytes],
+    attestation: dict[str, Any],
+    replay_receipts: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "tool": "ultra-postfix-evidence-builder",
-        "candidate_final_commit": data.candidate_final_commit,
-        "candidate_final_tree": data.candidate_final_tree,
-        "evidence_cutoff_at": data.evidence_cutoff_at,
-        "semantic_receipt_sha256": semantic_sha256,
-        "core_index_sha256": core_hash,
-        "counts": data.counts,
-        "input_sha256": {
-            "baseline_manifest": data.baseline.manifest_sha256,
-            "security_fix_group_map": data.group_map_sha256,
-            "handoff_manifest": data.handoff_sha256,
-            **{f"handoff:{key}": value for key, value in sorted(data.handoff_file_sha256.items())},
-        },
-        "tool_source_sha256": {
-            name: sha256_bytes(payload) for name, payload in sorted(tool_sources.items())
+        "candidate_final_commit": attestation["candidate_final_commit"],
+        "candidate_final_tree": attestation["candidate_final_tree"],
+        "evidence_cutoff_at": attestation["evidence_cutoff_at"],
+        "semantic_receipt_sha256": attestation[
+            "semantic_receipt_sha256"
+        ],
+        "source_snapshot_sha256": attestation[
+            "source_snapshot_sha256"
+        ],
+        "core_index_sha256": attestation["core_index_sha256"],
+        "counts": attestation["counts"],
+        "input_sha256": attestation["input_sha256"],
+        "tool_source_sha256": attestation["tool_source_sha256"],
+        "validated_replay_ids": sorted(replay_receipts),
+        "replay_receipt_sha256": {
+            replay_id: sha256_bytes(canonical_json_bytes(receipt, pretty=True))
+            for replay_id, receipt in sorted(replay_receipts.items())
         },
     }
+
+
+def _subprocess_environment() -> dict[str, str]:
+    return {
+        "HOME": "/var/empty" if Path("/var/empty").is_dir() else os.sep,
+        "LC_ALL": "C",
+        "PATH": os.defpath,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+    }
+
+
+def _run_json_process(command: list[str], *, label: str) -> dict[str, Any]:
+    completed = run_process_bounded(
+        command,
+        label=label,
+        cwd=Path(__file__).parents[2],
+        env=_subprocess_environment(),
+        timeout=1200,
+        max_stdout_bytes=WORKER_STDOUT_MAX_BYTES,
+        max_stderr_bytes=WORKER_STDERR_MAX_BYTES,
+        max_total_output_bytes=WORKER_OUTPUT_TOTAL_MAX_BYTES,
+        max_stdin_bytes=WORKER_STDIN_MAX_BYTES,
+    )
+    try:
+        value = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        if completed.returncode != 0:
+            raise ContractError(f"{label}: isolated process failed") from error
+        raise ContractError(f"{label}: isolated process returned invalid JSON") from error
+    if completed.returncode != 0:
+        if (
+            isinstance(value, dict)
+            and value.get("ok") is False
+            and isinstance(value.get("error"), str)
+            and 0 < len(value["error"]) <= 4096
+            and "\x00" not in value["error"]
+        ):
+            raise ContractError(f"{label}: {value['error']}")
+        raise ContractError(f"{label}: isolated process failed")
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        raise ContractError(f"{label}: isolated process did not attest success")
+    value = dict(value)
+    del value["ok"]
+    return value
+
+
+def _run_replay_worker(
+    replay_id: str,
+    destination: Path,
+    *,
+    baseline: Path,
+    group_map: Path,
+    handoff: Path,
+    candidate_repo: Path,
+    semantic_receipt_sha256: str,
+) -> dict[str, Any]:
+    return _run_json_process(
+        [
+            sys.executable,
+            "-m",
+            "scripts.postfix_evidence.render_postfix_replay",
+            "--baseline",
+            os.fspath(baseline),
+            "--group-map",
+            os.fspath(group_map),
+            "--handoff",
+            os.fspath(handoff),
+            "--candidate-repo",
+            os.fspath(candidate_repo),
+            "--destination",
+            os.fspath(destination),
+            "--semantic-receipt-sha256",
+            semantic_receipt_sha256,
+        ],
+        label=f"replay {replay_id} render",
+    )
+
+
+def _run_package_validator(
+    replay_id: str,
+    package: Path,
+    *,
+    baseline: Path,
+    group_map: Path,
+    candidate_repo: Path,
+    semantic_receipt_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        **_run_json_process(
+            [
+                sys.executable,
+                "-m",
+                "scripts.postfix_evidence.validate_postfix_package",
+                "--package",
+                os.fspath(package),
+                "--baseline",
+                os.fspath(baseline),
+                "--group-map",
+                os.fspath(group_map),
+                "--candidate-repo",
+                os.fspath(candidate_repo),
+                "--semantic-receipt-sha256",
+                semantic_receipt_sha256,
+            ],
+            label=f"replay {replay_id} package validation",
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class _OutputParentReservation:
+    requested_path: Path
+    canonical_path: Path
+    fd: int
+    device: int
+    inode: int
+    owner_uid: int
+    mode: int
+
+
+def _open_output_parent(path: Path) -> _OutputParentReservation:
+    requested = Path(os.path.abspath(path))
+    try:
+        canonical = requested.resolve(strict=True)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        parent_fd = os.open(canonical, flags)
+        info = os.fstat(parent_fd)
+    except OSError as error:
+        raise ContractError("output: parent directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o022
+    ):
+        os.close(parent_fd)
+        raise ContractError(
+            "output: parent must be an owner-controlled non-writable directory"
+        )
+    return _OutputParentReservation(
+        requested_path=requested,
+        canonical_path=canonical,
+        fd=parent_fd,
+        device=info.st_dev,
+        inode=info.st_ino,
+        owner_uid=info.st_uid,
+        mode=stat.S_IMODE(info.st_mode),
+    )
+
+
+def _verify_output_parent(
+    reservation: _OutputParentReservation,
+    *,
+    destination_name: str,
+    candidate_root: Path,
+    baseline_root: Path,
+) -> None:
+    try:
+        current = reservation.requested_path.resolve(strict=True)
+        path_info = os.stat(current, follow_symlinks=False)
+        fd_info = os.fstat(reservation.fd)
+    except OSError as error:
+        raise ContractError("output: parent identity changed during build") from error
+    expected_identity = (
+        reservation.device,
+        reservation.inode,
+        reservation.owner_uid,
+        reservation.mode,
+    )
+    path_identity = (
+        path_info.st_dev,
+        path_info.st_ino,
+        path_info.st_uid,
+        stat.S_IMODE(path_info.st_mode),
+    )
+    fd_identity = (
+        fd_info.st_dev,
+        fd_info.st_ino,
+        fd_info.st_uid,
+        stat.S_IMODE(fd_info.st_mode),
+    )
+    if (
+        current != reservation.canonical_path
+        or path_identity != expected_identity
+        or fd_identity != expected_identity
+        or not stat.S_ISDIR(path_info.st_mode)
+        or not stat.S_ISDIR(fd_info.st_mode)
+    ):
+        raise ContractError("output: parent identity changed during build")
+    destination = current / destination_name
+    for forbidden_root, label in (
+        (candidate_root, "candidate repository"),
+        (baseline_root, "authoritative baseline"),
+    ):
+        try:
+            destination.relative_to(forbidden_root)
+        except ValueError:
+            pass
+        else:
+            raise ContractError(
+                f"output: publication boundary moved inside the {label}"
+            )
+
+
+def _create_temporary_directory_at(
+    reservation: _OutputParentReservation,
+    *,
+    prefix: str,
+) -> tuple[str, Path]:
+    for _ in range(128):
+        name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=reservation.fd)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise ContractError("output: unable to create replay directory") from error
+        return name, reservation.canonical_path / name
+    raise ContractError("output: unable to reserve a unique replay directory")
+
+
+def _remove_tree_at(
+    parent_fd: int,
+    name: str,
+    *,
+    _entry_count: list[int] | None = None,
+    _depth: int = 0,
+) -> None:
+    if (
+        not isinstance(name, str)
+        or name in {"", ".", ".."}
+        or "/" in name
+        or "\x00" in name
+        or _depth > CLEANUP_MAX_DEPTH
+    ):
+        raise ContractError("output: unsafe cleanup boundary")
+    entry_count = [0] if _entry_count is None else _entry_count
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+            raise ContractError("output: cleanup entry could not be opened") from error
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return
+        except OSError as unlink_error:
+            raise ContractError(
+                "output: non-directory cleanup entry could not be removed"
+            ) from unlink_error
+        return
+    try:
+        try:
+            iterator = os.scandir(child_fd)
+        except OSError as error:
+            raise ContractError("output: cleanup directory could not be enumerated") from error
+        with iterator:
+            for entry in iterator:
+                entry_count[0] += 1
+                if entry_count[0] > CLEANUP_MAX_ENTRIES:
+                    raise ContractError("output: cleanup entry limit exceeded")
+                _remove_tree_at(
+                    child_fd,
+                    entry.name,
+                    _entry_count=entry_count,
+                    _depth=_depth + 1,
+                )
+    finally:
+        os.close(child_fd)
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ContractError("output: cleanup directory could not be removed") from error
+
+
+def _atomic_publish_directory_no_replace(
+    parent_fd: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    """Atomically publish one sibling directory without replacing a target."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    old_path = os.fsencode(source_name)
+    new_path = os.fsencode(destination_name)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        rename_no_replace = libc.renameatx_np
+        rename_no_replace.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_no_replace.restype = ctypes.c_int
+        result = rename_no_replace(
+            parent_fd,
+            old_path,
+            parent_fd,
+            new_path,
+            0x00000004,
+        )
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename_no_replace = libc.renameat2
+        rename_no_replace.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_no_replace.restype = ctypes.c_int
+        result = rename_no_replace(
+            parent_fd,
+            old_path,
+            parent_fd,
+            new_path,
+            0x00000001,
+        )
+    else:
+        raise ContractError(
+            "output: atomic no-replace publication is unsupported"
+        )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise ContractError("output: destination appeared during build")
+    raise ContractError(
+        f"output: atomic no-replace publication failed (errno={error_number})"
+    )
 
 
 def build_package(
@@ -242,82 +668,176 @@ def build_package(
     else:
         raise ContractError("output: package must not be created inside the authoritative baseline")
     output.parent.mkdir(parents=True, exist_ok=True)
-    data = validate_source_inputs(
-        baseline=baseline,
-        group_map=group_map,
-        handoff=handoff,
-        candidate_repo=candidate_repo,
-        semantic_receipt_sha256=semantic_receipt_sha256,
-    )
-    scan_secret_bytes(data.handoff_bytes, label="handoff manifest")
-    for key, payload in sorted(data.handoff_file_bytes.items()):
-        scan_secret_bytes(payload, label=f"handoff input {key}")
-    for receipt_id, payload in sorted(data.test_log_bytes.items()):
-        scan_secret_bytes(payload, label=f"test log {receipt_id}")
-    for group_id, payload in sorted(data.pre_fix_log_bytes.items()):
-        scan_secret_bytes(payload, label=f"pre-fix log {group_id}")
-    tool_sources = _tool_source_snapshots()
-    for name, payload in sorted(tool_sources.items()):
-        scan_secret_bytes(payload, label=f"tool source {name}")
-    replay_a = Path(tempfile.mkdtemp(prefix=".postfix-replay-a-", dir=output.parent))
-    replay_b = Path(tempfile.mkdtemp(prefix=".postfix-replay-b-", dir=output.parent))
+    reservation = _open_output_parent(output.parent)
+    replay_a_name = ""
+    replay_b_name = ""
     published = False
     try:
-        _render_core(replay_a, data, tool_sources)
-        _render_core(replay_b, data, tool_sources)
+        _verify_output_parent(
+            reservation,
+            destination_name=output.name,
+            candidate_root=candidate_root,
+            baseline_root=baseline_root,
+        )
+        replay_a_name, replay_a = _create_temporary_directory_at(
+            reservation,
+            prefix=".postfix-replay-a-",
+        )
+        replay_b_name, replay_b = _create_temporary_directory_at(
+            reservation,
+            prefix=".postfix-replay-b-",
+        )
+        _verify_output_parent(
+            reservation,
+            destination_name=output.name,
+            candidate_root=candidate_root,
+            baseline_root=baseline_root,
+        )
+        attestation_a = _run_replay_worker(
+            "A",
+            replay_a,
+            baseline=baseline,
+            group_map=group_map,
+            handoff=handoff,
+            candidate_repo=candidate_repo,
+            semantic_receipt_sha256=semantic_receipt_sha256,
+        )
+        attestation_b = _run_replay_worker(
+            "B",
+            replay_b,
+            baseline=baseline,
+            group_map=group_map,
+            handoff=handoff,
+            candidate_repo=candidate_repo,
+            semantic_receipt_sha256=semantic_receipt_sha256,
+        )
+        if attestation_a != attestation_b:
+            raise ContractError(
+                "replay: fresh-process source/core attestations differ"
+            )
         index_a = tree_index(replay_a)
         index_b = tree_index(replay_b)
-        if index_a != index_b:
-            raise ContractError("replay: independent core builds are not byte-identical")
         core_hash = sha256_bytes(canonical_json_bytes(index_a))
-        replay_receipt = {
-            "schema_version": 1,
-            "replay_count": 2,
-            "byte_identical": True,
-            "core_index_sha256": core_hash,
+        if (
+            index_a != index_b
+            or core_hash != attestation_a["core_index_sha256"]
+            or len(index_a) != attestation_a["core_entry_count"]
+        ):
+            raise ContractError("replay: independent core builds are not byte-identical")
+        replay_receipts = {
+            replay_id: {
+                "schema_version": 1,
+                "replay_id": replay_id,
+                "execution_model": "fresh-process",
+                "fresh_source_validation": True,
+                "fresh_core_render": True,
+                "package_validation_required_before_publish": True,
+                "candidate_final_commit": attestation_a[
+                    "candidate_final_commit"
+                ],
+                "candidate_final_tree": attestation_a[
+                    "candidate_final_tree"
+                ],
+                "source_snapshot_sha256": attestation_a[
+                    "source_snapshot_sha256"
+                ],
+                "core_index_sha256": core_hash,
+                "core_entry_count": len(index_a),
+            }
+            for replay_id in sorted(REPLAY_RECEIPT_PATHS)
         }
         build_receipt = _build_receipt(
-            data,
-            core_hash,
-            semantic_receipt_sha256,
-            tool_sources,
+            attestation_a,
+            replay_receipts,
         )
         for replay in (replay_a, replay_b):
-            write_json(replay / "receipts/replay_receipt.json", replay_receipt)
+            for replay_id, relative in REPLAY_RECEIPT_PATHS.items():
+                write_json(replay / relative, replay_receipts[replay_id])
             write_json(replay / "receipts/build_receipt.json", build_receipt)
             actual_paths = set(tree_index(replay))
-            expected_paths = set(
-                expected_package_payload_paths(data.test_receipt_rows, data.pre_fix_receipt)
-            )
+            expected_paths = set(attestation_a["expected_payload_paths"])
             if actual_paths != expected_paths:
                 raise ContractError("package allowlist: builder produced missing or extra files")
             write_manifest(replay)
+        validation_a = _run_package_validator(
+            "A",
+            replay_a,
+            baseline=baseline,
+            group_map=group_map,
+            candidate_repo=candidate_repo,
+            semantic_receipt_sha256=semantic_receipt_sha256,
+        )
+        validation_b = _run_package_validator(
+            "B",
+            replay_b,
+            baseline=baseline,
+            group_map=group_map,
+            candidate_repo=candidate_repo,
+            semantic_receipt_sha256=semantic_receipt_sha256,
+        )
+        if validation_a != validation_b:
+            raise ContractError(
+                "replay: independent package validation results differ"
+            )
         if tree_index(replay_a) != tree_index(replay_b):
             raise ContractError("replay: complete package builds are not byte-identical")
-        if output.exists() or output.is_symlink():
-            raise ContractError("output: destination appeared during build")
-        replay_a.rename(output)
+        revalidate_candidate_final_state(
+            candidate_repo,
+            expected_commit=attestation_a["candidate_final_commit"],
+            expected_tree=attestation_a["candidate_final_tree"],
+            expected_tool_source_sha256=attestation_a[
+                "tool_source_sha256"
+            ],
+        )
+        _verify_output_parent(
+            reservation,
+            destination_name=output.name,
+            candidate_root=candidate_root,
+            baseline_root=baseline_root,
+        )
+        _atomic_publish_directory_no_replace(
+            reservation.fd,
+            replay_a_name,
+            output.name,
+        )
         published = True
         try:
-            validation = validate_package(
-                package=output,
-                baseline=baseline,
-                group_map=group_map,
-                candidate_repo=candidate_repo,
-                semantic_receipt_sha256=semantic_receipt_sha256,
+            _verify_output_parent(
+                reservation,
+                destination_name=output.name,
+                candidate_root=candidate_root,
+                baseline_root=baseline_root,
             )
-        except Exception:
-            shutil.rmtree(output, ignore_errors=True)
-            published = False
+            revalidate_candidate_final_state(
+                candidate_repo,
+                expected_commit=attestation_a["candidate_final_commit"],
+                expected_tree=attestation_a["candidate_final_tree"],
+                expected_tool_source_sha256=attestation_a[
+                    "tool_source_sha256"
+                ],
+            )
+        except ContractError:
+            _remove_tree_at(reservation.fd, output.name)
             raise
-        return validation
+        return validation_a
     finally:
-        if replay_a.exists():
-            shutil.rmtree(replay_a, ignore_errors=True)
-        if replay_b.exists():
-            shutil.rmtree(replay_b, ignore_errors=True)
-        if not published and output.exists() and output.name.startswith(".postfix-replay-"):
-            shutil.rmtree(output, ignore_errors=True)
+        cleanup_error: ContractError | None = None
+        for replay_name in (replay_a_name, replay_b_name):
+            if not replay_name:
+                continue
+            try:
+                _remove_tree_at(reservation.fd, replay_name)
+            except ContractError as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None and published:
+            try:
+                _remove_tree_at(reservation.fd, output.name)
+            except ContractError as error:
+                cleanup_error = error
+        os.close(reservation.fd)
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.postfix_evidence.common import (
+    ByteBudget,
     ContractError,
     SHA1_RE,
     SHA256_RE,
@@ -27,7 +28,9 @@ from scripts.postfix_evidence.common import (
     ensure_path_at_commit,
     exact_keys,
     git,
+    git_blob,
     git_head,
+    git_optional_text,
     git_text,
     git_tree,
     load_json_bytes,
@@ -42,7 +45,28 @@ from scripts.postfix_evidence.common import (
     sha256_file,
     string_list,
     validate_manifest_snapshot,
+    with_immutable_git_query_cache,
 )
+
+
+MIB = 1024 * 1024
+BASELINE_MANIFEST_MAX_BYTES = 4 * MIB
+BASELINE_FILE_MAX_BYTES = 16 * MIB
+BASELINE_TOTAL_MAX_BYTES = 64 * MIB
+GROUP_MAP_MAX_BYTES = 4 * MIB
+HANDOFF_MANIFEST_MAX_BYTES = 1 * MIB
+HANDOFF_FILE_MAX_BYTES = 16 * MIB
+HANDOFF_TOTAL_MAX_BYTES = 96 * MIB
+COHORT_HANDOFF_MAX_BYTES = 16 * MIB
+EVIDENCE_LOG_MAX_BYTES = 10 * MIB
+EVIDENCE_LOG_TOTAL_MAX_BYTES = 128 * MIB
+TOOL_SOURCE_MAX_BYTES = 4 * MIB
+GIT_POINTER_MAX_BYTES = 64 * 1024
+GIT_EXCLUDE_MAX_BYTES = 1 * MIB
+EXECUTABLE_MAX_BYTES = 128 * MIB
+PACKAGE_MANIFEST_MAX_BYTES = 8 * MIB
+PACKAGE_FILE_MAX_BYTES = 16 * MIB
+PACKAGE_TOTAL_MAX_BYTES = 128 * MIB
 
 
 HANDOFF_FILE_KEYS = (
@@ -50,6 +74,7 @@ HANDOFF_FILE_KEYS = (
     "fix_group_ledger",
     "test_receipt_registry",
     "pre_fix_negative_receipt",
+    "pre_fix_test_definition_registry",
     "local_condition_closure",
     "documentation_alignment_receipt",
     "semantic_completion_receipt",
@@ -58,17 +83,37 @@ HANDOFF_FILE_KEYS = (
     "provider_live_residuals",
 )
 
+COHORT_HANDOFF_KEYS = (
+    "control_auth",
+    "control_services",
+    "hosted",
+    "runtime",
+    "backup_evidence",
+    "release",
+)
+
 HANDOFF_ARCHIVE_PATHS = {
     "postfix_classification_ledger": "receipts/input/handoff/postfix_classification_ledger.jsonl",
     "fix_group_ledger": "receipts/input/handoff/fix_group_ledger.jsonl",
     "test_receipt_registry": "receipts/input/handoff/test_receipt_registry.jsonl",
     "pre_fix_negative_receipt": "receipts/input/handoff/pre_fix_negative_receipt.json",
+    "pre_fix_test_definition_registry": (
+        "receipts/input/handoff/pre_fix_test_definition_registry.jsonl"
+    ),
     "local_condition_closure": "receipts/input/handoff/local_condition_closure.jsonl",
     "documentation_alignment_receipt": "receipts/input/handoff/documentation_alignment_receipt.json",
     "semantic_completion_receipt": "receipts/input/handoff/semantic_completion_receipt.json",
     "required_matrices": "receipts/input/handoff/required_matrices.md",
     "four_verdicts": "receipts/input/handoff/four_verdicts.json",
     "provider_live_residuals": "receipts/input/handoff/provider_live_residuals.jsonl",
+}
+COHORT_HANDOFF_ARCHIVE_PATHS = {
+    "control_auth": "receipts/input/cohorts/control-auth.jsonl",
+    "control_services": "receipts/input/cohorts/control-services.jsonl",
+    "hosted": "receipts/input/cohorts/hosted.jsonl",
+    "runtime": "receipts/input/cohorts/runtime.jsonl",
+    "backup_evidence": "receipts/input/cohorts/backup-evidence.jsonl",
+    "release": "receipts/input/cohorts/release.jsonl",
 }
 
 BASELINE_MANIFEST_ARCHIVE_PATH = "receipts/input/baseline/MANIFEST.sha256"
@@ -78,11 +123,15 @@ HANDOFF_MANIFEST_ARCHIVE_PATH = "receipts/input/handoff/handoff-v1.json"
 TOOL_SOURCE_NAMES = (
     "build_postfix_package.py",
     "common.py",
+    "render_postfix_replay.py",
     "validate_postfix_package.py",
     "handoff-v1.schema.json",
 )
 TOOL_SOURCE_PACKAGE_PATHS = {
     name: f"validators/{name}" for name in TOOL_SOURCE_NAMES
+}
+TOOL_SOURCE_REPO_PATHS = {
+    name: f"scripts/postfix_evidence/{name}" for name in TOOL_SOURCE_NAMES
 }
 
 REQUIRED_LOCAL_CLOSURES = frozenset(
@@ -273,6 +322,10 @@ SAFE_RECEIPT_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,127}$")
 SECRET_COMMAND_RE = re.compile(
     r"(?i)(?:password|passwd|api[_-]?key|access[_-]?token|private[_-]?key)\s*=\s*.+"
 )
+REPLAY_RECEIPT_PATHS = {
+    "A": "receipts/replays/replay-a.json",
+    "B": "receipts/replays/replay-b.json",
+}
 
 PACKAGE_STATIC_FILES = frozenset(
     {
@@ -295,12 +348,13 @@ PACKAGE_STATIC_FILES = frozenset(
         "schemas/matrix-schema-v1.json",
         "schemas/handoff-v1.schema.json",
         "receipts/candidate_identity.json",
-        "receipts/replay_receipt.json",
+        *REPLAY_RECEIPT_PATHS.values(),
         "receipts/build_receipt.json",
         BASELINE_MANIFEST_ARCHIVE_PATH,
         GROUP_MAP_ARCHIVE_PATH,
         HANDOFF_MANIFEST_ARCHIVE_PATH,
         *HANDOFF_ARCHIVE_PATHS.values(),
+        *COHORT_HANDOFF_ARCHIVE_PATHS.values(),
         *TOOL_SOURCE_PACKAGE_PATHS.values(),
     }
 )
@@ -340,14 +394,20 @@ class ValidatedInputs:
     handoff_file_paths: dict[str, Path]
     handoff_file_sha256: dict[str, str]
     handoff_file_bytes: dict[str, bytes]
+    cohort_handoff_sha256: dict[str, str]
+    cohort_handoff_bytes: dict[str, bytes]
+    cohort_expectations: dict[str, dict[str, Any]]
     evidence_cutoff_at: str
     candidate_repo: Path
     candidate_final_commit: str
     candidate_final_tree: str
+    tool_source_bytes: dict[str, bytes]
     classification_rows: list[dict[str, Any]]
     fix_group_rows: list[dict[str, Any]]
     test_receipt_rows: list[dict[str, Any]]
     pre_fix_receipt: dict[str, Any]
+    pre_fix_test_definition_rows: list[dict[str, Any]]
+    pre_fix_test_definition_bytes: bytes
     local_closure_rows: list[dict[str, Any]]
     documentation_receipt: dict[str, Any]
     semantic_receipt: dict[str, Any]
@@ -403,7 +463,15 @@ def _validate_baseline(root: Path) -> Baseline:
         "evidence/validation/canonical_candidate_registry.jsonl",
         "schemas/matrix-schema-v1.json",
     }
-    snapshot = validate_manifest_snapshot(root, exact=False, required=required)
+    snapshot = validate_manifest_snapshot(
+        root,
+        exact=False,
+        required=required,
+        max_manifest_bytes=BASELINE_MANIFEST_MAX_BYTES,
+        max_file_bytes=BASELINE_FILE_MAX_BYTES,
+        max_total_bytes=BASELINE_TOTAL_MAX_BYTES,
+        capture_all=False,
+    )
     classification_bytes = snapshot.files["finding_classification_ledger.jsonl"]
     registry_bytes = snapshot.files["evidence/validation/canonical_candidate_registry.jsonl"]
     inventory_bytes = snapshot.files["inventory_ledger.jsonl"]
@@ -547,7 +615,11 @@ def _validate_group_map(
     path: Path,
     reportable_ids: frozenset[str],
 ) -> tuple[list[dict[str, Any]], str, bytes]:
-    payload = read_regular_bytes(path, label="fix-group map")
+    payload = read_regular_bytes(
+        path,
+        label="fix-group map",
+        max_bytes=GROUP_MAP_MAX_BYTES,
+    )
     rows = load_jsonl_bytes(payload, label="fix-group map")
     by_id = _unique_rows(rows, "group_id", label="fix-group map")
     expected = {f"FG-{number:03d}" for number in range(1, 78)}
@@ -565,12 +637,406 @@ def _validate_group_map(
     return [by_id[group_id] for group_id in sorted(by_id)], sha256_bytes(payload), payload
 
 
+def _validate_cohort_handoffs(
+    snapshots: dict[str, bytes],
+    group_map_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    group_map = {row["group_id"]: row for row in group_map_rows}
+    required_keys = {
+        "group_id",
+        "slug",
+        "canonical_ids",
+        "cohort_commit",
+        "support_commits",
+        "final_commit",
+        "source",
+        "control",
+        "sink",
+        "boundary",
+        "pre_fix_negative",
+        "tests",
+        "independent_qa",
+        "runtime_status",
+        "external_conditions",
+        "rollback",
+    }
+    optional_keys = {"integration_mode", "cross_cohort_dependencies"}
+    result: dict[str, dict[str, Any]] = {}
+    pending_dependencies: list[dict[str, str]] = []
+    for source_name in COHORT_HANDOFF_KEYS:
+        rows = load_jsonl_bytes(
+            snapshots[source_name],
+            label=f"raw cohort handoff {source_name}",
+        )
+        source_group_count = 0
+        for row_index, row in enumerate(rows, start=1):
+            actual_keys = set(row)
+            if not required_keys.issubset(actual_keys) or not actual_keys.issubset(
+                required_keys | optional_keys
+            ):
+                raise ContractError(
+                    f"raw cohort handoff {source_name}:{row_index}: unknown or missing FG fields"
+                )
+            raw_id = nonempty_string(
+                row["group_id"],
+                label=f"raw cohort handoff {source_name}:{row_index} identity",
+            )
+            is_fix_group = raw_id.startswith("FG-")
+            if is_fix_group and re.fullmatch(r"FG-[0-9]{3}", raw_id) is None:
+                raise ContractError(
+                    f"raw cohort handoff {source_name}:{row_index}: malformed fix-group identity"
+                )
+            group_id = raw_id
+            canonical_ids = string_list(
+                row["canonical_ids"],
+                label=f"raw cohort handoff {group_id} canonical IDs",
+                allow_empty=not is_fix_group,
+            )
+            if not is_fix_group and canonical_ids:
+                raise ContractError(
+                    f"raw cohort handoff {group_id}: non-FG support row cannot claim canonical IDs"
+                )
+            if is_fix_group:
+                if group_id not in group_map or group_id in result:
+                    raise ContractError(
+                        f"raw cohort handoffs: unknown or duplicate fix group {group_id}"
+                    )
+                if row["slug"] != group_map[group_id]["slug"]:
+                    raise ContractError(
+                        f"raw cohort handoff {group_id}: authoritative slug changed"
+                    )
+                if canonical_ids != group_map[group_id]["canonical_ids"]:
+                    raise ContractError(
+                        f"raw cohort handoff {group_id}: canonical ID projection changed"
+                    )
+                source_group_count += 1
+            cohort_commit = nonempty_string(
+                row["cohort_commit"], label=f"raw cohort handoff {group_id} cohort commit"
+            )
+            if SHA1_RE.fullmatch(cohort_commit) is None:
+                raise ContractError(f"raw cohort handoff {group_id}: invalid cohort commit")
+            support_commits = string_list(
+                row["support_commits"],
+                label=f"raw cohort handoff {group_id} support commits",
+                allow_empty=True,
+            )
+            if any(SHA1_RE.fullmatch(commit) is None for commit in support_commits):
+                raise ContractError(f"raw cohort handoff {group_id}: invalid support commit")
+            if cohort_commit in support_commits:
+                raise ContractError(
+                    f"raw cohort handoff {group_id}: cohort commit is duplicated as support"
+                )
+            raw_final = row["final_commit"]
+            if raw_final is not None and (
+                not isinstance(raw_final, str) or SHA1_RE.fullmatch(raw_final) is None
+            ):
+                raise ContractError(f"raw cohort handoff {group_id}: invalid final commit")
+            if "integration_mode" in row and row["integration_mode"] not in {
+                "cherry-pick",
+                "direct-final",
+                "reconciled",
+            }:
+                raise ContractError(f"raw cohort handoff {group_id}: invalid integration mode")
+            for field in ("slug", "source", "control", "sink", "boundary"):
+                nonempty_string(row[field], label=f"raw cohort handoff {group_id} {field}")
+            string_list(
+                row["external_conditions"],
+                label=f"raw cohort handoff {group_id} external conditions",
+                allow_empty=True,
+            )
+            dependencies_value = row.get("cross_cohort_dependencies", [])
+            if not isinstance(dependencies_value, list):
+                raise ContractError(
+                    f"raw cohort handoff {group_id}: malformed cross-cohort dependencies"
+                )
+            dependencies: list[dict[str, str]] = []
+            seen_dependencies: set[tuple[str, str]] = set()
+            for dependency_index, dependency in enumerate(dependencies_value, start=1):
+                exact_keys(
+                    dependency,
+                    {"group_id", "commit", "reason"},
+                    label=f"raw cohort handoff {group_id} dependency {dependency_index}",
+                )
+                dependency_group = dependency["group_id"]
+                dependency_commit = dependency["commit"]
+                if (
+                    dependency_group not in group_map
+                    or dependency_group == group_id
+                    or not isinstance(dependency_commit, str)
+                    or SHA1_RE.fullmatch(dependency_commit) is None
+                ):
+                    raise ContractError(
+                        f"raw cohort handoff {group_id}: invalid cross-cohort dependency"
+                    )
+                reason = nonempty_string(
+                    dependency["reason"],
+                    label=f"raw cohort handoff {group_id} dependency reason",
+                )
+                identity = (dependency_group, dependency_commit)
+                if identity in seen_dependencies:
+                    raise ContractError(
+                        f"raw cohort handoff {group_id}: duplicate cross-cohort dependency"
+                    )
+                seen_dependencies.add(identity)
+                dependencies.append(
+                    {
+                        "group_id": dependency_group,
+                        "commit": dependency_commit,
+                        "reason": reason,
+                    }
+                )
+            if is_fix_group:
+                result[group_id] = {
+                    "source_name": source_name,
+                    "support_commits": sorted({cohort_commit, *support_commits}),
+                    "cross_cohort_dependencies": sorted(
+                        dependencies,
+                        key=lambda item: (item["group_id"], item["commit"]),
+                    ),
+                }
+                pending_dependencies.extend(
+                    {
+                        "source_group_id": group_id,
+                        "group_id": dependency["group_id"],
+                        "commit": dependency["commit"],
+                    }
+                    for dependency in dependencies
+                )
+            elif dependencies:
+                raise ContractError(
+                    f"raw cohort handoff {group_id}: non-FG support row cannot declare cross-cohort dependencies"
+                )
+        if source_group_count == 0:
+            raise ContractError(
+                f"raw cohort handoff {source_name}: no fix-group rows were supplied"
+            )
+    if set(result) != set(group_map):
+        raise ContractError(
+            f"raw cohort handoffs: exact 77-group coverage is missing {sorted(set(group_map) - set(result))}"
+        )
+    for dependency in pending_dependencies:
+        owner = dependency["group_id"]
+        if owner not in result:
+            raise ContractError(
+                f"raw cohort handoff {dependency['source_group_id']}: dependency owner {owner} is absent"
+            )
+        result[owner]["support_commits"] = sorted(
+            {*result[owner]["support_commits"], dependency["commit"]}
+        )
+    return result
+
+
+def _resolve_metadata_directory(
+    value: str,
+    *,
+    relative_to: Path,
+    label: str,
+) -> Path:
+    if not value or "\x00" in value or "\n" in value:
+        raise ContractError(f"candidate: malformed {label}")
+    path = Path(value)
+    if not path.is_absolute():
+        path = relative_to / path
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ContractError(f"candidate: {label} is unavailable") from error
+    if not resolved.is_dir():
+        raise ContractError(f"candidate: {label} is not a directory")
+    return resolved
+
+
+def _verify_git_repository_topology(repo: Path) -> Path:
+    try:
+        canonical_repo = repo.resolve(strict=True)
+    except OSError as error:
+        raise ContractError("candidate: repository is unavailable") from error
+    if not canonical_repo.is_dir():
+        raise ContractError("candidate: repository is not a directory")
+    reported_top = _resolve_metadata_directory(
+        git_text(repo, "rev-parse", "--show-toplevel"),
+        relative_to=canonical_repo,
+        label="Git top-level",
+    )
+    if reported_top != canonical_repo:
+        raise ContractError(
+            "candidate: Git top-level differs from the canonical repository"
+        )
+
+    dot_git = canonical_repo / ".git"
+    if dot_git.is_symlink():
+        raise ContractError("candidate: .git symlink is forbidden")
+    if dot_git.is_dir():
+        expected_git_dir = dot_git.resolve(strict=True)
+    elif dot_git.is_file():
+        try:
+            pointer = read_regular_bytes(
+                dot_git,
+                label="candidate .git pointer",
+                max_bytes=GIT_POINTER_MAX_BYTES,
+            ).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ContractError("candidate: .git pointer is not UTF-8") from error
+        match = re.fullmatch(r"gitdir: ([^\r\n]+)\r?\n?", pointer)
+        if match is None:
+            raise ContractError("candidate: malformed .git pointer")
+        expected_git_dir = _resolve_metadata_directory(
+            match.group(1),
+            relative_to=canonical_repo,
+            label="Git directory",
+        )
+    else:
+        raise ContractError("candidate: .git metadata is unavailable")
+
+    reported_git_dir = _resolve_metadata_directory(
+        git_text(repo, "rev-parse", "--absolute-git-dir"),
+        relative_to=canonical_repo,
+        label="reported Git directory",
+    )
+    if reported_git_dir != expected_git_dir:
+        raise ContractError(
+            "candidate: reported Git directory differs from .git metadata"
+        )
+
+    common_pointer = expected_git_dir / "commondir"
+    if common_pointer.is_symlink():
+        raise ContractError("candidate: Git common-directory symlink is forbidden")
+    if common_pointer.exists():
+        try:
+            common_value = read_regular_bytes(
+                common_pointer,
+                label="candidate Git common-directory pointer",
+                max_bytes=GIT_POINTER_MAX_BYTES,
+            ).decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise ContractError(
+                "candidate: Git common-directory pointer is not UTF-8"
+            ) from error
+        expected_common_dir = _resolve_metadata_directory(
+            common_value,
+            relative_to=expected_git_dir,
+            label="Git common directory",
+        )
+    else:
+        expected_common_dir = expected_git_dir
+    reported_common_dir = _resolve_metadata_directory(
+        git_text(repo, "rev-parse", "--git-common-dir"),
+        relative_to=canonical_repo,
+        label="reported Git common directory",
+    )
+    if reported_common_dir != expected_common_dir:
+        raise ContractError(
+            "candidate: reported Git common directory differs from repository metadata"
+        )
+    return expected_common_dir
+
+
+def _reject_git_history_overrides(repo: Path) -> None:
+    common_dir = _verify_git_repository_topology(repo)
+    replace_refs = git_text(
+        repo,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/replace",
+    )
+    if replace_refs:
+        raise ContractError("candidate: Git replace refs are forbidden")
+    shallow = git_text(repo, "rev-parse", "--is-shallow-repository")
+    if shallow != "false":
+        raise ContractError("candidate: shallow or indeterminate Git history is forbidden")
+    grafts = common_dir / "info" / "grafts"
+    if grafts.is_symlink() or grafts.exists():
+        raise ContractError("candidate: legacy Git grafts are forbidden")
+    exclude = common_dir / "info" / "exclude"
+    if exclude.is_symlink():
+        raise ContractError("candidate: Git info/exclude symlink is forbidden")
+    if exclude.exists():
+        try:
+            exclude_lines = read_regular_bytes(
+                exclude,
+                label="candidate Git info/exclude",
+                max_bytes=GIT_EXCLUDE_MAX_BYTES,
+            ).decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise ContractError("candidate: Git info/exclude is not UTF-8") from error
+        if any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in exclude_lines
+        ):
+            raise ContractError(
+                "candidate: Git info/exclude patterns are forbidden"
+            )
+    for key in ("core.sparseCheckout", "core.sparseCheckoutCone"):
+        value = git_optional_text(repo, "config", "--bool", "--get", key)
+        if value not in {None, "false"}:
+            raise ContractError("candidate: sparse checkout is forbidden")
+    index_rows = git(repo, "ls-files", "-v", "-z").split(b"\x00")
+    if index_rows and index_rows[-1] == b"":
+        index_rows.pop()
+    if any(not row.startswith(b"H ") for row in index_rows):
+        raise ContractError(
+            "candidate: non-canonical index flags are forbidden"
+        )
+
+
+def _current_tool_source_root() -> Path:
+    return Path(__file__).parent
+
+
+def _validated_tool_source_snapshots(
+    repo: Path,
+    final_commit: str,
+) -> dict[str, bytes]:
+    """Bind every executing tool byte to a regular blob at final HEAD."""
+    tool_root = _current_tool_source_root()
+    snapshots: dict[str, bytes] = {}
+    blob_budget = ByteBudget(
+        "tool source Git blobs",
+        len(TOOL_SOURCE_NAMES) * TOOL_SOURCE_MAX_BYTES,
+    )
+    for name in TOOL_SOURCE_NAMES:
+        repo_path = TOOL_SOURCE_REPO_PATHS[name]
+        listing = git_text(repo, "ls-tree", final_commit, "--", repo_path)
+        match = re.fullmatch(
+            rf"((?:100644|100755)) blob [0-9a-f]{{40}}\t{re.escape(repo_path)}",
+            listing,
+        )
+        if match is None:
+            raise ContractError(
+                f"tool source {name}: final-HEAD path is not a regular Git blob"
+            )
+        current = read_regular_bytes(
+            tool_root / name,
+            label=f"executing tool source {name}",
+            max_bytes=TOOL_SOURCE_MAX_BYTES,
+        )
+        committed = git_blob(
+            repo,
+            f"{final_commit}:{repo_path}",
+            label=f"tool source {name}",
+            max_bytes=TOOL_SOURCE_MAX_BYTES,
+            budget=blob_budget,
+        )
+        if current != committed:
+            raise ContractError(
+                f"tool source {name}: executing bytes differ from final HEAD"
+            )
+        snapshots[name] = current
+    return snapshots
+
+
 def _validate_candidate(repo: Path, baseline: Baseline, final_commit_value: Any) -> tuple[str, str]:
+    _reject_git_history_overrides(repo)
     final_commit = resolve_commit(repo, final_commit_value, label="handoff final commit")
     head = git_head(repo)
     if head != final_commit:
         raise ContractError("candidate: handoff final commit does not equal HEAD")
-    status = git_text(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    status = git_text(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
     if status:
         raise ContractError("candidate: final worktree must be clean")
     baseline_commit = resolve_commit(repo, baseline.candidate_commit, label="baseline commit")
@@ -580,15 +1046,66 @@ def _validate_candidate(repo: Path, baseline: Baseline, final_commit_value: Any)
     return final_commit, git_tree(repo, final_commit)
 
 
+def revalidate_candidate_final_state(
+    repo: Path,
+    *,
+    expected_commit: str,
+    expected_tree: str,
+    expected_tool_source_sha256: dict[str, str],
+) -> None:
+    """Recheck the complete mutable candidate boundary at publication time."""
+    _reject_git_history_overrides(repo)
+    if git_head(repo) != expected_commit or git_tree(repo, expected_commit) != expected_tree:
+        raise ContractError("candidate: final identity changed during package build")
+    status = git_text(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    if status:
+        raise ContractError("candidate: worktree changed during package build")
+    snapshots = _validated_tool_source_snapshots(repo, expected_commit)
+    actual_hashes = {
+        name: sha256_bytes(payload)
+        for name, payload in sorted(snapshots.items())
+    }
+    if actual_hashes != expected_tool_source_sha256:
+        raise ContractError("candidate: tool source identity changed during package build")
+
+
 def _validate_handoff_manifest(
     path: Path,
-) -> tuple[dict[str, Any], dict[str, Path], dict[str, str], dict[str, bytes], bytes]:
-    handoff_bytes = read_regular_bytes(path, label="handoff manifest")
+) -> tuple[
+    dict[str, Any],
+    dict[str, Path],
+    dict[str, str],
+    dict[str, bytes],
+    dict[str, str],
+    dict[str, bytes],
+    bytes,
+]:
+    input_budget = ByteBudget(
+        "handoff inputs",
+        HANDOFF_TOTAL_MAX_BYTES,
+    )
+    handoff_bytes = read_regular_bytes(
+        path,
+        label="handoff manifest",
+        max_bytes=HANDOFF_MANIFEST_MAX_BYTES,
+        budget=input_budget,
+    )
     scan_secret_bytes(handoff_bytes, label="handoff manifest")
     handoff = load_json_bytes(handoff_bytes, label="handoff manifest")
     exact_keys(
         handoff,
-        {"schema_version", "evidence_cutoff_at", "candidate_final_commit", "files"},
+        {
+            "schema_version",
+            "evidence_cutoff_at",
+            "candidate_final_commit",
+            "files",
+            "cohort_handoffs",
+        },
         label="handoff manifest",
     )
     if handoff["schema_version"] != 1:
@@ -602,12 +1119,23 @@ def _validate_handoff_manifest(
     hashes: dict[str, str] = {}
     snapshots: dict[str, bytes] = {}
     root = path.parent.resolve(strict=True)
+    seen_paths: set[str] = set()
     for key in HANDOFF_FILE_KEYS:
         entry = exact_keys(files[key], {"path", "sha256"}, label=f"handoff file {key}")
         if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
             raise ContractError(f"handoff file {key}: invalid SHA-256")
         relative = safe_relative(entry["path"], label=f"handoff file {key}")
-        payload = read_regular_under(path.parent, relative.as_posix(), label=f"handoff file {key}")
+        relative_text = relative.as_posix()
+        if relative_text in seen_paths:
+            raise ContractError(f"handoff file {key}: duplicate manifest path")
+        seen_paths.add(relative_text)
+        payload = read_regular_under(
+            path.parent,
+            relative.as_posix(),
+            label=f"handoff file {key}",
+            max_bytes=HANDOFF_FILE_MAX_BYTES,
+            budget=input_budget,
+        )
         actual = sha256_bytes(payload)
         if actual != entry["sha256"]:
             raise ContractError(f"handoff file {key}: stale SHA-256")
@@ -615,7 +1143,48 @@ def _validate_handoff_manifest(
         resolved[key] = root / Path(*relative.parts)
         hashes[key] = actual
         snapshots[key] = payload
-    return handoff, resolved, hashes, snapshots, handoff_bytes
+    cohort_entries = exact_keys(
+        handoff["cohort_handoffs"],
+        COHORT_HANDOFF_KEYS,
+        label="raw cohort handoffs",
+    )
+    cohort_hashes: dict[str, str] = {}
+    cohort_snapshots: dict[str, bytes] = {}
+    for key in COHORT_HANDOFF_KEYS:
+        entry = exact_keys(
+            cohort_entries[key],
+            {"path", "sha256"},
+            label=f"raw cohort handoff {key}",
+        )
+        if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
+            raise ContractError(f"raw cohort handoff {key}: invalid SHA-256")
+        relative = safe_relative(entry["path"], label=f"raw cohort handoff {key}")
+        relative_text = relative.as_posix()
+        if relative_text in seen_paths:
+            raise ContractError(f"raw cohort handoff {key}: duplicate manifest path")
+        seen_paths.add(relative_text)
+        payload = read_regular_under(
+            path.parent,
+            relative_text,
+            label=f"raw cohort handoff {key}",
+            max_bytes=COHORT_HANDOFF_MAX_BYTES,
+            budget=input_budget,
+        )
+        actual = sha256_bytes(payload)
+        if actual != entry["sha256"]:
+            raise ContractError(f"raw cohort handoff {key}: stale SHA-256")
+        scan_secret_bytes(payload, label=f"raw cohort handoff {key}")
+        cohort_hashes[key] = actual
+        cohort_snapshots[key] = payload
+    return (
+        handoff,
+        resolved,
+        hashes,
+        snapshots,
+        cohort_hashes,
+        cohort_snapshots,
+        handoff_bytes,
+    )
 
 
 def _validate_classification(
@@ -711,13 +1280,20 @@ def _validate_log_reference(
     *,
     label: str,
     artifact_snapshots: dict[str, bytes] | None = None,
+    read_budget: ByteBudget | None = None,
 ) -> bytes:
     entry = exact_keys(value, {"path", "sha256"}, label=label)
     if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
         raise ContractError(f"{label}: invalid SHA-256")
     relative = safe_relative(entry["path"], label=f"{label} path").as_posix()
     if artifact_snapshots is None:
-        payload = read_regular_under(root, relative, label=label)
+        payload = read_regular_under(
+            root,
+            relative,
+            label=label,
+            max_bytes=EVIDENCE_LOG_MAX_BYTES,
+            budget=read_budget,
+        )
     else:
         try:
             payload = artifact_snapshots[relative]
@@ -752,17 +1328,22 @@ def _git_object_anchor(
         expected_keys.add("kind")
     entry = exact_keys(value, expected_keys, label=label)
     path = safe_relative(entry["path"], label=f"{label} path").as_posix()
-    if not isinstance(entry["mode"], str) or re.fullmatch(r"[0-7]{6}", entry["mode"]) is None:
-        raise ContractError(f"{label}: invalid Git mode")
+    if entry["mode"] not in {"100644", "100755"}:
+        raise ContractError(f"{label}: Git object must be a regular executable or non-executable blob")
     if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
         raise ContractError(f"{label}: invalid blob SHA-256")
     if allowed_kinds is not None and entry["kind"] not in allowed_kinds:
         raise ContractError(f"{label}: invalid anchor kind")
     listing = git_text(repo, "ls-tree", commit, "--", path)
-    match = re.fullmatch(r"([0-7]{6}) (?:blob|commit) [0-9a-f]+\t.+", listing)
+    match = re.fullmatch(r"((?:100644|100755)) blob [0-9a-f]+\t.+", listing)
     if match is None or match.group(1) != entry["mode"]:
         raise ContractError(f"{label}: path/mode is absent at commit")
-    payload = git(repo, "show", f"{commit}:{path}")
+    payload = git_blob(
+        repo,
+        f"{commit}:{path}",
+        label=label,
+        max_bytes=HANDOFF_FILE_MAX_BYTES,
+    )
     if sha256_bytes(payload) != entry["sha256"]:
         raise ContractError(f"{label}: content does not match script-at-commit/blob anchor")
     return path, entry.get("kind")
@@ -791,7 +1372,15 @@ def _validate_executable(value: Any, argv: list[str], *, label: str) -> None:
     if located is None:
         raise ContractError(f"{label}: executable is unavailable")
     resolved = Path(located).resolve(strict=True)
-    if str(resolved) != resolved_value or sha256_file(resolved, label=label) != entry["sha256"]:
+    if (
+        str(resolved) != resolved_value
+        or sha256_file(
+            resolved,
+            label=label,
+            max_bytes=EXECUTABLE_MAX_BYTES,
+        )
+        != entry["sha256"]
+    ):
         raise ContractError(f"{label}: executable path/hash trust root changed")
 
 
@@ -882,6 +1471,7 @@ def _validate_test_receipts(
     final_tree: str,
     valid_groups: set[str],
     artifact_snapshots: dict[str, bytes] | None = None,
+    read_budget: ByteBudget | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, bytes]]:
     by_id = _unique_rows(rows, "receipt_id", label="test receipt registry")
     logs: dict[str, bytes] = {}
@@ -934,6 +1524,7 @@ def _validate_test_receipts(
             row["log"],
             label=f"test receipt {receipt_id} log",
             artifact_snapshots=artifact_snapshots,
+            read_budget=read_budget,
         )
         _validate_execution_proof(
             row,
@@ -950,9 +1541,149 @@ def _validate_test_receipts(
     return by_id, logs
 
 
+def _validate_reconciliation_receipt(
+    *,
+    receipt: Any,
+    group_id: str,
+    cohort_commit: str,
+    final_commit: str,
+    boundary_paths: set[str],
+    required_test_ids: set[str],
+    receipts: dict[str, dict[str, Any]],
+    repo: Path,
+) -> dict[str, Any]:
+    exact_keys(
+        receipt,
+        {
+            "schema_version",
+            "reason",
+            "final_integration_commit",
+            "boundary_paths",
+            "files",
+            "no_control_omitted",
+            "test_receipt_ids",
+        },
+        label=f"fix-group ledger {group_id} conflict-resolution receipt",
+    )
+    if receipt["schema_version"] != 1:
+        raise ContractError(
+            f"fix-group ledger {group_id}: unsupported conflict-resolution receipt"
+        )
+    nonempty_string(
+        receipt["reason"],
+        label=f"fix-group ledger {group_id} reconciliation reason",
+    )
+    if receipt["final_integration_commit"] != final_commit:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciliation lacks the explicit final integration commit"
+        )
+    receipt_boundaries = {
+        safe_relative(
+            path,
+            label=f"fix-group ledger {group_id} reconciliation boundary",
+        ).as_posix()
+        for path in string_list(
+            receipt["boundary_paths"],
+            label=f"fix-group ledger {group_id} reconciliation boundaries",
+        )
+    }
+    if receipt_boundaries != boundary_paths:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciliation boundary is not closed and exact"
+        )
+    if receipt["no_control_omitted"] is not True:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciliation does not attest no omitted control"
+        )
+    receipt_test_ids = set(
+        string_list(
+            receipt["test_receipt_ids"],
+            label=f"fix-group ledger {group_id} reconciliation tests",
+        )
+    )
+    if receipt_test_ids != required_test_ids:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciliation lacks exact final-HEAD negative/positive/hostile/independent tests"
+        )
+    required_phases = {"negative", "positive", "hostile", "independent-qa"}
+    observed_phases: set[str] = set()
+    for receipt_id in receipt_test_ids:
+        test_receipt = receipts.get(receipt_id)
+        if (
+            test_receipt is None
+            or group_id not in test_receipt["group_ids"]
+            or test_receipt["phase"] not in required_phases
+        ):
+            raise ContractError(
+                f"fix-group ledger {group_id}: reconciliation references an invalid final-HEAD test"
+            )
+        observed_phases.add(test_receipt["phase"])
+    if observed_phases != required_phases:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciliation test phases are incomplete"
+        )
+
+    cohort_delta = commit_delta_records(repo, cohort_commit)
+    final_delta = commit_delta_records(repo, final_commit)
+    if cohort_delta == final_delta:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciled mode is allowed only for a real conflicting delta"
+        )
+    cohort_by_path = {row["path"]: row for row in cohort_delta}
+    final_by_path = {row["path"]: row for row in final_delta}
+    if set(cohort_by_path) != boundary_paths or set(final_by_path) != boundary_paths:
+        raise ContractError(
+            f"fix-group ledger {group_id}: reconciled commit paths are not the exact closed boundary"
+        )
+
+    def snapshot(mode: str, digest: str | None) -> dict[str, Any]:
+        return {"mode": mode, "sha256": digest}
+
+    expected_files = []
+    for path in sorted(boundary_paths):
+        cohort_row = cohort_by_path[path]
+        final_row = final_by_path[path]
+        expected_files.append(
+            {
+                "path": path,
+                "before": snapshot(
+                    final_row["old_mode"],
+                    final_row["old_content_sha256"],
+                ),
+                "cohort": snapshot(
+                    cohort_row["new_mode"],
+                    cohort_row["new_content_sha256"],
+                ),
+                "final": snapshot(
+                    final_row["new_mode"],
+                    final_row["new_content_sha256"],
+                ),
+                "control_preserved": True,
+            }
+        )
+    files = receipt["files"]
+    if not isinstance(files, list) or files != expected_files:
+        raise ContractError(
+            f"fix-group ledger {group_id}: conflict-resolution before/cohort/final hashes are stale or incomplete"
+        )
+    return {
+        "cohort_commit": cohort_commit,
+        "final_commit": final_commit,
+        "integration_mode": "reconciled",
+        "boundary_paths": sorted(boundary_paths),
+        "cohort_tree_delta_sha256": sha256_bytes(canonical_json_bytes(cohort_delta)),
+        "tree_delta_sha256": sha256_bytes(canonical_json_bytes(final_delta)),
+        "conflict_resolution_receipt_sha256": sha256_bytes(
+            canonical_json_bytes(receipt)
+        ),
+        "accepted_by": "conflict-reconciliation-receipt-and-final-head-tests",
+    }
+
+
 def _validate_fix_groups(
     rows: list[dict[str, Any]],
     group_map_rows: list[dict[str, Any]],
+    cohort_expectations: dict[str, dict[str, Any]],
     receipts: dict[str, dict[str, Any]],
     repo: Path,
     final_head: str,
@@ -962,6 +1693,8 @@ def _validate_fix_groups(
     source_by_id = {row["group_id"]: row for row in group_map_rows}
     if set(by_id) != set(source_by_id):
         raise ContractError("fix-group ledger: missing or extra fix-group rows")
+    if set(cohort_expectations) != set(source_by_id):
+        raise ContractError("fix-group ledger: raw cohort expectations are incomplete")
     cache: dict[tuple[str, str], dict[str, Any]] = {}
     equivalence_by_group: list[dict[str, Any]] = []
     for group_id in sorted(by_id):
@@ -995,7 +1728,7 @@ def _validate_fix_groups(
             raise ContractError(f"fix-group ledger {group_id}: canonical ID projection changed")
         nonempty_string(row["cohort"], label=f"fix-group ledger {group_id} cohort")
         integration_mode = row["integration_mode"]
-        if integration_mode not in {"cherry-pick", "direct-final"}:
+        if integration_mode not in {"cherry-pick", "direct-final", "reconciled"}:
             raise ContractError(f"fix-group ledger {group_id}: invalid integration mode")
         for field in ("source", "control", "sink"):
             string_list(row[field], label=f"fix-group ledger {group_id} {field}")
@@ -1036,6 +1769,10 @@ def _validate_fix_groups(
             raise ContractError(
                 f"fix-group ledger {group_id}: cohort-only SHA is not a final integration mapping"
             )
+        if integration_mode == "reconciled" and cohort == final:
+            raise ContractError(
+                f"fix-group ledger {group_id}: reconciled mode lacks a distinct final integration commit"
+            )
         ensure_ancestor(repo, final, final_head, label=f"fix-group ledger {group_id} final mapping")
         final_delta = commit_delta_records(repo, final)
         changed_paths = {item["path"] for item in final_delta}
@@ -1047,6 +1784,11 @@ def _validate_fix_groups(
             row["support_commits"],
             label=f"fix-group ledger {group_id} support commits",
         )
+        expected_supports = set(cohort_expectations[group_id]["support_commits"])
+        if set(declared_supports) != expected_supports:
+            raise ContractError(
+                f"fix-group ledger {group_id}: raw handoff to ledger support SHA mapping is not exact"
+            )
         resolved_supports = {
             resolve_commit(
                 repo,
@@ -1062,14 +1804,39 @@ def _validate_fix_groups(
         mapped_cohorts: set[str] = set()
         mapped_boundaries: set[str] = set()
         primary_record: dict[str, Any] | None = None
+        reconciliation_test_ids = {
+            receipt_id
+            for field in (
+                "negative_test_receipt_ids",
+                "positive_test_receipt_ids",
+                "hostile_test_receipt_ids",
+                "independent_qa_receipt_ids",
+            )
+            for receipt_id in string_list(
+                row[field],
+                label=f"fix-group ledger {group_id} reconciliation {field}",
+            )
+        }
         for mapping_index, mapping in enumerate(mapping_rows, start=1):
+            if not isinstance(mapping, dict):
+                raise ContractError(
+                    f"fix-group ledger {group_id}: malformed support mapping"
+                )
+            mapping_mode = mapping.get("integration_mode")
+            mapping_keys = {
+                "cohort_commit",
+                "final_commit",
+                "integration_mode",
+                "boundary_paths",
+            }
+            if mapping_mode == "reconciled":
+                mapping_keys.add("conflict_resolution_receipt")
             exact_keys(
                 mapping,
-                {"cohort_commit", "final_commit", "integration_mode", "boundary_paths"},
+                mapping_keys,
                 label=f"fix-group ledger {group_id} support mapping {mapping_index}",
             )
-            mapping_mode = mapping["integration_mode"]
-            if mapping_mode not in {"cherry-pick", "direct-final"}:
+            if mapping_mode not in {"cherry-pick", "direct-final", "reconciled"}:
                 raise ContractError(
                     f"fix-group ledger {group_id}: invalid support integration mode"
                 )
@@ -1145,7 +1912,7 @@ def _validate_fix_groups(
                     "tree_delta_sha256": sha256_bytes(canonical_json_bytes(mapping_delta)),
                     "accepted_by": "direct-final-identity",
                 }
-            else:
+            elif mapping_mode == "cherry-pick":
                 if mapping_cohort == mapping_final:
                     raise ContractError(
                         f"fix-group ledger {group_id}: cohort-only support SHA lacks final mapping"
@@ -1158,6 +1925,21 @@ def _validate_fix_groups(
                     "boundary_paths": sorted(mapping_boundary),
                     **cache[pair],
                 }
+            else:
+                if mapping_cohort == mapping_final:
+                    raise ContractError(
+                        f"fix-group ledger {group_id}: reconciled support SHA lacks a distinct final integration commit"
+                    )
+                mapping_record = _validate_reconciliation_receipt(
+                    receipt=mapping["conflict_resolution_receipt"],
+                    group_id=group_id,
+                    cohort_commit=mapping_cohort,
+                    final_commit=mapping_final,
+                    boundary_paths=mapping_boundary,
+                    required_test_ids=reconciliation_test_ids,
+                    receipts=receipts,
+                    repo=repo,
+                )
             support_records.append(mapping_record)
             if (
                 mapping_cohort == cohort
@@ -1209,13 +1991,301 @@ def _validate_fix_groups(
     return equivalence_by_group
 
 
+def _validate_pre_fix_definition_registry(
+    rows: list[dict[str, Any]],
+    registry_bytes: bytes,
+    registry_anchor: Any,
+    *,
+    baseline: Baseline,
+    group_ids: set[str],
+    repo: Path,
+    final_commit: str,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    registry_path, _ = _git_object_anchor(
+        repo,
+        final_commit,
+        registry_anchor,
+        label="pre-fix test-definition registry at final commit",
+    )
+    if (
+        git_blob(
+            repo,
+            f"{final_commit}:{registry_path}",
+            label="pre-fix test-definition registry",
+            max_bytes=HANDOFF_FILE_MAX_BYTES,
+        )
+        != registry_bytes
+    ):
+        raise ContractError(
+            "pre-fix test-definition registry: handoff bytes differ from final HEAD"
+        )
+    if len(rows) != 77:
+        raise ContractError(
+            "pre-fix test-definition registry: expected exactly 77 definitions"
+        )
+    definitions: dict[str, dict[str, Any]] = {}
+    execution_identities: set[tuple[str, tuple[str, ...]]] = set()
+    forbidden_make_variables = {
+        "BASH_ENV",
+        "DYLD_INSERT_LIBRARIES",
+        "ENV",
+        "GNUMAKEFLAGS",
+        "LD_PRELOAD",
+        "MAKEFILES",
+        "MAKEFLAGS",
+        "MFLAGS",
+        "SHELL",
+    }
+    for index, row in enumerate(rows, start=1):
+        exact_keys(
+            row,
+            {
+                "schema_version",
+                "group_id",
+                "test_case_id",
+                "runner_kind",
+                "cwd",
+                "argv",
+                "test_definition_at_final_commit",
+                "consumer_paths_at_baseline",
+            },
+            label=f"pre-fix test-definition registry row {index}",
+        )
+        group_id = row["group_id"]
+        if (
+            row["schema_version"] != 1
+            or group_id not in group_ids
+            or group_id in definitions
+            or row["test_case_id"] != f"PRE-FIX-{group_id}"
+        ):
+            raise ContractError(
+                "pre-fix test-definition registry: invalid or duplicate group/test identity"
+            )
+        runner_kind = row["runner_kind"]
+        if runner_kind not in {"make-wrapper", "manual-harness"}:
+            raise ContractError(
+                f"pre-fix test-definition registry {group_id}: invalid runner kind"
+            )
+        cwd = _validate_cwd_at_commit(
+            repo,
+            final_commit,
+            row["cwd"],
+            label=f"pre-fix test-definition registry {group_id} cwd",
+        )
+        script_path, _ = _git_object_anchor(
+            repo,
+            final_commit,
+            row["test_definition_at_final_commit"],
+            label=f"pre-fix test-definition registry {group_id} definition",
+        )
+        if cwd != Path(script_path).parent.as_posix():
+            raise ContractError(
+                f"pre-fix test-definition registry {group_id}: cwd is not the definition directory"
+            )
+        script_bytes = git_blob(
+            repo,
+            f"{final_commit}:{script_path}",
+            label=f"pre-fix test-definition registry {group_id} definition",
+            max_bytes=HANDOFF_FILE_MAX_BYTES,
+        )
+        if len(script_bytes.strip()) < 64:
+            raise ContractError(
+                f"pre-fix test-definition registry {group_id}: definition is empty or trivially small"
+            )
+        scan_secret_bytes(
+            script_bytes,
+            label=f"pre-fix test-definition registry {group_id} definition",
+        )
+        argv = string_list(
+            row["argv"],
+            label=f"pre-fix test-definition registry {group_id} argv",
+        )
+        if any(
+            "\n" in item
+            or "\x00" in item
+            or "`" in item
+            or "$(" in item
+            or SECRET_COMMAND_RE.search(item)
+            for item in argv
+        ):
+            raise ContractError(
+                f"pre-fix test-definition registry {group_id}: unsafe argv"
+            )
+        executable = Path(argv[0]).name
+        script_name = Path(script_path).name
+        if runner_kind == "make-wrapper":
+            if (
+                executable not in {"make", "gmake"}
+                or script_name != "Makefile"
+                or len(argv) < 4
+                or argv[1:3] != ["-f", "Makefile"]
+                or re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.%/+@-]*",
+                    argv[3],
+                )
+                is None
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: invalid closed Make template"
+                )
+            for argument in argv[4:]:
+                match = re.fullmatch(
+                    r"([A-Z][A-Z0-9_]*)=([-A-Za-z0-9_./:@%+]+)",
+                    argument,
+                )
+                if match is None or match.group(1) in forbidden_make_variables:
+                    raise ContractError(
+                        f"pre-fix test-definition registry {group_id}: unsafe Make variable"
+                    )
+            try:
+                makefile_text = script_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: Makefile is not UTF-8"
+                ) from error
+            if (
+                re.search(
+                    rf"(?m)^{re.escape(argv[3])}\s*:(?![=])",
+                    makefile_text,
+                )
+                is None
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: Make target is absent"
+                )
+            recipe_match = re.search(
+                (
+                    rf"(?m)^{re.escape(argv[3])}\s*:(?![=])[^\n]*\n"
+                    r"((?:\t[^\n]*(?:\n|$))+)"
+                ),
+                makefile_text,
+            )
+            if recipe_match is None:
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: Make target has no recipe"
+                )
+            recipe_commands = [
+                line.lstrip("\t @+-")
+                for line in recipe_match.group(1).splitlines()
+                if line.strip()
+            ]
+            if not recipe_commands or all(
+                re.fullmatch(r"(?::|true|echo(?:\s+.*)?|printf(?:\s+.*)?)", command)
+                is not None
+                for command in recipe_commands
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: Make target is a no-op"
+                )
+        else:
+            allowed_interpreters = {
+                ".js": {"node"},
+                ".mjs": {"node"},
+                ".py": {"python3"},
+                ".sh": {"bash", "sh"},
+            }.get(Path(script_name).suffix)
+            if (
+                allowed_interpreters is None
+                or executable not in allowed_interpreters
+                or len(argv) < 2
+                or argv[1] != script_name
+                or any(
+                    re.fullmatch(r"[-A-Za-z0-9_./:@%+=]+", item) is None
+                    for item in argv[2:]
+                )
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: invalid manual template"
+                )
+            try:
+                manual_text = script_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: manual definition is not UTF-8"
+                ) from error
+            meaningful_lines = [
+                line.strip()
+                for line in manual_text.splitlines()
+                if line.strip()
+                and not line.lstrip().startswith(("#", "import ", "from "))
+            ]
+            if not meaningful_lines or all(
+                re.fullmatch(
+                    r"(?:pass|true|print\(.*\)|console\.log\(.*\)|(?:process\.)?exit\(0\);?)",
+                    line,
+                )
+                is not None
+                for line in meaningful_lines
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: manual definition is a no-op"
+                )
+        consumer_paths = [
+            safe_relative(
+                path,
+                label=f"pre-fix test-definition registry {group_id} consumer path",
+            ).as_posix()
+            for path in string_list(
+                row["consumer_paths_at_baseline"],
+                label=(
+                    f"pre-fix test-definition registry {group_id} "
+                    "consumer paths"
+                ),
+            )
+        ]
+        if consumer_paths != sorted(set(consumer_paths)):
+            raise ContractError(
+                f"pre-fix test-definition registry {group_id}: consumer paths are not unique and sorted"
+            )
+        for consumer_path in consumer_paths:
+            listing = git_text(
+                repo,
+                "ls-tree",
+                baseline.candidate_commit,
+                "--",
+                consumer_path,
+            )
+            if (
+                re.fullmatch(
+                    r"(?:100644|100755) blob [0-9a-f]+\t.+",
+                    listing,
+                )
+                is None
+            ):
+                raise ContractError(
+                    f"pre-fix test-definition registry {group_id}: baseline consumer is not a regular blob"
+                )
+        identity = (script_path, tuple(argv))
+        if identity in execution_identities:
+            raise ContractError(
+                "pre-fix test-definition registry: group execution identities are not one-to-one"
+            )
+        execution_identities.add(identity)
+        definitions[group_id] = {
+            **row,
+            "cwd": cwd,
+            "argv": argv,
+            "consumer_paths_at_baseline": consumer_paths,
+            "test_definition_path": script_path,
+        }
+    if set(definitions) != group_ids:
+        raise ContractError(
+            "pre-fix test-definition registry: exact 77-group coverage failed"
+        )
+    return definitions, registry_path
+
+
 def _validate_pre_fix_receipt(
     receipt: dict[str, Any],
     artifact_root: Path,
     baseline: Baseline,
     group_ids: set[str],
     repo: Path,
+    final_commit: str,
+    definition_rows: list[dict[str, Any]],
+    definition_bytes: bytes,
     artifact_snapshots: dict[str, bytes] | None = None,
+    read_budget: ByteBudget | None = None,
 ) -> dict[str, bytes]:
     exact_keys(
         receipt,
@@ -1223,6 +2293,9 @@ def _validate_pre_fix_receipt(
             "schema_version",
             "baseline_commit",
             "baseline_tree",
+            "test_definition_commit",
+            "test_definition_tree",
+            "test_definition_registry_at_final_commit",
             "detached_head",
             "worktree_clean",
             "forbidden_access",
@@ -1235,6 +2308,23 @@ def _validate_pre_fix_receipt(
         raise ContractError("pre-fix negative receipt: unsupported version")
     if receipt["baseline_commit"] != baseline.candidate_commit or receipt["baseline_tree"] != baseline.candidate_tree:
         raise ContractError("pre-fix negative receipt: baseline commit/tree mismatch")
+    final_tree = git_tree(repo, final_commit)
+    if (
+        receipt["test_definition_commit"] != final_commit
+        or receipt["test_definition_tree"] != final_tree
+    ):
+        raise ContractError(
+            "pre-fix negative receipt: test definitions are not bound to final HEAD/tree"
+        )
+    definitions, registry_path = _validate_pre_fix_definition_registry(
+        definition_rows,
+        definition_bytes,
+        receipt["test_definition_registry_at_final_commit"],
+        baseline=baseline,
+        group_ids=group_ids,
+        repo=repo,
+        final_commit=final_commit,
+    )
     if receipt["detached_head"] is not True or receipt["worktree_clean"] is not True:
         raise ContractError("pre-fix negative receipt: baseline was not detached and clean")
     exact_keys(receipt["forbidden_access"], {"live", "docker", "network", "secrets"}, label="pre-fix forbidden access")
@@ -1244,7 +2334,6 @@ def _validate_pre_fix_receipt(
     if not isinstance(executions, list) or len(executions) != 77:
         raise ContractError("pre-fix negative receipt: expected exactly 77 executions")
     seen: set[str] = set()
-    counts = {"make-wrapper": 0, "manual-harness": 0}
     logs: dict[str, bytes] = {}
     log_paths: set[str] = set()
     for index, row in enumerate(executions, start=1):
@@ -1252,20 +2341,17 @@ def _validate_pre_fix_receipt(
             row,
             {
                 "group_id",
-                "runner_kind",
-                "head_commit",
-                "head_tree",
+                "test_case_id",
+                "target_commit",
+                "target_tree",
                 "started_at",
                 "ended_at",
-                "cwd",
-                "argv",
                 "executable",
-                "script_at_commit",
                 "result",
                 "exit_code",
                 "sandbox",
                 "semantic_anchors",
-                "artifact_anchors",
+                "consumer_anchors_at_baseline",
                 "log",
             },
             label=f"pre-fix execution {index}",
@@ -1274,20 +2360,79 @@ def _validate_pre_fix_receipt(
         if group_id not in group_ids or group_id in seen:
             raise ContractError("pre-fix negative receipt: missing or duplicate fix-group execution")
         seen.add(group_id)
-        runner_kind = row["runner_kind"]
-        if runner_kind not in counts:
-            raise ContractError(f"pre-fix negative receipt: invalid runner kind for {group_id}")
-        counts[runner_kind] += 1
-        argv = string_list(row["argv"], label=f"pre-fix execution {group_id} argv")
-        executable = Path(argv[0]).name
-        if runner_kind == "make-wrapper" and executable not in {"make", "gmake"}:
-            raise ContractError(f"pre-fix negative receipt: {group_id} is not a Make wrapper")
-        if runner_kind == "manual-harness" and executable not in {"python3", "node", "bash", "sh"}:
-            raise ContractError(f"pre-fix negative receipt: {group_id} manual harness executable is not allowed")
-        if executable in {"docker", "ssh", "curl", "wget", "nc", "ncat"}:
-            raise ContractError(f"pre-fix negative receipt: forbidden executable for {group_id}")
+        definition = definitions[group_id]
+        if row["test_case_id"] != definition["test_case_id"]:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} test case differs from the final registry"
+            )
+        if (
+            row["target_commit"] != baseline.candidate_commit
+            or row["target_tree"] != baseline.candidate_tree
+        ):
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} target head/tree mismatch"
+            )
+        started = _parse_utc_second(
+            row["started_at"],
+            label=f"pre-fix execution {group_id} start",
+        )
+        ended = _parse_utc_second(
+            row["ended_at"],
+            label=f"pre-fix execution {group_id} end",
+        )
+        if ended < started:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} ended before it started"
+            )
+        argv = definition["argv"]
+        script_path = definition["test_definition_path"]
+        _validate_executable(
+            row["executable"],
+            argv,
+            label=f"pre-fix execution {group_id} executable",
+        )
         if row["result"] != "PRE-FIX-NEGATIVE-REPRODUCED" or row["exit_code"] != 0:
             raise ContractError(f"pre-fix negative receipt: {group_id} was not reproduced")
+        if row["sandbox"] != OFFLINE_SANDBOX:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} lacks the offline read-only sandbox"
+            )
+        semantic_anchors = string_list(
+            row["semantic_anchors"],
+            label=f"pre-fix execution {group_id} semantic anchors",
+        )
+        if semantic_anchors != ["pre-fix-negative-reproduced"]:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} semantic anchor is not exact"
+            )
+        artifact_rows = row["consumer_anchors_at_baseline"]
+        if not isinstance(artifact_rows, list) or not artifact_rows:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} consumer anchors are missing"
+            )
+        anchored_consumers: set[str] = set()
+        consumer_identity_lines: set[str] = set()
+        for anchor_index, anchor in enumerate(artifact_rows, start=1):
+            path, kind = _git_object_anchor(
+                repo,
+                baseline.candidate_commit,
+                anchor,
+                label=f"pre-fix execution {group_id} consumer anchor {anchor_index}",
+                allowed_kinds={"consumer"},
+            )
+            if kind != "consumer" or path in anchored_consumers:
+                raise ContractError(
+                    f"pre-fix negative receipt: {group_id} has an invalid or duplicate consumer anchor"
+                )
+            anchored_consumers.add(path)
+            consumer_identity_lines.add(
+                f"CONSUMER-BLOB {path} MODE {anchor['mode']} "
+                f"SHA256 {anchor['sha256']}"
+            )
+        if anchored_consumers != set(definition["consumer_paths_at_baseline"]):
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} consumer anchors differ from the final registry"
+            )
         log_entry = row["log"]
         log_path_text = exact_keys(log_entry, {"path", "sha256"}, label=f"pre-fix execution {group_id} log")["path"]
         if log_path_text in log_paths:
@@ -1298,47 +2443,43 @@ def _validate_pre_fix_receipt(
             log_entry,
             label=f"pre-fix execution {group_id} log",
             artifact_snapshots=artifact_snapshots,
+            read_budget=read_budget,
         )
-        _validate_execution_proof(
-            row,
-            receipt_id=group_id,
-            phase="pre-fix-negative",
-            repo=repo,
-            commit=baseline.candidate_commit,
-            tree=baseline.candidate_tree,
-            log_bytes=logs[group_id],
-            label=f"pre-fix execution {group_id}",
+        try:
+            log_lines = logs[group_id].decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} log is not UTF-8"
+            ) from error
+        identity_line = (
+            f"RECEIPT {group_id} HEAD {baseline.candidate_commit} "
+            f"TREE {baseline.candidate_tree} PHASE pre-fix-negative RESULT PASS"
         )
-        if runner_kind == "make-wrapper":
-            script_path = row["script_at_commit"]["path"]
-            script_payload = git(repo, "show", f"{baseline.candidate_commit}:{script_path}")
-            targets = [
-                item
-                for item in argv[1:]
-                if not item.startswith("-") and item not in {script_path, Path(script_path).name}
-            ]
-            if not targets:
-                raise ContractError(f"pre-fix negative receipt: {group_id} Make target is missing")
-            target = targets[-1]
-            try:
-                makefile_text = script_payload.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise ContractError(f"pre-fix negative receipt: {group_id} Makefile is not UTF-8") from error
-            if re.search(rf"(?m)^{re.escape(target)}\s*:", makefile_text) is None:
-                raise ContractError(
-                    f"pre-fix negative receipt: {group_id} Make target is absent at baseline commit"
-                )
-    if seen != group_ids or counts != {"make-wrapper": 72, "manual-harness": 5}:
-        raise ContractError("pre-fix negative receipt: exact 77-FG/72-Make/5-manual contract failed")
+        definition_line = (
+            f"TEST-DEFINITION HEAD {final_commit} TREE {final_tree} "
+            f"REGISTRY {registry_path} CASE {definition['test_case_id']} "
+            f"PATH {script_path}"
+        )
+        if (
+            identity_line not in log_lines
+            or definition_line not in log_lines
+            or "ANCHOR pre-fix-negative-reproduced" not in log_lines
+            or not consumer_identity_lines.issubset(log_lines)
+        ):
+            raise ContractError(
+                f"pre-fix negative receipt: {group_id} log lacks target identity"
+            )
+    if seen != group_ids:
+        raise ContractError(
+            "pre-fix negative receipt: exact 77-FG execution coverage failed"
+        )
     summary = exact_keys(
         receipt["summary"],
-        {"fix_group_count", "make_wrapper_count", "manual_harness_count", "reproduced_count"},
+        {"fix_group_count", "reproduced_count"},
         label="pre-fix negative summary",
     )
     expected_summary = {
         "fix_group_count": 77,
-        "make_wrapper_count": 72,
-        "manual_harness_count": 5,
         "reproduced_count": 77,
     }
     if summary != expected_summary:
@@ -1860,10 +3001,13 @@ def _validate_dataset(
     *,
     baseline: Baseline,
     group_map_rows: list[dict[str, Any]],
+    cohort_expectations: dict[str, dict[str, Any]],
     classification_rows: list[dict[str, Any]],
     fix_group_rows: list[dict[str, Any]],
     test_receipt_rows: list[dict[str, Any]],
     pre_fix_receipt: dict[str, Any],
+    pre_fix_test_definition_rows: list[dict[str, Any]],
+    pre_fix_test_definition_bytes: bytes,
     local_closure_rows: list[dict[str, Any]],
     documentation_receipt: dict[str, Any],
     semantic_receipt: dict[str, Any],
@@ -1881,6 +3025,14 @@ def _validate_dataset(
     classification, external_or_live = _validate_classification(classification_rows, baseline, final_commit)
     group_ids = {row["group_id"] for row in group_map_rows}
     final_tree = git_tree(candidate_repo, final_commit)
+    log_budget = (
+        ByteBudget(
+            "source evidence logs",
+            EVIDENCE_LOG_TOTAL_MAX_BYTES,
+        )
+        if artifact_snapshots is None
+        else None
+    )
     receipts, test_logs = _validate_test_receipts(
         test_receipt_rows,
         artifact_root,
@@ -1888,11 +3040,13 @@ def _validate_dataset(
         final_commit,
         final_tree,
         group_ids,
-        artifact_snapshots,
+        artifact_snapshots=artifact_snapshots,
+        read_budget=log_budget,
     )
     equivalence = _validate_fix_groups(
         fix_group_rows,
         group_map_rows,
+        cohort_expectations,
         receipts,
         candidate_repo,
         final_commit,
@@ -1904,7 +3058,11 @@ def _validate_dataset(
         baseline,
         group_ids,
         candidate_repo,
-        artifact_snapshots,
+        final_commit,
+        pre_fix_test_definition_rows,
+        pre_fix_test_definition_bytes,
+        artifact_snapshots=artifact_snapshots,
+        read_budget=log_budget,
     )
     pending_local_support = _validate_local_closures(
         local_closure_rows,
@@ -1944,6 +3102,7 @@ def _validate_dataset(
     return equivalence, test_logs, pre_fix_logs, counts
 
 
+@with_immutable_git_query_cache
 def validate_source_inputs(
     *,
     baseline: Path,
@@ -1954,14 +3113,32 @@ def validate_source_inputs(
 ) -> ValidatedInputs:
     baseline_data = _validate_baseline(baseline)
     group_rows, group_hash, group_bytes = _validate_group_map(group_map, baseline_data.reportable_ids)
-    handoff_value, files, hashes, snapshots, handoff_bytes = _validate_handoff_manifest(handoff)
+    (
+        handoff_value,
+        files,
+        hashes,
+        snapshots,
+        cohort_hashes,
+        cohort_snapshots,
+        handoff_bytes,
+    ) = _validate_handoff_manifest(handoff)
+    cohort_expectations = _validate_cohort_handoffs(cohort_snapshots, group_rows)
     final_commit, final_tree = _validate_candidate(candidate_repo, baseline_data, handoff_value["candidate_final_commit"])
+    tool_source_bytes = _validated_tool_source_snapshots(
+        candidate_repo,
+        final_commit,
+    )
     classification_rows = load_jsonl_bytes(
         snapshots["postfix_classification_ledger"], label="post-fix classification"
     )
     fix_group_rows = load_jsonl_bytes(snapshots["fix_group_ledger"], label="fix-group ledger")
     test_rows = load_jsonl_bytes(snapshots["test_receipt_registry"], label="test receipt registry")
     pre_fix = load_json_bytes(snapshots["pre_fix_negative_receipt"], label="pre-fix negative receipt")
+    pre_fix_definition_bytes = snapshots["pre_fix_test_definition_registry"]
+    pre_fix_definition_rows = load_jsonl_bytes(
+        pre_fix_definition_bytes,
+        label="pre-fix test-definition registry",
+    )
     closures = load_jsonl_bytes(snapshots["local_condition_closure"], label="local condition closure")
     documentation = load_json_bytes(
         snapshots["documentation_alignment_receipt"], label="documentation alignment receipt"
@@ -1974,10 +3151,13 @@ def validate_source_inputs(
     equivalence, test_logs, pre_fix_logs, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
+        cohort_expectations=cohort_expectations,
         classification_rows=classification_rows,
         fix_group_rows=fix_group_rows,
         test_receipt_rows=test_rows,
         pre_fix_receipt=pre_fix,
+        pre_fix_test_definition_rows=pre_fix_definition_rows,
+        pre_fix_test_definition_bytes=pre_fix_definition_bytes,
         local_closure_rows=closures,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
@@ -2003,14 +3183,20 @@ def validate_source_inputs(
         handoff_file_paths=files,
         handoff_file_sha256=hashes,
         handoff_file_bytes=snapshots,
+        cohort_handoff_sha256=cohort_hashes,
+        cohort_handoff_bytes=cohort_snapshots,
+        cohort_expectations=cohort_expectations,
         evidence_cutoff_at=handoff_value["evidence_cutoff_at"],
         candidate_repo=candidate_repo,
         candidate_final_commit=final_commit,
         candidate_final_tree=final_tree,
+        tool_source_bytes=tool_source_bytes,
         classification_rows=classification_rows,
         fix_group_rows=fix_group_rows,
         test_receipt_rows=test_rows,
         pre_fix_receipt=pre_fix,
+        pre_fix_test_definition_rows=pre_fix_definition_rows,
+        pre_fix_test_definition_bytes=pre_fix_definition_bytes,
         local_closure_rows=closures,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
@@ -2049,12 +3235,36 @@ def expected_baseline_binding(data: Baseline, group_map_sha256: str) -> dict[str
     }
 
 
+def replay_source_snapshot_sha256(
+    *,
+    candidate_final_commit: str,
+    candidate_final_tree: str,
+    evidence_cutoff_at: str,
+    semantic_receipt_sha256: str,
+    input_sha256: dict[str, str],
+    tool_source_sha256: dict[str, str],
+) -> str:
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "candidate_final_commit": candidate_final_commit,
+                "candidate_final_tree": candidate_final_tree,
+                "evidence_cutoff_at": evidence_cutoff_at,
+                "semantic_receipt_sha256": semantic_receipt_sha256,
+                "input_sha256": input_sha256,
+                "tool_source_sha256": tool_source_sha256,
+            }
+        )
+    )
+
+
 def _validate_packaged_trust_roots(
     *,
     package_files: dict[str, bytes],
     baseline: Baseline,
     group_map_rows: list[dict[str, Any]],
     group_map_sha256: str,
+    candidate_repo: Path,
     final_commit: str,
     evidence_cutoff: str,
     classification_rows: list[dict[str, Any]],
@@ -2067,7 +3277,13 @@ def _validate_packaged_trust_roots(
     matrices_bytes: bytes,
     verdicts: dict[str, Any],
     residuals: list[dict[str, Any]],
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, str],
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+    bytes,
+]:
     def archived(relative: str, *, label: str) -> bytes:
         try:
             return package_files[relative]
@@ -2092,7 +3308,13 @@ def _validate_packaged_trust_roots(
     handoff = load_json_bytes(handoff_bytes, label="archived handoff manifest")
     exact_keys(
         handoff,
-        {"schema_version", "evidence_cutoff_at", "candidate_final_commit", "files"},
+        {
+            "schema_version",
+            "evidence_cutoff_at",
+            "candidate_final_commit",
+            "files",
+            "cohort_handoffs",
+        },
         label="archived handoff manifest",
     )
     if (
@@ -2104,13 +3326,17 @@ def _validate_packaged_trust_roots(
     handoff_entries = exact_keys(handoff["files"], HANDOFF_FILE_KEYS, label="archived handoff files")
     handoff_payloads: dict[str, bytes] = {}
     handoff_hashes: dict[str, str] = {}
+    source_paths: set[str] = set()
     for key in HANDOFF_FILE_KEYS:
         entry = exact_keys(
             handoff_entries[key],
             {"path", "sha256"},
             label=f"archived handoff file {key}",
         )
-        safe_relative(entry["path"], label=f"archived handoff file {key} path")
+        relative = safe_relative(entry["path"], label=f"archived handoff file {key} path")
+        if relative.as_posix() in source_paths:
+            raise ContractError(f"package trust root: duplicate archived source path for {key}")
+        source_paths.add(relative.as_posix())
         if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
             raise ContractError(f"package trust root: invalid archived SHA-256 for {key}")
         payload = archived(HANDOFF_ARCHIVE_PATHS[key], label=f"handoff file {key}")
@@ -2119,6 +3345,45 @@ def _validate_packaged_trust_roots(
             raise ContractError(f"package trust root: archived handoff file hash changed for {key}")
         handoff_payloads[key] = payload
         handoff_hashes[key] = digest
+
+    cohort_entries = exact_keys(
+        handoff["cohort_handoffs"],
+        COHORT_HANDOFF_KEYS,
+        label="archived raw cohort handoffs",
+    )
+    cohort_payloads: dict[str, bytes] = {}
+    cohort_hashes: dict[str, str] = {}
+    for key in COHORT_HANDOFF_KEYS:
+        entry = exact_keys(
+            cohort_entries[key],
+            {"path", "sha256"},
+            label=f"archived raw cohort handoff {key}",
+        )
+        relative = safe_relative(
+            entry["path"],
+            label=f"archived raw cohort handoff {key} path",
+        )
+        if relative.as_posix() in source_paths:
+            raise ContractError(
+                f"package trust root: duplicate archived raw cohort path for {key}"
+            )
+        source_paths.add(relative.as_posix())
+        if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
+            raise ContractError(
+                f"package trust root: invalid archived raw cohort SHA-256 for {key}"
+            )
+        payload = archived(
+            COHORT_HANDOFF_ARCHIVE_PATHS[key],
+            label=f"raw cohort handoff {key}",
+        )
+        digest = sha256_bytes(payload)
+        if digest != entry["sha256"]:
+            raise ContractError(
+                f"package trust root: archived raw cohort handoff hash changed for {key}"
+            )
+        cohort_payloads[key] = payload
+        cohort_hashes[key] = digest
+    cohort_expectations = _validate_cohort_handoffs(cohort_payloads, group_map_rows)
 
     source_classification = load_jsonl_bytes(
         handoff_payloads["postfix_classification_ledger"],
@@ -2190,12 +3455,19 @@ def _validate_packaged_trust_roots(
         "security_fix_group_map": group_map_sha256,
         "handoff_manifest": sha256_bytes(handoff_bytes),
         **{f"handoff:{key}": digest for key, digest in sorted(handoff_hashes.items())},
+        **{
+            f"cohort_handoff:{key}": digest
+            for key, digest in sorted(cohort_hashes.items())
+        },
     }
 
-    tool_root = Path(__file__).parent
+    current_tools = _validated_tool_source_snapshots(
+        candidate_repo,
+        final_commit,
+    )
     expected_tools: dict[str, str] = {}
     for name in TOOL_SOURCE_NAMES:
-        current = read_regular_bytes(tool_root / name, label=f"current tool source {name}")
+        current = current_tools[name]
         packaged = archived(TOOL_SOURCE_PACKAGE_PATHS[name], label=f"tool source {name}")
         if packaged != current:
             raise ContractError(f"package trust root: packaged tool source differs for {name}")
@@ -2204,9 +3476,23 @@ def _validate_packaged_trust_roots(
         TOOL_SOURCE_PACKAGE_PATHS["handoff-v1.schema.json"]
     ]:
         raise ContractError("package trust root: handoff schema copies differ")
-    return expected_inputs, expected_tools
+    pre_fix_definition_bytes = handoff_payloads[
+        "pre_fix_test_definition_registry"
+    ]
+    pre_fix_definition_rows = load_jsonl_bytes(
+        pre_fix_definition_bytes,
+        label="archived pre-fix test-definition registry",
+    )
+    return (
+        expected_inputs,
+        expected_tools,
+        cohort_expectations,
+        pre_fix_definition_rows,
+        pre_fix_definition_bytes,
+    )
 
 
+@with_immutable_git_query_cache
 def validate_package(
     *,
     package: Path,
@@ -2234,6 +3520,10 @@ def validate_package(
         package,
         exact=True,
         required=PACKAGE_STATIC_FILES - {"MANIFEST.sha256"},
+        max_manifest_bytes=PACKAGE_MANIFEST_MAX_BYTES,
+        max_file_bytes=PACKAGE_FILE_MAX_BYTES,
+        max_total_bytes=PACKAGE_TOTAL_MAX_BYTES,
+        capture_all=True,
     )
     manifest = package_snapshot.rows
     package_files = package_snapshot.files
@@ -2313,11 +3603,18 @@ def validate_package(
     evidence_cutoff = verdicts.get("evidence_cutoff_at")
     if not isinstance(evidence_cutoff, str):
         raise ContractError("package: verdict cutoff is missing")
-    expected_input_hashes, expected_tool_hashes = _validate_packaged_trust_roots(
+    (
+        expected_input_hashes,
+        expected_tool_hashes,
+        cohort_expectations,
+        pre_fix_definition_rows,
+        pre_fix_definition_bytes,
+    ) = _validate_packaged_trust_roots(
         package_files=package_files,
         baseline=baseline_data,
         group_map_rows=group_rows,
         group_map_sha256=group_hash,
+        candidate_repo=candidate_repo,
         final_commit=final_commit,
         evidence_cutoff=evidence_cutoff,
         classification_rows=classification_rows,
@@ -2334,10 +3631,13 @@ def validate_package(
     equivalence, _, _, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
+        cohort_expectations=cohort_expectations,
         classification_rows=classification_rows,
         fix_group_rows=fix_rows,
         test_receipt_rows=test_rows,
         pre_fix_receipt=pre_fix,
+        pre_fix_test_definition_rows=pre_fix_definition_rows,
+        pre_fix_test_definition_bytes=pre_fix_definition_bytes,
         local_closure_rows=closure_rows,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
@@ -2378,21 +3678,47 @@ def validate_package(
     ):
         raise ContractError("package: candidate identity/equivalence receipt is stale")
 
-    core_excluded = {"MANIFEST.sha256", "receipts/build_receipt.json", "receipts/replay_receipt.json"}
+    core_excluded = {
+        "MANIFEST.sha256",
+        "receipts/build_receipt.json",
+        *REPLAY_RECEIPT_PATHS.values(),
+    }
     core_index = {
         relative: {"sha256": manifest[relative], "size": len(payload)}
         for relative, payload in sorted(package_files.items())
         if relative not in core_excluded
     }
     core_hash = sha256_bytes(canonical_json_bytes(core_index))
-    replay = json_at("receipts/replay_receipt.json", label="replay receipt")
-    if replay != {
-        "schema_version": 1,
-        "replay_count": 2,
-        "byte_identical": True,
-        "core_index_sha256": core_hash,
-    }:
-        raise ContractError("package: replay receipt is inconsistent")
+    source_snapshot_hash = replay_source_snapshot_sha256(
+        candidate_final_commit=final_commit,
+        candidate_final_tree=final_tree,
+        evidence_cutoff_at=evidence_cutoff,
+        semantic_receipt_sha256=semantic_receipt_sha256,
+        input_sha256=expected_input_hashes,
+        tool_source_sha256=expected_tool_hashes,
+    )
+    replay_receipt_hashes: dict[str, str] = {}
+    for replay_id, relative in sorted(REPLAY_RECEIPT_PATHS.items()):
+        replay = json_at(relative, label=f"replay {replay_id} receipt")
+        if replay != {
+            "schema_version": 1,
+            "replay_id": replay_id,
+            "execution_model": "fresh-process",
+            "fresh_source_validation": True,
+            "fresh_core_render": True,
+            "package_validation_required_before_publish": True,
+            "candidate_final_commit": final_commit,
+            "candidate_final_tree": final_tree,
+            "source_snapshot_sha256": source_snapshot_hash,
+            "core_index_sha256": core_hash,
+            "core_entry_count": len(core_index),
+        }:
+            raise ContractError(
+                f"package: replay {replay_id} receipt is inconsistent"
+            )
+        replay_receipt_hashes[replay_id] = sha256_bytes(
+            package_files[relative]
+        )
     build = json_at("receipts/build_receipt.json", label="build receipt")
     exact_keys(
         build,
@@ -2403,10 +3729,13 @@ def validate_package(
             "candidate_final_tree",
             "evidence_cutoff_at",
             "semantic_receipt_sha256",
+            "source_snapshot_sha256",
             "core_index_sha256",
             "counts",
             "input_sha256",
             "tool_source_sha256",
+            "validated_replay_ids",
+            "replay_receipt_sha256",
         },
         label="build receipt",
     )
@@ -2417,10 +3746,16 @@ def validate_package(
         or build.get("candidate_final_tree") != final_tree
         or build.get("evidence_cutoff_at") != evidence_cutoff
         or build.get("semantic_receipt_sha256") != semantic_receipt_sha256
+        or build.get("source_snapshot_sha256") != source_snapshot_hash
         or build.get("core_index_sha256") != core_hash
         or build.get("counts") != counts
         or build.get("input_sha256") != expected_input_hashes
         or build.get("tool_source_sha256") != expected_tool_hashes
+        or build.get("validated_replay_ids") != sorted(
+            REPLAY_RECEIPT_PATHS
+        )
+        or build.get("replay_receipt_sha256")
+        != replay_receipt_hashes
     ):
         raise ContractError("package: build receipt trust root/input SHA/tool source is inconsistent")
     return {
