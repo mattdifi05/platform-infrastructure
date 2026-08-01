@@ -34,7 +34,51 @@ const MAX_TRUST_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const MAX_ENGINE_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_REPLAY_ENTRIES = 4096;
 const MAX_REPLAY_LEDGER_BYTES = 1024 * 1024;
+const MAX_LEASE_STATE_BYTES = MAX_TRUST_DOCUMENT_BYTES + MAX_REQUEST_BYTES + 64 * 1024;
 const CLEANUP_TIMEOUT_MS = 10_000;
+const LEASE_SCHEMA_V2 = "platform.docker-action.lease/v2";
+const LEASE_JOURNAL_SCHEMA_V2 = "platform.docker-action.lease-journal-entry/v2";
+const ZERO_SHA256 = "0".repeat(64);
+const LEASE_EVENT_FIELDS = Object.freeze({
+  "snapshot-materialized": Object.freeze({
+    required: ["phaseId", "snapshot"],
+    optional: ["requestSha256"],
+  }),
+  "worker-recorded": Object.freeze({
+    required: [
+      "action",
+      "phaseId",
+      "phaseProfileSha256",
+      "receiptDigest",
+      "resourceName",
+    ],
+    optional: ["requestSha256", "snapshot"],
+  }),
+  "worker-created": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "worker-result-recorded": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId", "workerResultSha256"],
+    optional: [],
+  }),
+  "worker-deleted": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+  "snapshot-cleaned": Object.freeze({
+    required: ["phaseId", "snapshot"],
+    optional: ["requestSha256"],
+  }),
+  "action-completed": Object.freeze({
+    required: ["resultSha256"],
+    optional: ["requestSha256"],
+  }),
+  "remote-effect-unknown": Object.freeze({
+    required: ["phaseId", "resourceName", "workerId"],
+    optional: [],
+  }),
+});
 
 export class PersistentReplayStore {
   constructor(stateDir = DEFAULT_STATE_DIR, {
@@ -42,10 +86,12 @@ export class PersistentReplayStore {
     bootId = crypto.randomBytes(24).toString("hex"),
     expectedUid = 0,
     expectedGid = 0,
+    io = fs,
   } = {}) {
     this.stateDir = path.resolve(stateDir);
     this.replayDir = path.join(this.stateDir, "replay");
     this.activationReplayDir = path.join(this.stateDir, "activation-replay");
+    this.journalRoot = path.join(this.stateDir, "journal");
     this.lockPath = path.join(this.stateDir, "active.lock");
     this.generationPath = path.join(this.stateDir, "active-generation.json");
     this.activationPath = path.join(this.stateDir, "active-activation.json");
@@ -53,9 +99,22 @@ export class PersistentReplayStore {
     this.bootId = bootId;
     this.expectedUid = expectedUid;
     this.expectedGid = expectedGid;
-    ensurePrivateDirectory(this.stateDir, { expectedUid, expectedGid });
-    ensurePrivateDirectory(this.replayDir, { expectedUid, expectedGid });
-    ensurePrivateDirectory(this.activationReplayDir, { expectedUid, expectedGid });
+    this.io = io;
+    if (!/^[a-f0-9]{48}$/.test(String(bootId ?? ""))
+      || !Number.isSafeInteger(expectedUid) || expectedUid < 0
+      || !Number.isSafeInteger(expectedGid) || expectedGid < 0
+      || typeof now !== "function" || !io || typeof io !== "object") {
+      throw new TypeError("broker replay store policy is invalid");
+    }
+    ensurePrivateDirectoryWithIo(io, this.stateDir, { expectedUid, expectedGid });
+    const recovering = io.existsSync(this.lockPath);
+    for (const directory of [this.replayDir, this.activationReplayDir, this.journalRoot]) {
+      ensurePrivateDirectoryWithIo(io, directory, {
+        create: !recovering,
+        expectedUid,
+        expectedGid,
+      });
+    }
   }
 
   consume(request) {
@@ -67,15 +126,18 @@ export class PersistentReplayStore {
     const file = path.join(this.replayDir, id);
     let descriptor;
     try {
-      descriptor = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-      fs.writeFileSync(descriptor, `${JSON.stringify({ expiresAt: new Date(this.now() + 24 * 60 * 60_000).toISOString() })}\n`);
-      fs.fsyncSync(descriptor);
+      descriptor = this.io.openSync(file, safeCreateFlags(this.io), 0o600);
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson({
+        expiresAt: new Date(this.now() + 24 * 60 * 60_000).toISOString(),
+      })}\n`));
+      this.io.fsyncSync(descriptor);
     } catch (error) {
       if (error?.code === "EEXIST") throw brokerError(409, "request replay rejected");
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
     }
+    this.syncDirectory(this.replayDir);
   }
 
   admitTrustedContext(trusted) {
@@ -130,7 +192,7 @@ export class PersistentReplayStore {
     } else if (next.generation !== 1 || next.previousActiveSha256 !== "0".repeat(64)) {
       throw brokerError(409, "activation journal has no trusted genesis");
     }
-    const replayNames = fs.readdirSync(this.activationReplayDir);
+    const replayNames = this.io.readdirSync(this.activationReplayDir);
     if (replayNames.length >= MAX_REPLAY_ENTRIES) throw brokerError(503, "activation replay journal capacity is exhausted");
     const requestIdentitySha256 = crypto.createHash("sha256").update(`${next.requestId}\0${next.nonce}`).digest("hex");
     for (const name of replayNames) {
@@ -142,65 +204,157 @@ export class PersistentReplayStore {
     const replayFile = path.join(this.activationReplayDir, next.envelopeSha256);
     let descriptor;
     try {
-      descriptor = fs.openSync(replayFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-      fs.writeFileSync(descriptor, `${canonicalJson({
+      descriptor = this.io.openSync(replayFile, safeCreateFlags(this.io), 0o600);
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson({
         activationId: next.activationId,
         envelopeSha256: next.envelopeSha256,
         generation: next.generation,
         requestIdentitySha256,
-      })}\n`);
-      fs.fsyncSync(descriptor);
+      })}\n`));
+      this.io.fsyncSync(descriptor);
     } catch (error) {
       if (error?.code === "EEXIST") throw brokerError(409, "activation ABA replay rejected");
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
     }
-    const replayDirectory = fs.openSync(this.activationReplayDir, fs.constants.O_RDONLY);
-    try {
-      fs.fsyncSync(replayDirectory);
-    } finally {
-      fs.closeSync(replayDirectory);
-    }
+    this.syncDirectory(this.activationReplayDir);
     this.writeStateJsonAtomic(this.activationPath, next, { replace: Boolean(current) });
   }
 
   acquire(request, trusted) {
-    const record = {
-      schema: "platform.docker-action.lease/v1",
+    if (this.io.existsSync(this.lockPath)) {
+      throw brokerError(409, "another Docker action is running or requires remote reconciliation");
+    }
+    if (!isPlainRecord(request) || !isPlainRecord(trusted)
+      || !isPlainRecord(trusted.intent) || !isPlainRecord(trusted.receipt)
+      || request.action !== String(request.action ?? "")
+      || request.requestId !== String(request.requestId ?? "")
+      || trusted.intent.intentId !== String(trusted.intent.intentId ?? "")
+      || !/^[a-f0-9]{64}$/.test(String(trusted.receiptDigest ?? ""))
+      || sha256(canonicalJson(trusted.receipt)) !== trusted.receiptDigest) {
+      throw new TypeError("broker lease lineage is invalid");
+    }
+    const requestCopy = cloneCanonicalValue(request);
+    const trustedCopy = cloneCanonicalValue(trusted);
+    const requestSha256 = sha256(canonicalJson(requestCopy));
+    const startedAtMs = this.now();
+    if (!Number.isFinite(startedAtMs)) throw new TypeError("broker lease clock is invalid");
+    const startedAt = new Date(startedAtMs).toISOString();
+    const leaseId = sha256(canonicalJson({
       bootId: this.bootId,
+      entropy: crypto.randomBytes(32).toString("hex"),
+      requestSha256,
+      startedAt,
+    }));
+    const journalDirectory = path.join(this.journalRoot, leaseId);
+    const record = {
+      schema: LEASE_SCHEMA_V2,
+      bootId: this.bootId,
+      leaseId,
+      request: requestCopy,
       requestId: request.requestId,
       action: request.action,
       intentId: trusted.intent.intentId,
       receiptDigest: trusted.receiptDigest,
-      startedAt: new Date(this.now()).toISOString(),
-      expiresAt: new Date(this.now() + 24 * 60 * 60_000).toISOString(),
-      resourceName: null,
-      worker: null,
+      requestSha256,
+      startedAt,
+      expiresAt: new Date(startedAtMs + 24 * 60 * 60_000).toISOString(),
+      journalEntryCount: 0,
+      journalHeadSha256: ZERO_SHA256,
+      recoveryIntent: null,
+      trusted: trustedCopy,
     };
+    let journalCreated = false;
+    let lockCreated = false;
     let descriptor;
     try {
-      descriptor = fs.openSync(this.lockPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-      fs.writeFileSync(descriptor, `${canonicalJson(record)}\n`);
-      fs.fsyncSync(descriptor);
+      this.io.mkdirSync(journalDirectory, { mode: 0o700 });
+      journalCreated = true;
+      validatePrivateDirectoryWithIo(this.io, journalDirectory, {
+        expectedUid: this.expectedUid,
+        expectedGid: this.expectedGid,
+      });
+      this.syncDirectory(this.journalRoot);
+      descriptor = this.io.openSync(this.lockPath, safeCreateFlags(this.io), 0o600);
+      lockCreated = true;
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson(record)}\n`));
+      this.io.fsyncSync(descriptor);
     } catch (error) {
-      if (error?.code === "EEXIST") throw brokerError(409, "another Docker action is running");
+      if (error?.code === "EEXIST") {
+        throw brokerError(409, "another Docker action is running or requires remote reconciliation");
+      }
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
+      if (!lockCreated && journalCreated
+        && this.io.existsSync(journalDirectory)
+        && this.io.readdirSync(journalDirectory).length === 0) {
+        this.io.rmdirSync(journalDirectory);
+        this.syncDirectory(this.journalRoot);
+      }
     }
+    this.syncDirectory(this.stateDir);
+    const lineage = freezeCanonicalValue({
+      action: record.action,
+      intentId: record.intentId,
+      receiptDigest: record.receiptDigest,
+      request: record.request,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+    });
     let closed = false;
+    let terminal = null;
     return Object.freeze({
-      recordWorker: ({ resourceName, body, imageId, hostPath }) => {
-        if (closed || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(String(resourceName ?? ""))) {
-          throw new Error("broker lease resource name is invalid");
+      lineage,
+      recordRecoveryIntent: (value) => {
+        if (closed || terminal) throw new Error("broker lease is closed or terminal");
+        if (record.journalEntryCount !== 0) {
+          throw new Error("broker lease recovery intent must precede journal materialization");
         }
-        record.resourceName = resourceName;
-        record.worker = { body, imageId, hostPath };
-        this.writeStateJsonAtomic(this.lockPath, record, { replace: true });
+        if (!isPlainRecord(value)
+          || !hasExactKeys(value, ["phaseId", "snapshot"])
+          || !isLogicalLeaseId(value.phaseId)) {
+          throw new TypeError("broker lease recovery intent is invalid");
+        }
+        const snapshot = cloneCanonicalValue(normalizeSealedSnapshot(value.snapshot));
+        if (snapshot.requestSha256 !== record.requestSha256) {
+          throw new TypeError("broker lease recovery intent request lineage is invalid");
+        }
+        const nextIntent = {
+          phaseId: value.phaseId,
+          requestSha256: record.requestSha256,
+          snapshot,
+        };
+        if (record.recoveryIntent
+          && canonicalJson(record.recoveryIntent) !== canonicalJson(nextIntent)) {
+          throw new Error("broker lease recovery intent substitution rejected");
+        }
+        const next = { ...record, recoveryIntent: nextIntent };
+        this.installLeaseHead(next);
+        Object.assign(record, next);
+        return freezeCanonicalValue(nextIntent);
+      },
+      recordEvent: (event) => {
+        if (closed || terminal) throw new Error("broker lease is closed or terminal; journal append rejected");
+        const entry = this.appendLeaseEvent(record, event);
+        if (entry.event === "action-completed" || entry.event === "remote-effect-unknown") {
+          terminal = entry.event;
+        }
+        return entry;
+      },
+      recordWorker: (event) => {
+        if (closed || terminal) throw new Error("broker lease is closed or terminal; journal append rejected");
+        return this.appendLeaseEvent(record, { event: "worker-recorded", ...event });
       },
       release: () => {
         if (closed) return;
+        if (terminal === "remote-effect-unknown") {
+          throw new Error("remote effect is unknown and requires reconciliation");
+        }
+        if (record.recoveryIntent || (record.journalEntryCount > 0 && terminal !== "action-completed")) {
+          throw new Error("broker lease cannot be released before durable action completion");
+        }
         closed = true;
         this.unlinkExactStateFile(this.lockPath);
       },
@@ -213,29 +367,55 @@ export class PersistentReplayStore {
   async recover(engine) {
     const record = this.readStateJson(this.lockPath, { optional: true });
     if (!record) return { status: "clean" };
-    if (record.schema !== "platform.docker-action.lease/v1" || !record.bootId || !record.requestId
-      || !record.action || !record.intentId || !/^[a-f0-9]{64}$/.test(String(record.receiptDigest ?? ""))
-      || !Number.isFinite(Date.parse(record.expiresAt))) {
-      throw new Error("broker recovery lease is malformed");
-    }
+    this.validateLeaseRecord(record);
     if (record.bootId === this.bootId) throw new Error("broker has an unexpected live lease before startup");
-    if (record.resourceName) {
-      if (typeof engine?.recoverLease !== "function") throw new Error("broker cannot recover a prior worker lease");
-      await withTimeout((signal) => engine.recoverLease(record, signal), CLEANUP_TIMEOUT_MS, "worker recovery timed out");
+    const journalEntries = this.readAndValidateJournal(record);
+    const terminal = journalEntries.at(-1)?.event ?? null;
+    if (terminal === "remote-effect-unknown") {
+      throw new Error("remote effect is unknown and requires manual reconciliation");
     }
+    if (terminal === "action-completed" || (journalEntries.length === 0 && !record.recoveryIntent)) {
+      this.unlinkExactStateFile(this.lockPath);
+      return { status: "recovered", resourceName: null };
+    }
+    if (typeof engine?.recoverLease !== "function") {
+      throw new Error("broker cannot recover a prior worker lease");
+    }
+    const lineage = freezeCanonicalValue({
+      action: record.action,
+      intentId: record.intentId,
+      receiptDigest: record.receiptDigest,
+      request: record.request,
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+    });
+    const recoveryRecord = Object.freeze({
+      ...cloneCanonicalValue(record),
+      journalEntries: freezeCanonicalValue(journalEntries),
+      lineage,
+      recordEvent: (event) => this.appendLeaseEvent(record, event),
+    });
+    await withTimeout(
+      (signal) => engine.recoverLease(recoveryRecord, signal),
+      CLEANUP_TIMEOUT_MS,
+      "worker recovery timed out",
+    );
     this.unlinkExactStateFile(this.lockPath);
-    return { status: "recovered", resourceName: record.resourceName };
+    const resourceName = [...journalEntries]
+      .reverse()
+      .find(({ event }) => event === "worker-recorded")?.resourceName ?? null;
+    return { status: "recovered", resourceName };
   }
 
   purgeExpired() {
-    const names = fs.readdirSync(this.replayDir);
+    const names = this.io.readdirSync(this.replayDir);
     if (names.length > MAX_REPLAY_ENTRIES) throw brokerError(503, "replay ledger entry bound exceeded");
     let count = 0;
     let bytes = 0;
     for (const name of names) {
       if (!/^[a-f0-9]{64}$/.test(name)) throw new Error("unexpected replay ledger entry");
       const file = path.join(this.replayDir, name);
-      const stat = fs.lstatSync(file);
+      const stat = this.io.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== this.expectedUid
         || stat.gid !== this.expectedGid || (stat.mode & 0o077) !== 0 || stat.size > 512) {
         throw new Error("replay ledger integrity failure");
@@ -252,69 +432,516 @@ export class PersistentReplayStore {
     return { count, bytes };
   }
 
-  readStateJson(file, { optional = false } = {}) {
+  readStateJson(file, { optional = false, maximumBytes = MAX_LEASE_STATE_BYTES } = {}) {
     let descriptor;
     try {
-      descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      descriptor = this.io.openSync(file, safeReadFlags(this.io));
     } catch (error) {
       if (optional && error?.code === "ENOENT") return null;
       throw error;
     }
     try {
-      const before = fs.fstatSync(descriptor);
-      if (!before.isFile() || before.nlink !== 1 || before.uid !== this.expectedUid
-        || before.gid !== this.expectedGid || (before.mode & 0o077) !== 0 || before.size < 2 || before.size > 4096) {
+      const before = this.io.fstatSync(descriptor, { bigint: true });
+      if (!before.isFile() || before.nlink !== 1n
+        || before.gid !== BigInt(this.expectedGid) || before.uid !== BigInt(this.expectedUid)
+        || (before.mode & 0o777n) !== 0o600n || before.size < 2n
+        || before.size > BigInt(maximumBytes)) {
         throw new Error("broker state file integrity failure");
       }
-      const first = readDescriptor(descriptor, before.size);
-      const second = readDescriptor(descriptor, before.size);
-      const after = fs.fstatSync(descriptor);
-      if (!["dev", "ino", "size", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "nlink"].every((field) => before[field] === after[field])
+      const first = readDescriptorWithIo(this.io, descriptor, Number(before.size));
+      const second = readDescriptorWithIo(this.io, descriptor, Number(before.size));
+      const after = this.io.fstatSync(descriptor, { bigint: true });
+      if (!["dev", "ino", "size", "mtimeNs", "ctimeNs", "mode", "uid", "gid", "nlink"].every((field) => before[field] === after[field])
         || first.length !== second.length || !crypto.timingSafeEqual(first, second)) {
         throw new Error("broker state file changed while being read");
       }
-      return JSON.parse(first.toString("utf8"));
+      const text = first.toString("utf8");
+      const value = JSON.parse(text);
+      if (text !== `${canonicalJson(value)}\n`) {
+        throw new Error("broker state file is not canonical JSON");
+      }
+      return value;
     } finally {
-      fs.closeSync(descriptor);
+      this.io.closeSync(descriptor);
     }
   }
 
+  readJournalJson(file) {
+    const before = this.io.lstatSync(file, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+      || before.gid !== BigInt(this.expectedGid) || before.uid !== BigInt(this.expectedUid)
+      || (before.mode & 0o777n) !== 0o600n || before.size < 2n
+      || before.size > BigInt(MAX_TRUST_DOCUMENT_BYTES)) {
+      throw new Error("lease journal entry file integrity failure");
+    }
+    const first = this.io.readFileSync(file);
+    const second = this.io.readFileSync(file);
+    const after = this.io.lstatSync(file, { bigint: true });
+    if (!["dev", "ino", "size", "mtimeNs", "ctimeNs", "mode", "uid", "gid", "nlink"]
+      .every((field) => before[field] === after[field])
+      || first.length !== Number(before.size) || second.length !== first.length
+      || !crypto.timingSafeEqual(first, second)) {
+      throw new Error("lease journal entry changed while being read");
+    }
+    const text = first.toString("utf8");
+    const value = JSON.parse(text);
+    if (text !== `${canonicalJson(value)}\n`) {
+      throw new Error("lease journal entry is not canonical JSON");
+    }
+    return value;
+  }
+
   writeStateJsonAtomic(file, value, { replace = false } = {}) {
-    const temporary = path.join(this.stateDir, `.state-${process.pid}-${crypto.randomBytes(12).toString("hex")}`);
+    const directory = path.dirname(file);
+    const temporary = path.join(directory, `.state-${process.pid}-${crypto.randomBytes(12).toString("hex")}`);
+    let descriptor;
     try {
-      fs.writeFileSync(temporary, `${canonicalJson(value)}\n`, { flag: "wx", mode: 0o600 });
-      const descriptor = fs.openSync(temporary, fs.constants.O_RDONLY);
-      try {
-        fs.fsyncSync(descriptor);
-      } finally {
-        fs.closeSync(descriptor);
-      }
-      if (!replace && fs.existsSync(file)) throw new Error("broker state generation already exists");
-      fs.renameSync(temporary, file);
-      const directory = fs.openSync(this.stateDir, fs.constants.O_RDONLY);
-      try {
-        fs.fsyncSync(directory);
-      } finally {
-        fs.closeSync(directory);
-      }
+      descriptor = this.io.openSync(temporary, safeCreateFlags(this.io), 0o600);
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson(value)}\n`));
+      this.io.fsyncSync(descriptor);
+      this.io.closeSync(descriptor);
+      descriptor = undefined;
+      if (!replace && this.io.existsSync(file)) throw new Error("broker state generation already exists");
+      this.io.renameSync(temporary, file);
+      this.syncDirectory(directory);
     } finally {
-      fs.rmSync(temporary, { force: true });
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
+      if (this.io.existsSync(temporary)) {
+        this.io.unlinkSync(temporary);
+        this.syncDirectory(directory);
+      }
     }
   }
 
   unlinkExactStateFile(file) {
-    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    const stat = this.io.lstatSync(file);
     if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== this.expectedUid
-      || stat.gid !== this.expectedGid || (stat.mode & 0o077) !== 0) {
+      || stat.gid !== this.expectedGid || (stat.mode & 0o777) !== 0o600) {
       throw new Error("broker state unlink integrity failure");
     }
-    fs.unlinkSync(file);
-    const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
-    try {
-      fs.fsyncSync(directory);
-    } finally {
-      fs.closeSync(directory);
+    this.io.unlinkSync(file);
+    this.syncDirectory(path.dirname(file));
+  }
+
+  appendLeaseEvent(record, value) {
+    this.validateLeaseRecord(record);
+    const current = this.readAndValidateJournal(record);
+    const terminal = current.at(-1)?.event;
+    if (terminal === "action-completed" || terminal === "remote-effect-unknown") {
+      throw new Error("broker lease journal is terminal; append rejected");
     }
+    const event = normalizeLeaseEvent(value, record);
+    if (record.recoveryIntent && ["snapshot-materialized", "snapshot-cleaned"].includes(event.event)
+      && (event.phaseId !== record.recoveryIntent.phaseId
+        || canonicalJson(event.snapshot) !== canonicalJson(record.recoveryIntent.snapshot))) {
+      throw new Error("broker lease recovery intent substitution rejected");
+    }
+    const entry = {
+      schema: LEASE_JOURNAL_SCHEMA_V2,
+      leaseId: record.leaseId,
+      sequence: record.journalEntryCount,
+      previousEntrySha256: record.journalHeadSha256,
+      recordedAt: new Date(this.now()).toISOString(),
+      requestId: record.requestId,
+      requestSha256: record.requestSha256,
+      action: record.action,
+      ...event,
+    };
+    validateLeaseEventProgression([...current, entry], record);
+    const journalDirectory = path.join(this.journalRoot, record.leaseId);
+    const file = path.join(
+      journalDirectory,
+      `${String(entry.sequence).padStart(16, "0")}.json`,
+    );
+    let descriptor;
+    try {
+      descriptor = this.io.openSync(file, safeCreateFlags(this.io), 0o600);
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson(entry)}\n`));
+      this.io.fsyncSync(descriptor);
+    } finally {
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
+    }
+    this.syncDirectory(journalDirectory);
+    const next = {
+      ...record,
+      journalEntryCount: record.journalEntryCount + 1,
+      journalHeadSha256: sha256(canonicalJson(entry)),
+      recoveryIntent: ["snapshot-materialized", "snapshot-cleaned"].includes(event.event)
+        ? null
+        : record.recoveryIntent,
+    };
+    this.installLeaseHead(next);
+    Object.assign(record, next);
+    return freezeCanonicalValue(entry);
+  }
+
+  installLeaseHead(record) {
+    const temporary = path.join(
+      this.stateDir,
+      `active.lock.${process.pid}-${crypto.randomBytes(16).toString("hex")}.tmp`,
+    );
+    let descriptor;
+    try {
+      descriptor = this.io.openSync(temporary, safeCreateFlags(this.io), 0o600);
+      this.io.writeFileSync(descriptor, Buffer.from(`${canonicalJson(record)}\n`));
+      this.io.fsyncSync(descriptor);
+      this.io.closeSync(descriptor);
+      descriptor = undefined;
+      this.io.renameSync(temporary, this.lockPath);
+      this.syncDirectory(this.stateDir);
+    } finally {
+      if (descriptor !== undefined) this.io.closeSync(descriptor);
+      if (this.io.existsSync(temporary)) {
+        this.io.unlinkSync(temporary);
+        this.syncDirectory(this.stateDir);
+      }
+    }
+  }
+
+  readAndValidateJournal(record) {
+    const journalDirectory = path.join(this.journalRoot, record.leaseId);
+    try {
+      validatePrivateDirectoryWithIo(this.io, journalDirectory, {
+        expectedUid: this.expectedUid,
+        expectedGid: this.expectedGid,
+      });
+      const expectedNames = Array.from(
+        { length: record.journalEntryCount },
+        (_, index) => `${String(index).padStart(16, "0")}.json`,
+      );
+      const names = this.io.readdirSync(journalDirectory).map(String).sort();
+      if (canonicalJson(names) !== canonicalJson(expectedNames)) {
+        throw new Error("lease journal inventory or sequence is corrupt");
+      }
+      let previousEntrySha256 = ZERO_SHA256;
+      const entries = names.map((name, sequence) => {
+        const entry = this.readJournalJson(path.join(journalDirectory, name));
+        validateStoredLeaseEvent(entry, record, { previousEntrySha256, sequence });
+        previousEntrySha256 = sha256(canonicalJson(entry));
+        return entry;
+      });
+      if (previousEntrySha256 !== record.journalHeadSha256) {
+        throw new Error("lease journal head digest is corrupt");
+      }
+      validateLeaseEventProgression(entries, record);
+      if (record.recoveryIntent && entries.some(({ event, phaseId }) => (
+        phaseId === record.recoveryIntent.phaseId
+          && ["snapshot-materialized", "snapshot-cleaned"].includes(event)
+      ))) {
+        throw new Error("lease journal conflicts with its recovery intent");
+      }
+      return entries;
+    } catch (error) {
+      if (/lease journal/i.test(String(error?.message ?? ""))) throw error;
+      throw new Error(`broker lease journal integrity failure: ${error?.message ?? error}`, { cause: error });
+    }
+  }
+
+  validateLeaseRecord(record) {
+    const keys = [
+      "action",
+      "bootId",
+      "expiresAt",
+      "intentId",
+      "journalEntryCount",
+      "journalHeadSha256",
+      "leaseId",
+      "receiptDigest",
+      "recoveryIntent",
+      "request",
+      "requestId",
+      "requestSha256",
+      "schema",
+      "startedAt",
+      "trusted",
+    ];
+    if (!isPlainRecord(record) || !hasExactKeys(record, keys)
+      || record.schema !== LEASE_SCHEMA_V2
+      || !/^[a-f0-9]{48}$/.test(String(record.bootId ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(record.leaseId ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(record.receiptDigest ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(record.requestSha256 ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(record.journalHeadSha256 ?? ""))
+      || !Number.isSafeInteger(record.journalEntryCount)
+      || record.journalEntryCount < 0 || record.journalEntryCount > MAX_REPLAY_ENTRIES
+      || !Number.isFinite(Date.parse(String(record.startedAt ?? "")))
+      || !Number.isFinite(Date.parse(String(record.expiresAt ?? "")))
+      || !isPlainRecord(record.request) || !isPlainRecord(record.trusted)
+      || !isPlainRecord(record.trusted.intent) || !isPlainRecord(record.trusted.receipt)
+      || record.action !== record.request.action
+      || record.requestId !== record.request.requestId
+      || record.intentId !== record.trusted.intent.intentId
+      || record.receiptDigest !== record.trusted.receiptDigest
+      || sha256(canonicalJson(record.trusted.receipt)) !== record.receiptDigest
+      || sha256(canonicalJson(record.request)) !== record.requestSha256) {
+      throw new Error("broker recovery lease or journal head is malformed");
+    }
+    if (record.journalEntryCount === 0 && record.journalHeadSha256 !== ZERO_SHA256) {
+      throw new Error("broker recovery lease journal head is inconsistent");
+    }
+    if (record.recoveryIntent !== null) {
+      if (!isPlainRecord(record.recoveryIntent)
+        || !hasExactKeys(record.recoveryIntent, ["phaseId", "requestSha256", "snapshot"])
+        || !isLogicalLeaseId(record.recoveryIntent.phaseId)
+        || record.recoveryIntent.requestSha256 !== record.requestSha256
+        || canonicalJson(normalizeSealedSnapshot(record.recoveryIntent.snapshot))
+          !== canonicalJson(record.recoveryIntent.snapshot)) {
+        throw new Error("broker recovery lease recovery intent is malformed");
+      }
+    }
+  }
+
+  syncDirectory(directory) {
+    const descriptor = this.io.openSync(directory, safeDirectoryFlags(this.io));
+    try {
+      this.io.fsyncSync(descriptor);
+    } finally {
+      this.io.closeSync(descriptor);
+    }
+  }
+}
+
+function safeCreateFlags(io) {
+  return io.constants.O_WRONLY
+    | io.constants.O_CREAT
+    | io.constants.O_EXCL
+    | (io.constants.O_NOFOLLOW ?? 0);
+}
+
+function safeReadFlags(io) {
+  return io.constants.O_RDONLY | (io.constants.O_NOFOLLOW ?? 0);
+}
+
+function safeDirectoryFlags(io) {
+  return io.constants.O_RDONLY
+    | (io.constants.O_DIRECTORY ?? 0)
+    | (io.constants.O_NOFOLLOW ?? 0);
+}
+
+function cloneCanonicalValue(value) {
+  return JSON.parse(canonicalJson(value));
+}
+
+function freezeCanonicalValue(value) {
+  const copy = cloneCanonicalValue(value);
+  const freeze = (candidate) => {
+    if (!candidate || typeof candidate !== "object" || Object.isFrozen(candidate)) return candidate;
+    for (const child of Object.values(candidate)) freeze(child);
+    return Object.freeze(candidate);
+  };
+  return freeze(copy);
+}
+
+function ensurePrivateDirectoryWithIo(io, directory, {
+  create = true,
+  expectedUid,
+  expectedGid,
+}) {
+  if (!io.existsSync(directory)) {
+    if (!create) throw new Error(`broker state directory is missing: ${directory}`);
+    io.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  validatePrivateDirectoryWithIo(io, directory, { expectedUid, expectedGid });
+}
+
+function validatePrivateDirectoryWithIo(io, directory, { expectedUid, expectedGid }) {
+  const stat = io.lstatSync(directory, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+    || stat.uid !== BigInt(expectedUid) || stat.gid !== BigInt(expectedGid)
+    || (stat.mode & 0o777n) !== 0o700n
+    || path.resolve(String(io.realpathSync(directory))) !== directory) {
+    throw new Error(`broker state directory integrity failure: ${directory}`);
+  }
+}
+
+function readDescriptorWithIo(io, descriptor, size) {
+  const result = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = io.readSync(descriptor, result, offset, size - offset, offset);
+    if (count < 1) throw new Error("broker state file ended before its declared size");
+    offset += count;
+  }
+  return result;
+}
+
+function isLogicalLeaseId(value) {
+  return /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(String(value ?? ""));
+}
+
+function normalizeLeaseEvent(value, record) {
+  if (!isPlainRecord(value) || typeof value.event !== "string") {
+    throw new TypeError("broker lease journal event is invalid");
+  }
+  const policy = LEASE_EVENT_FIELDS[value.event];
+  if (!policy) throw new TypeError("broker lease journal event is unsupported");
+  const required = [...new Set(["event", ...policy.required])];
+  const optional = [...new Set(policy.optional.filter((field) => !required.includes(field)))];
+  if (!hasExactKeys(value, required, optional)) {
+    throw new TypeError("broker lease journal event fields are not exact");
+  }
+  const normalized = cloneCanonicalValue(value);
+  if (optional.includes("requestSha256") && normalized.requestSha256 === undefined) {
+    normalized.requestSha256 = record.requestSha256;
+  }
+  if (Object.hasOwn(normalized, "requestSha256")
+    && normalized.requestSha256 !== record.requestSha256) {
+    throw new TypeError("broker lease journal request lineage is invalid");
+  }
+  if (Object.hasOwn(normalized, "action") && normalized.action !== record.action) {
+    throw new TypeError("broker lease journal action lineage is invalid");
+  }
+  if (Object.hasOwn(normalized, "receiptDigest")
+    && normalized.receiptDigest !== record.receiptDigest) {
+    throw new TypeError("broker lease journal receipt lineage is invalid");
+  }
+  if (Object.hasOwn(normalized, "phaseId") && !isLogicalLeaseId(normalized.phaseId)) {
+    throw new TypeError("broker lease journal phase identity is invalid");
+  }
+  if (Object.hasOwn(normalized, "resourceName")
+    && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(String(normalized.resourceName ?? ""))) {
+    throw new TypeError("broker lease journal resource identity is invalid");
+  }
+  for (const field of [
+    "phaseProfileSha256",
+    "resultSha256",
+    "workerId",
+    "workerResultSha256",
+  ]) {
+    if (Object.hasOwn(normalized, field)
+      && !/^[a-f0-9]{64}$/.test(String(normalized[field] ?? ""))) {
+      throw new TypeError(`broker lease journal ${field} is invalid`);
+    }
+  }
+  if (normalized.event === "worker-recorded") {
+    const phase = record.trusted?.receipt?.resources?.phaseProfiles?.[normalized.phaseId];
+    if (!phase || phase.phaseSha256 !== normalized.phaseProfileSha256) {
+      throw new TypeError("broker lease journal phase profile lineage is invalid");
+    }
+  }
+  if (Object.hasOwn(normalized, "snapshot")) {
+    normalized.snapshot = cloneCanonicalValue(normalizeSealedSnapshot(normalized.snapshot));
+    if (normalized.snapshot.requestSha256 !== record.requestSha256) {
+      throw new TypeError("broker lease journal snapshot lineage is invalid");
+    }
+  }
+  return normalized;
+}
+
+function validateStoredLeaseEvent(entry, record, { previousEntrySha256, sequence }) {
+  if (!isPlainRecord(entry) || entry.schema !== LEASE_JOURNAL_SCHEMA_V2
+    || entry.leaseId !== record.leaseId || entry.sequence !== sequence
+    || entry.previousEntrySha256 !== previousEntrySha256
+    || entry.requestId !== record.requestId
+    || entry.requestSha256 !== record.requestSha256
+    || entry.action !== record.action
+    || !Number.isFinite(Date.parse(String(entry.recordedAt ?? "")))) {
+    throw new Error("lease journal entry chain or identity is corrupt");
+  }
+  const policy = LEASE_EVENT_FIELDS[entry.event];
+  if (!policy) throw new Error("lease journal entry event is corrupt");
+  const common = [
+    "action",
+    "event",
+    "leaseId",
+    "previousEntrySha256",
+    "recordedAt",
+    "requestId",
+    "requestSha256",
+    "schema",
+    "sequence",
+  ];
+  const required = [...new Set([...common, ...policy.required])];
+  const optional = [...new Set(policy.optional.filter((field) => !required.includes(field)))];
+  if (!hasExactKeys(entry, required, optional)) {
+    throw new Error("lease journal entry fields are corrupt");
+  }
+  const payload = Object.fromEntries(
+    Object.entries(entry).filter(([key]) => !common.includes(key)
+      || key === "event"
+      || (key === "action" && policy.required.includes("action"))),
+  );
+  normalizeLeaseEvent(payload, record);
+}
+
+function validateLeaseEventProgression(entries, record) {
+  const snapshots = new Map();
+  const workers = new Map();
+  let terminal = false;
+  for (const [index, entry] of entries.entries()) {
+    if (terminal) throw new Error("lease journal contains a post-terminal entry");
+    if (entry.event === "snapshot-materialized") {
+      if (snapshots.has(entry.phaseId)) {
+        throw new Error("lease journal snapshot materialization is duplicated");
+      }
+      snapshots.set(entry.phaseId, canonicalJson(entry.snapshot));
+    } else if (entry.event === "worker-recorded") {
+      if (workers.has(entry.resourceName)) throw new Error("lease journal contains a duplicate worker record");
+      if (entry.snapshot
+        && snapshots.get(entry.phaseId) !== canonicalJson(entry.snapshot)) {
+        throw new Error("lease journal worker snapshot progression is corrupt");
+      }
+      workers.set(entry.resourceName, {
+        created: false,
+        deleted: false,
+        phaseId: entry.phaseId,
+        resultRecorded: false,
+        snapshot: entry.snapshot ? canonicalJson(entry.snapshot) : null,
+        workerId: null,
+      });
+    } else if (["worker-created", "worker-result-recorded", "worker-deleted"].includes(entry.event)) {
+      const worker = workers.get(entry.resourceName);
+      if (!worker || worker.phaseId !== entry.phaseId || worker.deleted) {
+        throw new Error("lease journal worker progression is corrupt");
+      }
+      if (entry.event === "worker-created") {
+        if (worker.created) throw new Error("lease journal worker creation is duplicated");
+        worker.created = true;
+        worker.workerId = entry.workerId;
+      } else if (entry.event === "worker-result-recorded") {
+        if (!worker.created || worker.resultRecorded || worker.workerId !== entry.workerId) {
+          throw new Error("lease journal worker result identity is corrupt");
+        }
+        worker.resultRecorded = true;
+      } else {
+        if (worker.workerId && worker.workerId !== entry.workerId) {
+          throw new Error("lease journal worker deletion identity is corrupt");
+        }
+        worker.workerId = entry.workerId;
+        worker.deleted = true;
+      }
+    }
+    if (entry.event === "snapshot-cleaned") {
+      const materialized = snapshots.get(entry.phaseId);
+      const recoveryOnlyCleanup = index === 0 && entries.length >= 1;
+      if ((!materialized && !recoveryOnlyCleanup)
+        || (materialized && materialized !== canonicalJson(entry.snapshot))
+        || [...workers.values()].some(
+          (worker) => worker.phaseId === entry.phaseId && !worker.deleted,
+        )) {
+        throw new Error("lease journal snapshot cleanup progression is corrupt");
+      }
+      snapshots.delete(entry.phaseId);
+    }
+    if (entry.event === "remote-effect-unknown") {
+      const worker = workers.get(entry.resourceName);
+      if (!worker || worker.phaseId !== entry.phaseId
+        || worker.workerId !== entry.workerId || !worker.deleted) {
+        throw new Error("lease journal remote-effect identity is corrupt");
+      }
+    }
+    if (entry.event === "action-completed"
+      && ([...workers.values()].some(({ deleted, resultRecorded }) => !deleted || !resultRecorded)
+        || snapshots.size > 0)) {
+      throw new Error("lease journal completed before resource cleanup");
+    }
+    if (entry.event === "action-completed" || entry.event === "remote-effect-unknown") {
+      if (index !== entries.length - 1) throw new Error("lease journal terminal entry is not final");
+      terminal = true;
+    }
+  }
+  if (entries.some((entry) => entry.requestSha256 !== record.requestSha256)) {
+    throw new Error("lease journal request lineage is corrupt");
   }
 }
 
