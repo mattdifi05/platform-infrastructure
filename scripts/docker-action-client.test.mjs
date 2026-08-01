@@ -46,6 +46,14 @@ const MAX_EXECVE_STRING_BYTES = 128 * 1024;
 const MAX_PHASE_OUTPUT_BYTES = 4096;
 const SAFE_ACTION_IDENTITY = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SOCKETLESS_PREIMPORT_GUARD_SYMBOL = Symbol.for(
+  "platform-infrastructure.test.socketless-preimport-guard/v1",
+);
+const SOCKETLESS_SAFE_COHORT_NAMES = Object.freeze([
+  ["RED v2: in-memory request producer", " rejects SAFE action affixes before every provider"].join(""),
+  ["RED v2: in-memory response producer", " emits no success frame for identity-blind semantic results"].join(""),
+  ["RED v2: in-memory core", " crosses the real semantic executor without UDS"].join(""),
+]);
 
 test("client rejects raw argument injection before constructing a request", () => {
   const control = buildClientRequest("prune-manifest-backups-plan", [], {
@@ -961,21 +969,38 @@ test("test-only producer, result and semantic-core helpers are permanently NO-UD
     "the socketless connection must still cross the real production response encoder",
   );
   const completeTestSource = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
-  for (const testName of [
-    "RED v2: in-memory request producer rejects SAFE action affixes before every provider",
-    "RED v2: in-memory response producer emits no success frame for identity-blind semantic results",
-    "RED v2: in-memory core crosses the real semantic executor without UDS",
-  ]) {
-    const marker = `"${testName}"`;
-    const start = completeTestSource.lastIndexOf(marker);
-    assert.notEqual(start, -1, `${testName} source marker must remain unique and reachable`);
-    const remainder = completeTestSource.slice(start + marker.length);
-    const nextTest = /\n(?:test|testWhenClientExports|testWhenProductionExports)\s*\(/.exec(remainder);
-    assert.ok(nextTest, `${testName} must retain a bounded source region`);
-    const testBodySource = remainder.slice(0, nextTest.index);
+  for (const testName of SOCKETLESS_SAFE_COHORT_NAMES) {
+    const testBodySource = socketlessSafeCohortBodySource(
+      completeTestSource,
+      testName,
+    );
     assertSocketlessSourceOracle(
       testBodySource,
       `${testName} bounded SAFE body`,
+    );
+    assertExactlyOneSocketlessTrapInvocation(testBodySource, testName);
+  }
+});
+
+test("test-only SAFE wrapper cardinality oracle kills deletion and duplication mutants", () => {
+  const completeTestSource = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
+  for (const testName of SOCKETLESS_SAFE_COHORT_NAMES) {
+    const bodySource = socketlessSafeCohortBodySource(completeTestSource, testName);
+    assertExactlyOneSocketlessTrapInvocation(bodySource, testName);
+
+    const deleted = bodySource.replace(
+      /\bwithSocketlessNetworkCapabilityTrap\b/,
+      "withoutSocketlessNetworkCapabilityTrap",
+    );
+    assert.throws(
+      () => assertExactlyOneSocketlessTrapInvocation(deleted, `${testName} deletion mutant`),
+      /must invoke withSocketlessNetworkCapabilityTrap exactly once; observed 0/i,
+    );
+
+    const duplicated = `${bodySource}\nvoid withSocketlessNetworkCapabilityTrap;`;
+    assert.throws(
+      () => assertExactlyOneSocketlessTrapInvocation(duplicated, `${testName} duplicate mutant`),
+      /must invoke withSocketlessNetworkCapabilityTrap exactly once; observed 2/i,
     );
   }
 });
@@ -1096,6 +1121,97 @@ test("test-only NO-UDS oracle kills computed, aliased and builtin-module network
       { expectedAttempts },
     );
   });
+});
+
+test("test-only fresh process installs the NO-network guard before the three SAFE cohorts", async () => {
+  const guardUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(
+    socketlessFreshProcessGuardSource(),
+  )}`;
+  const exactNamePattern = `^(?:${SOCKETLESS_SAFE_COHORT_NAMES
+    .map(escapeRegularExpression)
+    .join("|")})(?: \\[activates when .+ is exported\\])?$`;
+  const childEnvironment = { ...process.env };
+  delete childEnvironment.NODE_OPTIONS;
+  delete childEnvironment.NODE_TEST_CONTEXT;
+  const result = await collectChildProcess(
+    process.execPath,
+    [
+      `--import=${guardUrl}`,
+      "--test",
+      "--test-reporter=tap",
+      `--test-name-pattern=${exactNamePattern}`,
+      fileURLToPath(import.meta.url),
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: childEnvironment,
+    },
+  );
+  assert.equal(
+    result.code,
+    0,
+    `the guarded three-cohort child must exit cleanly\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  assert.equal(result.signal, null);
+
+  const guardOutput = `${result.stdout}\n${result.stderr}`;
+  const guardReports = [...guardOutput.matchAll(
+    /^(?:# )?SOCKETLESS_PREIMPORT_GUARD_REPORT=(\{.*\})$/gm,
+  )];
+  assert.equal(
+    guardReports.length,
+    1,
+    `the pre-import guard must emit exactly one terminal report; output:\n${guardOutput}`,
+  );
+  const report = JSON.parse(guardReports[0][1]);
+  assert.deepEqual(Object.keys(report).sort(), [
+    "lockedCapabilities",
+    "staleAliasBlocked",
+    "transcript",
+  ]);
+  assert.equal(
+    report.staleAliasBlocked,
+    true,
+    "a node:net callable captured only after the test and production module graph import must already be blocked",
+  );
+  assert.deepEqual(
+    report.transcript,
+    [],
+    "the three SAFE cohorts must leave exactly zero NO-network capability attempts",
+  );
+  assert.deepEqual(
+    report.lockedCapabilities,
+    socketlessExpectedFreshGuardCapabilities(),
+    "the pre-import guard must patch and permanently lock the complete node:net surface and builtin escape",
+  );
+
+  const summary = parseTapTestSummary(result.stdout);
+  const expectedTodoCount = [
+    injectedAssemblyRequirements(),
+    injectedAssemblyRequirements(),
+    semanticCoreRequirements(),
+  ].filter((requirements) => missingProductionExports(requirements).length > 0).length;
+  assert.deepEqual(
+    summary,
+    {
+      fail: 0,
+      pass: SOCKETLESS_SAFE_COHORT_NAMES.length - expectedTodoCount,
+      tests: SOCKETLESS_SAFE_COHORT_NAMES.length,
+      todo: expectedTodoCount,
+    },
+    "the fresh child must run only the three SAFE cohorts and expose the exact current RED TODO count",
+  );
+  for (const testName of SOCKETLESS_SAFE_COHORT_NAMES) {
+    const resultLinePattern = new RegExp(
+      `^ok \\d+ - ${escapeRegularExpression(testName)}(?: \\[.*\\])?(?: # TODO)?$`,
+      "gm",
+    );
+    assert.equal(
+      [...result.stdout.matchAll(resultLinePattern)].length,
+      1,
+      `${testName} must be selected exactly once without executing the meta-test recursively`,
+    );
+  }
 });
 
 testWhenProductionExports(
@@ -2781,6 +2897,178 @@ testWhenClientExports(
   },
 );
 
+function socketlessSafeCohortBodySource(completeTestSource, testName) {
+  assert.equal(typeof completeTestSource, "string");
+  assert.ok(SOCKETLESS_SAFE_COHORT_NAMES.includes(testName));
+  const marker = `"${testName}"`;
+  const markerCount = completeTestSource.split(marker).length - 1;
+  assert.equal(
+    markerCount,
+    1,
+    `${testName} source marker must remain unique and reachable`,
+  );
+  const start = completeTestSource.indexOf(marker);
+  const remainder = completeTestSource.slice(start + marker.length);
+  const nextTest = /\n(?:test|testWhenClientExports|testWhenProductionExports)\s*\(/.exec(remainder);
+  assert.ok(nextTest, `${testName} must retain a bounded source region`);
+  return remainder.slice(0, nextTest.index);
+}
+
+function assertExactlyOneSocketlessTrapInvocation(source, label) {
+  const observed = source.match(/\bwithSocketlessNetworkCapabilityTrap\b/g)?.length ?? 0;
+  assert.equal(
+    observed,
+    1,
+    `${label} must invoke withSocketlessNetworkCapabilityTrap exactly once; observed ${observed}`,
+  );
+}
+
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function socketlessExpectedFreshGuardCapabilities() {
+  return [
+    ...socketlessNetCallableNames().map((name) => `net.${name}`),
+    "net.Server.prototype.listen",
+    "net.Socket.prototype.connect",
+    "process.getBuiltinModule",
+  ].sort((left, right) => left.localeCompare(right));
+}
+
+function parseTapTestSummary(stdout) {
+  const summary = {};
+  for (const name of ["fail", "pass", "tests", "todo"]) {
+    const matches = [...stdout.matchAll(new RegExp(`^# ${name} (\\d+)$`, "gm"))];
+    assert.equal(matches.length, 1, `TAP summary must contain exactly one ${name} counter`);
+    summary[name] = Number(matches[0][1]);
+  }
+  return summary;
+}
+
+async function socketlessFreshProcessGuardMain() {
+  const [
+    { default: guardedNet },
+    { syncBuiltinESMExports: synchronizeBuiltins },
+    { writeSync },
+  ] = await Promise.all([import("node:net"), import("node:module"), import("node:fs")]);
+  void process.stdin;
+  void process.stdout;
+  void process.stderr;
+  const attempts = [];
+  const installations = [];
+
+  function blockedCapability(label) {
+    return function preimportNoNetworkCapability() {
+      attempts.push(label);
+      const error = new Error(`fresh-process NO-network guard blocked ${label}`);
+      error.code = "ERR_TEST_FRESH_NO_NETWORK_CAPABILITY";
+      throw error;
+    };
+  }
+
+  function install(target, property, label) {
+    const descriptor = Object.getOwnPropertyDescriptor(target, property);
+    if (!descriptor || descriptor.configurable !== true) {
+      throw new Error(`fresh-process guard cannot lock ${label}`);
+    }
+    const blocker = blockedCapability(label);
+    Object.defineProperty(target, property, {
+      configurable: false,
+      enumerable: descriptor.enumerable,
+      value: blocker,
+      writable: false,
+    });
+    installations.push({ blocker, label, property, target });
+  }
+
+  const originalSocketPrototype = guardedNet.Socket.prototype;
+  const originalServerPrototype = guardedNet.Server.prototype;
+  install(originalSocketPrototype, "connect", "net.Socket.prototype.connect");
+  install(originalServerPrototype, "listen", "net.Server.prototype.listen");
+
+  const callableNames = Reflect.ownKeys(guardedNet)
+    .filter((name) => typeof name === "string")
+    .filter((name) => typeof Reflect.get(guardedNet, name) === "function")
+    .sort((left, right) => left.localeCompare(right));
+  for (const name of callableNames) install(guardedNet, name, `net.${name}`);
+  install(process, "getBuiltinModule", "process.getBuiltinModule");
+  synchronizeBuiltins();
+  const synchronizedNetNamespace = await import("node:net");
+
+  const guardFacade = Object.freeze({
+    kind: "platform-infrastructure.test.socketless-preimport-guard/v1",
+    snapshot() {
+      return Object.freeze([...attempts]);
+    },
+  });
+  Object.defineProperty(
+    globalThis,
+    Symbol.for("platform-infrastructure.test.socketless-preimport-guard/v1"),
+    {
+      configurable: false,
+      enumerable: false,
+      value: guardFacade,
+      writable: false,
+    },
+  );
+
+  process.once("exit", () => {
+    let staleAliasBlocked = false;
+    let transcript = [...attempts];
+    try {
+      if (transcript.length !== 0) {
+        throw new Error(`SAFE cohorts attempted guarded capabilities: ${JSON.stringify(transcript)}`);
+      }
+      const staleAliasCapturedAfterModuleImport = synchronizedNetNamespace.createServer;
+      try {
+        Reflect.apply(staleAliasCapturedAfterModuleImport, undefined, []);
+      } catch (error) {
+        staleAliasBlocked = error?.code === "ERR_TEST_FRESH_NO_NETWORK_CAPABILITY";
+      }
+      if (!staleAliasBlocked) {
+        throw new Error("the post-import node:net alias was not blocked");
+      }
+      if (
+        attempts.length !== 1 ||
+        attempts[0] !== "net.createServer"
+      ) {
+        throw new Error(`unexpected stale-alias transcript: ${JSON.stringify(attempts)}`);
+      }
+      attempts.length = 0;
+      transcript = [...attempts];
+      for (const installation of installations) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          installation.target,
+          installation.property,
+        );
+        if (
+          descriptor?.configurable !== false ||
+          descriptor?.writable !== false ||
+          descriptor?.value !== installation.blocker
+        ) {
+          throw new Error(`guard lock drifted for ${installation.label}`);
+        }
+      }
+    } catch (error) {
+      process.exitCode = 1;
+      transcript = [...attempts];
+    }
+    const report = {
+      lockedCapabilities: installations
+        .map(({ label }) => label)
+        .sort((left, right) => left.localeCompare(right)),
+      staleAliasBlocked,
+      transcript,
+    };
+    writeSync(2, `SOCKETLESS_PREIMPORT_GUARD_REPORT=${JSON.stringify(report)}\n`);
+  });
+}
+
+function socketlessFreshProcessGuardSource() {
+  return `await (${Function.prototype.toString.call(socketlessFreshProcessGuardMain)})();\n`;
+}
+
 function socketlessNetCallableEntries() {
   return Reflect.ownKeys(net)
     .filter((name) => typeof name === "string")
@@ -2879,6 +3167,41 @@ async function withSocketlessNetworkCapabilityTrap(
 ) {
   assert.equal(typeof body, "function", `${label} body must be callable`);
   assert.ok(Array.isArray(expectedAttempts), `${label} expected-attempt transcript must be an array`);
+  const preimportGuard = globalThis[SOCKETLESS_PREIMPORT_GUARD_SYMBOL];
+  if (preimportGuard !== undefined) {
+    assert.equal(
+      preimportGuard?.kind,
+      "platform-infrastructure.test.socketless-preimport-guard/v1",
+      `${label} must recognize only the exact fresh-process guard`,
+    );
+    assert.equal(Object.isFrozen(preimportGuard), true);
+    assert.deepEqual(
+      Object.keys(preimportGuard).sort(),
+      ["kind", "snapshot"],
+      `${label} fresh-process guard facade must expose only its identity and transcript snapshot`,
+    );
+    assert.deepEqual(
+      expectedAttempts,
+      [],
+      `${label} SAFE cohort may not declare expected network attempts under the pre-import guard`,
+    );
+    const before = preimportGuard.snapshot();
+    assert.deepEqual(before, [], `${label} must begin with a zero capability transcript`);
+    let bodyError;
+    let value;
+    try {
+      value = await body();
+    } catch (error) {
+      bodyError = error;
+    }
+    assert.deepEqual(
+      preimportGuard.snapshot(),
+      before,
+      `${label} must leave the fresh-process NO-network transcript exactly zero`,
+    );
+    if (bodyError) throw bodyError;
+    return value;
+  }
   const attempts = [];
   const callableEntries = socketlessNetCallableEntries();
   const patches = [];

@@ -702,6 +702,26 @@ function assertRuntimeGuardLexicalHandleDiscipline(source, label) {
       "Reflect applicator",
       /\bconst\s+reflectApply\s*=\s*Reflect\.apply\.bind\(Reflect\)\s*;/,
     ],
+    [
+      "EventEmitter on listener",
+      /\bconst\s+eventEmitterOn\s*=\s*eventEmitterPrototype\.on\s*;/,
+    ],
+    [
+      "EventEmitter once listener",
+      /\bconst\s+eventEmitterOnce\s*=\s*eventEmitterPrototype\.once\s*;/,
+    ],
+    [
+      "EventEmitter addListener listener",
+      /\bconst\s+eventEmitterAddListener\s*=\s*eventEmitterPrototype\.addListener\s*;/,
+    ],
+    [
+      "EventEmitter emitter",
+      /\bconst\s+eventEmitterEmit\s*=\s*eventEmitterPrototype\.emit\s*;/,
+    ],
+    [
+      "EventEmitter removeListener listener",
+      /\bconst\s+eventEmitterRemoveListener\s*=\s*eventEmitterPrototype\.removeListener\s*;/,
+    ],
   ]) {
     assert.match(
       source,
@@ -709,6 +729,11 @@ function assertRuntimeGuardLexicalHandleDiscipline(source, label) {
       `${label} did not capture its lexical ${identity} before worker code`,
     );
   }
+  assert.match(
+    source,
+    /objectDefineProperty\(eventEmitterPrototype, methodName, \{\s*configurable: false,\s*enumerable: descriptor\.enumerable,\s*value: method,\s*writable: false,\s*\}\);/,
+    `${label} did not irreversibly lock the captured EventEmitter methods`,
+  );
   const delayedSpawnSource = source.slice(source.indexOf("childProcess.spawn ="));
   assert.notEqual(
     delayedSpawnSource,
@@ -779,6 +804,35 @@ function runRuntimeGuardGlobalIdentityBoundary(guardPath, root) {
       "--eval",
       `${GLOBAL_REACHABILITY_IDENTITY_SOURCE}
 await import("node:child_process");
+const observedEventsNamespace = await import("node:events");
+const observedEventEmitterPrototype =
+  observedEventsNamespace.EventEmitter.prototype;
+const observedStreamNamespace = await import("node:stream");
+for (const [prototype, prototypeName, methodNames] of [
+  [
+    observedEventEmitterPrototype,
+    "EventEmitter.prototype",
+    ["on", "once", "addListener", "emit", "removeListener"],
+  ],
+  [
+    observedStreamNamespace.Readable.prototype,
+    "Readable.prototype",
+    ["on", "addListener", "removeListener"],
+  ],
+]) {
+  for (const methodName of methodNames) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, methodName);
+    if (!descriptor || typeof descriptor.value !== "function") {
+      throw new Error("identity baseline lacks " + prototypeName + "." + methodName);
+    }
+    Object.defineProperty(prototype, methodName, {
+      configurable: false,
+      enumerable: descriptor.enumerable,
+      value: descriptor.value,
+      writable: false,
+    });
+  }
+}
 const observedModuleNamespace = await import("node:module");
 const observedModuleBuiltin = observedModuleNamespace.default;
 const originalObservedRegisterHooks = observedModuleBuiltin.registerHooks;
@@ -3488,6 +3542,23 @@ childProcess.ChildProcess.prototype.spawn = function (options) {
   this.stdout = new PassThrough();
   this.stderr = new PassThrough();
   this.kill = () => true;
+  Object.defineProperties(this, {
+    [Symbol.for("platform.test.raw-child")]: {
+      configurable: false,
+      value: true,
+    },
+    _handle: {
+      configurable: false,
+      value: Object.freeze({ testOnlyRawHandle: true }),
+    },
+  });
+  for (const stream of [this.stdout, this.stderr]) {
+    Object.defineProperty(
+      stream,
+      Symbol.for("platform.test.raw-stream"),
+      { configurable: false, value: true },
+    );
+  }
   const environmentDescriptors =
     Object.getOwnPropertyDescriptors(options.env);
   const optionDescriptors =
@@ -3531,13 +3602,17 @@ syncBuiltinESMExports();
     { mode: 0o600 },
   );
   fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
-  const runGuarded = (source, environment = {}) => spawnSync(
+  const runGuarded = (
+    source,
+    environment = {},
+    selectedGuardPath = guardPath,
+  ) => spawnSync(
     process.execPath,
     [
       "--import",
       pathToFileURL(hookPath).href,
       "--import",
-      pathToFileURL(guardPath).href,
+      pathToFileURL(selectedGuardPath).href,
       "--input-type=module",
       "--eval",
       source,
@@ -3655,79 +3730,184 @@ syncBuiltinESMExports();
     stdioOwnData: true,
   });
 
-  fs.rmSync(tracePath, { force: true });
-  const hostileEnvironmentReplacement = runGuarded(`
+  const eventEmitterMutationSource = `
     import childProcess from "node:child_process";
-    import { types as mutableUtilTypes } from "node:util";
+    import { EventEmitter } from "node:events";
+    import { Readable } from "node:stream";
 
-    const originalEnvironment = process.env;
-    const originalArrayIsArray = Array.isArray.bind(Array);
-    const originalJsonStringify = JSON.stringify.bind(JSON);
-    const originalObjectEntries = Object.entries.bind(Object);
-    const originalObjectFreeze = Object.freeze.bind(Object);
-    const originalObjectFromEntries = Object.fromEntries.bind(Object);
-    const originalObjectGetOwnPropertyDescriptor =
-      Object.getOwnPropertyDescriptor.bind(Object);
-    const originalObjectGetOwnPropertyDescriptors =
-      Object.getOwnPropertyDescriptors.bind(Object);
-    const originalObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
-    const originalObjectHasOwn = Object.hasOwn.bind(Object);
-    const originalObjectIs = Object.is.bind(Object);
-    const originalReflectApply = Reflect.apply.bind(Reflect);
-    const originalReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
-    const canonicalEnvironment = originalJsonStringify(
-      originalObjectFromEntries(
-        originalObjectEntries(originalEnvironment)
-          .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
-      ),
-    );
-    let actionReads = 0;
-    let phaseReads = 0;
-    const replacementEnvironment = new Proxy(originalEnvironment, {
-      get(target, key, receiver) {
-        if (key === "PLATFORM_DOCKER_ACTION") {
-          actionReads += 1;
-          return actionReads === 1 ? "backup.catalog" : "backup.create";
+    const rawChildMarker = Symbol.for("platform.test.raw-child");
+    const rawStreamMarker = Symbol.for("platform.test.raw-stream");
+    const capturedReceivers = [];
+    let lockIntact = true;
+    for (const [prototype, methodNames] of [
+      [
+        EventEmitter.prototype,
+        ["on", "once", "addListener", "emit", "removeListener"],
+      ],
+      [Readable.prototype, ["on", "addListener", "removeListener"]],
+    ]) {
+      for (const methodName of methodNames) {
+        const original = prototype[methodName];
+        const mutant = function (...arguments_) {
+          capturedReceivers.push(this);
+          return Reflect.apply(original, this, arguments_);
+        };
+        try {
+          prototype[methodName] = mutant;
+        } catch {}
+        try {
+          Object.defineProperty(prototype, methodName, {
+            configurable: true,
+            value: mutant,
+            writable: true,
+          });
+        } catch {}
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, methodName);
+        if (
+          descriptor === undefined
+          || descriptor.value !== original
+          || descriptor.configurable !== false
+          || descriptor.writable !== false
+        ) {
+          lockIntact = false;
         }
-        if (key === "PLATFORM_DOCKER_PHASE_ID") {
-          phaseReads += 1;
-          return phaseReads === 1 ? "catalog.capture" : "job.execute";
-        }
-        return originalReflectApply(Reflect.get, Reflect, [target, key, receiver]);
-      },
-    });
-    process.env = replacementEnvironment;
-
-    mutableUtilTypes.isProxy = () => false;
-    Object.entries = (...arguments_) => originalObjectEntries(...arguments_);
-    Object.freeze = (...arguments_) => originalObjectFreeze(...arguments_);
-    Object.fromEntries = (...arguments_) => originalObjectFromEntries(...arguments_);
-    Object.getOwnPropertyDescriptor = (...arguments_) =>
-      originalObjectGetOwnPropertyDescriptor(...arguments_);
-    Object.getOwnPropertyDescriptors = (...arguments_) =>
-      originalObjectGetOwnPropertyDescriptors(...arguments_);
-    Object.getPrototypeOf = (...arguments_) =>
-      originalObjectGetPrototypeOf(...arguments_);
-    Object.hasOwn = (...arguments_) => originalObjectHasOwn(...arguments_);
-    Object.is = (...arguments_) => originalObjectIs(...arguments_);
-    JSON.stringify = (value, ...arguments_) => {
-      if (
-        value !== null
-        && typeof value === "object"
-        && !originalArrayIsArray(value)
-        && originalObjectHasOwn(value, "PLATFORM_DOCKER_ACTION")
-        && originalObjectHasOwn(value, "PLATFORM_DOCKER_PHASE_ID")
-      ) {
-        return canonicalEnvironment;
       }
-      return originalJsonStringify(value, ...arguments_);
-    };
-    Reflect.apply = (...arguments_) => originalReflectApply(...arguments_);
-    Reflect.ownKeys = (...arguments_) => originalReflectOwnKeys(...arguments_);
+    }
 
+    const child = childProcess.spawn(
+      ${JSON.stringify(exactExecutable)},
+      [],
+      {
+        env: process.env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const returnedCapabilities = [child, child.stdout, child.stderr];
+    if (
+      returnedCapabilities.some((value) =>
+        value?.[rawChildMarker] === true
+        || value?.[rawStreamMarker] === true
+        || value?._handle !== undefined)
+      || typeof child.constructor?.prototype?.spawn === "function"
+    ) {
+      throw new Error("raw child, stream or native handle escaped in the facade");
+    }
+    const removedListener = () => {
+      throw new Error("removed safe-facade listener executed");
+    };
+    child.addListener("platform-test-removed", removedListener);
+    child.removeListener("platform-test-removed", removedListener);
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.once("close", () => {
+      const rawReceiverLeaked = capturedReceivers.some((value) =>
+        value?.[rawChildMarker] === true
+        || value?.[rawStreamMarker] === true
+        || value?._handle !== undefined
+        || typeof value?.constructor?.prototype?.spawn === "function");
+      if (rawReceiverLeaked) {
+        process.stderr.write("event-emitter-mutant-captured-raw-authority");
+        process.exitCode = 79;
+        return;
+      }
+      if (!lockIntact || capturedReceivers.length !== 0) {
+        process.stderr.write("event-emitter-prototype-lock-bypassed");
+        process.exitCode = 78;
+        return;
+      }
+      process.stdout.write("emitter-facade-ok\\n");
+    });
+  `;
+  fs.rmSync(tracePath, { force: true });
+  const eventEmitterMutationRejected = runGuarded(eventEmitterMutationSource);
+  assert.deepEqual(
+    {
+      signal: eventEmitterMutationRejected.signal,
+      status: eventEmitterMutationRejected.status,
+      stderr: eventEmitterMutationRejected.stderr,
+      stdout: eventEmitterMutationRejected.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "owned-child-output\nemitter-facade-ok\n",
+    },
+    "EventEmitter prototype mutants broke or captured the safe child facade",
+  );
+
+  const canonicalGuardSource = socketlessRuntimeGuardSource();
+  const emitterLockStart = canonicalGuardSource.indexOf(
+    "for (const [methodName, method] of [\n",
+  );
+  const emitterLockEnd = canonicalGuardSource.indexOf(
+    "const setHas = Function.prototype.call.bind(Set.prototype.has);",
+    emitterLockStart,
+  );
+  assert.ok(emitterLockStart >= 0, "EventEmitter lock mutant start was not found");
+  assert.ok(
+    emitterLockEnd > emitterLockStart,
+    "EventEmitter lock mutant end was not found",
+  );
+  const exactLockedDescriptor = `configurable: false,
+    enumerable: descriptor.enumerable,
+    value: method,
+    writable: false,`;
+  const unlockedDescriptor = `configurable: true,
+    enumerable: descriptor.enumerable,
+    value: method,
+    writable: true,`;
+  const emitterLockRegion = canonicalGuardSource.slice(
+    emitterLockStart,
+    emitterLockEnd,
+  );
+  assert.equal(
+    emitterLockRegion.split(exactLockedDescriptor).length - 1,
+    2,
+    "EventEmitter/Readable lock-removal mutant did not find both locks",
+  );
+  const unlockedGuardSource =
+    canonicalGuardSource.slice(0, emitterLockStart)
+    + emitterLockRegion.split(exactLockedDescriptor).join(unlockedDescriptor)
+    + canonicalGuardSource.slice(emitterLockEnd);
+  assert.notEqual(
+    unlockedGuardSource,
+    canonicalGuardSource,
+    "EventEmitter lock-removal mutant was not activated",
+  );
+  const unlockedGuardPath = path.join(root, "owned-spawn-unlocked-guard.mjs");
+  fs.writeFileSync(unlockedGuardPath, unlockedGuardSource, { mode: 0o600 });
+  fs.rmSync(tracePath, { force: true });
+  const eventEmitterVulnerabilityControl = runGuarded(
+    eventEmitterMutationSource,
+    {},
+    unlockedGuardPath,
+  );
+  assert.deepEqual(
+    {
+      signal: eventEmitterVulnerabilityControl.signal,
+      status: eventEmitterVulnerabilityControl.status,
+      stderr: eventEmitterVulnerabilityControl.stderr,
+      stdout: eventEmitterVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 79,
+      stderr: "event-emitter-mutant-captured-raw-authority",
+      stdout: "owned-child-output\n",
+    },
+    "EventEmitter lock-removal mutant did not expose the raw child emitter",
+  );
+
+  fs.rmSync(tracePath, { force: true });
+  const environmentIdentityReplacement = runGuarded(`
+    import childProcess from "node:child_process";
+    const originalEnvironment = process.env;
+    const replacementEnvironment = new Proxy(originalEnvironment, {});
+    process.env = replacementEnvironment;
     try {
       childProcess.spawn(
-        ${JSON.stringify(EXPECTED_FIXED_ADAPTERS["backup-job"].executable)},
+        ${JSON.stringify(exactExecutable)},
         [],
         {
           env: replacementEnvironment,
@@ -3736,30 +3916,146 @@ syncBuiltinESMExports();
         },
       );
     } catch (error) {
-      process.stderr.write("hostile-env-rejected:" + error.message);
+      process.stderr.write("environment-identity-rejected:" + error.message);
       process.exitCode = 73;
     }
   `);
   assert.deepEqual(
     {
-      signal: hostileEnvironmentReplacement.signal,
-      status: hostileEnvironmentReplacement.status,
-      stderr: hostileEnvironmentReplacement.stderr,
-      stdout: hostileEnvironmentReplacement.stdout,
+      signal: environmentIdentityReplacement.signal,
+      status: environmentIdentityReplacement.status,
+      stderr: environmentIdentityReplacement.stderr,
+      stdout: environmentIdentityReplacement.stdout,
     },
     {
       signal: null,
       status: 73,
       stderr:
-        "hostile-env-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
+        "environment-identity-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
       stdout: "",
     },
-    "stateful process.env/monkeypatched-intrinsic PoC changed the lexical action/phase identity",
+    "process.env Proxy replacement crossed the original-environment identity guard",
   );
   assert.equal(
     fs.existsSync(tracePath),
     false,
-    "stateful process.env/monkeypatched-intrinsic PoC reached the spawn sink",
+    "process.env Proxy replacement reached the spawn sink",
+  );
+
+  const actionPhaseMutation = runGuarded(`
+    import childProcess from "node:child_process";
+    const originalEnvironment = process.env;
+    originalEnvironment.PLATFORM_DOCKER_ACTION = "backup.job.execute";
+    originalEnvironment.PLATFORM_DOCKER_PHASE_ID = "job.backup.capture";
+    try {
+      childProcess.spawn(
+        ${JSON.stringify(EXPECTED_FIXED_ADAPTERS["backup-job"].executable)},
+        [],
+        {
+          env: originalEnvironment,
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (error) {
+      process.stderr.write("action-phase-mutation-rejected:" + error.message);
+      process.exitCode = 74;
+    }
+  `);
+  assert.deepEqual(
+    {
+      signal: actionPhaseMutation.signal,
+      status: actionPhaseMutation.status,
+      stderr: actionPhaseMutation.stderr,
+      stdout: actionPhaseMutation.stdout,
+    },
+    {
+      signal: null,
+      status: 74,
+      stderr:
+        "action-phase-mutation-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
+      stdout: "",
+    },
+    "post-guard action/phase mutation changed the captured phase executable",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    false,
+    "post-guard action/phase mutation reached the cross-phase spawn sink",
+  );
+
+  const intrinsicAndOptionsProxyMutation = runGuarded(`
+    import childProcess from "node:child_process";
+    import { types as mutableUtilTypes } from "node:util";
+    let proxyTrapCount = 0;
+    const trap = () => {
+      proxyTrapCount += 1;
+      throw new Error("options Proxy trap executed");
+    };
+    const options = new Proxy({
+      env: process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    }, {
+      get: trap,
+      getOwnPropertyDescriptor: trap,
+      getPrototypeOf: trap,
+      ownKeys: trap,
+    });
+    mutableUtilTypes.isProxy = () => false;
+    Object.entries = () => { throw new Error("mutable Object.entries used"); };
+    Object.freeze = () => { throw new Error("mutable Object.freeze used"); };
+    Object.fromEntries = () => { throw new Error("mutable Object.fromEntries used"); };
+    Object.getOwnPropertyDescriptor = () => {
+      throw new Error("mutable Object.getOwnPropertyDescriptor used");
+    };
+    Object.getOwnPropertyDescriptors = () => {
+      throw new Error("mutable Object.getOwnPropertyDescriptors used");
+    };
+    Object.getPrototypeOf = () => {
+      throw new Error("mutable Object.getPrototypeOf used");
+    };
+    Object.hasOwn = () => { throw new Error("mutable Object.hasOwn used"); };
+    Object.is = () => { throw new Error("mutable Object.is used"); };
+    JSON.stringify = () => { throw new Error("mutable JSON.stringify used"); };
+    Reflect.apply = () => { throw new Error("mutable Reflect.apply used"); };
+    Reflect.ownKeys = () => { throw new Error("mutable Reflect.ownKeys used"); };
+    try {
+      childProcess.spawn(
+        ${JSON.stringify(exactExecutable)},
+        [],
+        options,
+      );
+    } catch (error) {
+      process.stderr.write(
+        "intrinsic-options-proxy-rejected:"
+          + error.message
+          + ":traps="
+          + proxyTrapCount,
+      );
+      process.exitCode = 75;
+    }
+  `);
+  assert.deepEqual(
+    {
+      signal: intrinsicAndOptionsProxyMutation.signal,
+      status: intrinsicAndOptionsProxyMutation.status,
+      stderr: intrinsicAndOptionsProxyMutation.stderr,
+      stdout: intrinsicAndOptionsProxyMutation.stdout,
+    },
+    {
+      signal: null,
+      status: 75,
+      stderr:
+        "intrinsic-options-proxy-rejected:socketless runtime guard rejected non-exact fixed adapter spawn:traps=0",
+      stdout: "",
+    },
+    "mutable intrinsics or options Proxy traps influenced the captured guard intrinsics",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    false,
+    "mutable intrinsic/options Proxy mutant reached the spawn sink",
   );
 
   for (const [label, source, pattern] of [
@@ -8303,7 +8599,7 @@ function socketlessRuntimeGuardSource() {
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import moduleBuiltin from "node:module";
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { types as utilTypes } from "node:util";
 
 const arrayIsArray = Array.isArray.bind(Array);
@@ -8327,6 +8623,67 @@ const objectIs = Object.is.bind(Object);
 const objectPrototype = Object.prototype;
 const reflectApply = Reflect.apply.bind(Reflect);
 const reflectOwnKeys = Reflect.ownKeys.bind(Reflect);
+const eventEmitterPrototype = EventEmitter.prototype;
+const eventEmitterOn = eventEmitterPrototype.on;
+const eventEmitterOnce = eventEmitterPrototype.once;
+const eventEmitterAddListener = eventEmitterPrototype.addListener;
+const eventEmitterEmit = eventEmitterPrototype.emit;
+const eventEmitterRemoveListener = eventEmitterPrototype.removeListener;
+for (const [methodName, method] of [
+  ["on", eventEmitterOn],
+  ["once", eventEmitterOnce],
+  ["addListener", eventEmitterAddListener],
+  ["emit", eventEmitterEmit],
+  ["removeListener", eventEmitterRemoveListener],
+]) {
+  const descriptor = objectGetOwnPropertyDescriptor(
+    eventEmitterPrototype,
+    methodName,
+  );
+  if (
+    descriptor === undefined
+    || !objectHasOwn(descriptor, "value")
+    || descriptor.value !== method
+    || typeof method !== "function"
+  ) {
+    throw new Error(
+      "socketless runtime guard requires EventEmitter.prototype." + methodName,
+    );
+  }
+  objectDefineProperty(eventEmitterPrototype, methodName, {
+    configurable: false,
+    enumerable: descriptor.enumerable,
+    value: method,
+    writable: false,
+  });
+}
+const readablePrototype = Readable.prototype;
+const readableOn = readablePrototype.on;
+const readableAddListener = readablePrototype.addListener;
+const readableRemoveListener = readablePrototype.removeListener;
+for (const [methodName, method] of [
+  ["on", readableOn],
+  ["addListener", readableAddListener],
+  ["removeListener", readableRemoveListener],
+]) {
+  const descriptor = objectGetOwnPropertyDescriptor(readablePrototype, methodName);
+  if (
+    descriptor === undefined
+    || !objectHasOwn(descriptor, "value")
+    || descriptor.value !== method
+    || typeof method !== "function"
+  ) {
+    throw new Error(
+      "socketless runtime guard requires Readable.prototype." + methodName,
+    );
+  }
+  objectDefineProperty(readablePrototype, methodName, {
+    configurable: false,
+    enumerable: descriptor.enumerable,
+    value: method,
+    writable: false,
+  });
+}
 const setHas = Function.prototype.call.bind(Set.prototype.has);
 const stringStartsWith =
   Function.prototype.call.bind(String.prototype.startsWith);
@@ -8680,14 +9037,19 @@ function safeReadableFacade(rawStream, label) {
   if (
     rawStream === null
     || typeof rawStream !== "object"
-    || typeof rawStream.on !== "function"
   ) {
     throw new Error("socketless runtime guard received no " + label + " stream");
   }
   const safeStream = new PassThrough();
-  rawStream.on("data", (chunk) => safeStream.write(chunk));
-  rawStream.on("end", () => safeStream.end());
-  rawStream.on("error", (error) => safeStream.destroy(error));
+  reflectApply(readableOn, rawStream, [
+    "data",
+    (chunk) => safeStream.write(chunk),
+  ]);
+  reflectApply(readableOn, rawStream, ["end", () => safeStream.end()]);
+  reflectApply(readableOn, rawStream, [
+    "error",
+    (error) => safeStream.destroy(error),
+  ]);
   return safeStream;
 }
 
@@ -8695,7 +9057,6 @@ function safeChildFacade(rawChild) {
   if (
     rawChild === null
     || typeof rawChild !== "object"
-    || typeof rawChild.on !== "function"
   ) {
     throw new Error("socketless runtime guard received no child process");
   }
@@ -8712,7 +9073,13 @@ function safeChildFacade(rawChild) {
     return reflectApply(rawChild.kill, rawChild, [signal]);
   };
   for (const event of ["close", "disconnect", "error", "exit"]) {
-    rawChild.on(event, (...arguments_) => safeChild.emit(event, ...arguments_));
+    reflectApply(eventEmitterOn, rawChild, [event, (...arguments_) => {
+      const emitArguments = [event];
+      for (let index = 0; index < arguments_.length; index += 1) {
+        emitArguments[index + 1] = arguments_[index];
+      }
+      reflectApply(eventEmitterEmit, safeChild, emitArguments);
+    }]);
   }
   return safeChild;
 }
