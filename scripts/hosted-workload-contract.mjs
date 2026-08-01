@@ -649,8 +649,8 @@ function normalizeDnsHost(value, label) {
 }
 
 function normalizeRoute(route, serviceName, workloadId) {
-  const slug = requiredText(route?.slug, `route slug for ${serviceName}`).toLowerCase();
-  const port = Number(route?.port);
+  const slug = exactText(route?.slug, `route slug for ${serviceName}`);
+  const port = route?.port;
   if (!ROUTE_SLUG.test(slug)) invalid(`Route slug '${slug}' is invalid.`);
   if (!Number.isInteger(port) || port < 1 || port > 65535) invalid(`Route port for ${slug} is invalid.`);
   const canonicalHost = normalizeDnsHost(route?.host, `route host for ${slug}`);
@@ -786,7 +786,9 @@ export function deriveCanonicalRoutes(workloads) {
   if (!Array.isArray(workloads)) invalid("Hosted workload route lineage has no workloads array.");
   const workloadIds = assertNonPrefixCollidingWorkloadIds(workloads.map((workload) => workload?.id));
   const serviceNames = new Set();
-  const routeSlugs = new Set();
+  const routeNames = new Set();
+  const routeHosts = new Set();
+  const routeUpstreams = new Set();
   const routes = [];
   for (const workload of workloads) {
     if (!workload || typeof workload !== "object" || Array.isArray(workload)
@@ -808,18 +810,42 @@ export function deriveCanonicalRoutes(workloads) {
         invalid(`Hosted workload route lineage cannot expose ${service.role} service ${service.name}.`);
       }
       for (const route of service.routes) {
+        const expectedRouteKeys = ["aliases", "canonicalHost", "hosts", "owner", "port", "slug"];
+        const aliases = Array.isArray(route?.aliases) ? route.aliases : [];
+        const canonicalHost = typeof route?.canonicalHost === "string"
+          ? normalizeDnsHost(route.canonicalHost, "canonical route host")
+          : "";
+        const suffix = canonicalHost.split(".").slice(1).join(".");
+        const expectedHosts = canonicalHost
+          ? [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)]
+          : [];
+        const upstreamIdentity = `${service.name}:${route?.port}`;
         if (!route || typeof route !== "object" || Array.isArray(route)
-            || !same(Object.keys(route).sort(), ["port", "slug"])
+            || !same(Object.keys(route).sort(), expectedRouteKeys)
+            || route.owner !== workload.id
             || typeof route.slug !== "string" || !ROUTE_SLUG.test(route.slug)
+            || !same(aliases, [...new Set(aliases)].sort())
+            || aliases.some((alias) => typeof alias !== "string" || !ROUTE_SLUG.test(alias) || alias === route.slug)
+            || canonicalHost !== route.canonicalHost
+            || canonicalHost.split(".")[0] !== route.slug
+            || !same(route.hosts, expectedHosts)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
-            || routeSlugs.has(route.slug)) {
+            || [route.slug, ...aliases].some((name) => routeNames.has(name))
+            || expectedHosts.some((host) => routeHosts.has(host))
+            || routeUpstreams.has(upstreamIdentity)) {
           invalid("Hosted workload route lineage has invalid route declarations.");
         }
-        routeSlugs.add(route.slug);
+        for (const name of [route.slug, ...aliases]) routeNames.add(name);
+        for (const host of expectedHosts) routeHosts.add(host);
+        routeUpstreams.add(upstreamIdentity);
         routes.push({
+          owner: workload.id,
           workloadId: workload.id,
           slug: route.slug,
+          aliases,
+          canonicalHost,
+          hosts: expectedHosts,
           service: service.name,
           port: route.port,
           upstream: `http://${service.name}:${route.port}`,
@@ -827,7 +853,7 @@ export function deriveCanonicalRoutes(workloads) {
       }
     }
   }
-  return routes.sort((left, right) => (left.slug < right.slug ? -1 : (left.slug > right.slug ? 1 : 0)));
+  return routes.sort((left, right) => left.canonicalHost.localeCompare(right.canonicalHost));
 }
 
 function verifyCanonicalRouteLineage(lock) {
@@ -1529,10 +1555,10 @@ function combinedWorkloadIds(combined) {
 }
 
 export function validateRenderedWorkloads({ core, combined, lock }) {
-  validateGlobalRouteOwnership(lock.workloads);
-  assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
   assertNonPrefixCollidingWorkloadIds(workloadIds);
+  validateGlobalRouteOwnership(lock.workloads);
+  assertBrokerPolicyDigest(lock);
   const protectedNetworkNames = new Set(Object.keys(core.networks ?? {}));
   const protectedSecretNames = new Set(Object.keys(core.secrets ?? {}));
   const protectedVolumeNames = new Set(Object.keys(core.volumes ?? {}));

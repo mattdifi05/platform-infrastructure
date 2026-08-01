@@ -1357,7 +1357,14 @@ test("supplied or forged nested-id locks cannot assign child resources to the pa
       composeFile: "compose.yaml",
       projectMetadataFile: null,
       services: id === "billing"
-        ? [{ name: childService, role: "web", routes: [{ slug: "billing", port: 3000 }] }]
+        ? [{ name: childService, role: "web", routes: [{
+          owner: "billing",
+          slug: "billing",
+          aliases: [],
+          canonicalHost: "billing.example.com",
+          hosts: ["billing.example.com"],
+          port: 3000,
+        }] }]
         : [{ name: `${id}-worker`, role: "worker", routes: [] }],
       secrets: id === "billing" ? [childSecret] : [],
       migrationRoots: [],

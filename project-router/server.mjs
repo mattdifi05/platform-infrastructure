@@ -26,6 +26,7 @@ const workloadLockMode = explicitWorkloadLockMode(process.env.PROJECT_ROUTER_WOR
 const workloadLockSha256 = String(process.env.PROJECT_ROUTER_WORKLOAD_LOCK_SHA256 || "").toLowerCase();
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
 const testLegacyDiscoveryAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY === "true";
+const upstreamTimeoutMs = boundedEnvironmentInteger("PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS", 30_000, 50, 30_000);
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
 const controlCenterUpstream = validateUpstream(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080", "control-center");
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
@@ -151,7 +152,10 @@ function proxy(clientReq, clientRes, upstream) {
     clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
     clientRes.end("upstream unavailable\n");
   });
-  proxyReq.setTimeout(30000, () => proxyReq.destroy(new Error("upstream timeout")));
+  const wallClockTimeout = setTimeout(() => proxyReq.destroy(new Error("upstream timeout")), upstreamTimeoutMs);
+  wallClockTimeout.unref();
+  proxyReq.once("close", () => clearTimeout(wallClockTimeout));
+  proxyReq.setTimeout(upstreamTimeoutMs, () => proxyReq.destroy(new Error("upstream timeout")));
 
   clientReq.pipe(proxyReq);
 }

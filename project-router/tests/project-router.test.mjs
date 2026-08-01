@@ -64,6 +64,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       ...process.env,
       NODE_ENV: "test",
       PROJECT_ROUTER_PORT: String(routerPort),
+      PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS: "100",
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
       PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,
@@ -505,15 +506,13 @@ test("project-router keeps the startup route snapshot frozen and rejects a repla
   replacement.workloads[0].services = [{
     name: "fixture-app-alt",
     role: "web",
-    routes: [{ slug: "locked-demo", port: 3001 }],
+    routes: [manifestRouteFixture({ port: 3001 })],
   }];
-  replacement.routes = [{
-    workloadId: "fixture-app",
-    slug: "locked-demo",
+  replacement.routes = [routeFixture({
     service: "fixture-app-alt",
     port: 3001,
     upstream: "http://fixture-app-alt:3001",
-  }];
+  })];
   writeLock(replacement);
 
   const healthAfterReplacement = await httpGet(routerPort, "portal.localhost.com", "/__health");
@@ -655,22 +654,29 @@ test("forged nested-id route locks cannot assign a child service to its parent",
 
 test("project-router enforces the exact 61-byte workload-id boundary before route lineage", () => {
   const maximumId = `b${"a".repeat(60)}`;
-  const valid = canonicalFixtureLock();
+  const valid = verifiedRouteLock();
   valid.workloads = [{
     id: maximumId,
     services: [{
       name: `${maximumId}-x`,
       role: "web",
-      routes: [{ slug: "ok", port: 3000 }],
+      routes: [manifestRouteFixture({
+        owner: maximumId,
+        slug: "ok",
+        canonicalHost: "ok.localhost.com",
+        hosts: ["ok.localhost.com"],
+      })],
     }],
   }];
-  valid.routes = [{
+  valid.routes = [routeFixture({
+    owner: maximumId,
     workloadId: maximumId,
     slug: "ok",
+    canonicalHost: "ok.localhost.com",
+    hosts: ["ok.localhost.com"],
     service: `${maximumId}-x`,
-    port: 3000,
     upstream: `http://${maximumId}-x:3000`,
-  }];
+  })];
   assert.equal(parseHostedRouteLock(valid).routes.get("ok"), `http://${maximumId}-x:3000`);
 
   for (const length of [62, 63, 64]) {
@@ -693,38 +699,50 @@ test("exact route owners preserve non-colliding and single-owner textual prefixe
   const nonColliding = verifiedRouteLock();
   nonColliding.workloads = [
     { id: "billing", services: [{ name: "billing-web", role: "worker", routes: [] }] },
-    { id: "billingapi", services: [{ name: "billingapi-web", role: "web", routes: [{ slug: "billingapi", port: 3000 }] }] },
+    { id: "billingapi", services: [{ name: "billingapi-web", role: "web", routes: [manifestRouteFixture({
+      owner: "billingapi",
+      slug: "billingapi",
+      canonicalHost: "billingapi.localhost.com",
+      hosts: ["billingapi.localhost.com"],
+    })] }] },
   ];
-  nonColliding.routes = [{
+  nonColliding.routes = [routeFixture({
+    owner: "billingapi",
     workloadId: "billingapi",
     slug: "billingapi",
+    canonicalHost: "billingapi.localhost.com",
+    hosts: ["billingapi.localhost.com"],
     service: "billingapi-web",
-    port: 3000,
     upstream: "http://billingapi-web:3000",
-  }];
+  })];
   assert.equal(parseHostedRouteLock(nonColliding).routes.get("billingapi"), "http://billingapi-web:3000");
 
   const singleOwner = verifiedRouteLock();
   singleOwner.workloads = [{
     id: "billing",
-    services: [{ name: "billing-api-web", role: "web", routes: [{ slug: "billing", port: 3000 }] }],
+    services: [{ name: "billing-api-web", role: "web", routes: [manifestRouteFixture({
+      owner: "billing",
+      slug: "billing",
+      canonicalHost: "billing.localhost.com",
+      hosts: ["billing.localhost.com"],
+    })] }],
   }];
-  singleOwner.routes = [{
+  singleOwner.routes = [routeFixture({
+    owner: "billing",
     workloadId: "billing",
     slug: "billing",
+    canonicalHost: "billing.localhost.com",
+    hosts: ["billing.localhost.com"],
     service: "billing-api-web",
-    port: 3000,
     upstream: "http://billing-api-web:3000",
-  }];
+  })];
   assert.equal(parseHostedRouteLock(singleOwner).routes.get("billing"), "http://billing-api-web:3000");
 
   const wrongExactOwner = structuredClone(nonColliding);
   wrongExactOwner.routes[0] = {
+    ...wrongExactOwner.routes[0],
+    owner: "billing",
     workloadId: "billing",
-    slug: "billingapi",
-    service: "billingapi-web",
-    port: 3000,
-    upstream: "http://billingapi-web:3000",
   };
   assert.throws(() => parseHostedRouteLock(wrongExactOwner), /verified lock contract/);
 
@@ -857,7 +875,7 @@ function prepareFixture() {
     snapshotGenerationIdentity: statIdentity(snapshotGenerationStat),
     workloads: [{
       id: "fixture-app",
-      services: [{ name: "fixture-app-web" }],
+      services: [{ name: "fixture-app-web", role: "web", routes: [manifestRouteFixture()] }],
       projectMetadataSourcePath: fiplatformMetadataSource,
       projectMetadataPath: fiplatformMetadataSnapshot,
     }],
@@ -905,12 +923,12 @@ function verifiedMetadataLockFixture(root) {
     snapshotGenerationIdentity: statIdentity(statSync(snapshotGeneration, { bigint: true })),
     workloads: [{
       id: "fixture-app",
-      services: [{ name: "fixture-app-web" }],
+      services: [{ name: "fixture-app-web", role: "web", routes: [manifestRouteFixture()] }],
       projectMetadataSourcePath: sourcePath,
       projectMetadataPath: snapshotPath,
     }],
     files: [record],
-    routes: [{ workloadId: "fixture-app", slug: "fixture", service: "fixture-app-web", port: 3000, upstream: "http://fixture-app-web:3000" }],
+    routes: [routeFixture()],
   };
   lock.workloadContentSha256 = workloadContentDigest(lock.files);
   return lock;
@@ -961,7 +979,7 @@ function verifiedRouteLock() {
       services: [{
         name: "fixture-app-web",
         role: "web",
-        routes: [{ slug: "locked-demo", port: 3000 }],
+        routes: [manifestRouteFixture()],
       }],
     }],
     routes: [routeFixture()],
@@ -983,6 +1001,18 @@ function routeFixture(overrides = {}) {
   };
 }
 
+function manifestRouteFixture(overrides = {}) {
+  const route = routeFixture(overrides);
+  return {
+    owner: route.owner,
+    slug: route.slug,
+    aliases: route.aliases,
+    canonicalHost: route.canonicalHost,
+    hosts: route.hosts,
+    port: route.port,
+  };
+}
+
 function writeLock(lock) {
   writeFileSync(workloadLockFile, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
   chmodSync(workloadLockFile, 0o600);
@@ -1001,6 +1031,7 @@ function spawnFixtureRouter(routerPort, expectedSha256, extraEnv = {}) {
     ...process.env,
     NODE_ENV: "test",
     PROJECT_ROUTER_PORT: String(routerPort),
+    PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS: "100",
     PROJECTS_ROOT: projectsRoot,
     PROJECT_STATE_FILE: stateFile,
     PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,

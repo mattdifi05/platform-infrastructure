@@ -203,8 +203,15 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and (if ($service.routes | length) > 0 then ($service.role | IN("api", "web")) else true end)
     and all($service.routes[];
       type == "object"
-      and ((keys | sort) == ["port", "slug"])
+      and ((keys | sort) == ["aliases", "canonicalHost", "hosts", "owner", "port", "slug"])
+      and .owner == $workload_id
       and (.slug | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.slug as $slug | .aliases | type == "array" and . == (unique | sort)
+        and all(.[]; type == "string" and test("^[a-z][a-z0-9-]{1,62}$") and . != $slug))
+      and (.canonicalHost | type == "string" and test("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"))
+      and (.canonicalHost | split(".")[0]) == .slug
+      and ((.canonicalHost | split(".")[1:] | join(".")) as $suffix
+        | .hosts == ([.canonicalHost] + [.aliases[] | if $suffix == "" then . else . + "." + $suffix end]))
       and (.port | type == "number" and floor == . and . >= 1 and . <= 65535));
   def canonical_routes:
     [
@@ -212,13 +219,17 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       | $workload.services[] as $service
       | $service.routes[]
       | {
+          owner: $workload.id,
           workloadId: $workload.id,
           slug,
+          aliases,
+          canonicalHost,
+          hosts,
           service: $service.name,
           port,
           upstream: ("http://" + $service.name + ":" + (.port | tostring))
         }
-    ] | sort_by(.slug);
+    ] | sort_by(.canonicalHost);
   . as $lock
   | ($lock.workloads | map(.id)) as $workload_ids
   | ($lock.files | map(.path)) as $file_paths
@@ -255,7 +266,9 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       . as $workload
       | ($workload.services | type == "array" and length > 0)
       and all($workload.services[]; canonical_manifest_service($workload.id)))
-    and (($canonical_routes | map(.slug) | length) == ($canonical_routes | map(.slug) | unique | length))
+    and (($canonical_routes | map([.slug] + .aliases) | flatten | length) == ($canonical_routes | map([.slug] + .aliases) | flatten | unique | length))
+    and (($canonical_routes | map(.hosts) | flatten | length) == ($canonical_routes | map(.hosts) | flatten | unique | length))
+    and (($canonical_routes | map(.service + ":" + (.port | tostring)) | length) == ($canonical_routes | map(.service + ":" + (.port | tostring)) | unique | length))
     and (if $lock.state == "verified"
       then ($lock.routes | type == "array") and $lock.routes == $canonical_routes
       else ($lock | has("routes") | not)
@@ -461,8 +474,10 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
   manifest_path=$(jq_lock -r --arg id "$workload_id" '.workloads[] | select(.id == $id) | .manifestPath')
   jq_lock -e --arg id "$workload_id" --slurpfile manifest "$manifest_path" '
     def unique_preserve: reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
+    def normalized_route_text: gsub("^\\s+|\\s+$"; "") | ascii_downcase;
     def normalized_manifest:
-      {
+      . as $manifest
+      | {
         version,
         id: .id,
         composeFile,
@@ -470,7 +485,19 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
         services: [.services[] | {
           name: .name,
           role: .role,
-          routes: [(.routes // [])[] | {slug: .slug, port: .port}]
+          routes: [(.routes // [])[]
+            | . as $route
+            | (($route.aliases // []) | map(normalized_route_text) | unique | sort) as $aliases
+            | ($route.host | normalized_route_text | sub("\\.$"; "")) as $canonicalHost
+            | ($canonicalHost | split(".")[1:] | join(".")) as $suffix
+            | {
+                owner: $manifest.id,
+                slug: $route.slug,
+                aliases: $aliases,
+                canonicalHost: $canonicalHost,
+                hosts: ([$canonicalHost] + [$aliases[] | if $suffix == "" then . else . + "." + $suffix end]),
+                port: $route.port
+              }]
         }],
         secrets: ((.secrets // []) | unique | sort),
         migrationRoots: ((.migrationRoots // []) | unique_preserve)

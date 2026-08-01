@@ -43,7 +43,9 @@ function assertPrefixDisjointWorkloadIds(workloadIds) {
 
 function deriveCanonicalRoutes(workloads) {
   const serviceNames = new Set();
-  const routeSlugs = new Set();
+  const routeNames = new Set();
+  const routeHosts = new Set();
+  const routeUpstreams = new Set();
   const routes = [];
   for (const workload of workloads) {
     if (!workload || typeof workload !== "object" || Array.isArray(workload)
@@ -65,18 +67,36 @@ function deriveCanonicalRoutes(workloads) {
         throw new Error("Hosted workload canonical route lineage exposes a non-routable role.");
       }
       for (const route of service.routes) {
+        const aliases = Array.isArray(route?.aliases) ? route.aliases : [];
+        const canonicalHost = exactDnsHost(route?.canonicalHost);
+        const suffix = canonicalHost.split(".").slice(1).join(".");
+        const expectedHosts = [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)];
+        const upstreamIdentity = `${service.name}:${route?.port}`;
         if (!route || typeof route !== "object" || Array.isArray(route)
-            || !same(Object.keys(route).sort(), ["port", "slug"])
+            || !same(Object.keys(route).sort(), ["aliases", "canonicalHost", "hosts", "owner", "port", "slug"])
+            || route.owner !== workload.id
             || typeof route.slug !== "string" || !ROUTE_SLUG.test(route.slug)
+            || !same(aliases, [...new Set(aliases)].sort())
+            || aliases.some((alias) => typeof alias !== "string" || !ROUTE_SLUG.test(alias) || alias === route.slug)
+            || canonicalHost.split(".")[0] !== route.slug
+            || !same(route.hosts, expectedHosts)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
-            || routeSlugs.has(route.slug)) {
+            || [route.slug, ...aliases].some((name) => routeNames.has(name))
+            || expectedHosts.some((host) => routeHosts.has(host))
+            || routeUpstreams.has(upstreamIdentity)) {
           throw new Error("Hosted workload canonical route lineage has invalid route declarations.");
         }
-        routeSlugs.add(route.slug);
+        for (const name of [route.slug, ...aliases]) routeNames.add(name);
+        for (const host of expectedHosts) routeHosts.add(host);
+        routeUpstreams.add(upstreamIdentity);
         routes.push({
+          owner: workload.id,
           workloadId: workload.id,
           slug: route.slug,
+          aliases,
+          canonicalHost,
+          hosts: expectedHosts,
           service: service.name,
           port: route.port,
           upstream: `http://${service.name}:${route.port}`,
@@ -84,7 +104,16 @@ function deriveCanonicalRoutes(workloads) {
       }
     }
   }
-  return routes.sort((left, right) => (left.slug < right.slug ? -1 : (left.slug > right.slug ? 1 : 0)));
+  return routes.sort((left, right) => left.canonicalHost.localeCompare(right.canonicalHost));
+}
+
+function exactDnsHost(value) {
+  if (typeof value !== "string" || value.length === 0 || value !== value.toLowerCase() || value.endsWith(".")
+      || value.length > 253 || value.includes(":") || value.includes("*")
+      || value.split(".").some((part) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) {
+    throw new Error("Hosted workload canonical route lineage has invalid route declarations.");
+  }
+  return value;
 }
 
 function hasExactProtectedResourceNames(receipt) {

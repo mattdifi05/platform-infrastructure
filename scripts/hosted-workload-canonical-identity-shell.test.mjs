@@ -138,8 +138,12 @@ test("shell independently rejects a re-pinned undeclared worker route", () => {
     forged.coreRenderSha256 = "b".repeat(64);
     forged.combinedRenderSha256 = "c".repeat(64);
     forged.routes = [{
+      owner: "billing",
       workloadId: "billing",
       slug: "admin",
+      aliases: [],
+      canonicalHost: "admin.example.com",
+      hosts: ["admin.example.com"],
       service: "billing-worker",
       port: 9999,
       upstream: "http://billing-worker:9999",
@@ -188,7 +192,7 @@ test("manifest to raw receipt to shell verification rejects noncanonical raw sem
       serviceName: "billing-web",
       manifestServiceName: "Billing-Web",
       manifestRole: "WEB",
-      routes: [{ slug: "billing", port: 3000 }],
+      routes: [{ slug: "billing", host: "billing.example.com", port: 3000 }],
       manifestRoutes: [{ slug: "Billing", port: 3000 }],
     });
     assert.notEqual(
@@ -218,7 +222,7 @@ for (const [label, mutate] of [
         id: "billing",
         serviceName: "billing-web",
         secretName: "billing-key",
-        routes: [{ slug: "billing", port: 3000 }],
+        routes: [{ slug: "billing", host: "billing.example.com", port: 3000 }],
       }]);
       forgeManifestSnapshot(fixture.lockPath, mutate);
       const rawPolicy = spawnSync("ruby", [policyScript, "--lock", fixture.lockPath], { encoding: "utf8" });

@@ -6,6 +6,7 @@ import {
   validateRenderedWorkloads,
   validateWorkloadManifest,
 } from "./hosted-workload-contract.mjs";
+import { brokerPolicySha256 } from "./workload-broker-policy.mjs";
 
 test("final Node consumer rejects a sole claimant stealing another workload secret", () => {
   const fixture = renderedFixture({
@@ -110,7 +111,7 @@ test("manifest intake rejects raw service role route and secret normalization", 
       services: [{
         name: "billing-web",
         role: "web",
-        routes: [{ slug: "billing", port: 3000 }],
+        routes: [{ slug: "billing", host: "billing.example.com", port: 3000 }],
       }],
     };
     mutate(document);
@@ -144,7 +145,7 @@ test("workload id leaves exact room for a canonical service and secret suffix", 
     services: [{
       name: "billing-web",
       role: "web",
-      routes: [{ slug: maxRouteSlug, port: 3000 }],
+      routes: [{ slug: maxRouteSlug, host: `${maxRouteSlug}.example.com`, port: 3000 }],
     }],
   }));
 
@@ -250,6 +251,7 @@ function renderedFixture({
     lock: {
       projectName,
       workloads: manifests,
+      brokerPolicySha256: brokerPolicySha256(manifests),
       rawPolicyReceipt: {
         protectedNetworkNames: ["platform_routing"],
         protectedResourceNames: {

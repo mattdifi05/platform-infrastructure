@@ -61,8 +61,12 @@ test("verified lock and activation render reject a re-pinned undeclared worker r
     const fixture = verifiedRenderFixture(root);
     const forged = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
     forged.routes = [{
+      owner: "billing",
       workloadId: "billing",
       slug: "admin",
+      aliases: [],
+      canonicalHost: "admin.example.com",
+      hosts: ["admin.example.com"],
       service: "billing-worker",
       port: 9999,
       upstream: "http://billing-worker:9999",
@@ -90,7 +94,7 @@ function verifiedRenderFixture(root) {
     services: [{
       name: "billing-web",
       role: "web",
-      routes: [{ slug: "billing", port: 3000 }],
+      routes: [{ slug: "billing", host: "billing.example.com", port: 3000 }],
     }, {
       name: "billing-worker",
       role: "worker",
@@ -248,8 +252,12 @@ function verifiedRenderFixture(root) {
   verified.coreRenderSha256 = sha256(fs.readFileSync(coreRenderPath));
   verified.combinedRenderSha256 = sha256(fs.readFileSync(combinedRenderPath));
   verified.routes = [{
+    owner: "billing",
     workloadId: "billing",
     slug: "billing",
+    aliases: [],
+    canonicalHost: "billing.example.com",
+    hosts: ["billing.example.com"],
     service: "billing-web",
     port: 3000,
     upstream: "http://billing-web:3000",
