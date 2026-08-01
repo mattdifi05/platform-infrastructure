@@ -29,6 +29,7 @@ services:
     profiles:
       - backup
     init: true
+    user: "0:0"
     read_only: true
     pids_limit: 256
     security_opt:
@@ -50,21 +51,47 @@ services:
         target: docker_action_runtime_intent_trust_key
         uid: "0"
         gid: "0"
-        mode: 0400
+        mode: 256
+      - source: docker_action_backup_catalog
+        target: docker_action_backup_catalog
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_job_execute
+        target: docker_action_backup_job_execute
+        uid: "0"
+        gid: "0"
+        mode: 256
       - source: docker_action_backup_prune_plan
         target: docker_action_backup_prune_plan
         uid: "0"
         gid: "0"
-        mode: 0400
+        mode: 256
+      - source: docker_action_backup_prune_apply
+        target: docker_action_backup_prune_apply
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_restore_drill_full
+        target: docker_action_restore_drill_full
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_offsite_sync
+        target: docker_action_backup_offsite_sync
+        uid: "0"
+        gid: "0"
+        mode: 256
       - source: docker_action_evidence_runtime_snapshot
         target: docker_action_evidence_runtime_snapshot
         uid: "0"
         gid: "0"
-        mode: 0400
+        mode: 256
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - docker_action_broker_socket:/run/platform/docker-action-broker
       - docker_action_broker_state:/var/lib/platform/docker-action-broker
+      - backup_scheduler_jobs:/run/platform/backup-jobs:ro
       - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256:ro
       - ${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}:/run/platform/docker-action-trust/runtime-intent.json:ro
       - ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
@@ -78,16 +105,13 @@ services:
         condition: service_completed_successfully
 
   backup-scheduler:
-    image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
-    build:
-      context: .
-      dockerfile: docker/ops.Dockerfile
-      args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    image: ${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY:?set digest-pinned scheduler repository}@sha256:${PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256:?set scheduler image sha256}
     container_name: enterprise-backup-scheduler
     profiles:
       - backup
     init: true
+    user: "0:0"
+    read_only: true
     pids_limit: 256
     logging:
       driver: json-file
@@ -96,19 +120,13 @@ services:
         max-file: "5"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
+    network_mode: none
     entrypoint:
-      - sh
-      - /infra/scripts/backup-scheduler.sh
+      - /opt/platform-backup-scheduler/backup-scheduler.sh
     environment:
-      PLATFORM_INFRA_ROOT: /infra
-      PLATFORM_INFRA_CONTAINER_ROOT: /infra
-      PLATFORM_INFRA_HOST_ROOT: ${PLATFORM_INFRA_HOST_ROOT:-}
-      PROJECT_SOURCE_ROOT: /project
-      PROJECT_SOURCE_HOST_ROOT: ${PROJECT_SOURCE_HOST_ROOT:-}
-      PROJECT_STATE_ROOT: /var/www/project-state
-      PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
-      NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
       BACKUP_SCHEDULER_CATALOG_CRON: "${BACKUP_SCHEDULER_CATALOG_CRON:-5 */8 * * *}"
       BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT: ${BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT:-04:45}
       BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY: ${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}
@@ -116,65 +134,64 @@ services:
       BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY: ${BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY:-false}
       BACKUP_SCHEDULER_ENABLE_OFFSITE: ${BACKUP_SCHEDULER_ENABLE_OFFSITE:-false}
       BACKUP_SCHEDULER_OFFSITE_CRON: "${BACKUP_SCHEDULER_OFFSITE_CRON:-35 */8 * * *}"
-      BACKUP_SIGNING_KEYS_FILE: /infra/secrets/backup_signing_keys.txt
-      RESTIC_IMAGE: ${RESTIC_IMAGE:-}
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
-      RESTIC_PASSWORD_FILE: ${RESTIC_PASSWORD_FILE:-/infra/secrets/restic_password.txt}
-      RESTIC_KEEP_LAST: ${RESTIC_KEEP_LAST:-42}
-      RESTIC_HOSTNAME: ${RESTIC_HOSTNAME:-platform-infrastructure}
-      RESTIC_REQUIRE_IMMUTABLE_IMAGE: ${RESTIC_REQUIRE_IMMUTABLE_IMAGE:-true}
-      RESTIC_MAX_REPOSITORY_BYTES: ${RESTIC_MAX_REPOSITORY_BYTES:-2500000000000}
-      RCLONE_CONFIG: ${RCLONE_CONFIG:-/infra/secrets/rclone/rclone.conf}
-      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
-      BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
       BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_LOG_DIR: /var/log/platform
+      BACKUP_SCHEDULER_CRON_FILE: /run/platform/backup-scheduler/crontabs/root
+      BACKUP_SCHEDULER_ENV_FILE: /run/platform/backup-scheduler/backup-scheduler.env
       DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
       DOCKER_ACTION_RUNTIME_INTENT_ID: ${DOCKER_ACTION_RUNTIME_INTENT_ID:?set admitted runtime intent id}
       DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: ${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:?set admitted active receipt sha256}
       DOCKER_ACTION_COMBINED_RENDER_SHA256: ${DOCKER_ACTION_COMBINED_RENDER_SHA256:?set exact final combined render sha256}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m
     volumes:
-      - .:/infra:ro
-      - ./projects-portal/state:/var/www/project-state
-      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
+      - backup_scheduler_jobs:/var/www/project-state/backup-jobs
       - backup_scheduler_logs:/var/log/platform
       - docker_action_broker_socket:/run/platform/docker-action-broker:ro
     secrets:
+      - source: docker_action_backup_catalog
+        target: docker_action_backup_catalog
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_job_execute
+        target: docker_action_backup_job_execute
+        uid: "0"
+        gid: "0"
+        mode: 256
       - source: docker_action_backup_prune_plan
         target: docker_action_backup_prune_plan
         uid: "0"
         gid: "0"
-        mode: 0400
-      - source: docker_action_evidence_runtime_snapshot
-        target: docker_action_evidence_runtime_snapshot
+        mode: 256
+      - source: docker_action_backup_prune_apply
+        target: docker_action_backup_prune_apply
         uid: "0"
         gid: "0"
-        mode: 0400
+        mode: 256
+      - source: docker_action_restore_drill_full
+        target: docker_action_restore_drill_full
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_offsite_sync
+        target: docker_action_backup_offsite_sync
+        uid: "0"
+        gid: "0"
+        mode: 256
     depends_on:
       docker-action-broker:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
-      mariadb:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-    networks:
-      - platform_db_admin
-      - platform_storage
-      - platform_egress
     healthcheck:
-      test: ["CMD-SHELL", "test -s /etc/crontabs/root && pgrep crond >/dev/null"]
+      test: ["CMD-SHELL", "test -s /run/platform/backup-scheduler/crontabs/root"]
       interval: 30s
       timeout: 5s
       retries: 5
 
 volumes:
   backup_scheduler_logs:
-    name: ${BACKUP_SCHEDULER_LOG_VOLUME:-platform_backup_scheduler_logs}
+  backup_scheduler_jobs:
   docker_action_broker_socket:
   docker_action_broker_state:
   docker_action_activation_cas:

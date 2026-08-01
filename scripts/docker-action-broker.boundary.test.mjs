@@ -625,6 +625,8 @@ function deterministicComposeEnvironment() {
     "MAILER_REPLY_TO=no-reply@example.invalid",
     "MARIADB_ROOT_PASSWORD=offline-not-a-secret",
     "MINIO_ROOT_PASSWORD_FILE=/run/secrets/minio_root_password",
+    "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=registry.example.invalid/platform/backup-scheduler",
+    `PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256=${"e".repeat(64)}`,
     "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=registry.example.invalid/platform/docker-action-broker",
     `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"c".repeat(64)}`,
     "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/platform/provider-activation",

@@ -74,11 +74,36 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
     `expected one image recipe that owns backup-scheduler.sh, found ${candidates.map(({ name }) => name).join(",") || "none"}`,
   );
   const instructions = dockerfileInstructions(candidates[0].source);
+  assert.match(candidates[0].source, /^ARG NODE_IMAGE=[^\s]+@sha256:[a-f0-9]{64}\s*$/m);
+  for (const source of [
+    "scripts/backup-scheduler.sh",
+    "scripts/docker-action-client.mjs",
+    "scripts/docker-action-contract.mjs",
+  ]) {
+    assert.ok(dockerfileCopies(candidates[0].source, source), `scheduler image is missing ${source}`);
+  }
   const executableSurface = instructions
     .filter(({ opcode }) => ["FROM", "RUN", "ENTRYPOINT", "CMD"].includes(opcode))
     .map(({ value }) => value)
     .join("\n");
   assert.doesNotMatch(executableSurface, /(?:^|[^a-z0-9_-])docker(?:-cli|-compose)?(?:[^a-z0-9_-]|$)/i);
+});
+
+test("FG-005 all six scheduler capabilities have local and managed materialization definitions", () => {
+  const fileSecrets = fs.readFileSync(path.join(root, "compose.secrets.yaml"), "utf8");
+  const managedSecrets = fs.readFileSync(path.join(root, "compose.managed-secrets.yaml"), "utf8");
+  const secretManager = fs.readFileSync(path.join(root, "scripts", "infra-secret-manager.mjs"), "utf8");
+  const infraOps = fs.readFileSync(path.join(root, "scripts", "infra-ops.mjs"), "utf8");
+
+  for (const name of schedulerCapabilitySecrets) {
+    assert.match(fileSecrets, new RegExp(`^  ${name}:\\n    file: \\./secrets/${name}\\.txt$`, "m"), name);
+    assert.match(managedSecrets, new RegExp(`^  ${name}:\\n    external: true$`, "m"), name);
+    assert.match(secretManager, new RegExp(`\\{ name: "${name}", kind: "opaque", bytes: 48, rotationDays: 90 \\}`), name);
+    assert.ok(
+      [...infraOps.matchAll(new RegExp(`"${name}"`, "g"))].length >= 2,
+      `${name} must be covered by rotation metadata and local-secret validation`,
+    );
+  }
 });
 
 test("FG-005 scheduler is read-only, Linux-capability-free and host-private", () => {
@@ -131,6 +156,7 @@ test("FG-005 scheduler mounts only its private queue, logs and broker UDS", () =
 
 test("FG-005 scheduler writable control files stay on bounded hardened tmpfs", () => {
   const scheduler = serviceBlock(fs.readFileSync(path.join(root, "compose.backup-scheduler.yaml"), "utf8"), "backup-scheduler");
+  const entrypoint = fs.readFileSync(path.join(root, "scripts", "backup-scheduler.sh"), "utf8");
   const cronFile = mappingScalar(scheduler, "environment", "BACKUP_SCHEDULER_CRON_FILE");
   const envFile = mappingScalar(scheduler, "environment", "BACKUP_SCHEDULER_ENV_FILE");
   for (const [name, value] of [["cron", cronFile], ["environment", envFile]]) {
@@ -151,6 +177,11 @@ test("FG-005 scheduler writable control files stay on bounded hardened tmpfs", (
     );
     assert.ok(mount.sizeBytes >= 1024 * 1024 && mount.sizeBytes <= 128 * 1024 * 1024, `${mount.target} tmpfs size is unbounded`);
   }
+  assert.match(
+    entrypoint,
+    /exec crond\b[^\n]*\s-c\s+"\$\(dirname\s+"\$CRON_FILE"\)"/,
+    "crond must consume the relocated private tmpfs crontab directory",
+  );
 });
 
 test("FG-005 scheduler owns exactly six backup capabilities and no evidence snapshot capability", () => {
@@ -208,9 +239,35 @@ test("FG-005 the real queue consumer forwards only its atomically claimed filena
     "--jobFileName",
     observed.fileName,
   ]);
+  assert.equal(observed.clientInvocationCount, 1);
   assert.equal(observed.terminalJob.status, "done");
   assert.equal(observed.queuedExists, false);
   assert.equal(observed.runningExists, false);
+});
+
+test("FG-005 an unknown post-admission outcome remains running for manual reconciliation without retry", () => {
+  const observed = runClaimedQueueWithFakeClient({
+    clientExitCode: 74,
+    expectedStatus: "running",
+    expectedSummary: "manual-reconciliation",
+  });
+
+  assert.equal(observed.result.status, 0, `${observed.result.stdout}\n${observed.result.stderr}`);
+  assert.deepEqual(observed.clientArguments, [
+    path.join(root, "scripts", "docker-action-client.mjs"),
+    "execute-backup-job",
+    "--jobFileName",
+    observed.fileName,
+  ]);
+  assert.equal(observed.clientInvocationCount, 1);
+  assert.equal(observed.terminalJob.status, "running");
+  assert.equal(observed.terminalJob.exitCode, 74);
+  assert.match(observed.terminalJob.resultSummary, /manual-reconciliation/i);
+  assert.equal(Object.hasOwn(observed.terminalJob, "logPath"), false);
+  assert.equal(observed.queuedExists, false);
+  assert.equal(observed.runningExists, true);
+  assert.equal(observed.doneExists, false);
+  assert.equal(observed.failedExists, false);
 });
 
 function serviceBlock(source, name) {
@@ -378,17 +435,24 @@ function runSchedulerWithFakeClient(arguments_) {
   return { result, clientArguments };
 }
 
-function runClaimedQueueWithFakeClient() {
+function runClaimedQueueWithFakeClient({
+  clientExitCode = 0,
+  expectedStatus = "done",
+  expectedSummary = "",
+} = {}) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-claimed-queue-"));
   const bin = path.join(temporary, "bin");
   const jobs = path.join(temporary, "jobs");
   const logs = path.join(temporary, "logs");
   const runtime = path.join(temporary, "runtime");
   const capture = path.join(temporary, "client-arguments.txt");
+  const callCapture = path.join(temporary, "client-invocations.txt");
   const fileName = "0123456789abcdef.json";
   const queued = path.join(jobs, "queued", fileName);
   const running = path.join(jobs, "running", fileName);
   const done = path.join(jobs, "done", fileName);
+  const failed = path.join(jobs, "failed", fileName);
+  const terminal = path.join(jobs, expectedStatus, fileName);
   fs.mkdirSync(path.dirname(queued), { recursive: true });
   fs.mkdirSync(bin);
   fs.writeFileSync(queued, `${JSON.stringify({
@@ -405,6 +469,7 @@ function runClaimedQueueWithFakeClient() {
     "date",
     "dirname",
     "find",
+    "grep",
     "head",
     "mkdir",
     "mv",
@@ -419,8 +484,9 @@ function runClaimedQueueWithFakeClient() {
     fakeNode,
     `#!/bin/sh
 if [ "\${1:-}" = "$SCHEDULER_EXPECTED_CLIENT" ]; then
+  printf 'call\\n' >> "$SCHEDULER_CLIENT_CALL_CAPTURE"
   printf '%s\\n' "$@" > "$SCHEDULER_CLIENT_CAPTURE"
-  exit 0
+  exit "$SCHEDULER_CLIENT_EXIT_CODE"
 fi
 exec ${shellQuote(process.execPath)} "$@"
 `,
@@ -432,7 +498,11 @@ exec ${shellQuote(process.execPath)} "$@"
     `#!/bin/sh
 attempt=0
 while [ "$attempt" -lt 500 ]; do
-  if [ -f "$SCHEDULER_EXPECTED_DONE" ]; then exit 0; fi
+  if [ -f "$SCHEDULER_EXPECTED_TERMINAL" ]; then
+    if [ -z "$SCHEDULER_EXPECTED_SUMMARY" ] || grep -q "$SCHEDULER_EXPECTED_SUMMARY" "$SCHEDULER_EXPECTED_TERMINAL"; then
+      exit 0
+    fi
+  fi
   /bin/sleep 0.01
   attempt=$((attempt + 1))
 done
@@ -460,17 +530,26 @@ exit 70
       PATH: bin,
       PLATFORM_INFRA_ROOT: root,
       SCHEDULER_CLIENT_CAPTURE: capture,
+      SCHEDULER_CLIENT_CALL_CAPTURE: callCapture,
+      SCHEDULER_CLIENT_EXIT_CODE: String(clientExitCode),
       SCHEDULER_EXPECTED_CLIENT: path.join(root, "scripts", "docker-action-client.mjs"),
-      SCHEDULER_EXPECTED_DONE: done,
+      SCHEDULER_EXPECTED_SUMMARY: expectedSummary,
+      SCHEDULER_EXPECTED_TERMINAL: terminal,
     },
     timeout: 10_000,
   });
   const clientArguments = fs.existsSync(capture)
     ? fs.readFileSync(capture, "utf8").trimEnd().split("\n").filter(Boolean)
     : [];
-  const terminalJob = fs.existsSync(done) ? JSON.parse(fs.readFileSync(done, "utf8")) : {};
+  const clientInvocationCount = fs.existsSync(callCapture)
+    ? fs.readFileSync(callCapture, "utf8").trimEnd().split("\n").filter(Boolean).length
+    : 0;
+  const terminalJob = fs.existsSync(terminal) ? JSON.parse(fs.readFileSync(terminal, "utf8")) : {};
   const observed = {
     clientArguments,
+    clientInvocationCount,
+    doneExists: fs.existsSync(done),
+    failedExists: fs.existsSync(failed),
     fileName,
     queuedExists: fs.existsSync(queued),
     result,

@@ -52,6 +52,7 @@ services:
 
   docker-action-broker:
     <<: *runtime_control
+    user: "0:0"
     read_only: true
     cpus: 0.50
     mem_limit: 512m
@@ -65,6 +66,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - docker_action_broker_socket:/run/platform/docker-action-broker
       - docker_action_broker_state:/var/lib/platform/docker-action-broker
+      - backup_scheduler_jobs:/run/platform/backup-jobs:ro
       - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256:ro
       - ${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}:/run/platform/docker-action-trust/runtime-intent.json:ro
       - ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
@@ -261,31 +263,79 @@ services:
 
   backup-scheduler:
     <<: *runtime_control
+    image: ${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY:?set digest-pinned scheduler repository}@sha256:${PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256:?set scheduler image sha256}
+    build: !reset null
+    user: "0:0"
     read_only: true
     cpus: 1.00
     mem_limit: 512m
     mem_reservation: 128m
     pids_limit: 256
-    environment:
+    entrypoint: !override
+      - /opt/platform-backup-scheduler/backup-scheduler.sh
+    command: !reset []
+    cap_drop: !override
+      - ALL
+    cap_add: !reset []
+    group_add: !reset []
+    network_mode: none
+    networks: !reset []
+    ports: !reset []
+    expose: !reset []
+    environment: !override
       DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
       DOCKER_ACTION_RUNTIME_INTENT_ID: ${DOCKER_ACTION_RUNTIME_INTENT_ID:?set admitted runtime intent id}
       DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: ${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:?set admitted active receipt sha256}
       DOCKER_ACTION_COMBINED_RENDER_SHA256: ${DOCKER_ACTION_COMBINED_RENDER_SHA256:?set exact final combined render sha256}
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,size=256m
-      - /root:rw,nosuid,nodev,size=32m
+      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_LOG_DIR: /var/log/platform
+      BACKUP_SCHEDULER_CRON_FILE: /run/platform/backup-scheduler/crontabs/root
+      BACKUP_SCHEDULER_ENV_FILE: /run/platform/backup-scheduler/backup-scheduler.env
+    secrets: !override
+      - source: docker_action_backup_catalog
+        target: docker_action_backup_catalog
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_job_execute
+        target: docker_action_backup_job_execute
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_prune_plan
+        target: docker_action_backup_prune_plan
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_prune_apply
+        target: docker_action_backup_prune_apply
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_restore_drill_full
+        target: docker_action_restore_drill_full
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_offsite_sync
+        target: docker_action_backup_offsite_sync
+        uid: "0"
+        gid: "0"
+        mode: 256
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m
     volumes: !override
-      - .:/infra:ro
-      - ./backups:/infra/backups
-      - ./reports:/infra/reports
-      - ./projects-portal/state:/var/www/project-state
-      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
+      - backup_scheduler_jobs:/var/www/project-state/backup-jobs
       - backup_scheduler_logs:/var/log/platform
       - docker_action_broker_socket:/run/platform/docker-action-broker:ro
-    depends_on:
+    depends_on: !override
       docker-action-broker:
         condition: service_healthy
-    networks: !override
-      - platform_db_admin
-      - platform_storage
-      - platform_egress
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -s /run/platform/backup-scheduler/crontabs/root
+      interval: 30s
+      timeout: 5s
+      retries: 5

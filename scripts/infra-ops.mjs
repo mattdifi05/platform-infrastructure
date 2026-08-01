@@ -5691,7 +5691,12 @@ async function retentionEvidence(options = {}) {
 
 const managedSecretRotationExpectations = [
   { name: "docker_action_runtime_intent_trust_key", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_backup_catalog", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_backup_job_execute", kind: "opaque", rotationDays: 90 },
   { name: "docker_action_backup_prune_plan", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_backup_prune_apply", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_restore_drill_full", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_backup_offsite_sync", kind: "opaque", rotationDays: 90 },
   { name: "docker_action_evidence_runtime_snapshot", kind: "opaque", rotationDays: 90 },
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
@@ -11909,7 +11914,12 @@ async function validateLocalSecrets() {
   const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
   const required = [
     "docker_action_runtime_intent_trust_key",
+    "docker_action_backup_catalog",
+    "docker_action_backup_job_execute",
     "docker_action_backup_prune_plan",
+    "docker_action_backup_prune_apply",
+    "docker_action_restore_drill_full",
+    "docker_action_backup_offsite_sync",
     "docker_action_evidence_runtime_snapshot",
     "postgres_superuser_password",
     "keycloak_db_password",

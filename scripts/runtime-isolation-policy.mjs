@@ -17,6 +17,23 @@ const FORBIDDEN_WORKLOAD_TARGETS = [
   "/var/www/project-state",
 ];
 
+const SCHEDULER_CAPABILITY_SECRETS = Object.freeze([
+  "docker_action_backup_catalog",
+  "docker_action_backup_job_execute",
+  "docker_action_backup_prune_plan",
+  "docker_action_backup_prune_apply",
+  "docker_action_restore_drill_full",
+  "docker_action_backup_offsite_sync",
+]);
+const EVIDENCE_CAPABILITY_SECRET = "docker_action_evidence_runtime_snapshot";
+const RUNTIME_INTENT_TRUST_SECRET = "docker_action_runtime_intent_trust_key";
+const BROKER_READINESS_COMMAND = Object.freeze([
+  "CMD",
+  "node",
+  "/opt/platform-docker-broker/docker-action-readiness.mjs",
+  "--require-trusted-activation",
+]);
+
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
   const networks = object(config?.networks);
@@ -128,10 +145,16 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   record("docker-broker-minimum-process-authority", dockerBroker.read_only === true && dockerBroker.cap_drop?.includes("ALL")
     && !(dockerBroker.cap_add?.length > 0) && dockerBroker.security_opt?.includes("no-new-privileges:true"), `capDrop=${dockerBroker.cap_drop || "unset"}`);
   record("docker-broker-no-supplemental-groups", !(dockerBroker.group_add?.length > 0), `groupAdd=${dockerBroker.group_add || "none"}`);
+  record("docker-broker-root-identity", String(dockerBroker.user || "") === "0:0", `user=${dockerBroker.user || "unset"}`);
+  record("docker-broker-trust-aware-readiness", sameExact(
+    Array.isArray(dockerBroker.healthcheck?.test) ? dockerBroker.healthcheck.test.map(String) : [],
+    BROKER_READINESS_COMMAND,
+  ), `healthcheck=${JSON.stringify(dockerBroker.healthcheck?.test || [])}`);
   const exactBrokerTargets = [
     "/var/run/docker.sock",
     "/run/platform/docker-action-broker",
     "/var/lib/platform/docker-action-broker",
+    "/run/platform/backup-jobs",
     "/run/platform/docker-action-activation/by-bundle-sha256",
     "/run/platform/docker-action-trust/runtime-intent.json",
     "/run/platform/docker-action-trust/active-receipt.json",
@@ -143,9 +166,9 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   const socketVolume = object(namedVolumes.docker_action_broker_socket);
   const stateVolume = object(namedVolumes.docker_action_broker_state);
   const activationCasVolume = object(namedVolumes.docker_action_activation_cas);
-  record("docker-broker-socket-volume-not-aliased", Object.keys(socketVolume).length === 0, `declaration=${JSON.stringify(socketVolume)}`);
-  record("docker-broker-state-volume-not-aliased", Object.keys(stateVolume).length === 0, `declaration=${JSON.stringify(stateVolume)}`);
-  record("docker-broker-activation-cas-volume-not-aliased", Object.keys(activationCasVolume).length === 0, `declaration=${JSON.stringify(activationCasVolume)}`);
+  record("docker-broker-socket-volume-not-aliased", canonicalPrivateVolume(socketVolume, "docker_action_broker_socket", config?.name), `declaration=${JSON.stringify(socketVolume)}`);
+  record("docker-broker-state-volume-not-aliased", canonicalPrivateVolume(stateVolume, "docker_action_broker_state", config?.name), `declaration=${JSON.stringify(stateVolume)}`);
+  record("docker-broker-activation-cas-volume-not-aliased", canonicalPrivateVolume(activationCasVolume, "docker_action_activation_cas", config?.name), `declaration=${JSON.stringify(activationCasVolume)}`);
   const activationCasMount = dockerBrokerMounts.find((mount) => mount.target === "/run/platform/docker-action-activation/by-bundle-sha256");
   record("docker-broker-activation-cas-read-only", activationCasMount?.type === "volume"
     && activationCasMount.source === "docker_action_activation_cas" && activationCasMount.readOnly, `mount=${JSON.stringify(activationCasMount || {})}`);
@@ -153,24 +176,76 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   record("docker-broker-trust-inputs-read-only", trustMounts.length === 2 && trustMounts.every((mount) => mount.type === "bind" && mount.readOnly
     && mount.source.startsWith("/srv/platform/trust/")), `trust=${trustMounts.map((mount) => `${mount.source}:${mount.readOnly}`).join(",")}`);
 
-  const capabilitySecrets = ["docker_action_backup_prune_plan", "docker_action_evidence_runtime_snapshot"];
-  const trustSecret = "docker_action_runtime_intent_trust_key";
-  for (const secret of [...capabilitySecrets, trustSecret]) {
+  const brokerCapabilitySecrets = [
+    ...SCHEDULER_CAPABILITY_SECRETS,
+    EVIDENCE_CAPABILITY_SECRET,
+    RUNTIME_INTENT_TRUST_SECRET,
+  ];
+  record("docker-broker-exact-capability-secrets", same(
+    secretNames(dockerBroker),
+    brokerCapabilitySecrets,
+  ), `secrets=${secretNames(dockerBroker).join(",") || "none"}`);
+  for (const secret of brokerCapabilitySecrets) {
     const declaration = object(topLevelSecrets[secret]);
     const owners = Object.entries(services).filter(([, service]) => secretNames(service).includes(secret)).map(([name]) => name).sort();
-    const expectedOwners = secret === trustSecret ? ["docker-action-broker"] : ["backup-scheduler", "docker-action-broker"];
-    record(`docker-broker-secret-source-${secret}`, declaration.file === `./secrets/${secret}.txt`
-      && !declaration.external && !declaration.name && !declaration.driver_opts, `declaration=${JSON.stringify(declaration)}`);
+    const expectedOwners = SCHEDULER_CAPABILITY_SECRETS.includes(secret)
+      ? ["backup-scheduler", "docker-action-broker"]
+      : ["docker-action-broker"];
+    record(`docker-broker-secret-source-${secret}`, canonicalSecretDeclaration(
+      declaration,
+      secret,
+      config?.name,
+    ), `declaration=${JSON.stringify(declaration)}`);
     record(`docker-broker-secret-owners-${secret}`, same(owners, expectedOwners), `owners=${owners.join(",") || "none"}`);
     for (const owner of owners) {
       const mount = secretMount(services[owner], secret);
-      record(`docker-broker-secret-mode-${secret}-${owner}`, mount?.uid === "0" && mount?.gid === "0" && Number(mount?.mode) === 0o400, `mount=${JSON.stringify(mount || {})}`);
+      record(`docker-broker-secret-mode-${secret}-${owner}`, mount?.uid === "0" && mount?.gid === "0"
+        && renderedSecretModeIs0400(mount?.mode), `mount=${JSON.stringify(mount || {})}`);
     }
   }
 
   const scheduler = services["backup-scheduler"] || {};
   const schedulerEnvironment = object(scheduler.environment);
   const schedulerMounts = volumes(scheduler);
+  const schedulerImage = String(scheduler.image || "");
+  const schedulerQueueMount = schedulerMounts.find((mount) => mount.source === "backup_scheduler_jobs");
+  const brokerQueueMount = dockerBrokerMounts.find((mount) => mount.source === "backup_scheduler_jobs");
+  const queueOwners = Object.entries(services)
+    .filter(([, service]) => volumes(service).some((mount) => mount.source === "backup_scheduler_jobs"))
+    .map(([name]) => name)
+    .sort();
+  const queueVolume = object(namedVolumes.backup_scheduler_jobs);
+  record("docker-broker-claimed-job-queue-read-only", brokerQueueMount?.type === "volume"
+    && brokerQueueMount.target === "/run/platform/backup-jobs" && brokerQueueMount.readOnly,
+  `mount=${JSON.stringify(brokerQueueMount || {})}`);
+  record("docker-broker-claimed-job-queue-not-aliased", canonicalPrivateVolume(
+    queueVolume,
+    "backup_scheduler_jobs",
+    config?.name,
+  ) && same(queueOwners, ["backup-scheduler", "docker-action-broker"]),
+  `declaration=${JSON.stringify(queueVolume)} owners=${queueOwners.join(",") || "none"}`);
+  record("scheduler-immutable-image", /^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[a-f0-9]{64}$/.test(schedulerImage)
+    && !scheduler.build, `image=${schedulerImage || "unset"} build=${Boolean(scheduler.build)}`);
+  record("scheduler-minimum-authority", String(scheduler.user || "") === "0:0"
+    && scheduler.read_only === true
+    && sameExact(scheduler.cap_drop || [], ["ALL"])
+    && !(scheduler.cap_add?.length > 0)
+    && !(scheduler.group_add?.length > 0)
+    && scheduler.security_opt?.includes("no-new-privileges:true"),
+  `user=${scheduler.user || "unset"} capDrop=${scheduler.cap_drop || "unset"}`);
+  record("scheduler-host-private", scheduler.network_mode === "none"
+    && networkNames(scheduler).length === 0
+    && !(scheduler.ports?.length > 0)
+    && !(scheduler.expose?.length > 0), `networkMode=${scheduler.network_mode || "unset"}`);
+  record("scheduler-exact-mount-targets", exactSchedulerMounts(schedulerMounts),
+    `mounts=${schedulerMounts.map((mount) => `${mount.source}:${mount.target}:${mount.readOnly ? "ro" : "rw"}`).join(",") || "none"}`);
+  record("scheduler-claimed-job-queue-read-write", schedulerQueueMount?.type === "volume"
+    && schedulerQueueMount.target === "/var/www/project-state/backup-jobs" && !schedulerQueueMount.readOnly,
+  `mount=${JSON.stringify(schedulerQueueMount || {})}`);
+  record("scheduler-writable-paths", exactSchedulerWritablePaths(scheduler, schedulerEnvironment),
+    `cron=${schedulerEnvironment.BACKUP_SCHEDULER_CRON_FILE || "unset"} env=${schedulerEnvironment.BACKUP_SCHEDULER_ENV_FILE || "unset"} tmpfs=${JSON.stringify(scheduler.tmpfs || [])}`);
+  record("scheduler-exact-capability-secrets", same(secretNames(scheduler), SCHEDULER_CAPABILITY_SECRETS),
+    `secrets=${secretNames(scheduler).join(",") || "none"}`);
   record("scheduler-uses-local-action-socket", schedulerEnvironment.DOCKER_ACTION_BROKER_SOCKET === "/run/platform/docker-action-broker/broker.sock"
     && schedulerMounts.some((mount) => mount.source === "docker_action_broker_socket" && mount.target === "/run/platform/docker-action-broker" && mount.readOnly), `socket=${schedulerEnvironment.DOCKER_ACTION_BROKER_SOCKET || "unset"}`);
   record("scheduler-binds-final-render", /^[a-f0-9]{64}$/.test(String(schedulerEnvironment.DOCKER_ACTION_COMBINED_RENDER_SHA256 || "")),
@@ -293,10 +368,85 @@ function secretMount(service, name) {
   };
 }
 
+function canonicalPrivateVolume(declaration, logicalName, projectName) {
+  const expectedName = `${String(projectName || "")}_${logicalName}`;
+  return Boolean(projectName)
+    && declaration.name === expectedName
+    && declaration.external !== true
+    && !Object.hasOwn(declaration, "driver_opts")
+    && (!Object.hasOwn(declaration, "driver") || declaration.driver === "local");
+}
+
+function renderedSecretModeIs0400(value) {
+  const mode = Number(value);
+  return mode === 400 || mode === 0o400;
+}
+
+function canonicalSecretDeclaration(declaration, logicalName, projectName) {
+  const file = String(declaration.file || "").replaceAll("\\", "/");
+  return Boolean(projectName)
+    && declaration.name === `${projectName}_${logicalName}`
+    && !declaration.external
+    && !declaration.driver_opts
+    && !file.includes("\0")
+    && (file === `./secrets/${logicalName}.txt` || file.endsWith(`/secrets/${logicalName}.txt`));
+}
+
+function exactSchedulerMounts(mounts) {
+  if (mounts.length !== 3) return false;
+  return mounts.some((mount) => mount.type === "volume"
+      && mount.source === "backup_scheduler_jobs"
+      && mount.target === "/var/www/project-state/backup-jobs"
+      && !mount.readOnly)
+    && mounts.some((mount) => mount.type === "volume"
+      && mount.source === "backup_scheduler_logs"
+      && mount.target === "/var/log/platform"
+      && !mount.readOnly)
+    && mounts.some((mount) => mount.type === "volume"
+      && mount.source === "docker_action_broker_socket"
+      && mount.target === "/run/platform/docker-action-broker"
+      && mount.readOnly);
+}
+
+function exactSchedulerWritablePaths(scheduler, environment) {
+  if (environment.BACKUP_SCHEDULER_CRON_FILE !== "/run/platform/backup-scheduler/crontabs/root"
+    || environment.BACKUP_SCHEDULER_ENV_FILE !== "/run/platform/backup-scheduler/backup-scheduler.env") {
+    return false;
+  }
+  const tmpfs = (scheduler.tmpfs || []).map(parseTmpfs).filter(Boolean);
+  if (tmpfs.length !== 2) return false;
+  const targets = tmpfs.map((mount) => mount.target).sort();
+  if (!sameExact(targets, ["/run/platform/backup-scheduler", "/tmp"])) return false;
+  return tmpfs.every((mount) => sameExact(mount.flags, ["nodev", "noexec", "nosuid", "rw"])
+    && mount.sizeBytes >= 1024 * 1024
+    && mount.sizeBytes <= 128 * 1024 * 1024);
+}
+
+function parseTmpfs(value) {
+  if (typeof value !== "string") return null;
+  const separator = value.indexOf(":");
+  if (separator < 1 || value.indexOf(":", separator + 1) !== -1) return null;
+  const target = value.slice(0, separator);
+  const options = value.slice(separator + 1).split(",");
+  const sizeOptions = options.filter((option) => option.startsWith("size="));
+  if (!target.startsWith("/") || sizeOptions.length !== 1) return null;
+  const sizeBytes = bytes(sizeOptions[0].slice("size=".length));
+  if (!sizeBytes) return null;
+  return {
+    flags: options.filter((option) => !option.startsWith("size=")).sort(),
+    sizeBytes,
+    target,
+  };
+}
+
 function stableId(value) {
   return String(value).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
 }
 
 function same(left, right) {
   return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+}
+
+function sameExact(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

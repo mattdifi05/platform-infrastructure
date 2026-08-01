@@ -13,7 +13,12 @@ const argv = parseArgs(process.argv.slice(3));
 
 const requiredSecrets = [
   { name: "docker_action_runtime_intent_trust_key", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_backup_catalog", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_backup_job_execute", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "docker_action_backup_prune_plan", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_backup_prune_apply", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_restore_drill_full", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_backup_offsite_sync", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "docker_action_evidence_runtime_snapshot", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "postgres_superuser_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
