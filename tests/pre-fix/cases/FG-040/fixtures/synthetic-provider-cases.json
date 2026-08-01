@@ -1,0 +1,226 @@
+{
+  "manifest": {
+    "accountId": "11111111111111111111111111111111",
+    "teamName": "synthetic-platform",
+    "adminSessionDuration": "15m",
+    "mfaEnforcedByIdentityProvider": true,
+    "allowedIdentityProviderIds": [
+      "synthetic-mfa-idp"
+    ],
+    "allowedEmails": [],
+    "allowedEmailDomains": [
+      "admins.invalid"
+    ],
+    "applications": [
+      {
+        "name": "Synthetic Admin",
+        "domain": "admin.invalid"
+      }
+    ]
+  },
+  "cases": {
+    "exact": {
+      "applications": [
+        {
+          "id": "app-synthetic-admin",
+          "name": "Synthetic Admin",
+          "domain": "admin.invalid",
+          "type": "self_hosted",
+          "session_duration": "15m",
+          "allowed_idps": [
+            "synthetic-mfa-idp"
+          ],
+          "auto_redirect_to_identity": true,
+          "enable_binding_cookie": true,
+          "http_only_cookie_attribute": true,
+          "same_site_cookie_attribute": "strict"
+        }
+      ],
+      "policiesByApplication": {
+        "app-synthetic-admin": [
+          {
+            "id": "policy-expected",
+            "name": "Synthetic Admin admin allow",
+            "decision": "allow",
+            "precedence": 1,
+            "session_duration": "15m",
+            "include": [
+              {
+                "email_domain": {
+                  "domain": "admins.invalid"
+                }
+              }
+            ],
+            "require": [
+              {
+                "login_method": {
+                  "id": "synthetic-mfa-idp"
+                }
+              }
+            ],
+            "exclude": []
+          }
+        ]
+      }
+    },
+    "broadenedSelector": {
+      "applications": [
+        {
+          "id": "app-synthetic-admin",
+          "name": "Synthetic Admin",
+          "domain": "admin.invalid",
+          "type": "self_hosted",
+          "session_duration": "15m",
+          "allowed_idps": [
+            "synthetic-mfa-idp"
+          ],
+          "auto_redirect_to_identity": true,
+          "enable_binding_cookie": true,
+          "http_only_cookie_attribute": true,
+          "same_site_cookie_attribute": "strict"
+        }
+      ],
+      "policiesByApplication": {
+        "app-synthetic-admin": [
+          {
+            "id": "policy-expected",
+            "name": "Synthetic Admin admin allow",
+            "decision": "allow",
+            "precedence": 1,
+            "session_duration": "15m",
+            "include": [
+              {
+                "email_domain": {
+                  "domain": "admins.invalid"
+                }
+              },
+              {
+                "email_domain": {
+                  "domain": "admins.invalid"
+                }
+              },
+              {
+                "email_domain": {
+                  "domain": "contractors.invalid"
+                }
+              },
+              {
+                "everyone": {}
+              }
+            ],
+            "require": [
+              {
+                "login_method": {
+                  "id": "synthetic-mfa-idp"
+                }
+              }
+            ],
+            "exclude": []
+          }
+        ]
+      }
+    },
+    "siblingBypass": {
+      "applications": [
+        {
+          "id": "app-synthetic-admin",
+          "name": "Synthetic Admin",
+          "domain": "admin.invalid",
+          "type": "self_hosted",
+          "session_duration": "15m",
+          "allowed_idps": [
+            "synthetic-mfa-idp"
+          ],
+          "auto_redirect_to_identity": true,
+          "enable_binding_cookie": true,
+          "http_only_cookie_attribute": true,
+          "same_site_cookie_attribute": "strict"
+        }
+      ],
+      "policiesByApplication": {
+        "app-synthetic-admin": [
+          {
+            "id": "policy-expected",
+            "name": "Synthetic Admin admin allow",
+            "decision": "allow",
+            "precedence": 1,
+            "session_duration": "15m",
+            "include": [
+              {
+                "email_domain": {
+                  "domain": "admins.invalid"
+                }
+              }
+            ],
+            "require": [
+              {
+                "login_method": {
+                  "id": "synthetic-mfa-idp"
+                }
+              }
+            ],
+            "exclude": []
+          },
+          {
+            "id": "policy-untracked-bypass",
+            "name": "Synthetic emergency bypass",
+            "decision": "bypass",
+            "precedence": 0,
+            "session_duration": "15m",
+            "include": [
+              {
+                "everyone": {}
+              }
+            ],
+            "require": [],
+            "exclude": []
+          }
+        ]
+      }
+    },
+    "missingExpectedSelector": {
+      "applications": [
+        {
+          "id": "app-synthetic-admin",
+          "name": "Synthetic Admin",
+          "domain": "admin.invalid",
+          "type": "self_hosted",
+          "session_duration": "15m",
+          "allowed_idps": [
+            "synthetic-mfa-idp"
+          ],
+          "auto_redirect_to_identity": true,
+          "enable_binding_cookie": true,
+          "http_only_cookie_attribute": true,
+          "same_site_cookie_attribute": "strict"
+        }
+      ],
+      "policiesByApplication": {
+        "app-synthetic-admin": [
+          {
+            "id": "policy-expected",
+            "name": "Synthetic Admin admin allow",
+            "decision": "allow",
+            "precedence": 1,
+            "session_duration": "15m",
+            "include": [
+              {
+                "email_domain": {
+                  "domain": "contractors.invalid"
+                }
+              }
+            ],
+            "require": [
+              {
+                "login_method": {
+                  "id": "synthetic-mfa-idp"
+                }
+              }
+            ],
+            "exclude": []
+          }
+        ]
+      }
+    }
+  }
+}

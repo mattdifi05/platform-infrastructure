@@ -1,0 +1,10 @@
+{
+  "projects": [
+    {
+      "name": "Victim service",
+      "slug": "victim",
+      "type": "node",
+      "host": "victim.platform-infrastructure.com"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "state": "verified",
+  "tuples": [
+    {
+      "owner": "attacker",
+      "sourceDirectory": "attacker-workload",
+      "slug": "attacker",
+      "host": "attacker.platform-infrastructure.com",
+      "aliases": [],
+      "upstream": "http://attacker-app:8080"
+    },
+    {
+      "owner": "victim",
+      "sourceDirectory": "victim-workload",
+      "slug": "victim",
+      "host": "victim.platform-infrastructure.com",
+      "aliases": [
+        "victim-workload"
+      ],
+      "upstream": "http://victim-app:8080"
+    }
+  ]
+}

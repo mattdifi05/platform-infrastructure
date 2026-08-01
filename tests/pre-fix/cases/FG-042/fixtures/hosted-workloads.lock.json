@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "state": "verified",
+  "routes": [
+    {
+      "workloadId": "attacker",
+      "slug": "attacker",
+      "service": "attacker-app",
+      "port": 8080,
+      "upstream": "http://attacker-app:8080"
+    },
+    {
+      "workloadId": "victim",
+      "slug": "victim",
+      "service": "victim-app",
+      "port": 8080,
+      "upstream": "http://victim-app:8080"
+    }
+  ]
+}

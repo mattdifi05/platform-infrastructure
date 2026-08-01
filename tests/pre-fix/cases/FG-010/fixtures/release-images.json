@@ -1,0 +1,8 @@
+{
+  "releaseImages": [
+    {
+      "key": "PLATFORM_ALERT_DISPATCHER_IMAGE",
+      "image": "registry.example/platform/alert-dispatcher:poc@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

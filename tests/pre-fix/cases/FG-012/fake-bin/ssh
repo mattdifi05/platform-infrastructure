@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+: "${POC_SSH_ARGV:?POC_SSH_ARGV is required}"
+: "${POC_SSH_STDIN:?POC_SSH_STDIN is required}"
+
+printf '%s\n' "$@" > "$POC_SSH_ARGV"
+cat > "$POC_SSH_STDIN"
+
+if [ "${POC_SSH_MODE:-capture}" = "evidence" ]; then
+  : "${POC_FORGED_ARCHIVE_ROOT:?POC_FORGED_ARCHIVE_ROOT is required}"
+  printf '%s\n' '__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__'
+  tar -C "$POC_FORGED_ARCHIVE_ROOT" -czf - reports/vps-host | base64 | tr -d '\r\n'
+  printf '\n%s\n' '__PLATFORM_VPS_EVIDENCE_TGZ_END__'
+fi

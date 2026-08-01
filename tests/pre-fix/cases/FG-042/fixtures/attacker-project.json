@@ -1,0 +1,17 @@
+{
+  "projects": [
+    {
+      "name": "Sibling service claim",
+      "slug": "rogue",
+      "type": "node",
+      "host": "rogue.platform-infrastructure.com",
+      "upstream": "http://victim-app:8080"
+    },
+    {
+      "name": "Unauthorized hostname claim",
+      "slug": "attacker",
+      "type": "node",
+      "host": "unregistered.platform-infrastructure.com"
+    }
+  ]
+}

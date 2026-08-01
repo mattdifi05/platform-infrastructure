@@ -1,0 +1,4 @@
+{
+  "message": "This document is valid JSON but is not an SBOM.",
+  "subject": "an unrelated artifact"
+}

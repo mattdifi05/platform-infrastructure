@@ -1,0 +1,52 @@
+{
+  "schema": "platform.pre-fix-replay-sandbox/v2",
+  "implementation": "macos-sandbox-exec",
+  "mode": "offline-contained",
+  "default_policy": "allow",
+  "network": false,
+  "docker": false,
+  "live": false,
+  "provider": false,
+  "secrets": false,
+  "deny_network": true,
+  "deny_file_write_by_default": true,
+  "target_worktree_write": false,
+  "ephemeral_write": true,
+  "filesystem_write": {
+    "target_worktree": false,
+    "baseline_worktree": false,
+    "ephemeral_scratch": true,
+    "external_artifacts": true
+  },
+  "allowed_write_scope": "per-case ephemeral scratch directory only",
+  "inherit_environment": false,
+  "allowed_executables": [
+    "/bin/bash",
+    "/bin/sh",
+    "/usr/bin/env",
+    "/usr/bin/tar",
+    "node",
+    "xcrun-resolved git",
+    "xcrun-resolved make"
+  ],
+  "blocked_commands": [
+    "curl",
+    "docker",
+    "iptables",
+    "nc",
+    "ncat",
+    "scp",
+    "sftp",
+    "socat",
+    "ssh",
+    "ufw",
+    "wget"
+  ],
+  "forbidden_capabilities": [
+    "Docker Engine or socket access",
+    "external or loopback network access",
+    "live infrastructure access",
+    "secret-store or user-home access",
+    "writes to the baseline or runner worktree"
+  ]
+}
