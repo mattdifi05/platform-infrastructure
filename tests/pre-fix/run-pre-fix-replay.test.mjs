@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -80,6 +81,18 @@ test("every migrated seed tree and primary probe matches its registry digest", a
     const anchor = definition.anchors.find((candidate) => candidate.kind === "tracked_seed");
     assert.equal(sha256(await readFile(path.join(REPOSITORY_ROOT, anchor.value))), anchor.sha256);
   }
+});
+
+test("FG-012 harmless forged readiness fixture is Git-tracked", () => {
+  const fixture = "tests/pre-fix/cases/FG-012/fixtures/forged-archive-root/reports/vps-host/forged-readiness.json";
+  const staged = spawnSync("git", ["-C", REPOSITORY_ROOT, "ls-files", "--stage", "--", fixture], {
+    encoding: "utf8",
+  });
+  assert.equal(staged.status, 0, staged.stderr);
+  assert.match(staged.stdout, new RegExp(`^100644 [0-9a-f]{40} 0\\t${fixture}\\n$`));
+  const content = spawnSync("git", ["-C", REPOSITORY_ROOT, "show", `:${fixture}`]);
+  assert.equal(content.status, 0, content.stderr?.toString());
+  assert.equal(sha256(content.stdout), "9ed31839e373d9bf8e478554a4490702feb7d608d2803ce8b542b87920b60d89");
 });
 
 test("registry validation fails closed on filesystem-write and baseline drift", async () => {
