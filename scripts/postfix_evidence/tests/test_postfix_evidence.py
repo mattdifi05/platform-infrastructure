@@ -2757,9 +2757,20 @@ class PostfixEvidenceTests(unittest.TestCase):
         original_bytes = source.read_bytes()
         original_loader = validator_module.load_jsonl_bytes
 
-        def hostile_loader(payload: bytes, *, label: str) -> list[dict[str, object]]:
+        def hostile_loader(
+            payload: bytes,
+            *,
+            label: str,
+            max_rows: int,
+            max_line_bytes: int,
+        ) -> list[dict[str, object]]:
             if label != "post-fix classification":
-                return original_loader(payload, label=label)
+                return original_loader(
+                    payload,
+                    label=label,
+                    max_rows=max_rows,
+                    max_line_bytes=max_line_bytes,
+                )
             hostile_rows = [json.loads(line) for line in original_bytes.splitlines()]
             target = next(row for row in hostile_rows if row["id"].startswith("AUX-"))
             target["title"] = "HOSTILE-SWAP-AFTER-SNAPSHOT"
@@ -2767,7 +2778,12 @@ class PostfixEvidenceTests(unittest.TestCase):
                 b"".join(canonical_json_bytes(row) for row in hostile_rows)
             )
             try:
-                return original_loader(payload, label=label)
+                return original_loader(
+                    payload,
+                    label=label,
+                    max_rows=max_rows,
+                    max_line_bytes=max_line_bytes,
+                )
             finally:
                 source.write_bytes(original_bytes)
 
@@ -2789,6 +2805,46 @@ class PostfixEvidenceTests(unittest.TestCase):
                 for row in packaged
             )
         )
+
+    def test_jsonl_loader_rejects_row_and_line_flood_before_parse(self) -> None:
+        with mock.patch.object(
+            common_module,
+            "strict_json_bytes",
+            wraps=common_module.strict_json_bytes,
+        ) as parser:
+            with self.assertRaisesRegex(ContractError, "row limit"):
+                common_module.load_jsonl_bytes(
+                    b"{}\n" * 78,
+                    label="row-flood PoC",
+                    max_rows=77,
+                    max_line_bytes=1024,
+                )
+            self.assertEqual(parser.call_count, 77)
+
+        oversized_line = b'{"value":"' + b"x" * 64 + b'"}\n'
+        with mock.patch.object(
+            common_module,
+            "strict_json_bytes",
+            wraps=common_module.strict_json_bytes,
+        ) as parser:
+            with self.assertRaisesRegex(ContractError, "line byte limit"):
+                common_module.load_jsonl_bytes(
+                    oversized_line,
+                    label="line-flood PoC",
+                    max_rows=77,
+                    max_line_bytes=32,
+                )
+            parser.assert_not_called()
+
+        for invalid_limit in (True, 0):
+            with self.subTest(invalid_limit=invalid_limit):
+                with self.assertRaisesRegex(ContractError, "invalid JSONL"):
+                    common_module.load_jsonl_bytes(
+                        b"{}\n",
+                        label="invalid-limit PoC",
+                        max_rows=invalid_limit,
+                        max_line_bytes=1024,
+                    )
 
     def test_m01_rejects_134_fake_duplicate_inventory_rows(self) -> None:
         path = self.fixture.inputs / "required-matrices.md"
@@ -2858,6 +2914,8 @@ class PostfixEvidenceTests(unittest.TestCase):
             b'let apiKey: string = "unsafe-value-12345";\n',
             b'connect(password="unsafe-value-12345")\n',
             b'password: str = "unsafe-value-12345"\n',
+            b'AUTH_TOKEN="unsafe-value-12345"\n',
+            b'JWT_SECRET="unsafe-value-12345"\n',
         ):
             with self.subTest(payload=payload[:20]):
                 with self.assertRaises(ContractError):
@@ -2868,6 +2926,8 @@ class PostfixEvidenceTests(unittest.TestCase):
             b"password = args.password\n",
             b'const password = "<redacted>";\n',
             b'const password = "${PASSWORD}";\n',
+            b"AUTH_TOKEN=process.env.AUTH_TOKEN\n",
+            b"JWT_SECRET=args.jwt_secret\n",
         ):
             with self.subTest(runtime_reference=payload):
                 scanner(payload, label="non-secret control")

@@ -6,6 +6,7 @@ import contextvars
 import errno
 import functools
 import hashlib
+import io
 import json
 import os
 import re
@@ -350,9 +351,25 @@ def load_json(path: Path, *, label: str, max_bytes: int) -> Any:
     )
 
 
-def load_jsonl_bytes(payload: bytes, *, label: str) -> list[dict[str, Any]]:
+def load_jsonl_bytes(
+    payload: bytes,
+    *,
+    label: str,
+    max_rows: int,
+    max_line_bytes: int,
+) -> list[dict[str, Any]]:
+    if type(max_rows) is not int or max_rows <= 0:
+        raise ContractError(f"{label}: invalid JSONL row limit")
+    if type(max_line_bytes) is not int or max_line_bytes <= 0:
+        raise ContractError(f"{label}: invalid JSONL line byte limit")
     rows: list[dict[str, Any]] = []
-    for line_number, raw in enumerate(payload.splitlines(), start=1):
+    for line_number, raw in enumerate(io.BytesIO(payload), start=1):
+        if line_number > max_rows:
+            raise ContractError(f"{label}: JSONL row limit exceeded")
+        if len(raw) > max_line_bytes:
+            raise ContractError(
+                f"{label}:{line_number}: JSONL line byte limit exceeded"
+            )
         if not raw.strip():
             raise ContractError(f"{label}: blank JSONL line {line_number}")
         value = strict_json_bytes(raw, label=f"{label}:{line_number}")
@@ -364,10 +381,19 @@ def load_jsonl_bytes(payload: bytes, *, label: str) -> list[dict[str, Any]]:
     return rows
 
 
-def load_jsonl(path: Path, *, label: str, max_bytes: int) -> list[dict[str, Any]]:
+def load_jsonl(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    max_rows: int,
+    max_line_bytes: int,
+) -> list[dict[str, Any]]:
     return load_jsonl_bytes(
         read_regular_bytes(path, label=label, max_bytes=max_bytes),
         label=label,
+        max_rows=max_rows,
+        max_line_bytes=max_line_bytes,
     )
 
 
@@ -392,10 +418,13 @@ _SECRET_HEADER_RE = re.compile(
     rb"(?im)^[ \t]*(?:authorization[ \t]*:[ \t]*(?:bearer|basic)|cookie[ \t]*:|set-cookie[ \t]*:)[ \t]*([^\r\n]+)"
 )
 _SECRET_IDENTIFIER_PATTERN = (
+    rb"(?:"
     rb"(?:[A-Za-z0-9][A-Za-z0-9_.-]*[._-])?"
     rb"(?:password|passwd|api[_-]?key|api[_-]?token|access[_-]?token|"
     rb"refresh[_-]?token|client[_-]?secret|private[_-]?key|"
     rb"secret[_-]?access[_-]?key)"
+    rb"|[A-Za-z0-9][A-Za-z0-9_.-]*[._-](?:token|secret)"
+    rb")"
 )
 _SECRET_EQUALS_ASSIGNMENT_RE = re.compile(
     rb"(?im)(?:^[ \t]*|[({,;][ \t]*|export[ \t]+)"

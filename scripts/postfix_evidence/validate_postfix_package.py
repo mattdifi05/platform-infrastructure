@@ -312,6 +312,22 @@ GLOBAL_TEST_PHASES = frozenset(
     {"full-suite", "differential-scan", "adversarial-qa", "documentation-validation"}
 )
 
+JSONL_MAX_LINE_BYTES = 1 * MIB
+OPEN_CONTRACT_JSONL_MAX_ROWS = 10_000
+CLASSIFICATION_MAX_ROWS = 341
+CANONICAL_REGISTRY_MAX_ROWS = 240
+INVENTORY_MAX_ROWS = 134
+FIX_GROUP_MAX_ROWS = 77
+# Cohort support rows and multiple receipts for one group/phase are valid v1
+# extensions, so these two formats have a finite resource ceiling rather than
+# a semantic exact cardinality.
+COHORT_HANDOFF_MAX_ROWS = OPEN_CONTRACT_JSONL_MAX_ROWS
+TEST_RECEIPT_MAX_ROWS = OPEN_CONTRACT_JSONL_MAX_ROWS
+PRE_FIX_REGISTRY_MAX_ROWS = 77
+LOCAL_CLOSURE_MAX_ROWS = 341
+PROVIDER_RESIDUAL_MAX_ROWS = 341
+FINDING_MAP_MAX_ROWS = 135
+
 PHASE_SEMANTIC_ANCHOR = {
     "negative": "negative-boundary",
     "positive": "positive-control",
@@ -534,12 +550,22 @@ def _validate_baseline(root: Path) -> Baseline:
     registry_bytes = snapshot.files["evidence/validation/canonical_candidate_registry.jsonl"]
     inventory_bytes = snapshot.files["inventory_ledger.jsonl"]
     matrix_bytes = snapshot.files["schemas/matrix-schema-v1.json"]
-    rows = load_jsonl_bytes(classification_bytes, label="baseline classification")
+    rows = load_jsonl_bytes(
+        classification_bytes,
+        label="baseline classification",
+        max_rows=CLASSIFICATION_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     by_id = _unique_rows(rows, "id", label="baseline classification")
     if len(rows) != 341:
         raise ContractError("baseline: authoritative classification cardinality is not 341")
 
-    registry = load_jsonl_bytes(registry_bytes, label="baseline canonical registry")
+    registry = load_jsonl_bytes(
+        registry_bytes,
+        label="baseline canonical registry",
+        max_rows=CANONICAL_REGISTRY_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     registry_by_id = _unique_rows(registry, "id", label="baseline canonical registry")
     if len(registry_by_id) != 240:
         raise ContractError("baseline: canonical candidate cardinality is not 240")
@@ -581,7 +607,12 @@ def _validate_baseline(root: Path) -> Baseline:
     if len(commits) != 1 or len(trees) != 1:
         raise ContractError("baseline: canonical registry has mixed candidate identities")
 
-    inventory = load_jsonl_bytes(inventory_bytes, label="baseline inventory")
+    inventory = load_jsonl_bytes(
+        inventory_bytes,
+        label="baseline inventory",
+        max_rows=INVENTORY_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     if len(inventory) != 134:
         raise ContractError("baseline: inventory cardinality is not 134")
     inventory_ids: list[str] = []
@@ -678,7 +709,12 @@ def _validate_group_map(
         label="fix-group map",
         max_bytes=GROUP_MAP_MAX_BYTES,
     )
-    rows = load_jsonl_bytes(payload, label="fix-group map")
+    rows = load_jsonl_bytes(
+        payload,
+        label="fix-group map",
+        max_rows=FIX_GROUP_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     by_id = _unique_rows(rows, "group_id", label="fix-group map")
     expected = {f"FG-{number:03d}" for number in range(1, 78)}
     if set(by_id) != expected:
@@ -725,6 +761,8 @@ def _validate_cohort_handoffs(
         rows = load_jsonl_bytes(
             snapshots[source_name],
             label=f"raw cohort handoff {source_name}",
+            max_rows=COHORT_HANDOFF_MAX_ROWS,
+            max_line_bytes=JSONL_MAX_LINE_BYTES,
         )
         source_group_count = 0
         for row_index, row in enumerate(rows, start=1):
@@ -3200,15 +3238,30 @@ def validate_source_inputs(
         final_commit,
     )
     classification_rows = load_jsonl_bytes(
-        snapshots["postfix_classification_ledger"], label="post-fix classification"
+        snapshots["postfix_classification_ledger"],
+        label="post-fix classification",
+        max_rows=CLASSIFICATION_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
-    fix_group_rows = load_jsonl_bytes(snapshots["fix_group_ledger"], label="fix-group ledger")
-    test_rows = load_jsonl_bytes(snapshots["test_receipt_registry"], label="test receipt registry")
+    fix_group_rows = load_jsonl_bytes(
+        snapshots["fix_group_ledger"],
+        label="fix-group ledger",
+        max_rows=FIX_GROUP_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
+    test_rows = load_jsonl_bytes(
+        snapshots["test_receipt_registry"],
+        label="test receipt registry",
+        max_rows=TEST_RECEIPT_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     pre_fix = load_json_bytes(snapshots["pre_fix_negative_receipt"], label="pre-fix negative receipt")
     pre_fix_definition_bytes = snapshots["pre_fix_test_definition_registry"]
     pre_fix_definition_rows = load_jsonl_bytes(
         pre_fix_definition_bytes,
         label="pre-fix test-definition registry",
+        max_rows=PRE_FIX_REGISTRY_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     pre_fix_mode = classify_pre_fix_registry(pre_fix_definition_rows)
     native_pre_fix_replays: NativeReplaySet | None = None
@@ -3226,7 +3279,12 @@ def validate_source_inputs(
             baseline_commit=baseline_data.candidate_commit,
             baseline_tree=baseline_data.candidate_tree,
         )
-    closures = load_jsonl_bytes(snapshots["local_condition_closure"], label="local condition closure")
+    closures = load_jsonl_bytes(
+        snapshots["local_condition_closure"],
+        label="local condition closure",
+        max_rows=LOCAL_CLOSURE_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     documentation = load_json_bytes(
         snapshots["documentation_alignment_receipt"], label="documentation alignment receipt"
     )
@@ -3234,7 +3292,12 @@ def validate_source_inputs(
     semantic = load_json_bytes(semantic_bytes, label="semantic completion receipt")
     matrices_bytes = snapshots["required_matrices"]
     verdicts = load_json_bytes(snapshots["four_verdicts"], label="four verdicts")
-    residuals = load_jsonl_bytes(snapshots["provider_live_residuals"], label="provider/live residuals")
+    residuals = load_jsonl_bytes(
+        snapshots["provider_live_residuals"],
+        label="provider/live residuals",
+        max_rows=PROVIDER_RESIDUAL_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     equivalence, test_logs, pre_fix_logs, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
@@ -3428,7 +3491,12 @@ def _validate_packaged_trust_roots(
     group_map_bytes = archived(GROUP_MAP_ARCHIVE_PATH, label="fix-group map snapshot")
     if sha256_bytes(group_map_bytes) != group_map_sha256:
         raise ContractError("package trust root: fix-group map snapshot hash changed")
-    archived_group_rows = load_jsonl_bytes(group_map_bytes, label="archived fix-group map")
+    archived_group_rows = load_jsonl_bytes(
+        group_map_bytes,
+        label="archived fix-group map",
+        max_rows=FIX_GROUP_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     if archived_group_rows != group_map_rows:
         raise ContractError("package trust root: fix-group map snapshot content changed")
 
@@ -3516,16 +3584,25 @@ def _validate_packaged_trust_roots(
     source_classification = load_jsonl_bytes(
         handoff_payloads["postfix_classification_ledger"],
         label="archived classification",
+        max_rows=CLASSIFICATION_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     if sorted(source_classification, key=lambda row: row["id"]) != classification_rows:
         raise ContractError("package trust root: classification is not projected from archived input")
-    source_fix = load_jsonl_bytes(handoff_payloads["fix_group_ledger"], label="archived fix groups")
+    source_fix = load_jsonl_bytes(
+        handoff_payloads["fix_group_ledger"],
+        label="archived fix groups",
+        max_rows=FIX_GROUP_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
+    )
     if sorted(source_fix, key=lambda row: row["group_id"]) != fix_rows:
         raise ContractError("package trust root: fix groups are not projected from archived input")
 
     source_tests = load_jsonl_bytes(
         handoff_payloads["test_receipt_registry"],
         label="archived test receipts",
+        max_rows=TEST_RECEIPT_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     source_test_by_id = _unique_rows(source_tests, "receipt_id", label="archived test receipts")
     packaged_test_by_id = _unique_rows(test_rows, "receipt_id", label="packaged test receipts")
@@ -3549,6 +3626,8 @@ def _validate_packaged_trust_roots(
     source_closures = load_jsonl_bytes(
         handoff_payloads["local_condition_closure"],
         label="archived local closures",
+        max_rows=LOCAL_CLOSURE_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     if sorted(source_closures, key=lambda row: row["id"]) != closure_rows:
         raise ContractError("package trust root: local closures are not projected from archived input")
@@ -3568,6 +3647,8 @@ def _validate_packaged_trust_roots(
     source_residuals = load_jsonl_bytes(
         handoff_payloads["provider_live_residuals"],
         label="archived provider/live residuals",
+        max_rows=PROVIDER_RESIDUAL_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     if sorted(source_residuals, key=lambda row: row["id"]) != residuals:
         raise ContractError("package trust root: provider/live residual projection changed")
@@ -3608,6 +3689,8 @@ def _validate_packaged_trust_roots(
     pre_fix_definition_rows = load_jsonl_bytes(
         pre_fix_definition_bytes,
         label="archived pre-fix test-definition registry",
+        max_rows=PRE_FIX_REGISTRY_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     if classify_pre_fix_registry(pre_fix_definition_rows) != pre_fix_mode:
         raise ContractError("package trust root: pre-fix registry dispatch changed")
@@ -3653,6 +3736,8 @@ def validate_package(
     preflight_registry_rows = load_jsonl_bytes(
         preflight_registry_bytes,
         label="package pre-fix registry dispatch",
+        max_rows=PRE_FIX_REGISTRY_MAX_ROWS,
+        max_line_bytes=JSONL_MAX_LINE_BYTES,
     )
     pre_fix_mode = classify_pre_fix_registry(preflight_registry_rows)
     static_files = (
@@ -3690,12 +3775,22 @@ def validate_package(
             raise ContractError(f"{label}: file is absent from the package snapshot") from error
         return load_json_bytes(payload, label=label)
 
-    def jsonl_at(relative: str, *, label: str) -> list[dict[str, Any]]:
+    def jsonl_at(
+        relative: str,
+        *,
+        label: str,
+        max_rows: int,
+    ) -> list[dict[str, Any]]:
         try:
             payload = package_files[relative]
         except KeyError as error:
             raise ContractError(f"{label}: file is absent from the package snapshot") from error
-        return load_jsonl_bytes(payload, label=label)
+        return load_jsonl_bytes(
+            payload,
+            label=label,
+            max_rows=max_rows,
+            max_line_bytes=JSONL_MAX_LINE_BYTES,
+        )
 
     baseline_data = _validate_baseline(baseline)
     group_rows, group_hash, group_bytes = _validate_group_map(
@@ -3711,13 +3806,16 @@ def validate_package(
     if binding != expected_baseline_binding(baseline_data, group_hash):
         raise ContractError("package: baseline binding is stale")
     packaged_group_map = jsonl_at(
-        "baseline/security_fix_groups_v1.jsonl", label="packaged fix-group map"
+        "baseline/security_fix_groups_v1.jsonl",
+        label="packaged fix-group map",
+        max_rows=FIX_GROUP_MAX_ROWS,
     )
     if packaged_group_map != group_rows:
         raise ContractError("package: packaged fix-group map differs from caller trust root")
     packaged_registry = jsonl_at(
         "evidence/validation/canonical_candidate_registry.jsonl",
         label="packaged canonical registry",
+        max_rows=CANONICAL_REGISTRY_MAX_ROWS,
     )
     if packaged_registry != baseline_data.registry:
         raise ContractError("package: canonical registry differs from baseline")
@@ -3728,9 +3826,18 @@ def validate_package(
     classification_rows = jsonl_at(
         "evidence/remediation/finding_classification_ledger.jsonl",
         label="packaged classification",
+        max_rows=CLASSIFICATION_MAX_ROWS,
     )
-    fix_rows = jsonl_at("evidence/remediation/fix_group_ledger_v1.jsonl", label="packaged fix groups")
-    test_rows = jsonl_at("evidence/test/test_receipt_registry_v1.jsonl", label="packaged test receipts")
+    fix_rows = jsonl_at(
+        "evidence/remediation/fix_group_ledger_v1.jsonl",
+        label="packaged fix groups",
+        max_rows=FIX_GROUP_MAX_ROWS,
+    )
+    test_rows = jsonl_at(
+        "evidence/test/test_receipt_registry_v1.jsonl",
+        label="packaged test receipts",
+        max_rows=TEST_RECEIPT_MAX_ROWS,
+    )
     pre_fix_relative = (
         "evidence/test/pre_fix_negative_receipt.json"
         if pre_fix_mode == LEGACY_MODE
@@ -3752,6 +3859,7 @@ def validate_package(
     closure_rows = jsonl_at(
         "evidence/remediation/local_condition_closure.jsonl",
         label="packaged local closures",
+        max_rows=LOCAL_CLOSURE_MAX_ROWS,
     )
     documentation = json_at(
         "evidence/remediation/documentation_alignment_receipt.json",
@@ -3764,6 +3872,7 @@ def validate_package(
     residuals = jsonl_at(
         "evidence/validation/provider_live_residuals.jsonl",
         label="packaged residuals",
+        max_rows=PROVIDER_RESIDUAL_MAX_ROWS,
     )
     evidence_cutoff = verdicts.get("evidence_cutoff_at")
     if not isinstance(evidence_cutoff, str):
@@ -3841,6 +3950,7 @@ def validate_package(
     finding_map = jsonl_at(
         "evidence/remediation/finding_fix_commit_test_v1.jsonl",
         label="packaged finding map",
+        max_rows=FINDING_MAP_MAX_ROWS,
     )
     receipts_by_id = _unique_rows(test_rows, "receipt_id", label="packaged test receipts")
     if finding_map != _derive_finding_map(fix_rows, receipts_by_id):

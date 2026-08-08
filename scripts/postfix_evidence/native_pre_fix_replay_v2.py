@@ -101,6 +101,7 @@ NATIVE_REPLAY_TOTAL_MAX_BYTES = 384 * MIB
 NATIVE_REPLAY_SET_TOTAL_MAX_BYTES = 768 * MIB
 NATIVE_REGISTRY_MAX_BYTES = 16 * MIB
 NATIVE_TRACKED_INPUT_MAX_BYTES = 16 * MIB
+NATIVE_JSONL_MAX_LINE_BYTES = 1 * MIB
 NATIVE_REPLAY_TREE_MAX_ENTRIES = len(EXPECTED_ARTIFACT_PATHS) + len(
     EXPECTED_CASE_IDS
 )
@@ -1611,7 +1612,12 @@ def _validate_replay_files(
         baseline_tree=baseline_tree,
         expected_run_id=expected_run_id,
     )
-    raw_results = load_jsonl_bytes(results_payload, label=f"native replay {replay_id} results")
+    raw_results = load_jsonl_bytes(
+        results_payload,
+        label=f"native replay {replay_id} results",
+        max_rows=len(EXPECTED_CASE_IDS),
+        max_line_bytes=NATIVE_JSONL_MAX_LINE_BYTES,
+    )
     if len(raw_results) != 77:
         raise ContractError(f"native replay {replay_id}: expected exactly 77 results")
     results: list[dict[str, Any]] = []
