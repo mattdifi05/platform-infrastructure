@@ -91,12 +91,12 @@ function validateRequest(request) {
     "releaseContextSha256",
     "runtimeIntentSha256",
     "privilegedRuntime",
-    "bundle",
-    "activationAdmission",
+    "releaseBundle",
+    "dockerActivationEnvelope",
     "dockerRuntime",
     "requestedOperations",
   ]);
-  if (request.schema !== "platform-activation-request/v2") invalid("Activation request schema is invalid.");
+  if (request.schema !== "platform-activation-request/v3") invalid("Activation request schema is invalid.");
   if (!/^activation:[a-f0-9]{64}:[a-f0-9]{64}$/.test(String(request.requestId ?? ""))) {
     invalid("Activation request ID is invalid.");
   }
@@ -131,6 +131,7 @@ function validateRequest(request) {
     "decisionId",
     "provider",
     "receipts",
+    "dastChainSha256",
     "runtimeIntentSha256",
     "subjects",
     "hostedLockSha256",
@@ -140,7 +141,7 @@ function validateRequest(request) {
     "persistentVolumes",
   ]);
   if (
-    context.schema !== "platform-trusted-release-context/v2"
+    context.schema !== "platform-trusted-release-context/v3"
     || context.projectName !== request.deploymentTarget.projectName
     || context.runtimeIntentSha256 !== request.runtimeIntentSha256
   ) {
@@ -155,10 +156,17 @@ function validateRequest(request) {
   exactPositiveInteger(Number(context.provider.runId), "provider run ID");
   exactPositiveInteger(context.provider.attempt, "provider run attempt");
   exactSha256(context.provider.challenge, "provider challenge");
-  exactObject(context.receipts, "Activation release receipts", ["artifactSha256", "deploymentSha256", "dastSha256"]);
+  exactObject(context.receipts, "Activation release receipts", [
+    "artifactSha256",
+    "deploymentSha256",
+    "dastProviderSha256",
+    "dastAuthorizationSha256",
+  ]);
   exactSha256(context.receipts.artifactSha256, "artifact receipt SHA256");
   exactSha256(context.receipts.deploymentSha256, "deployment receipt SHA256");
-  exactSha256(context.receipts.dastSha256, "DAST receipt SHA256");
+  exactSha256(context.receipts.dastProviderSha256, "provider DAST receipt SHA256");
+  exactSha256(context.receipts.dastAuthorizationSha256, "DAST authorization SHA256");
+  exactSha256(context.dastChainSha256, "DAST chain SHA256");
   if (context.receipts.deploymentSha256 !== deploymentReceiptSha256) {
     invalid("Activation request ID does not bind its deployment receipt.");
   }
@@ -217,17 +225,55 @@ function validateRequest(request) {
   const helperHashes = new Set(Object.values(runtime).map((helper) => helper.sha256));
   if (helperHashes.size !== 3) invalid("Privileged helper SHA256 identities must be distinct.");
 
-  exactObject(request.bundle, "Activation bundle descriptor", ["schema", "sha256", "sizeBytes", "manifestSha256"]);
-  if (request.bundle.schema !== "platform-activation-bundle-descriptor/v1") invalid("Activation bundle descriptor is invalid.");
-  exactSha256(request.bundle.sha256, "activation bundle SHA256");
-  exactSha256(request.bundle.manifestSha256, "activation bundle manifest SHA256");
-  exactPositiveInteger(request.bundle.sizeBytes, "activation bundle size", 384 * 1024 * 1024);
-  exactObject(request.activationAdmission, "Activation admission descriptor", ["schema", "sha256", "sizeBytes"]);
-  if (request.activationAdmission.schema !== "platform-activation-admission-descriptor/v1") {
-    invalid("Activation admission descriptor is invalid.");
+  exactObject(request.releaseBundle, "Release bundle descriptor", ["schema", "sha256", "sizeBytes", "manifestSha256"]);
+  if (request.releaseBundle.schema !== "platform-activation-bundle-descriptor/v2") {
+    invalid("Release bundle descriptor is invalid.");
   }
-  exactSha256(request.activationAdmission.sha256, "activation admission SHA256");
-  exactPositiveInteger(request.activationAdmission.sizeBytes, "activation admission size", 16 * 1024 * 1024);
+  exactSha256(request.releaseBundle.sha256, "release bundle SHA256");
+  exactSha256(request.releaseBundle.manifestSha256, "release bundle manifest SHA256");
+  exactPositiveInteger(request.releaseBundle.sizeBytes, "release bundle size", 384 * 1024 * 1024);
+  exactObject(request.dockerActivationEnvelope, "Docker activation envelope descriptor", [
+    "schema",
+    "sha256",
+    "sizeBytes",
+    "payloadType",
+    "runtimeIntentId",
+    "generation",
+    "dastAuthorizationSha256",
+    "dastChainSha256",
+  ]);
+  if (
+    request.dockerActivationEnvelope.schema !== "platform-docker-runtime-activation-envelope-descriptor/v1"
+    || request.dockerActivationEnvelope.payloadType
+      !== "application/vnd.platform.docker-runtime-activation.v2+json"
+    || !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(
+      String(request.dockerActivationEnvelope.runtimeIntentId ?? ""),
+    )
+  ) {
+    invalid("Docker activation envelope descriptor is invalid.");
+  }
+  exactSha256(request.dockerActivationEnvelope.sha256, "Docker activation envelope SHA256");
+  exactPositiveInteger(request.dockerActivationEnvelope.sizeBytes, "Docker activation envelope size", 2 * 1024 * 1024);
+  exactPositiveInteger(request.dockerActivationEnvelope.generation, "Docker activation generation");
+  exactSha256(request.dockerActivationEnvelope.dastAuthorizationSha256, "Docker activation DAST authorization SHA256");
+  exactSha256(request.dockerActivationEnvelope.dastChainSha256, "Docker activation DAST chain SHA256");
+  if (
+    request.dockerActivationEnvelope.dastAuthorizationSha256
+      !== context.receipts.dastAuthorizationSha256
+    || request.dockerActivationEnvelope.dastChainSha256 !== context.dastChainSha256
+  ) {
+    invalid("Docker activation envelope is not bound to the context DAST authorization and chain.");
+  }
+  const semanticDigests = [
+    request.releaseBundle.sha256,
+    request.dockerActivationEnvelope.sha256,
+    context.receipts.dastProviderSha256,
+    context.receipts.dastAuthorizationSha256,
+    context.dastChainSha256,
+  ];
+  if (new Set(semanticDigests).size !== semanticDigests.length) {
+    invalid("Release bundle, activation envelope, provider receipt, authorization and chain digests must be distinct.");
+  }
   exactObject(request.dockerRuntime, "Docker runtime identity", [
     "releaseId", "candidateId", "targetId", "treeSha256",
   ]);
@@ -278,16 +324,18 @@ export function validateActivationReceipt(receipt, request, {
     "requestSha256",
     "releaseContextSha256",
     "runtimeIntentSha256",
-    "bundleSha256",
-    "activationAdmissionSha256",
+    "releaseBundleSha256",
+    "dockerActivationEnvelopeSha256",
+    "dastAuthorizationSha256",
+    "dastChainSha256",
     "deploymentTarget",
     "broker",
     "activeReceipt",
     "activeReceiptSha256",
     "operationResults",
   ]);
-  if (receipt.schema !== "platform-activation-receipt/v2" || receipt.status !== "ACTIVE") {
-    invalid("Activation receipt is not one successful v2 activation.");
+  if (receipt.schema !== "platform-activation-receipt/v3" || receipt.status !== "ACTIVE") {
+    invalid("Activation receipt is not one successful v3 activation.");
   }
   exactTimestamp(receipt.activatedAt, "activation timestamp");
   const bindings = [
@@ -295,8 +343,18 @@ export function validateActivationReceipt(receipt, request, {
     [receipt.requestSha256, requestSha256, "Activation receipt request SHA256"],
     [receipt.releaseContextSha256, request.releaseContextSha256, "Activation receipt release context SHA256"],
     [receipt.runtimeIntentSha256, request.runtimeIntentSha256, "Activation receipt runtime intent SHA256"],
-    [receipt.bundleSha256, request.bundle.sha256, "Activation receipt bundle SHA256"],
-    [receipt.activationAdmissionSha256, request.activationAdmission.sha256, "Activation receipt admission SHA256"],
+    [receipt.releaseBundleSha256, request.releaseBundle.sha256, "Activation receipt release bundle SHA256"],
+    [
+      receipt.dockerActivationEnvelopeSha256,
+      request.dockerActivationEnvelope.sha256,
+      "Activation receipt Docker activation envelope SHA256",
+    ],
+    [
+      receipt.dastAuthorizationSha256,
+      request.releaseContext.receipts.dastAuthorizationSha256,
+      "Activation receipt DAST authorization SHA256",
+    ],
+    [receipt.dastChainSha256, request.releaseContext.dastChainSha256, "Activation receipt DAST chain SHA256"],
   ];
   for (const [actual, expected, label] of bindings) {
     if (actual !== expected) invalid(`${label} is mismatched.`);
@@ -312,15 +370,24 @@ export function validateActivationReceipt(receipt, request, {
     invalid("Docker active receipt SHA256 is mismatched.");
   }
   for (const [actual, expected, label] of [
-    [activeReceipt.activationBundleSha256, request.bundle.sha256, "Docker active receipt activation bundle"],
+    [
+      activeReceipt.activationBundleSha256,
+      request.dockerActivationEnvelope.sha256,
+      "Docker active receipt activation envelope",
+    ],
     [activeReceipt.releaseId, request.dockerRuntime.releaseId, "Docker active receipt release ID"],
     [activeReceipt.candidateId, request.dockerRuntime.candidateId, "Docker active receipt candidate ID"],
     [activeReceipt.targetId, request.dockerRuntime.targetId, "Docker active receipt target ID"],
+    [
+      activeReceipt.generation,
+      request.dockerActivationEnvelope.generation,
+      "Docker active receipt activation generation",
+    ],
     [activeReceipt.treeSha256, request.dockerRuntime.treeSha256, "Docker active receipt tree SHA256"],
     [activeReceipt.environment, request.deploymentTarget.environment, "Docker active receipt environment"],
     [activeReceipt.sourceRenderSha256, request.releaseContext.sourceRenderSha256, "Docker active receipt source render"],
     [activeReceipt.combinedRenderSha256, request.releaseContext.combinedRenderSha256, "Docker active receipt combined render"],
-    [activeReceipt.dastChainSha256, request.releaseContext.receipts.dastSha256, "Docker active receipt DAST chain"],
+    [activeReceipt.dastChainSha256, request.releaseContext.dastChainSha256, "Docker active receipt DAST chain"],
     [activeReceipt.issuedAt, receipt.activatedAt, "Docker active receipt issue time"],
   ]) {
     if (actual !== expected) invalid(`${label} is not bound to the activation request.`);

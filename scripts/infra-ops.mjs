@@ -2805,6 +2805,16 @@ async function testingHygiene() {
 }
 
 function infraTestingHygiene() {
+  const dockerActionBrokerTestFiles = [
+    "scripts/docker-action-contract.test.mjs",
+    "scripts/docker-action-broker.test.mjs",
+    "scripts/docker-action-client.test.mjs",
+    "scripts/docker-action-worker.test.mjs",
+    "scripts/docker-action-broker.boundary.test.mjs",
+    "scripts/docker-action-helper-plan.test.mjs",
+    "scripts/docker-action-v2-fixtures.test.mjs",
+    "scripts/docker-action-activation.test.mjs",
+  ];
   const checkFiles = [
     "scripts/infra-ops.mjs",
     "scripts/alert-delivery-sandbox-test.mjs",
@@ -2829,6 +2839,12 @@ function infraTestingHygiene() {
     "scripts/dast-runtime-receipt-policy.test.mjs",
     "scripts/dast-provider-countersign.test.mjs",
     "scripts/dast-deploy-sink.test.mjs",
+    "scripts/dast-activation-authorization.mjs",
+    "scripts/dast-activation-authorization.test.mjs",
+    "scripts/docker-action-activation.mjs",
+    "scripts/docker-action-activation.test.mjs",
+    "scripts/platform-release-context.mjs",
+    "scripts/platform-release-context.test.mjs",
     "scripts/provider-evidence-auth.mjs",
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
@@ -2869,6 +2885,11 @@ function infraTestingHygiene() {
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
   }
+  run(process.execPath, [
+    "--test",
+    "--test-concurrency=1",
+    ...dockerActionBrokerTestFiles,
+  ], { cwd: infraRoot });
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
   run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
@@ -2881,6 +2902,8 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/dast-runtime-receipt-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/dast-provider-countersign.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/dast-deploy-sink.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/dast-activation-authorization.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/platform-release-context.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
@@ -2916,10 +2939,12 @@ async function controlCenterTests() {
 }
 
 function controlCenterTestFiles() {
-  return fs.readdirSync(path.join(infraRoot, "control-center", "tests"))
-    .filter((name) => name.endsWith(".test.mjs"))
-    .sort()
-    .map((name) => path.join("control-center", "tests", name));
+  return ["tests", "state", "status"].flatMap((directory) => (
+    fs.readdirSync(path.join(infraRoot, "control-center", directory))
+      .filter((name) => name.endsWith(".test.mjs"))
+      .sort()
+      .map((name) => path.join("control-center", directory, name))
+  ));
 }
 
 async function projectRouterTests() {

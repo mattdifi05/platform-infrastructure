@@ -5,6 +5,26 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 GIT_OBJECT_ROOT=${DEPLOY_GIT_OBJECT_ROOT:-$INFRA_ROOT}
 
+offline_help() {
+  awk '
+    /^function help\(\) \{$/ { in_help = 1; next }
+    in_help && !started && /log\(`Usage:/ {
+      sub(/^.*log\(`/, "")
+      started = 1
+    }
+    started && /`\);[[:space:]]*$/ {
+      sub(/`\);[[:space:]]*$/, "")
+      print
+      exit
+    }
+    started { print }
+  ' "$SCRIPT_DIR/infra-ops.mjs"
+}
+
+case "${1:-}" in
+  help|-h|--help) offline_help; exit 0 ;;
+esac
+
 command -v docker >/dev/null 2>&1 || { echo "Docker is required for the admitted ops runner." >&2; exit 127; }
 OPS_COMMAND=${1:-}
 [ -n "$OPS_COMMAND" ] || { echo "An ops command is required." >&2; exit 64; }
@@ -300,6 +320,7 @@ run_ops_container() {
   set -- -e "PLATFORM_GIT_COMMIT=$OPS_GIT_COMMIT" "$@"
   set -- -e "PLATFORM_GIT_TREE=$DEPLOY_RELEASE_TREE" "$@"
   set -- -e "PLATFORM_GIT_BRANCH=$OPS_GIT_BRANCH" "$@"
+  set -- -e "PLATFORM_GIT_REPOSITORY=$DEPLOY_REPO" "$@"
   set -- -e "PROJECT_SOURCE_ROOT=$SOURCE_CONTAINER_ROOT" "$@"
   set -- -e HOME=/tmp "$@"
   set -- -e "DOCKER_HOST=$OPS_DOCKER_HOST" "$@"

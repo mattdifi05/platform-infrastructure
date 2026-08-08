@@ -49,7 +49,12 @@ RUN chmod -R a-w /opt/platform-infrastructure \
       /opt/platform-infrastructure/scripts/deploy-vps-remote.sh \
       /opt/platform-infrastructure/scripts/activation-bundle.mjs \
       /opt/platform-infrastructure/scripts/activation-request.mjs \
-      /opt/platform-infrastructure/scripts/activation-receipt-policy.mjs
+      /opt/platform-infrastructure/scripts/activation-receipt-policy.mjs \
+      /opt/platform-infrastructure/scripts/dast-activation-authorization.mjs \
+      /opt/platform-infrastructure/scripts/docker-action-activation.mjs \
+      /opt/platform-infrastructure/scripts/docker-action-contract.mjs \
+      /opt/platform-infrastructure/scripts/ssh-known-host-endpoint.sh \
+      /opt/platform-infrastructure/scripts/pinned-ssh-host-key.mjs
 
 WORKDIR /workspace
 

@@ -28,7 +28,7 @@ assert.equal(dockerActionContract.ACTIVE_RECEIPT_SCHEMA, "platform.docker-active
 const brokerNow = dockerActionFixtures.FIXTURE_NOW;
 const sha = (character) => character.repeat(64);
 const request = {
-  schema: "platform-activation-request/v2",
+  schema: "platform-activation-request/v3",
   requestId: `activation:${sha("a")}:${sha("b")}`,
   deploymentTarget: {
     environment: "production",
@@ -37,7 +37,7 @@ const request = {
   },
   sshPort: 2222,
   releaseContext: {
-    schema: "platform-trusted-release-context/v2",
+    schema: "platform-trusted-release-context/v3",
     repository: "owner/repo",
     commitSha: "c".repeat(40),
     treeSha: "d".repeat(40),
@@ -59,9 +59,11 @@ const request = {
     receipts: {
       artifactSha256: sha("3"),
       deploymentSha256: sha("a"),
-      dastSha256: sha("4"),
+      dastProviderSha256: sha("4"),
+      dastAuthorizationSha256: sha("5"),
     },
-    runtimeIntentSha256: sha("5"),
+    dastChainSha256: sha("6"),
+    runtimeIntentSha256: sha("7"),
     subjects: [
       {
         serviceName: "app",
@@ -93,7 +95,7 @@ const request = {
     }],
   },
   releaseContextSha256: sha("b"),
-  runtimeIntentSha256: sha("5"),
+  runtimeIntentSha256: sha("7"),
   privilegedRuntime: {
     activationBroker: {
       path: "/usr/local/libexec/platform-activation-broker",
@@ -114,16 +116,21 @@ const request = {
       providerAttested: true,
     },
   },
-  bundle: {
-    schema: "platform-activation-bundle-descriptor/v1",
+  releaseBundle: {
+    schema: "platform-activation-bundle-descriptor/v2",
     sha256: sha("d"),
     sizeBytes: 4096,
     manifestSha256: sha("e"),
   },
-  activationAdmission: {
-    schema: "platform-activation-admission-descriptor/v1",
+  dockerActivationEnvelope: {
+    schema: "platform-docker-runtime-activation-envelope-descriptor/v1",
     sha256: sha("f"),
     sizeBytes: 8192,
+    payloadType: "application/vnd.platform.docker-runtime-activation.v2+json",
+    runtimeIntentId: "runtime.production",
+    generation: 2,
+    dastAuthorizationSha256: sha("5"),
+    dastChainSha256: sha("6"),
   },
   dockerRuntime: {
     releaseId: `release.${sha("a")}`,
@@ -155,7 +162,7 @@ request.requestId = `activation:${sha("a")}:${request.releaseContextSha256}`;
 
 function boundDockerActiveReceipt() {
   const active = dockerActionFixtures.buildRawActiveReceiptV2({ now: brokerNow });
-  active.activationBundleSha256 = request.bundle.sha256;
+  active.activationBundleSha256 = request.dockerActivationEnvelope.sha256;
   active.releaseId = request.dockerRuntime.releaseId;
   active.candidateId = request.dockerRuntime.candidateId;
   active.targetId = request.dockerRuntime.targetId;
@@ -163,7 +170,7 @@ function boundDockerActiveReceipt() {
   active.environment = request.deploymentTarget.environment;
   active.sourceRenderSha256 = request.releaseContext.sourceRenderSha256;
   active.combinedRenderSha256 = request.releaseContext.combinedRenderSha256;
-  active.dastChainSha256 = request.releaseContext.receipts.dastSha256;
+  active.dastChainSha256 = request.releaseContext.dastChainSha256;
   for (const container of Object.values(active.resources.containers)) {
     container.labels["com.platform.runtime.candidate-id"] = active.candidateId;
     container.labels["com.platform.runtime.source-render-sha256"] = active.sourceRenderSha256;
@@ -179,15 +186,17 @@ function activeReceiptSha256(activeReceipt) {
 function validReceipt() {
   const activeReceipt = boundDockerActiveReceipt();
   return {
-    schema: "platform-activation-receipt/v2",
+    schema: "platform-activation-receipt/v3",
     status: "ACTIVE",
     activatedAt: activeReceipt.issuedAt,
     requestId: request.requestId,
     requestSha256: activationRequestSha256(request),
     releaseContextSha256: request.releaseContextSha256,
     runtimeIntentSha256: request.runtimeIntentSha256,
-    bundleSha256: request.bundle.sha256,
-    activationAdmissionSha256: request.activationAdmission.sha256,
+    releaseBundleSha256: request.releaseBundle.sha256,
+    dockerActivationEnvelopeSha256: request.dockerActivationEnvelope.sha256,
+    dastAuthorizationSha256: request.releaseContext.receipts.dastAuthorizationSha256,
+    dastChainSha256: request.releaseContext.dastChainSha256,
     deploymentTarget: structuredClone(request.deploymentTarget),
     broker: structuredClone(request.privilegedRuntime.activationBroker),
     activeReceipt,
@@ -205,6 +214,14 @@ const validate = (receipt, activationRequest = request) => validateActivationRec
 });
 const valid = validReceipt();
 assert.deepEqual(validate(valid), valid);
+const digestSentinels = [
+  request.releaseBundle.sha256,
+  request.dockerActivationEnvelope.sha256,
+  request.releaseContext.receipts.dastProviderSha256,
+  request.releaseContext.receipts.dastAuthorizationSha256,
+  request.releaseContext.dastChainSha256,
+];
+assert.equal(new Set(digestSentinels).size, digestSentinels.length);
 assert.equal(Object.keys(valid.activeReceipt.resources.helperProfiles).length, 13);
 assert.deepEqual(Object.keys(valid.activeReceipt.resources.serviceEndpoints).sort(), [
   "capture.database.mariadb",
@@ -224,8 +241,10 @@ const outerMutations = [
   ["wrong request hash", (value) => { value.requestSha256 = sha("9"); }],
   ["wrong release context", (value) => { value.releaseContextSha256 = sha("9"); }],
   ["wrong runtime intent", (value) => { value.runtimeIntentSha256 = sha("9"); }],
-  ["wrong bundle", (value) => { value.bundleSha256 = sha("9"); }],
-  ["wrong admission", (value) => { value.activationAdmissionSha256 = sha("9"); }],
+  ["wrong release bundle", (value) => { value.releaseBundleSha256 = sha("9"); }],
+  ["wrong activation envelope", (value) => { value.dockerActivationEnvelopeSha256 = sha("9"); }],
+  ["wrong DAST authorization", (value) => { value.dastAuthorizationSha256 = sha("9"); }],
+  ["wrong DAST chain", (value) => { value.dastChainSha256 = sha("9"); }],
   ["wrong target", (value) => { value.deploymentTarget.host = "attacker.internal"; }],
   ["wrong broker", (value) => { value.broker.sha256 = sha("9"); }],
   ["missing operation", (value) => { value.operationResults.pop(); }],
@@ -251,8 +270,25 @@ for (const [label, mutate] of [
 }
 
 for (const [label, mutate] of [
+  ["release bundle cannot substitute for envelope", (value) => {
+    value.activeReceipt.activationBundleSha256 = request.releaseBundle.sha256;
+  }],
+  ["provider receipt cannot substitute for chain", (value) => {
+    value.activeReceipt.dastChainSha256 = request.releaseContext.receipts.dastProviderSha256;
+  }],
+  ["authorization cannot substitute for chain", (value) => {
+    value.activeReceipt.dastChainSha256 = request.releaseContext.receipts.dastAuthorizationSha256;
+  }],
+]) {
+  const candidate = validReceipt();
+  mutate(candidate);
+  candidate.activeReceiptSha256 = activeReceiptSha256(candidate.activeReceipt);
+  assert.throws(() => validate(candidate), undefined, label);
+}
+
+for (const [label, mutate] of [
   ["active receipt digest", (value) => { value.activeReceiptSha256 = sha("9"); }],
-  ["active bundle binding", (value) => { value.activeReceipt.activationBundleSha256 = sha("9"); }],
+  ["active envelope binding", (value) => { value.activeReceipt.activationBundleSha256 = sha("9"); }],
   ["active release binding", (value) => { value.activeReceipt.releaseId = "release.attacker"; }],
   ["active candidate binding", (value) => {
     value.activeReceipt.candidateId = "candidate.attacker";
@@ -260,6 +296,7 @@ for (const [label, mutate] of [
       container.labels["com.platform.runtime.candidate-id"] = value.activeReceipt.candidateId;
     }
   }],
+  ["active generation binding", (value) => { value.activeReceipt.generation += 1; }],
   ["active DAST binding", (value) => { value.activeReceipt.dastChainSha256 = sha("9"); }],
 ]) {
   const candidate = validReceipt();
@@ -278,6 +315,9 @@ assert.throws(
   () => validate(valid, { ...request, attacker: true }),
   /request.*closed schema/i,
 );
+const aliasedDigestRequest = structuredClone(request);
+aliasedDigestRequest.releaseBundle.sha256 = aliasedDigestRequest.dockerActivationEnvelope.sha256;
+assert.throws(() => validate(valid, aliasedDigestRequest), /digests must be distinct/);
 const unhashedSchedulerMutation = structuredClone(request);
 unhashedSchedulerMutation.releaseContext.subjects[1].imageId = `sha256:${sha("0")}`;
 assert.throws(() => validate(valid, unhashedSchedulerMutation), /context SHA256/);
@@ -294,4 +334,4 @@ for (const imageReference of [
   assert.throws(() => validate(valid, candidate));
 }
 
-process.stdout.write("activation receipt outer/integrated broker policy tests passed 33/33\n");
+process.stdout.write("activation receipt outer/integrated broker policy tests passed 42/42\n");

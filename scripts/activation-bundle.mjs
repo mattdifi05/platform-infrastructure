@@ -5,12 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "./runtime-intent-policy.mjs";
 
-export const ACTIVATION_BUNDLE_MAGIC = Buffer.from("PLATFORM-ACTIVATION-BUNDLE-V1\n", "ascii");
+export const ACTIVATION_BUNDLE_MAGIC = Buffer.from("PLATFORM-ACTIVATION-BUNDLE-V2\n", "ascii");
 export const ACTIVATION_BUNDLE_MAX_BYTES = 384 * 1024 * 1024;
 export const ACTIVATION_BUNDLE_ENTRY_LIMITS = Object.freeze({
   "artifact-verification.json": 16 * 1024 * 1024,
   "combined-compose.json": 32 * 1024 * 1024,
-  "dast-admission.json": 16 * 1024 * 1024,
+  "dast-activation-authorization.json": 16 * 1024 * 1024,
+  "dast-provider-verification.json": 16 * 1024 * 1024,
   "environment.env": 1024 * 1024,
   "exact-source-archive.tar": 256 * 1024 * 1024,
   "hosted-workloads.lock.json": 16 * 1024 * 1024,
@@ -146,7 +147,7 @@ export function validateActivationBundleManifest(manifest, {
     "runtimeIntentSha256",
     "entries",
   ]);
-  if (manifest.schema !== "platform-activation-bundle-manifest/v1") {
+  if (manifest.schema !== "platform-activation-bundle-manifest/v2") {
     invalid("Activation bundle manifest schema is invalid.");
   }
   if (manifest.requestId !== exactRequestId(requestId ?? manifest.requestId)) {
@@ -225,7 +226,7 @@ export function buildActivationBundle({
       inputs.push(input);
     }
     const manifest = {
-      schema: "platform-activation-bundle-manifest/v1",
+      schema: "platform-activation-bundle-manifest/v2",
       requestId: exactRequestId(requestId),
       releaseContextSha256: exactSha256(releaseContextSha256, "release context SHA256"),
       runtimeIntentSha256: exactSha256(runtimeIntentSha256, "runtime intent SHA256"),
@@ -259,7 +260,7 @@ export function buildActivationBundle({
     const sha256 = bundleHash.digest("hex");
     fs.writeFileSync(manifestOutput, `${canonicalJson(manifest)}\n`, { flag: "wx", mode: 0o600 });
     return {
-      schema: "platform-activation-bundle-descriptor/v1",
+      schema: "platform-activation-bundle-descriptor/v2",
       sha256,
       sizeBytes,
       manifestSha256: validated.sha256,

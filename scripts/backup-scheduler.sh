@@ -56,6 +56,24 @@ write_env_var() {
   fi
 }
 
+valid_claimed_job_file_name() {
+  file_name="${1:-}"
+  case "$file_name" in
+    *.json) job_id="${file_name%.json}" ;;
+    *) return 1 ;;
+  esac
+  [ "$file_name" = "$job_id.json" ] || return 1
+  [ "${#job_id}" -ge 16 ] && [ "${#job_id}" -le 128 ] || return 1
+  case "$job_id" in
+    [a-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$job_id" in
+    *[!a-z0-9-]*) return 1 ;;
+  esac
+  return 0
+}
+
 queue_control() {
   node "$INFRA_ROOT/scripts/backup-queue-control.mjs" "$@" --jobsDir "$JOBS_DIR" --logDir "$LOG_DIR"
 }
@@ -175,6 +193,10 @@ process_backup_job() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] claimed typed job $name returned exit $exit_code" >> "$log_file"
   fi
   if [ "$exit_code" -eq 74 ]; then
+    queue_control mark-unknown \
+      --jobId "$job_id" \
+      --summary "manual-reconciliation required: Docker broker outcome is unknown after admission." \
+      --exitCode 74
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] leaving $name in running for manual reconciliation" >> "$log_file"
   elif [ "$exit_code" -eq 0 ]; then
     queue_control finish --jobId "$job_id" --status done --summary "Job completato dal backup scheduler."

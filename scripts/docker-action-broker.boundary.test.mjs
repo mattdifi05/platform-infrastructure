@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -230,7 +230,7 @@ test("canonical Compose rendering is available without a Docker Engine", () => {
   );
 });
 
-test("the effective canonical VPS JSON render has one raw Docker authority", (t) => {
+test("the effective canonical VPS JSON render has one raw Docker authority and no raw-host metrics profile", (t) => {
   const config = canonicalComposeRenderOrSkip(t);
   if (!config) return;
   assertRenderedPolicySurface(config);
@@ -242,11 +242,10 @@ test("the effective canonical VPS JSON render has one raw Docker authority", (t)
     `raw Docker socket owners include bind parents or named-volume aliases: ${owners.join(",") || "none"}`,
   );
   for (const metricsService of ["cadvisor", "node-exporter"]) {
-    assert.ok(config.services?.[metricsService], `${metricsService} service disappeared instead of being de-privileged`);
     assert.equal(
-      renderedServiceOwnsRawSocket(config, metricsService),
-      false,
-      `${metricsService} must not regain Docker authority through /, /run, /var/run or a named-volume alias`,
+      config.services?.[metricsService],
+      undefined,
+      `${metricsService} must remain absent unless the non-canonical raw-host-metrics-disabled profile is explicit`,
     );
   }
 });
@@ -362,39 +361,91 @@ test("the true readiness CLI reads documents, stats the UDS and rejects tamper",
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "platform-readiness-cli-"));
   const inputFile = path.join(temporaryRoot, "readiness-input.json");
   const socketPath = path.join(temporaryRoot, "broker.sock");
-  const server = net.createServer();
+  let protocolResponse = `${JSON.stringify({
+    error: "action grammar is invalid",
+    schema: "platform.docker-action.response/v1",
+    status: "rejected",
+    statusCode: 403,
+  })}\n`;
+  const server = net.createServer((connection) => {
+    const chunks = [];
+    connection.on("data", (chunk) => chunks.push(chunk));
+    connection.on("end", () => {
+      const request = Buffer.concat(chunks).toString("utf8");
+      if (request !== "{}\n") return connection.destroy();
+      connection.end(protocolResponse);
+    });
+  });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
 
-  const runCli = () => spawnSync(process.execPath, [
-    "scripts/docker-action-readiness.mjs",
-    "--require-trusted-activation",
-  ], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      DOCKER_ACTION_BROKER_SOCKET: socketPath,
-      DOCKER_ACTION_READINESS_INPUT_FILE: inputFile,
-      HOME: temporaryRoot,
-      LANG: "C",
-      LC_ALL: "C",
-      PATH: process.env.PATH,
-    },
-    timeout: 10_000,
+  const runCli = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      "scripts/docker-action-readiness.mjs",
+      "--require-trusted-activation",
+    ], {
+      cwd: root,
+      env: {
+        DOCKER_ACTION_BROKER_SOCKET: socketPath,
+        DOCKER_ACTION_READINESS_INPUT_FILE: inputFile,
+        DOCKER_ACTION_READINESS_TEST_ONLY: "1",
+        HOME: temporaryRoot,
+        LANG: "C",
+        LC_ALL: "C",
+        NODE_ENV: "test",
+        PATH: process.env.PATH,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 10_000);
+    child.once("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({
+        signal,
+        status,
+        stderr: `${stderr}${timedOut ? "readiness test command timed out\n" : ""}`,
+        stdout,
+      });
+    });
   });
 
   try {
     const trusted = trustedReadinessInput();
     fs.writeFileSync(inputFile, `${JSON.stringify(trusted)}\n`, { mode: 0o600 });
-    const valid = runCli();
+    const valid = await runCli();
     assert.equal(valid.status, 0, `valid readiness CLI fixture rejected:\n${valid.stdout}\n${valid.stderr}`);
+
+    protocolResponse = '{"status":"ok"}\n';
+    const rejectedWrongProtocol = await runCli();
+    assert.notEqual(
+      rejectedWrongProtocol.status,
+      0,
+      "readiness CLI accepted a live non-broker listener with the wrong protocol response",
+    );
+    protocolResponse = `${JSON.stringify({
+      error: "action grammar is invalid",
+      schema: "platform.docker-action.response/v1",
+      status: "rejected",
+      statusCode: 403,
+    })}\n`;
 
     const tampered = structuredClone(trusted);
     tampered.activeReceipt.document.combinedRenderSha256 = "e".repeat(64);
     fs.writeFileSync(inputFile, `${JSON.stringify(tampered)}\n`, { mode: 0o600 });
-    const rejectedDocument = runCli();
+    const rejectedDocument = await runCli();
     assert.notEqual(
       rejectedDocument.status,
       0,
@@ -404,11 +455,33 @@ test("the true readiness CLI reads documents, stats the UDS and rejects tamper",
     fs.writeFileSync(inputFile, `${JSON.stringify(trusted)}\n`, { mode: 0o600 });
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     fs.rmSync(socketPath, { force: true });
-    const rejectedSocket = runCli();
+    const rejectedSocket = await runCli();
     assert.notEqual(
       rejectedSocket.status,
       0,
       "readiness CLI trusted fixture-reported socket state instead of statting the actual UDS",
+    );
+
+    const staleListener = spawn(process.execPath, [
+      "-e",
+      "const net=require('node:net');const server=net.createServer();server.listen(process.env.STALE_SOCKET_PATH,()=>process.stdout.write('ready\\n'));setInterval(()=>{},1<<30);",
+    ], {
+      env: { ...process.env, STALE_SOCKET_PATH: socketPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await new Promise((resolve, reject) => {
+      staleListener.once("error", reject);
+      staleListener.once("exit", (code, signal) => reject(new Error(`stale listener exited early: ${code ?? signal}`)));
+      staleListener.stdout.once("data", resolve);
+    });
+    staleListener.kill("SIGKILL");
+    await new Promise((resolve) => staleListener.once("exit", resolve));
+    assert.equal(fs.lstatSync(socketPath).isSocket(), true, "stale listener fixture did not leave a UDS inode");
+    const rejectedStaleSocket = await runCli();
+    assert.notEqual(
+      rejectedStaleSocket.status,
+      0,
+      "readiness CLI accepted a stale Unix-socket inode without a serving broker",
     );
   } finally {
     if (server.listening) {
@@ -464,26 +537,31 @@ function canonicalComposeRenderOrSkip(t) {
 function canonicalComposeRender() {
   if (cachedCanonicalRender) return structuredClone(cachedCanonicalRender);
 
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "platform-compose-render-"));
-  const envFile = path.join(temporaryRoot, "compose.env");
-  const dockerConfig = path.join(temporaryRoot, "docker-config");
-  fs.mkdirSync(dockerConfig, { mode: 0o700 });
-  fs.writeFileSync(envFile, deterministicComposeEnvironment(), { mode: 0o600 });
-  const executionPath = prepareComposeExecutionPath(temporaryRoot);
-
+  const temporaryRoot = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "platform-compose-render-")),
+  );
   try {
+    const workspaceRoot = path.join(temporaryRoot, "workspace");
+    copyTrackedWorkspaceSnapshot(workspaceRoot);
+    const envFile = path.join(workspaceRoot, ".env");
+    const dockerConfig = path.join(temporaryRoot, "docker-config");
+    fs.mkdirSync(dockerConfig, { mode: 0o700 });
+    fs.writeFileSync(envFile, deterministicComposeEnvironment(), { flag: "wx", mode: 0o600 });
+    fs.chmodSync(envFile, 0o600);
+    prepareOfflineSecretFixtures(workspaceRoot);
+    prepareOfflineFilesystemFixtures(workspaceRoot, temporaryRoot, envFile, dockerConfig);
+    const executionPath = prepareComposeExecutionPath(temporaryRoot);
+
     const result = spawnSync(
       "bash",
-      [path.join(root, "scripts", "compose-vps.sh"), "config", "--format", "json"],
+      [path.join(workspaceRoot, "scripts", "compose-vps.sh"), "config", "--format", "json"],
       {
-        cwd: root,
+        cwd: workspaceRoot,
         encoding: "utf8",
         env: {
           COMPOSE_ANSI: "never",
-          COMPOSE_ENV_FILE: envFile,
           COMPOSE_PROJECT_NAME: "platform_infra_vps",
           DOCKER_CONFIG: dockerConfig,
-          DOCKER_HOST: `unix://${path.join(temporaryRoot, "engine-must-not-exist.sock")}`,
           HOME: temporaryRoot,
           HOSTED_WORKLOAD_ALLOW_RESOLVED: "0",
           HOSTED_WORKLOAD_LOCK: "",
@@ -513,6 +591,43 @@ function canonicalComposeRender() {
     return structuredClone(cachedCanonicalRender);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function copyTrackedWorkspaceSnapshot(workspaceRoot) {
+  fs.mkdirSync(workspaceRoot, { mode: 0o700 });
+  const listed = spawnSync("git", ["ls-files", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      GIT_CONFIG_NOSYSTEM: "1",
+      HOME: os.tmpdir(),
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: process.env.PATH,
+    },
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  assert.equal(listed.status, 0, `could not enumerate tracked Compose fixture inputs: ${listed.stderr}`);
+  const trackedFiles = listed.stdout.split("\0").filter(Boolean);
+  assert.ok(trackedFiles.length > 0, "tracked Compose fixture input set is empty");
+  for (const relative of trackedFiles) {
+    assert.ok(
+      !path.isAbsolute(relative)
+        && relative !== ".."
+        && !relative.startsWith(`..${path.sep}`)
+        && path.normalize(relative) === relative,
+      `unsafe tracked fixture path: ${relative}`,
+    );
+    if (relative === "secrets" || relative.startsWith(`secrets${path.sep}`)) continue;
+    const source = path.join(root, relative);
+    const sourceStat = fs.lstatSync(source);
+    assert.ok(sourceStat.isFile() && !sourceStat.isSymbolicLink(), `unsupported tracked fixture object: ${relative}`);
+    const destination = path.join(workspaceRoot, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 });
+    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(destination, sourceStat.mode & 0o777);
   }
 }
 
@@ -588,14 +703,36 @@ function prepareComposeExecutionPath(temporaryRoot) {
   if (!composeAvailability.standalone) return composeAvailability.path;
   const shimDir = path.join(temporaryRoot, "compose-shim");
   const shim = path.join(shimDir, "docker");
+  const materializedDir = path.join(temporaryRoot, "compose-inputs");
   fs.mkdirSync(shimDir, { mode: 0o700 });
+  fs.mkdirSync(materializedDir, { mode: 0o700 });
   fs.writeFileSync(
     shim,
     [
-      "#!/bin/sh",
+      "#!/bin/bash",
+      "set -euo pipefail",
       "[ \"$1\" = compose ] || exit 64",
       "shift",
-      `exec ${shellSingleQuote(composeAvailability.standalone)} "$@"`,
+      "arguments=()",
+      "for argument in \"$@\"; do",
+      "  case \"$argument\" in",
+      "    /dev/fd/*)",
+      `      materialized=$(mktemp ${shellSingleQuote(`${materializedDir}/input.XXXXXX`)})`,
+      "      chmod 600 \"$materialized\"",
+      "      /bin/cat -- \"$argument\" > \"$materialized\"",
+      "      arguments+=(\"$materialized\")",
+      "      ;;",
+      "    *) arguments+=(\"$argument\") ;;",
+      "  esac",
+      "done",
+      "argument_count=${#arguments[@]}",
+      "(( argument_count >= 3 )) || exit 65",
+      "[[ \"${arguments[$((argument_count - 3))]}\" == config ]] || exit 65",
+      "[[ \"${arguments[$((argument_count - 2))]}\" == --format ]] || exit 65",
+      "[[ \"${arguments[$((argument_count - 1))]}\" == json ]] || exit 65",
+      `export DOCKER_HOST=${shellSingleQuote(`unix://${path.join(temporaryRoot, "engine-must-not-exist.sock")}`)}`,
+      "unset DOCKER_CONTEXT",
+      `exec ${shellSingleQuote(composeAvailability.standalone)} "\${arguments[@]}"`,
       "",
     ].join("\n"),
     { mode: 0o700 },
@@ -619,6 +756,7 @@ function deterministicComposeEnvironment() {
     "DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json",
     "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.offline-compose-v2",
     "HOSTED_WORKLOAD_LOCK=",
+    "HOSTED_WORKLOAD_MODE=no-hosted",
     "KC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/run/secrets/keycloak_admin_password",
     "KC_DB_PASSWORD_FILE=/run/secrets/keycloak_db_password",
     "MAILER_FROM=no-reply@example.invalid",
@@ -631,6 +769,7 @@ function deterministicComposeEnvironment() {
     `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"c".repeat(64)}`,
     "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/platform/provider-activation",
     `PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=${"d".repeat(64)}`,
+    `PLATFORM_OPS_IMAGE=registry.example.invalid/platform/ops@sha256:${"f".repeat(64)}`,
     "POSTGRES_USER=postgres",
     "REDIS_PASSWORD_FILE=/run/secrets/redis_password",
     "REDIS_USERNAME=platform",
@@ -638,6 +777,143 @@ function deterministicComposeEnvironment() {
     "SMTP_USER=mailer",
     "",
   ].join("\n");
+}
+
+function prepareOfflineSecretFixtures(workspaceRoot) {
+  const secretsDirectory = path.join(workspaceRoot, "secrets");
+  fs.mkdirSync(secretsDirectory, { mode: 0o700 });
+  fs.chmodSync(secretsDirectory, 0o700);
+  const workspaceReal = fs.realpathSync.native(workspaceRoot);
+  const secretsReal = fs.realpathSync.native(secretsDirectory);
+  const secretsStat = fs.lstatSync(secretsDirectory);
+  assert.equal(secretsReal, path.join(workspaceReal, "secrets"));
+  assert.ok(secretsStat.isDirectory() && !secretsStat.isSymbolicLink());
+  const secretNames = new Set();
+  const copiedWrapper = fs.readFileSync(path.join(workspaceRoot, "scripts", "compose-vps.sh"), "utf8");
+  for (const composeFile of canonicalComposeFiles(copiedWrapper)) {
+    const source = fs.readFileSync(path.join(workspaceRoot, composeFile), "utf8");
+    for (const match of source.matchAll(/(?:\$\{[A-Z0-9_]+:-)?\.\/secrets\/([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\})?/g)) {
+      secretNames.add(match[1]);
+    }
+  }
+  for (const secretName of secretNames) {
+    const mode = secretName === "alertmanager_webhook_token.txt" ? 0o640 : 0o600;
+    const secretFile = path.join(secretsDirectory, secretName);
+    fs.writeFileSync(secretFile, "offline-test-fixture\n", { flag: "wx", mode });
+    fs.chmodSync(secretFile, mode);
+    const secretStat = fs.lstatSync(secretFile);
+    assert.ok(secretStat.isFile() && !secretStat.isSymbolicLink() && secretStat.nlink === 1);
+  }
+}
+
+const offlineDirectoryMountTargets = new Set([
+  "/app",
+  "/docker-entrypoint-initdb.d",
+  "/etc/coredns",
+  "/etc/grafana/provisioning",
+  "/etc/mysql/conf.d",
+  "/etc/mysql/ssl",
+  "/etc/phpmyadmin/certs",
+  "/etc/prometheus/rules",
+  "/infra",
+  "/infra/backups",
+  "/infra/reports",
+  "/loki/rules",
+  "/opt/keycloak/data/import",
+  "/platform-postgres-init",
+  "/project",
+  "/var/lib/grafana/dashboards",
+  "/var/lib/node-exporter/textfile",
+  "/var/www/infra-docs",
+  "/var/www/project-state",
+  "/var/www/projects",
+]);
+
+function prepareOfflineFilesystemFixtures(workspaceRoot, temporaryRoot, envFile, dockerConfig) {
+  const copiedWrapper = fs.readFileSync(path.join(workspaceRoot, "scripts", "compose-vps.sh"), "utf8");
+  const composeFiles = canonicalComposeFiles(copiedWrapper);
+  const composeArguments = [
+    "--env-file",
+    envFile,
+    "-p",
+    "platform_infra_vps",
+    ...composeFiles.flatMap((composeFile) => ["-f", composeFile]),
+    "--profile",
+    "backup",
+    "config",
+    "--format",
+    "json",
+  ];
+  const rendered = spawnSync(composeAvailability.standalone, composeArguments, {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+    env: {
+      COMPOSE_ANSI: "never",
+      DOCKER_CONFIG: dockerConfig,
+      DOCKER_HOST: `unix://${path.join(temporaryRoot, "preflight-engine-must-not-exist.sock")}`,
+      HOME: temporaryRoot,
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: composeAvailability.path,
+    },
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  assert.equal(
+    rendered.status,
+    0,
+    `offline filesystem-fixture Compose pre-render failed:\n${rendered.stdout}\n${rendered.stderr}`,
+  );
+  assert.equal(rendered.signal, null, `offline filesystem-fixture pre-render terminated by ${rendered.signal}`);
+  let config;
+  try {
+    config = JSON.parse(rendered.stdout);
+  } catch (error) {
+    assert.fail(`offline filesystem-fixture pre-render returned invalid JSON: ${error.message}`);
+  }
+  materializeOfflineCanonicalSources(workspaceRoot, temporaryRoot, config);
+}
+
+function materializeOfflineCanonicalSources(workspaceRoot, temporaryRoot, config) {
+  const workspaceReal = fs.realpathSync.native(workspaceRoot);
+  const siblingSource = path.join(temporaryRoot, "src");
+  fs.mkdirSync(siblingSource, { mode: 0o755 });
+  const siblingReal = fs.realpathSync.native(siblingSource);
+  assert.equal(siblingReal, siblingSource);
+
+  for (const service of Object.values(config.services ?? {})) {
+    for (const mount of service.volumes ?? []) {
+      if (mount?.type !== "bind" || typeof mount.source !== "string") continue;
+      const source = path.resolve(mount.source);
+      const anchor = source === workspaceReal || source.startsWith(`${workspaceReal}${path.sep}`)
+        ? workspaceReal
+        : source === siblingReal || source.startsWith(`${siblingReal}${path.sep}`)
+          ? siblingReal
+          : "";
+      if (!anchor) continue;
+      if (source === anchor || offlineDirectoryMountTargets.has(mount.target)) {
+        fs.mkdirSync(source, { recursive: true, mode: 0o755 });
+        const sourceStat = fs.lstatSync(source);
+        assert.ok(sourceStat.isDirectory() && !sourceStat.isSymbolicLink(), `unsafe fixture directory: ${source}`);
+        assert.ok(fs.realpathSync.native(source) === source || fs.realpathSync.native(source).startsWith(`${anchor}${path.sep}`));
+        continue;
+      }
+      if (mount.target === "/run/platform/hosted-workloads.lock.json" && fs.existsSync(source)) continue;
+      fs.mkdirSync(path.dirname(source), { recursive: true, mode: 0o755 });
+      const parentReal = fs.realpathSync.native(path.dirname(source));
+      assert.ok(parentReal === anchor || parentReal.startsWith(`${anchor}${path.sep}`), `fixture parent escaped: ${source}`);
+      if (fs.existsSync(source)) {
+        const sourceStat = fs.lstatSync(source);
+        assert.ok(sourceStat.isFile() && !sourceStat.isSymbolicLink(), `unsafe fixture file: ${source}`);
+        continue;
+      }
+      const mode = mount.target === "/usr/local/bin/platform-postgres-entrypoint" ? 0o755 : 0o644;
+      fs.writeFileSync(source, `offline-source:${mount.target}\n`, { flag: "wx", mode });
+      fs.chmodSync(source, mode);
+      const sourceStat = fs.lstatSync(source);
+      assert.ok(sourceStat.isFile() && !sourceStat.isSymbolicLink() && sourceStat.nlink === 1);
+    }
+  }
 }
 
 function assertRenderedPolicySurface(config) {

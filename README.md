@@ -97,15 +97,15 @@ I container usano prefisso `enterprise-`, network `enterprise_net` e volumi `ent
 Il core si renderizza e passa i gate con zero applicazioni. Per collegare un
 workload, la repository applicativa fornisce un manifest, un overlay Compose
 image-only, un environment non-secret ignorato da Git e le proprie migrazioni.
-La piattaforma registra il manifest in un catalogo esterno e prepara un lock:
-
-```sh
-HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
-HOSTED_WORKLOAD_ROOT=/path/applications \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-COMPOSE_ENV_FILE=.env.vps \
-sh ./scripts/prepare-hosted-workloads.sh
-```
+La preparazione non e' un comando portabile da eseguire con `.env.vps`: e' un
+protocollo provider-side in due fasi. In fase A il provider installa sul target
+l'environment root-owned `0640` nell'esatto release-state content-addressed e,
+con un'autorizzazione preliminare provider-owned dell'immagine ops, prepara e
+verifica il lock target-local. In fase B il provider verifica quegli output e
+solo allora conia runtime intent, admission e release context v3 finali e
+invoca il broker di attivazione fisso. L'orchestrazione provider
+che collega le due fasi resta `EXTERNAL-PENDING`; questo checkout non costituisce
+un sostituto del provider e non offre un percorso production manuale equivalente.
 
 La preparazione valida digest immutabili, nomi, route, secret dichiarati,
 network e budget, confronta render core e combinato e scrive un lock `0600` con
@@ -122,16 +122,19 @@ trust boundary amministrativa e non deve essere condivisa con servizi workload.
 Il runtime richiede `HOSTED_WORKLOAD_MODE=hosted` con un lock non vuoto; lo
 stato senza workload richiede invece `HOSTED_WORKLOAD_MODE=no-hosted`, lock
 vuoto e il lock canonico `config/no-hosted-workloads.lock.json`.
-Non crea database, non applica migrazioni e non avvia container. La preparazione
-del lock procede soltanto dopo che `ops-image-trust.sh` ha verificato policy repository-owned,
-receipt artifact/deployment, metadata del run provider, checkout pulito ed
-esatto, digest dell'immagine ops e relativo image ID locale. Il runner viene
+Non crea database, non applica migrazioni e non avvia container. La verifica
+locale del lock procede soltanto dopo che `ops-image-trust.sh` ha verificato
+policy repository-owned, receipt artifact/deployment, metadata del run
+provider, release immutabile autenticata dall'archivio sorgente (oppure un
+checkout Git locale pulito ed esatto), digest dell'immagine ops e relativo
+image ID locale. Il runner viene
 eseguito tramite quell'ID con `--pull=never`; non esiste un fallback locale,
 auto-build o host-Node. Il deploy usa soltanto un lock `verified`; se il
 producer non e' configurato o un input cambia, fallisce chiuso finche' il lock
 non viene rigenerato e approvato. La policy versionata in questa baseline resta
-`EXTERNAL-PENDING`, quindi oggi il percorso production si arresta prima di
-eseguire il container ops.
+`EXTERNAL-PENDING`: finche' il provider non fornisce autorizzazione e receipt
+firmate di Phase A e prova di preservazione target-local, il percorso Hosted
+production si arresta prima di eseguire il container ops.
 
 Il deploy approvato proietta su ogni container core una tupla runtime completa
 tramite `compose.runtime-identity.yaml`: ID candidato FG-048, commit, tree,
@@ -171,8 +174,9 @@ per workload e un utente distinto per ogni ruolo di servizio. Publish, subscribe
 queue group, reply limit e deny `$SYS.>`/`$JS.>` derivano soltanto dalla policy
 firmata; non esiste piu' un `--user`/`--pass` globale e gli export/import restano
 chiusi finche' non esiste un'approvazione direzionale esatta. Redis e NATS
-verificano il digest del proprio file prima di avviarsi, e ogni
-`compose-vps.sh up` riesegue il bootstrap per rendere effettive le rotazioni.
+verificano il digest del proprio file prima di avviarsi. Le rotazioni diventano
+effettive solo tramite una nuova attivazione ammessa dal broker root-owned;
+`compose-vps.sh` resta un entrypoint di verifica read-only.
 La matrice reale di pub/sub/queue, persistenza, restart e rotazione resta un gate
 runtime obbligatorio.
 
@@ -1050,7 +1054,7 @@ fuori dal GO/NO-GO infra.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
 - `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
-- `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo dentro l'image ID ops autenticato; con la policy inclusa termina `EXTERNAL-PENDING`.
+- `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo sul target, dentro l'image ID ops autenticato. Un env non-default deve essere l'esatto `/srv/platform-infrastructure/release-states/<releaseId>-<envSha256>/environment.env`, root-owned, group-readable dal deployment e mode `0640`; il bind nel runner e' file-only/read-only. Il lock risultante e' target-local, non portabile. Con la policy inclusa il percorso termina `EXTERNAL-PENDING`.
 - `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.
 - `scripts/hosted-workload-lock.sh`: verifica hash, permessi e file Compose/environment bloccati dal lock.
 - `traefik/traefik.edge-http.yml`: Traefik per edge TLS esterno.

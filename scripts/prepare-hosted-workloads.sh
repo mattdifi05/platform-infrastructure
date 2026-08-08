@@ -8,10 +8,159 @@ PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hosted-workloads.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
+trusted_host_os() {
+  if [[ -x /usr/bin/uname ]]; then
+    /usr/bin/uname -s
+  elif [[ -x /bin/uname ]]; then
+    /bin/uname -s
+  else
+    return 1
+  fi
+}
+
+HOST_OS=$(trusted_host_os) || {
+  printf '%s\n' "Hosted workload preparation cannot determine the host OS safely." >&2
+  exit 1
+}
+case "$HOST_OS" in Linux|Darwin) ;; *) printf 'Unsupported host OS: %s\n' "$HOST_OS" >&2; exit 1 ;; esac
+
 [[ "$ENV_FILE" = /* ]] || ENV_FILE="$INFRA_ROOT/$ENV_FILE"
 [[ -f "$ENV_FILE" ]] || {
   printf '%s\n' "Compose env file must exist: $ENV_FILE" >&2
   exit 1
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+authority_identity() {
+  local raw device inode uid gid mode links size modified changed
+  if stat -c '%d|%i|%u|%g|%a|%h|%s|%Y|%Z' "$1" >/dev/null 2>&1; then
+    raw=$(stat -c '%d|%i|%u|%g|%a|%h|%s|%Y|%Z' "$1")
+  else
+    raw=$(stat -f '%d|%i|%u|%g|%Lp|%l|%z|%m|%c' "$1")
+  fi
+  IFS='|' read -r device inode uid gid mode links size modified changed <<< "$raw"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$device" "$inode" "$uid" "$gid" "$((8#$mode))" "$links" "$size" "$modified" "$changed"
+}
+
+assert_safe_authority_path() {
+  local value=$1 remainder cursor component
+  [[ "$value" = /*
+      && "$value" != *[!A-Za-z0-9_./-]*
+      && "$value" != *//*
+      && "$value" != */../*
+      && "$value" != */..
+      && "$value" != */./*
+      && "$value" != */. ]] || {
+    printf 'Target-local authority path is not canonical: %s\n' "$value" >&2
+    exit 1
+  }
+  remainder=${value#/}
+  cursor=
+  while [[ -n "$remainder" ]]; do
+    if [[ "$remainder" = */* ]]; then
+      component=${remainder%%/*}
+      remainder=${remainder#*/}
+    else
+      component=$remainder
+      remainder=
+    fi
+    cursor=$cursor/$component
+    [[ -e "$cursor" && ! -L "$cursor" ]] || {
+      printf 'Target-local authority path has a missing or symlinked component: %s\n' "$cursor" >&2
+      exit 1
+    }
+  done
+}
+
+assert_authority_directory() {
+  local directory=$1 expected_owner=$2 label=$3 identity device inode uid gid mode links size modified changed
+  assert_safe_authority_path "$directory"
+  [[ -d "$directory" && "$(CDPATH= cd -- "$directory" && pwd -P)" = "$directory" ]] || {
+    printf '%s must be one canonical directory.\n' "$label" >&2
+    exit 1
+  }
+  identity=$(authority_identity "$directory")
+  IFS='|' read -r device inode uid gid mode links size modified changed <<< "$identity"
+  [[ "$uid" = "$expected_owner" && $((mode & 18)) -eq 0 ]] || {
+    printf '%s must be authority-owned and non-group/world-writable.\n' "$label" >&2
+    exit 1
+  }
+  PREPARE_AUTHORITY_PATHS+=("$directory")
+  PREPARE_AUTHORITY_IDENTITIES+=("$identity")
+}
+
+PREPARE_AUTHORITY_PATHS=()
+PREPARE_AUTHORITY_IDENTITIES=()
+env_mount_args=()
+if [[ "$ENV_FILE" != "$INFRA_ROOT/.env" ]]; then
+  case "$HOST_OS" in
+    Linux)
+      authority_root=/srv/platform-infrastructure
+      authority_owner=0
+      ;;
+    Darwin)
+      authority_root=${HOSTED_TEST_INFRASTRUCTURE_ROOT:-}
+      authority_owner=$(id -u)
+      [[ -n "$authority_root" ]] || {
+        printf '%s\n' "Target-local Compose env authority is unavailable outside Linux." >&2
+        exit 1
+      }
+      ;;
+    *)
+      printf '%s\n' "Target-local Compose env authority cannot determine a supported host OS." >&2
+      exit 1
+      ;;
+  esac
+  release_id=$(basename -- "$INFRA_ROOT")
+  [[ "$release_id" =~ ^([a-f0-9]{40}|[a-f0-9]{64})-[a-f0-9]{64}$ ]] || {
+    printf '%s\n' "Target-local release identifier is invalid." >&2
+    exit 1
+  }
+  expected_release_root=$authority_root/releases/$release_id
+  assert_safe_authority_path "$ENV_FILE"
+  environment_before=$(authority_identity "$ENV_FILE")
+  environment_sha256=$(sha256_file "$ENV_FILE")
+  expected_state_root=$authority_root/release-states/$release_id-$environment_sha256
+  IFS='|' read -r _device _inode environment_uid environment_gid environment_mode environment_links \
+    _size _modified _changed <<< "$environment_before"
+  [[ "$INFRA_ROOT" = "$expected_release_root"
+      && "$ENV_FILE" = "$expected_state_root/environment.env"
+      && "$environment_uid" = "$authority_owner"
+      && "$environment_gid" = "$(id -g)"
+      && "$environment_mode" = 416
+      && "$environment_links" = 1
+      && -f "$ENV_FILE" && ! -L "$ENV_FILE" && -r "$ENV_FILE"
+      && "$(authority_identity "$ENV_FILE")" = "$environment_before" ]] || {
+    printf '%s\n' "Non-default Compose env is not the exact readable target-local release-state authority." >&2
+    exit 1
+  }
+  assert_authority_directory "$(dirname -- "$authority_root")" "$authority_owner" "Platform service root"
+  assert_authority_directory "$authority_root" "$authority_owner" "Platform infrastructure root"
+  assert_authority_directory "$authority_root/releases" "$authority_owner" "Immutable release store"
+  assert_authority_directory "$INFRA_ROOT" "$authority_owner" "Immutable release root"
+  assert_authority_directory "$authority_root/release-states" "$authority_owner" "Release-state store"
+  assert_authority_directory "$expected_state_root" "$authority_owner" "Release-state root"
+  PREPARE_AUTHORITY_PATHS+=("$ENV_FILE")
+  PREPARE_AUTHORITY_IDENTITIES+=("$environment_before")
+  env_mount_args=(-v "$ENV_FILE:$ENV_FILE:ro")
+fi
+
+revalidate_prepare_authority() {
+  local index
+  for ((index = 0; index < ${#PREPARE_AUTHORITY_PATHS[@]}; index += 1)); do
+    [[ "${PREPARE_AUTHORITY_IDENTITIES[$index]}" = "$(authority_identity "${PREPARE_AUTHORITY_PATHS[$index]}")" ]] || {
+      printf 'Target-local preparation authority changed: %s\n' "${PREPARE_AUTHORITY_PATHS[$index]}" >&2
+      exit 1
+    }
+  done
 }
 
 env_path_value() {
@@ -88,14 +237,24 @@ ensure_private_directory() {
 admitted=$(sh "$SCRIPT_DIR/ops-image-trust.sh")
 OPS_IMAGE=$(printf '%s' "$admitted" | jq -er '.image')
 OPS_IMAGE_ID=$(printf '%s' "$admitted" | jq -er '.imageId')
+ADMITTED_SOURCE_ARCHIVE_SHA256=$(printf '%s' "$admitted" | jq -er '.sourceArchiveSha256')
 
 assert_admitted_checkout() {
-  [[ "$(git -C "$INFRA_ROOT" rev-parse HEAD)" == "$DEPLOY_RELEASE_SHA" ]]
-  [[ "$(git -C "$INFRA_ROOT" rev-parse "${DEPLOY_RELEASE_SHA}^{tree}")" == "$DEPLOY_RELEASE_TREE" ]]
-  [[ -z "$(git -C "$INFRA_ROOT" status --porcelain --untracked-files=all)" ]] || {
-    printf '%s\n' "Hosted workload preparation checkout changed after ops admission." >&2
+  local current current_image current_image_id current_archive_sha256
+  current=$(sh "$SCRIPT_DIR/ops-image-trust.sh") || {
+    printf '%s\n' "Hosted workload source/admission authority changed after ops admission." >&2
     exit 1
   }
+  current_image=$(printf '%s' "$current" | jq -er '.image')
+  current_image_id=$(printf '%s' "$current" | jq -er '.imageId')
+  current_archive_sha256=$(printf '%s' "$current" | jq -er '.sourceArchiveSha256')
+  [[ "$current_image" = "$OPS_IMAGE"
+      && "$current_image_id" = "$OPS_IMAGE_ID"
+      && "$current_archive_sha256" = "$ADMITTED_SOURCE_ARCHIVE_SHA256" ]] || {
+    printf '%s\n' "Hosted workload source/admission identity changed after ops admission." >&2
+    exit 1
+  }
+  revalidate_prepare_authority
 }
 
 core_files=(
@@ -127,6 +286,7 @@ combined_render="$TMP/combined-render.json"
 assert_admitted_checkout
 docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
+  "${env_mount_args[@]}" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$(dirname "$CATALOG"):$(dirname "$CATALOG"):ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
@@ -140,6 +300,7 @@ docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
     --snapshotRoot "$snapshot_root" \
     --activationLock "$OUTPUT" \
     --output "$resolved"
+revalidate_prepare_authority
 
 docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
@@ -147,6 +308,7 @@ docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypo
   -v "$TMP:$TMP" \
   -w "$INFRA_ROOT" \
   "$OPS_IMAGE_ID" scripts/hosted-workload-source-policy.rb --lock "$resolved"
+revalidate_prepare_authority
 
 [[ ! -L "$OUTPUT" && ( ! -e "$OUTPUT" || -f "$OUTPUT" ) ]] || {
   printf '%s\n' "Hosted workload activation output must be absent or a regular non-symlink file: $OUTPUT" >&2
@@ -157,15 +319,18 @@ install -m 0600 "$resolved" "$OUTPUT"
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= HOSTED_WORKLOAD_MODE=hosted \
 HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" HOSTED_WORKLOAD_PREPARE_RESOLVED=1 \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$core_render"
+revalidate_prepare_authority
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
 HOSTED_WORKLOAD_LOCK="$OUTPUT" HOSTED_WORKLOAD_MODE=hosted HOSTED_WORKLOAD_PREPARE_RESOLVED=1 \
 HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$combined_render"
+revalidate_prepare_authority
 
 assert_admitted_checkout
 docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
+  "${env_mount_args[@]}" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$TMP:$TMP:ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
@@ -174,6 +339,7 @@ docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
     --coreRender "$core_render" \
     --combinedRender "$combined_render" \
     --output "$OUTPUT"
+revalidate_prepare_authority
 
 chmod 600 "$OUTPUT"
 sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$OUTPUT" verify

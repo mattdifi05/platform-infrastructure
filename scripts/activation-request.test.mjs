@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { buildActivationRequest, buildTrustedReleaseContext } from "./activation-request.mjs";
 import { exactNoHostedLockBytes, validateActivationBundleManifest } from "./activation-bundle.mjs";
+import { dastActivationChainSha256 } from "./dast-activation-authorization.mjs";
 import { runtimeIntentSha256 } from "./runtime-intent-policy.mjs";
 
 function artifact(document) {
@@ -186,7 +187,10 @@ const providerMetadataDocument = {
   conclusion: "success",
 };
 const providerMetadata = artifact(providerMetadataDocument);
-const dastReceiptDocument = {
+const dastProviderMetadataSha256 = "2".repeat(64);
+const dastSigstoreBundleSha256 = "3".repeat(64);
+const dastSigstoreSubject = `dast-provider-verification.json@sha256:${"4".repeat(64)}`;
+const dastProviderReceiptDocument = {
   version: 1,
   kind: "platform-dast-verification/v1",
   status: "passed",
@@ -195,11 +199,28 @@ const dastReceiptDocument = {
   treeSha,
   runtimeIntentSha256: deploymentReceiptDocument.runtimeIntentSha256,
   generatedAt: "2026-07-21T00:00:00.000Z",
-  target: { url: "https://staging.example.com/", origin: "https://staging.example.com" },
-  report: {
-    name: "zap-baseline.json",
-    sha256: "d".repeat(64),
-    sizeBytes: 4096,
+  target: "https://staging.example.com",
+  scanRequestSha256: "a".repeat(64),
+  runtimeInventorySha256: "b".repeat(64),
+  targetServingInventoryHash: "c".repeat(64),
+  reportArtifact: {
+    id: "456789",
+    name: "dast-scan-request-789012-3",
+    archiveSha256: "d".repeat(64),
+    repository,
+    runId: "789012",
+    runAttempt: 3,
+  },
+  reportEvidenceSha256: "e".repeat(64),
+  provider: {
+    repository: "owner/trusted-admission",
+    workflowPath: ".github/workflows/produce-admission.yml",
+    workflowSha: "4".repeat(40),
+    sourceRef: "refs/heads/main",
+    event: "workflow_dispatch",
+    runId: "987654",
+    runAttempt: 2,
+    job: "dast-countersign",
   },
   consumerChallenge: {
     consumerRepository: repository,
@@ -209,16 +230,51 @@ const dastReceiptDocument = {
     challengeNonce: "d".repeat(64),
   },
 };
-const dastReceipt = artifact(dastReceiptDocument);
+const dastProviderReceipt = artifact(dastProviderReceiptDocument);
+const dastChain = {
+  schema: "platform.docker-dast-chain/v2",
+  repository,
+  commitSha,
+  treeSha,
+  target: dastProviderReceiptDocument.target,
+  runtimeIntentSha256: deploymentReceiptDocument.runtimeIntentSha256,
+  runtimeInventorySha256: dastProviderReceiptDocument.runtimeInventorySha256,
+  targetServingInventoryHash: dastProviderReceiptDocument.targetServingInventoryHash,
+  consumerChallengeSha256: crypto.createHash("sha256")
+    .update((await import("./runtime-intent-policy.mjs")).canonicalJson(dastProviderReceiptDocument.consumerChallenge))
+    .digest("hex"),
+  scanRequestSha256: dastProviderReceiptDocument.scanRequestSha256,
+  providerReceiptSha256: dastProviderReceipt.sha256,
+  providerMetadataSha256: dastProviderMetadataSha256,
+  providerRunId: dastProviderReceiptDocument.provider.runId,
+  providerRunAttempt: dastProviderReceiptDocument.provider.runAttempt,
+  reportArtifactId: dastProviderReceiptDocument.reportArtifact.id,
+  reportArtifactArchiveSha256: dastProviderReceiptDocument.reportArtifact.archiveSha256,
+  reportEvidenceSha256: dastProviderReceiptDocument.reportEvidenceSha256,
+  sigstoreBundleSha256: dastSigstoreBundleSha256,
+  sigstoreSubject: dastSigstoreSubject,
+  verdict: "pass",
+};
+const dastAuthorizationDocument = {
+  schema: "platform-dast-activation-authorization/v1",
+  status: "READY",
+  consumerChallenge: structuredClone(dastProviderReceiptDocument.consumerChallenge),
+  chain: dastChain,
+  chainSha256: dastActivationChainSha256(dastChain),
+  generatedAt: "2026-07-21T00:01:00.000Z",
+};
+const dastAuthorization = artifact(dastAuthorizationDocument);
 const context = buildTrustedReleaseContext({
   deploymentReceipt: deploymentReceiptDocument,
   artifactReceiptSha256: artifactReceipt.sha256,
   deploymentReceiptSha256: deploymentReceipt.sha256,
   providerMetadataSha256: providerMetadata.sha256,
-  dastReceiptSha256: dastReceipt.sha256,
+  dastProviderReceiptSha256: dastProviderReceipt.sha256,
+  dastAuthorizationSha256: dastAuthorization.sha256,
+  dastChainSha256: dastAuthorizationDocument.chainSha256,
   providerRunId: "123456",
   providerRunAttempt: 2,
-  providerChallenge: dastReceiptDocument.consumerChallenge.challengeNonce,
+  providerChallenge: dastProviderReceiptDocument.consumerChallenge.challengeNonce,
 });
 const contextSha256 = crypto.createHash("sha256")
   .update(JSON.stringify(context, Object.keys(context).sort()))
@@ -234,7 +290,8 @@ const noHostedSha256 = crypto.createHash("sha256").update(exactNoHostedLockBytes
 const entryHashes = {
   "artifact-verification.json": artifactReceipt.sha256,
   "combined-compose.json": runtimeIntent.combinedComposeSha256,
-  "dast-admission.json": dastReceipt.sha256,
+  "dast-activation-authorization.json": dastAuthorization.sha256,
+  "dast-provider-verification.json": dastProviderReceipt.sha256,
   "environment.env": runtimeIntent.environmentSha256,
   "exact-source-archive.tar": runtimeIntent.sourceArchiveSha256,
   "hosted-workloads.lock.json": noHostedSha256,
@@ -243,7 +300,7 @@ const entryHashes = {
   "trusted-provider-run.json": providerMetadata.sha256,
 };
 const bundleManifestDocument = {
-  schema: "platform-activation-bundle-manifest/v1",
+  schema: "platform-activation-bundle-manifest/v2",
   requestId,
   releaseContextSha256: provisionalContextSha256,
   runtimeIntentSha256: deploymentReceiptDocument.runtimeIntentSha256,
@@ -268,19 +325,29 @@ const base = {
   deploymentReceiptSha256: deploymentReceipt.sha256,
   providerMetadata,
   providerMetadataSha256: providerMetadata.sha256,
-  dastReceipt,
-  dastReceiptSha256: dastReceipt.sha256,
+  dastProviderReceipt,
+  dastProviderReceiptSha256: dastProviderReceipt.sha256,
+  dastAuthorization,
+  dastAuthorizationSha256: dastAuthorization.sha256,
+  dastProviderMetadataSha256,
+  dastSigstoreBundleSha256,
+  dastSigstoreSubject,
   bundleManifest,
-  bundleDescriptor: {
-    schema: "platform-activation-bundle-descriptor/v1",
+  releaseBundleDescriptor: {
+    schema: "platform-activation-bundle-descriptor/v2",
     sha256: "e".repeat(64),
     sizeBytes: 1024,
     manifestSha256: bundleManifestSha256,
   },
-  activationAdmission: {
-    schema: "platform-activation-admission-descriptor/v1",
+  dockerActivationEnvelope: {
+    schema: "platform-docker-runtime-activation-envelope-descriptor/v1",
     sha256: "f".repeat(64),
     sizeBytes: 4096,
+    payloadType: "application/vnd.platform.docker-runtime-activation.v2+json",
+    runtimeIntentId: "runtime.production",
+    generation: 7,
+    dastAuthorizationSha256: dastAuthorization.sha256,
+    dastChainSha256: dastAuthorizationDocument.chainSha256,
   },
   repository,
   commitSha,
@@ -295,8 +362,8 @@ const base = {
 };
 
 const request = buildActivationRequest(base);
-assert.equal(request.schema, "platform-activation-request/v2");
-assert.equal(request.releaseContext.schema, "platform-trusted-release-context/v2");
+assert.equal(request.schema, "platform-activation-request/v3");
+assert.equal(request.releaseContext.schema, "platform-trusted-release-context/v3");
 assert.equal(request.requestId, requestId);
 assert.equal(request.releaseContext.releaseRoot, `/srv/platform-infrastructure/releases/${commitSha}-${sourceArchiveSha256}`);
 assert.equal(request.releaseContext.stateRoot, `/srv/platform-infrastructure/release-states/${commitSha}-${sourceArchiveSha256}-${runtimeIntent.environmentSha256}`);
@@ -306,9 +373,17 @@ assert.equal(request.releaseContext.subjects[1].imageId, schedulerImageId);
 assert.equal(request.releaseContext.runtimeIntentSha256, deploymentReceiptDocument.runtimeIntentSha256);
 assert.equal(request.releaseContext.sourceRenderSha256, runtimeIntent.sourceRenderSha256);
 assert.equal(request.releaseContext.combinedRenderSha256, runtimeIntent.combinedComposeSha256);
-assert.equal(request.releaseContext.provider.challenge, dastReceiptDocument.consumerChallenge.challengeNonce);
+assert.equal(request.releaseContext.provider.challenge, dastProviderReceiptDocument.consumerChallenge.challengeNonce);
+assert.equal(request.releaseContext.receipts.dastProviderSha256, dastProviderReceipt.sha256);
+assert.equal(request.releaseContext.receipts.dastAuthorizationSha256, dastAuthorization.sha256);
+assert.equal(request.releaseContext.dastChainSha256, dastAuthorizationDocument.chainSha256);
 assert.match(request.releaseContextSha256, /^[a-f0-9]{64}$/);
-assert.equal(request.bundle.manifestSha256, bundleManifestSha256);
+assert.equal(request.releaseBundle.manifestSha256, bundleManifestSha256);
+assert.equal(request.dockerActivationEnvelope.dastAuthorizationSha256, dastAuthorization.sha256);
+assert.equal(request.dockerActivationEnvelope.dastChainSha256, dastAuthorizationDocument.chainSha256);
+assert.notEqual(request.releaseBundle.sha256, request.dockerActivationEnvelope.sha256);
+assert.notEqual(request.releaseContext.receipts.dastProviderSha256, request.releaseContext.receipts.dastAuthorizationSha256);
+assert.notEqual(request.releaseContext.receipts.dastAuthorizationSha256, request.releaseContext.dastChainSha256);
 assert.match(request.dockerRuntime.releaseId, /^release\.[a-f0-9]{64}$/);
 assert.match(request.dockerRuntime.candidateId, /^candidate\.[a-f0-9]{64}$/);
 assert.match(request.dockerRuntime.targetId, /^target\.[a-f0-9]{64}$/);
@@ -323,16 +398,69 @@ assert.throws(() => buildActivationRequest({ ...base, targetHost: "attacker.exam
 assert.throws(() => buildActivationRequest({ ...base, environmentSha256: "f".repeat(64) }), /environment hash/);
 assert.throws(() => buildActivationRequest({
   ...base,
-  dastReceipt: artifact({ ...dastReceiptDocument, runtimeIntentSha256: "0".repeat(64) }),
+  dastProviderReceipt: artifact({ ...dastProviderReceiptDocument, runtimeIntentSha256: "0".repeat(64) }),
 }), /input artifacts|runtime intent/);
 assert.throws(() => buildActivationRequest({
   ...base,
-  bundleDescriptor: { ...base.bundleDescriptor, manifestSha256: "0".repeat(64) },
+  releaseBundleDescriptor: { ...base.releaseBundleDescriptor, manifestSha256: "0".repeat(64) },
 }), /exact canonical manifest/);
 assert.throws(() => buildActivationRequest({
   ...base,
-  activationAdmission: { ...base.activationAdmission, sizeBytes: 32 * 1024 * 1024 },
+  dockerActivationEnvelope: { ...base.dockerActivationEnvelope, sizeBytes: 3 * 1024 * 1024 },
 }), /size/);
+assert.throws(() => buildActivationRequest({
+  ...base,
+  dockerActivationEnvelope: {
+    ...base.dockerActivationEnvelope,
+    dastAuthorizationSha256: "9".repeat(64),
+  },
+}), /exact DAST authorization/);
+assert.throws(() => buildActivationRequest({
+  ...base,
+  dockerActivationEnvelope: {
+    ...base.dockerActivationEnvelope,
+    dastChainSha256: "9".repeat(64),
+  },
+}), /canonical chain/);
+assert.throws(() => buildActivationRequest({
+  ...base,
+  releaseBundleDescriptor: {
+    ...base.releaseBundleDescriptor,
+    schema: "platform-activation-bundle-descriptor/v1",
+  },
+}), /schema/);
+assert.throws(() => buildActivationRequest({
+  ...base,
+  dockerActivationEnvelope: {
+    ...base.dockerActivationEnvelope,
+    payloadType: "application/vnd.platform.docker-runtime-activation.v1+json",
+  },
+}), /payload type/);
+assert.throws(() => buildActivationRequest({
+  ...base,
+  releaseBundleDescriptor: {
+    ...base.releaseBundleDescriptor,
+    sha256: base.dockerActivationEnvelope.sha256,
+  },
+}), /digests must be distinct/);
+const nonCanonicalProviderReceipt = artifact({
+  ...dastProviderReceiptDocument,
+  provider: { ...dastProviderReceiptDocument.provider, runId: "0987654" },
+});
+assert.throws(() => buildActivationRequest({
+  ...base,
+  dastProviderReceipt: nonCanonicalProviderReceipt,
+  dastProviderReceiptSha256: nonCanonicalProviderReceipt.sha256,
+}), /canonical positive numeric identifier/);
+const nonCanonicalReportReceipt = artifact({
+  ...dastProviderReceiptDocument,
+  reportArtifact: { ...dastProviderReceiptDocument.reportArtifact, id: "0456789" },
+});
+assert.throws(() => buildActivationRequest({
+  ...base,
+  dastProviderReceipt: nonCanonicalReportReceipt,
+  dastProviderReceiptSha256: nonCanonicalReportReceipt.sha256,
+}), /canonical positive numeric identifier/);
 
 assert.match(contextSha256, /^[a-f0-9]{64}$/);
-process.stdout.write("activation request policy tests passed 28/28\n");
+process.stdout.write("activation request policy tests passed 43/43\n");

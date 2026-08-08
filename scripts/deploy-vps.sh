@@ -21,14 +21,23 @@ PROVIDER_METADATA=${DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:-}
 PROVIDER_METADATA_SHA256=${DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:-}
 PROVIDER_RUN_ID=${DEPLOY_TRUSTED_PROVIDER_RUN_ID:-}
 PROVIDER_RUN_ATTEMPT=${DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:-}
-DAST_RECEIPT=${DEPLOY_DAST_RECEIPT_PATH:-}
-DAST_RECEIPT_SHA256=${DEPLOY_DAST_RECEIPT_SHA256:-}
-BUNDLE_MANIFEST=${DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH:-}
-BUNDLE_SHA256=${DEPLOY_ACTIVATION_BUNDLE_SHA256:-}
-BUNDLE_SIZE_BYTES=${DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES:-}
-BUNDLE_MANIFEST_SHA256=${DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256:-}
-ACTIVATION_ADMISSION_SHA256=${DEPLOY_ACTIVATION_ADMISSION_SHA256:-}
-ACTIVATION_ADMISSION_SIZE_BYTES=${DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES:-}
+DAST_PROVIDER_RECEIPT=${DEPLOY_DAST_PROVIDER_RECEIPT_PATH:-}
+DAST_PROVIDER_RECEIPT_SHA256=${DEPLOY_DAST_PROVIDER_RECEIPT_SHA256:-}
+DAST_ACTIVATION_AUTHORIZATION=${DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH:-}
+DAST_ACTIVATION_AUTHORIZATION_SHA256=${DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256:-}
+DAST_PROVIDER_METADATA_SHA256=${DEPLOY_DAST_PROVIDER_METADATA_SHA256:-}
+DAST_SIGSTORE_BUNDLE_SHA256=${DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256:-}
+DAST_SIGSTORE_SUBJECT=${DEPLOY_DAST_SIGSTORE_SUBJECT:-}
+DAST_CHAIN_SHA256=${DEPLOY_DAST_CHAIN_SHA256:-}
+RELEASE_BUNDLE_MANIFEST=${DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH:-}
+RELEASE_BUNDLE_SHA256=${DEPLOY_RELEASE_BUNDLE_SHA256:-}
+RELEASE_BUNDLE_SIZE_BYTES=${DEPLOY_RELEASE_BUNDLE_SIZE_BYTES:-}
+RELEASE_BUNDLE_MANIFEST_SHA256=${DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256:-}
+DOCKER_ACTIVATION_ENVELOPE_SHA256=${DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256:-}
+DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES=${DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES:-}
+DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE=${DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE:-}
+DOCKER_ACTIVATION_RUNTIME_INTENT_ID=${DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID:-}
+DOCKER_ACTIVATION_GENERATION=${DEPLOY_DOCKER_ACTIVATION_GENERATION:-}
 CONSUMER_RUN_ID=${DEPLOY_CONSUMER_RUN_ID:-${GITHUB_RUN_ID:-}}
 CONSUMER_RUN_ATTEMPT=${DEPLOY_CONSUMER_RUN_ATTEMPT:-${GITHUB_RUN_ATTEMPT:-}}
 RECEIPT_OUTPUT=${DEPLOY_ACTIVATION_RECEIPT_PATH:-}
@@ -93,12 +102,25 @@ require_sha256 "Environment SHA256" "$ENVIRONMENT_SHA256"
 require_sha256 "Artifact receipt SHA256" "$ARTIFACT_RECEIPT_SHA256"
 require_sha256 "Deployment receipt SHA256" "$DEPLOYMENT_RECEIPT_SHA256"
 require_sha256 "Provider metadata SHA256" "$PROVIDER_METADATA_SHA256"
-require_sha256 "DAST receipt SHA256" "$DAST_RECEIPT_SHA256"
-require_sha256 "Activation bundle SHA256" "$BUNDLE_SHA256"
-require_sha256 "Activation bundle manifest SHA256" "$BUNDLE_MANIFEST_SHA256"
-require_sha256 "Activation admission SHA256" "$ACTIVATION_ADMISSION_SHA256"
-require_positive_integer "Activation bundle size" "$BUNDLE_SIZE_BYTES"
-require_positive_integer "Activation admission size" "$ACTIVATION_ADMISSION_SIZE_BYTES"
+require_sha256 "DAST provider receipt SHA256" "$DAST_PROVIDER_RECEIPT_SHA256"
+require_sha256 "DAST activation authorization SHA256" "$DAST_ACTIVATION_AUTHORIZATION_SHA256"
+require_sha256 "DAST provider metadata SHA256" "$DAST_PROVIDER_METADATA_SHA256"
+require_sha256 "DAST Sigstore bundle SHA256" "$DAST_SIGSTORE_BUNDLE_SHA256"
+require_sha256 "DAST chain SHA256" "$DAST_CHAIN_SHA256"
+require_sha256 "Release bundle SHA256" "$RELEASE_BUNDLE_SHA256"
+require_sha256 "Release bundle manifest SHA256" "$RELEASE_BUNDLE_MANIFEST_SHA256"
+require_sha256 "Docker activation envelope SHA256" "$DOCKER_ACTIVATION_ENVELOPE_SHA256"
+require_positive_integer "Release bundle size" "$RELEASE_BUNDLE_SIZE_BYTES"
+require_positive_integer "Docker activation envelope size" "$DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES"
+require_positive_integer "Docker activation generation" "$DOCKER_ACTIVATION_GENERATION"
+[ "$DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE" = "application/vnd.platform.docker-runtime-activation.v2+json" ] \
+  || fail "Docker activation envelope payload type must be the exact v2 media type."
+case "$DOCKER_ACTIVATION_RUNTIME_INTENT_ID" in
+  [a-z]* ) ;;
+  * ) fail "Docker activation runtime intent ID is invalid." ;;
+esac
+case "$DAST_SIGSTORE_SUBJECT" in "") fail "DAST Sigstore subject is required." ;; esac
+[ "${#DAST_SIGSTORE_SUBJECT}" -le 512 ] || fail "DAST Sigstore subject exceeds its boundary."
 require_positive_integer "Provider run ID" "$PROVIDER_RUN_ID"
 require_positive_integer "Provider run attempt" "$PROVIDER_RUN_ATTEMPT"
 require_positive_integer "Consumer run ID" "$CONSUMER_RUN_ID"
@@ -108,8 +130,9 @@ require_input_file "Deployment admission policy" "$POLICY"
 require_input_file "Artifact receipt" "$ARTIFACT_RECEIPT"
 require_input_file "Deployment receipt" "$DEPLOYMENT_RECEIPT"
 require_input_file "Provider metadata" "$PROVIDER_METADATA"
-require_input_file "DAST receipt" "$DAST_RECEIPT"
-require_input_file "Activation bundle manifest" "$BUNDLE_MANIFEST"
+require_input_file "DAST provider receipt" "$DAST_PROVIDER_RECEIPT"
+require_input_file "DAST activation authorization" "$DAST_ACTIVATION_AUTHORIZATION"
+require_input_file "Release bundle manifest" "$RELEASE_BUNDLE_MANIFEST"
 require_input_file "SSH private key" "$SSH_KEY_SOURCE"
 require_input_file "SSH known-hosts input" "$KNOWN_HOSTS_SOURCE"
 
@@ -161,14 +184,23 @@ node "$SCRIPT_ROOT/activation-request.mjs" \
   --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
   --providerMetadata "$PROVIDER_METADATA" \
   --providerMetadataSha256 "$PROVIDER_METADATA_SHA256" \
-  --dastReceipt "$DAST_RECEIPT" \
-  --dastReceiptSha256 "$DAST_RECEIPT_SHA256" \
-  --bundleManifest "$BUNDLE_MANIFEST" \
-  --bundleSha256 "$BUNDLE_SHA256" \
-  --bundleSizeBytes "$BUNDLE_SIZE_BYTES" \
-  --bundleManifestSha256 "$BUNDLE_MANIFEST_SHA256" \
-  --activationAdmissionSha256 "$ACTIVATION_ADMISSION_SHA256" \
-  --activationAdmissionSizeBytes "$ACTIVATION_ADMISSION_SIZE_BYTES" \
+  --dastProviderReceipt "$DAST_PROVIDER_RECEIPT" \
+  --dastProviderReceiptSha256 "$DAST_PROVIDER_RECEIPT_SHA256" \
+  --dastAuthorization "$DAST_ACTIVATION_AUTHORIZATION" \
+  --dastAuthorizationSha256 "$DAST_ACTIVATION_AUTHORIZATION_SHA256" \
+  --dastProviderMetadataSha256 "$DAST_PROVIDER_METADATA_SHA256" \
+  --dastSigstoreBundleSha256 "$DAST_SIGSTORE_BUNDLE_SHA256" \
+  --dastSigstoreSubject "$DAST_SIGSTORE_SUBJECT" \
+  --dastChainSha256 "$DAST_CHAIN_SHA256" \
+  --bundleManifest "$RELEASE_BUNDLE_MANIFEST" \
+  --releaseBundleSha256 "$RELEASE_BUNDLE_SHA256" \
+  --releaseBundleSizeBytes "$RELEASE_BUNDLE_SIZE_BYTES" \
+  --releaseBundleManifestSha256 "$RELEASE_BUNDLE_MANIFEST_SHA256" \
+  --dockerActivationEnvelopeSha256 "$DOCKER_ACTIVATION_ENVELOPE_SHA256" \
+  --dockerActivationEnvelopeSizeBytes "$DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES" \
+  --dockerActivationEnvelopePayloadType "$DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE" \
+  --dockerActivationRuntimeIntentId "$DOCKER_ACTIVATION_RUNTIME_INTENT_ID" \
+  --dockerActivationGeneration "$DOCKER_ACTIVATION_GENERATION" \
   --repository "$REPOSITORY" \
   --commit "$COMMIT_SHA" \
   --tree "$TREE_SHA" \
@@ -198,9 +230,9 @@ set -- \
   -o ExitOnForwardFailure=yes
 
 # The provider/admin-owned promoter must already have installed the exact
-# content-addressed bundle and its independently authenticated Sigstore/DSSE
-# admission sidecar. This client never stages into the trusted CAS and never
-# supplies a remote path or candidate executable.
+# content-addressed release bundle and authenticated Docker activation envelope.
+# This client never stages into the trusted CAS, transports raw provider/DAST
+# evidence over SSH, or supplies a remote path or candidate executable.
 ssh "$@" -- "$REMOTE" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate' \
   < "$request" > "$receipt"
 

@@ -67,7 +67,13 @@ record("verifier-certificate", includes(trustModule, "verification.signature?.ce
 record("verifier-transparency", includes(trustModule, "verification.verifiedTimestamps"), "transparency/timestamp witness is required");
 record("verifier-no-self-assertion", includes(trustModule, "self-asserted reports are not accepted"), "legacy verified booleans are rejected");
 record("verifier-subject-digest", includes(trustModule, "does not cover expected subject"), "subject digest must match");
-record("verifier-offline-pair", includes(trustModule, "both an attestation bundle and a custom trusted root"), "offline bundle and root are paired");
+const exactOfflineTrustMode = includes(trustModule, "(!bundle && (trustedRoot || useGithubPublicGoodRoot))")
+  && includes(trustModule, "(bundle && !trustedRoot && !useGithubPublicGoodRoot)")
+  && includes(trustModule, "(trustedRoot && useGithubPublicGoodRoot)")
+  && includes(trustModule, "bundle plus exactly one explicit trust mode: custom trusted root or GitHub public-good roots")
+  && includes(trustModule, 'args.push("--bundle", existingFile(bundle, "attestation bundle"))')
+  && includes(trustModule, 'args.push("--custom-trusted-root", existingFile(trustedRoot, "trusted root"))');
+record("verifier-offline-pair", exactOfflineTrustMode, "offline bundle requires exactly one fail-closed trust mode: custom root or GitHub public-good roots");
 
 record("ops-rejects-local-json", includes(ops, "Unsigned local SLSA JSON is not admissible"), "release gate rejects loose SLSA JSON");
 record("ops-rejects-normalized-json", includes(ops, "Normalized GitHub attestation reports are not trust inputs"), "release gate rejects normalized reports");
@@ -112,9 +118,19 @@ record(
   "production deploy sends only the bounded canonical activation request on stdin",
 );
 record("deploy-vps-no-remote-argv", !includes(deployVps, "sh -s --") && !includes(deployVps, "REMOTE_SCRIPT"), "production deploy has no dynamic SSH argv or heredoc interpolation");
+const boundedActivationShim = [
+  "BROKER=/usr/local/libexec/platform-activation-broker",
+  "SUDO=/usr/bin/sudo",
+  "MAX_REQUEST_BYTES=1048576",
+  'SYSTEM_NAME=$(/usr/bin/uname -s)',
+  '/bin/dd if=/dev/stdin of="$request" bs=65536 count=17',
+  '[ "$size" -gt 0 ] && [ "$size" -le "$MAX_REQUEST_BYTES" ]',
+  'exec "$SUDO" -n "$BROKER" activate < "$request"',
+].every((needle) => includes(deployVpsRemote, needle))
+  && /if \[ "\$SYSTEM_NAME" != Linux \]; then[\s\S]*BROKER=\$\{PLATFORM_ACTIVATION_TEST_BROKER:-\$BROKER\}[\s\S]*SUDO=\$\{PLATFORM_ACTIVATION_TEST_SUDO:-\$SUDO\}[\s\S]*fi/.test(deployVpsRemote);
 record(
   "deploy-vps-remote-revalidation",
-  includes(deployVpsRemote, "exec /usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate")
+  boundedActivationShim
     && includes(deployVps, 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"')
     && !/decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
   "remote sink delegates only to the root-owned broker and the client validates its exact receipt",

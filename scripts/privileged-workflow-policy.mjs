@@ -56,8 +56,8 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   if (JSON.stringify(exactNeeds(dast)) !== JSON.stringify(["enterprise-readiness", "release-admission"])
     || !/environment:\s*\n\s+name:\s+staging/.test(dast)
     || !/dast-zap-baseline\.sh/.test(dast)
-    || !/dast-admission-policy\.mjs/.test(dast)
-    || !/dast-runtime-receipt-policy\.mjs/.test(dast)) {
+    || !/dast-runtime-receipt-policy\.mjs/.test(dast)
+    || !/mode\]=dast-countersign/.test(dast)) {
     issues.push("dast-zap must consume the exact readiness and release-admission prerequisites and bind both runtime verification and activation admission receipts");
   }
   if (!/^    needs: enterprise-readiness\s*$/m.test(admission)
@@ -79,6 +79,27 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
   if (productionEnvironments.length !== 1) {
     issues.push("enterprise-infra must expose exactly one production environment job");
+  }
+  const promotionIndex = deploy.indexOf("node ./scripts/activation-promotion-policy.mjs");
+  const providerReplayIndex = deploy.lastIndexOf("node ./scripts/dast-runtime-receipt-policy.mjs");
+  const sshCredentialIndex = deploy.indexOf("- name: Install SSH key");
+  if (
+    promotionIndex < 0
+    || providerReplayIndex < 0
+    || sshCredentialIndex < 0
+    || promotionIndex >= sshCredentialIndex
+    || providerReplayIndex >= sshCredentialIndex
+  ) {
+    issues.push("provider replay and activation promotion v2 must both finish before SSH credential installation");
+  }
+  if (
+    !deploy.includes("platform-activation-receipt/v3")
+    || !deploy.includes(".releaseBundleSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_RELEASE_BUNDLE_SHA256")
+    || !deploy.includes(".dockerActivationEnvelopeSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256")
+    || !deploy.includes(".dastAuthorizationSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256")
+    || !deploy.includes(".dastChainSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_CHAIN_SHA256")
+  ) {
+    issues.push("deploy-vps must validate the exact receipt v3 release, envelope, authorization and chain identities");
   }
   return issues;
 }
@@ -170,10 +191,35 @@ export function dastReceiptWiringMismatches(workflowText) {
     || !deploy.includes('--dastReceiptSha256 "$DAST_RECEIPT_SHA256"')
     || !deploy.includes('--dastAttestationBundle "$DAST_ATTESTATION_BUNDLE"')
     || !deploy.includes('--attestationVerifier /usr/local/bin/gh')
-    || !deploy.includes("DEPLOY_DAST_REPORT_ARTIFACT_SHA256:")
     || (deploy.match(/node \.\/scripts\/dast-runtime-receipt-policy\.mjs/g) ?? []).length !== 1
   ) {
     issues.push("deploy must cryptographically revalidate the exact request, report archive and provider receipt before mutation");
+  }
+  const promotedNames = "release-activation.bundle release-activation-bundle-manifest.json docker-runtime-activation.dsse.json dast-activation-authorization.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json";
+  if (
+    !deploy.includes("-eq 7")
+    || !deploy.includes(promotedNames)
+    || !deploy.includes('--releaseBundle "$PROMOTED/release-activation.bundle"')
+    || !deploy.includes('--releaseBundleManifest "$PROMOTED/release-activation-bundle-manifest.json"')
+    || !deploy.includes('--dockerActivationEnvelope "$PROMOTED/docker-runtime-activation.dsse.json"')
+    || !deploy.includes('--dastAuthorization "$PROMOTED/dast-activation-authorization.json"')
+    || !deploy.includes('--dastProviderReceipt "$DAST_RECEIPT"')
+    || !deploy.includes('--dastProviderMetadata "$DAST_PROVIDER_METADATA"')
+    || !deploy.includes('--dastProviderAttestationBundle "$DAST_PROVIDER_ATTESTATION_BUNDLE"')
+    || !deploy.includes('test "$(wc -c < "$RESULT" | tr -d \' \')" -le 1048576')
+  ) {
+    issues.push("deploy must consume the exact bounded seven-file activation promotion v2 handoff");
+  }
+  const opsStart = deploy.indexOf("docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges");
+  const opsEnd = deploy.indexOf('"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"', opsStart);
+  const opsInvocation = opsStart >= 0 && opsEnd > opsStart ? deploy.slice(opsStart, opsEnd) : "";
+  if (
+    !opsInvocation.includes("dast-provider-verification.json:ro")
+    || !opsInvocation.includes("dast-activation-authorization.json:ro")
+    || !opsInvocation.includes("release-activation-bundle-manifest.json:ro")
+    || /dast-scan-request|dast-provider-run|dast-provider-attestation|sigstore-trusted-root|docker-runtime-activation\.dsse|release-activation\.bundle/.test(opsInvocation)
+  ) {
+    issues.push("trusted ops sink must receive only the closed receipt, authorization and manifest evidence projection");
   }
   if (/continue-on-error:\s*true/.test(`${release}\n${dast}\n${deploy}`)) {
     issues.push("release, DAST and deploy receipt gates may not continue on error");

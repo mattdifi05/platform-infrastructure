@@ -15,8 +15,13 @@ exit 99
 SH
 chmod 0555 "$TMP/bin/sudo"
 
-grep -Fx 'exec /usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate' \
-  "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'BROKER=/usr/local/libexec/platform-activation-broker' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'SUDO=/usr/bin/sudo' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'MAX_REQUEST_BYTES=1048576' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'if [ "$SYSTEM_NAME" != Linux ]; then' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '/bin/dd if=/dev/stdin of="$request" bs=65536 count=17' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '[ "$size" -gt 0 ] && [ "$size" -le "$MAX_REQUEST_BYTES" ]' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'exec "$SUDO" -n "$BROKER" activate < "$request"' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 if grep -Eq 'exec[[:space:]]+sudo|/usr/bin/env[[:space:]]+sudo' "$SCRIPT_DIR/deploy-vps-remote.sh"; then
   echo "FAIL: activation sink resolves sudo through caller PATH" >&2
   exit 1
@@ -52,6 +57,38 @@ receipt_line=$(grep -n 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"' "$SCR
 }
 printf 'PASS\trequest-before-broker-before-receipt-validation\n'
 
+for required in \
+  DEPLOY_DAST_PROVIDER_RECEIPT_PATH \
+  DEPLOY_DAST_PROVIDER_RECEIPT_SHA256 \
+  DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH \
+  DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256 \
+  DEPLOY_DAST_PROVIDER_METADATA_SHA256 \
+  DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256 \
+  DEPLOY_DAST_SIGSTORE_SUBJECT \
+  DEPLOY_DAST_CHAIN_SHA256 \
+  DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH \
+  DEPLOY_RELEASE_BUNDLE_SHA256 \
+  DEPLOY_RELEASE_BUNDLE_SIZE_BYTES \
+  DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256 \
+  DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256 \
+  DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES \
+  DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE \
+  DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID \
+  DEPLOY_DOCKER_ACTIVATION_GENERATION; do
+  grep -F "$required" "$SCRIPT_DIR/deploy-vps.sh" >/dev/null || {
+    echo "FAIL: deployment client omits v3 input $required" >&2
+    exit 1
+  }
+done
+printf 'PASS\texact-v3-release-and-docker-activation-inputs\n'
+
+if grep -Eq 'DEPLOY_DAST_RECEIPT_(PATH|SHA256)|DEPLOY_ACTIVATION_BUNDLE_|DEPLOY_ACTIVATION_ADMISSION_|--dastReceipt([[:space:]]|$)|--activationAdmission' \
+  "$SCRIPT_DIR/deploy-vps.sh"; then
+  echo "FAIL: deployment client retains a legacy DAST/bundle/admission input" >&2
+  exit 1
+fi
+printf 'PASS\tlegacy-activation-admission-is-absent\n'
+
 grep -F '[ "${1:-}" = "deploy-vps" ]' "$SCRIPT_DIR/ops-image-entrypoint.sh" >/dev/null
 grep -F 'export PLATFORM_TRUSTED_OPS_RUNNER=1' "$SCRIPT_DIR/ops-image-entrypoint.sh" >/dev/null
 grep -F 'export PLATFORM_OPS_CODE_ROOT="$CODE_ROOT"' "$SCRIPT_DIR/ops-image-entrypoint.sh" >/dev/null
@@ -77,4 +114,4 @@ if grep -Eq 'DEPLOY_REMOTE_DIR|DEPLOY_SOURCE_ARCHIVE_PATH|DEPLOY_RUN_|PRE_GO_LIV
 fi
 printf 'PASS\tlegacy-ordering-inputs-are-not-consumed\n'
 
-printf 'deploy VPS broker order tests passed 9/9\n'
+printf 'deploy VPS broker order tests passed 11/11\n'

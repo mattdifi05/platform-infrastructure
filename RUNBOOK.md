@@ -6,8 +6,13 @@ Il producer ops trusted non e' configurato nella policy versionata:
 `scripts/infra-ops.sh` e `scripts/prepare-hosted-workloads.sh` terminano
 `EXTERNAL-PENDING` con codice 78 prima di eseguire un container operativo.
 Il percorso positivo esiste, ma richiede receipt artifact/deployment, metadata
-del run provider, checkout pulito ed esatto e corrispondenza fra digest e image
-ID locale; esegue quell'ID con `--pull=never`. Finche' la policy resta pending,
+del run provider, checkout pulito ed esatto oppure release immutabile estratta
+dall'archive autenticato, e corrispondenza fra digest e image ID locale; esegue
+quell'ID con `--pull=never`. Per Hosted il provider deve installare sul target
+l'env root-owned `0640`, eseguire la preparazione target-local del lock e solo
+poi coniare il context v3 che ne lega il digest. Questa orchestrazione provider
+resta `EXTERNAL-PENDING`; il lock e il suo snapshot non sono portabili tra host.
+Finche' la policy resta pending,
 i comandi wrapper non sono procedure production ne' evidence positiva. I
 controlli repository attivi girano nei job CI non privilegiati sul checkout
 esatto.
@@ -38,6 +43,9 @@ checkout before executing only the admitted local image ID with
 Scheduled backup/restore jobs remain socketless and submit only fixed semantic
 actions to the root-owned broker. No loopback or ephemeral raw Docker API is
 created.
+`backup-scheduler` is activated or updated only by the trusted
+`deploy-vps.sh` workflow. `compose-vps.sh` is limited to render and inspection; it is
+not a supported scheduler mutation entrypoint.
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is

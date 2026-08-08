@@ -7,5 +7,7 @@ WORKDIR /opt/platform-backup-scheduler
 
 COPY --chmod=0555 scripts/backup-scheduler.sh /opt/platform-backup-scheduler/backup-scheduler.sh
 COPY --chmod=0444 scripts/docker-action-client.mjs scripts/docker-action-contract.mjs /opt/platform-backup-scheduler/
+COPY --chmod=0444 scripts/backup-queue-control.mjs /opt/platform-backup-scheduler/scripts/backup-queue-control.mjs
+COPY --chmod=0444 control-center/backup/contracts.mjs control-center/backup/queue-admission.mjs control-center/backup/queue-operation-adapter.mjs /opt/platform-backup-scheduler/control-center/backup/
 
 ENTRYPOINT ["/opt/platform-backup-scheduler/backup-scheduler.sh"]

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createBackupJobDocument } from "../control-center/backup/contracts.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const schedulerCapabilitySecrets = [
@@ -20,7 +21,19 @@ test("FG-005 documents only the isolation-aware scheduler entrypoint", () => {
   for (const name of ["README.md", "RUNBOOK.md"]) {
     const source = fs.readFileSync(path.join(root, name), "utf8");
     const schedulerBlocks = documentedSchedulerComposeBlocks(source);
-    assert.ok(schedulerBlocks.length > 0, `${name} must document scheduler startup`);
+    if (schedulerBlocks.length === 0) {
+      assert.match(
+        source,
+        /backup-scheduler[^\n]*\n(?:[^\n]*\n){0,2}[^\n]*deploy-vps\.sh/i,
+        `${name} must document the trusted scheduler activation path`,
+      );
+      assert.match(
+        source,
+        /compose-vps\.sh[^\n]*(?:render|ispezion)/i,
+        `${name} must keep the Compose wrapper non-mutating`,
+      );
+      continue;
+    }
     for (const block of schedulerBlocks) {
       if (!/(?:^|\n)\s*(?:docker logs|docker exec)\b/.test(block) || /(?:^|\n)\s*(?:docker compose|docker-compose)\b/.test(block)) {
         assert.match(block, /COMPOSE_ENV_FILE=.*COMPOSE_PROJECT_NAME=.*\\?\n?\s*bash \.\/scripts\/compose-vps\.sh up -d backup-scheduler/);
@@ -77,11 +90,25 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
   assert.match(candidates[0].source, /^ARG NODE_IMAGE=[^\s]+@sha256:[a-f0-9]{64}\s*$/m);
   for (const source of [
     "scripts/backup-scheduler.sh",
+    "scripts/backup-queue-control.mjs",
     "scripts/docker-action-client.mjs",
     "scripts/docker-action-contract.mjs",
+    "control-center/backup/contracts.mjs",
+    "control-center/backup/queue-admission.mjs",
+    "control-center/backup/queue-operation-adapter.mjs",
   ]) {
     assert.ok(dockerfileCopies(candidates[0].source, source), `scheduler image is missing ${source}`);
   }
+  assert.match(
+    candidates[0].source,
+    /^COPY --chmod=0444 scripts\/backup-queue-control\.mjs \/opt\/platform-backup-scheduler\/scripts\/backup-queue-control\.mjs$/m,
+    "queue control must exist at the scheduler entrypoint's exact INFRA_ROOT path",
+  );
+  assert.match(
+    candidates[0].source,
+    /^COPY --chmod=0444 control-center\/backup\/contracts\.mjs control-center\/backup\/queue-admission\.mjs control-center\/backup\/queue-operation-adapter\.mjs \/opt\/platform-backup-scheduler\/control-center\/backup\/$/m,
+    "queue control dependencies must preserve their repository-relative import graph",
+  );
   const executableSurface = instructions
     .filter(({ opcode }) => ["FROM", "RUN", "ENTRYPOINT", "CMD"].includes(opcode))
     .map(({ value }) => value)
@@ -455,12 +482,19 @@ function runClaimedQueueWithFakeClient({
   const terminal = path.join(jobs, expectedStatus, fileName);
   fs.mkdirSync(path.dirname(queued), { recursive: true });
   fs.mkdirSync(bin);
-  fs.writeFileSync(queued, `${JSON.stringify({
-    schema: "platform.backup-job/v1",
+  fs.writeFileSync(queued, `${JSON.stringify(createBackupJobDocument({
     id: "0123456789abcdef",
     operation: "backup",
-    status: "queued",
-  })}\n`, { mode: 0o600 });
+    scope: { kind: "platform" },
+    resources: [{
+      kind: "platform-state",
+      externalId: "control-state",
+      name: "control-state",
+    }],
+    requestedBy: "owner@example.test",
+    environment: "test",
+    createdAt: "2026-07-21T00:00:00.000Z",
+  }))}\n`, { mode: 0o600 });
 
   for (const command of [
     "basename",

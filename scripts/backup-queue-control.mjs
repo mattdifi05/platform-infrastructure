@@ -5,6 +5,7 @@ import {
   backupQueuePolicyFromEnvironment,
   claimNextBackupJob,
   finishBackupJob,
+  markBackupJobOutcomeUnknown,
   pruneBackupQueue,
   releaseBackupSchedulerLease,
 } from "../control-center/backup/queue-admission.mjs";
@@ -29,6 +30,14 @@ try {
       exitCode: options.exitCode ?? null,
       policy,
     });
+  } else if (command === "mark-unknown") {
+    markBackupJobOutcomeUnknown({
+      jobsDir,
+      jobId: requiredOption(options, "jobId"),
+      summary: requiredOption(options, "summary"),
+      exitCode: requiredOption(options, "exitCode"),
+      policy,
+    });
   } else if (command === "prune") {
     const result = pruneBackupQueue({ jobsDir, logDir, policy });
     process.stdout.write(`${JSON.stringify({ removed: result.length })}\n`);
@@ -43,7 +52,7 @@ try {
   } else if (command === "release-lease") {
     releaseBackupSchedulerLease({ jobsDir, handle: requiredOption(options, "handle"), policy });
   } else {
-    throw new Error("Usage: backup-queue-control.mjs <claim|finish|prune|acquire-lease|release-lease> --jobsDir PATH [--logDir PATH]");
+    throw new Error("Usage: backup-queue-control.mjs <claim|finish|mark-unknown|prune|acquire-lease|release-lease> --jobsDir PATH [--logDir PATH]");
   }
 } catch (error) {
   if (error instanceof BackupQueueAdmissionError) {

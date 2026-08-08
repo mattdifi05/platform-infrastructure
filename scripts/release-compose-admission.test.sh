@@ -160,7 +160,7 @@ expect_reject_with_previous changed-network-identity
 grep -F 'COPY --chown=node:node project-router/server.mjs /app/server.mjs' "$ROOT/docker/project-router.Dockerfile" >/dev/null
 printf 'PASS\tproject-router-code-is-image-baked\n'
 
-[ "$(grep -c 'build: !reset null' "$ROOT/compose.runtime-isolation.yaml")" -eq 4 ]
+[ "$(grep -c 'build: !reset null' "$ROOT/compose.runtime-isolation.yaml")" -eq 5 ]
 printf 'PASS\tvps-repository-build-fallbacks-reset\n'
 
 ! grep -F 'profiles: !reset []' "$ROOT/compose.runtime.yaml" >/dev/null

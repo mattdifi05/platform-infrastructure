@@ -80,6 +80,7 @@ function deriveCanonicalRoutes(workloads) {
             || aliases.some((alias) => typeof alias !== "string" || !ROUTE_SLUG.test(alias) || alias === route.slug)
             || canonicalHost.split(".")[0] !== route.slug
             || !same(route.hosts, expectedHosts)
+            || expectedHosts.some((host) => host.length > 253)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
             || [route.slug, ...aliases].some((name) => routeNames.has(name))

@@ -19,6 +19,7 @@ import {
   admitBackupJob,
   claimNextBackupJob,
   finishBackupJob,
+  markBackupJobOutcomeUnknown,
   pruneBackupQueue,
   releaseBackupSchedulerLease,
 } from "../backup/queue-admission.mjs";
@@ -208,6 +209,73 @@ test("scheduler concurrency is global and completion releases active work", (t) 
     () => admitBackupJob({ jobsDir: retryFixture.jobsDir, logDir: retryFixture.logDir, operation: operation(), principal: owner, job: job("job-retry-a", owner, "different-work", "backup", BASE_TIME + 4000), policy: bounded, now: BASE_TIME + 4000 }),
     "job_id_conflict",
   );
+});
+
+test("unknown post-admission outcome is persisted atomically as running for manual reconciliation", (t) => {
+  const { jobsDir, logDir } = fixture(t);
+  const owner = "owner-unknown@example.test";
+  const bounded = policy({ maxConcurrency: 1 });
+  admitBackupJob({
+    jobsDir,
+    logDir,
+    operation: operation(),
+    principal: owner,
+    job: job("job-unknown", owner, "unknown"),
+    policy: bounded,
+    now: BASE_TIME,
+  });
+  const claimed = claimNextBackupJob({ jobsDir, logDir, policy: bounded, now: BASE_TIME + 1000 });
+  assert.equal(claimed.claimed, true);
+
+  assert.throws(() => markBackupJobOutcomeUnknown({
+    jobsDir,
+    jobId: claimed.job.id,
+    summary: "manual-reconciliation required",
+    exitCode: 75,
+    policy: bounded,
+    now: BASE_TIME + 1500,
+  }), /Invalid unknown-outcome exit code/);
+  rejectedCode(() => markBackupJobOutcomeUnknown({
+    jobsDir,
+    jobId: claimed.job.id,
+    summary: "outcome unknown",
+    exitCode: 74,
+    policy: bounded,
+    now: BASE_TIME + 1500,
+  }), "invalid_unknown_summary");
+
+  const marked = markBackupJobOutcomeUnknown({
+    jobsDir,
+    jobId: claimed.job.id,
+    summary: "manual-reconciliation required after unknown broker delivery",
+    exitCode: 74,
+    policy: bounded,
+    now: BASE_TIME + 2000,
+  });
+  assert.equal(marked.marked, true);
+
+  const runningPath = path.join(jobsDir, "running", `${claimed.job.id}.json`);
+  const durable = JSON.parse(readFileSync(runningPath, "utf8"));
+  assert.equal(durable.status, "running");
+  assert.equal(durable.exitCode, 74);
+  assert.match(durable.resultSummary, /manual-reconciliation/i);
+  assert.equal(durable.updatedAt, new Date(BASE_TIME + 2000).toISOString());
+  assert.equal(existsSync(path.join(jobsDir, "done", `${claimed.job.id}.json`)), false);
+  assert.equal(existsSync(path.join(jobsDir, "failed", `${claimed.job.id}.json`)), false);
+  assert.equal(claimNextBackupJob({ jobsDir, logDir, policy: bounded, now: BASE_TIME + 3000 }).reason, "concurrency_full");
+
+  finishBackupJob({
+    jobsDir,
+    logDir,
+    jobId: claimed.job.id,
+    status: "done",
+    summary: "manually reconciled successful",
+    policy: bounded,
+    now: BASE_TIME + 4000,
+  });
+  const reconciled = JSON.parse(readFileSync(path.join(jobsDir, "done", `${claimed.job.id}.json`), "utf8"));
+  assert.equal(reconciled.status, "done");
+  assert.equal(Object.hasOwn(reconciled, "exitCode"), false, "successful reconciliation must clear stale exit 74");
 });
 
 test("scheduled work reserves the same global execution budget", (t) => {

@@ -135,6 +135,20 @@ function proxy(clientReq, clientRes, upstream) {
   headers["x-forwarded-host"] = clientReq.headers.host || "";
   headers["x-forwarded-proto"] = clientReq.headers["x-forwarded-proto"] || "https";
 
+  let upstreamFailureHandled = false;
+  const failUpstream = (error) => {
+    if (upstreamFailureHandled) return;
+    upstreamFailureHandled = true;
+    console.error(`project upstream request failed for ${upstream.hostname}:${upstream.port || 80}: ${error?.code || "request-error"}`);
+    if (clientRes.destroyed || clientRes.writableEnded) return;
+    if (clientRes.headersSent) {
+      clientRes.destroy();
+      return;
+    }
+    clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+    clientRes.end("upstream unavailable\n");
+  };
+
   const proxyReq = httpRequest({
     protocol: upstream.protocol,
     hostname: upstream.hostname,
@@ -143,15 +157,17 @@ function proxy(clientReq, clientRes, upstream) {
     path: requestPath,
     headers,
   }, (proxyRes) => {
+    proxyRes.once("aborted", () => failUpstream(new Error("upstream response aborted")));
+    proxyRes.once("error", failUpstream);
+    if (clientRes.destroyed || clientRes.writableEnded) {
+      proxyRes.destroy();
+      return;
+    }
     clientRes.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
     proxyRes.pipe(clientRes);
   });
 
-  proxyReq.on("error", (error) => {
-    console.error(`project upstream request failed for ${upstream.hostname}:${upstream.port || 80}: ${error.code || "request-error"}`);
-    clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-    clientRes.end("upstream unavailable\n");
-  });
+  proxyReq.once("error", failUpstream);
   const wallClockTimeout = setTimeout(() => proxyReq.destroy(new Error("upstream timeout")), upstreamTimeoutMs);
   wallClockTimeout.unref();
   proxyReq.once("close", () => clearTimeout(wallClockTimeout));

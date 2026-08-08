@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+RELEASE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-records|activation-bundle]}
 COMMAND=${2:-verify}
 RAW_POLICY_CONTROLS='["bind-bounded-dependencies","bind-bounded-local-logging","bind-closed-service-schema","bind-exact-healthcheck","bind-exact-security-opt","bind-exact-ulimits","bind-exact-volume-mounts","bind-firewall-gated-restart","bind-network-identity","bind-network-topology","bind-no-swap-oom-policy","bind-owned-secret-aliases","bind-owned-volume-driver","bind-owned-volumes","bind-platform-extension-records","bind-private-pid-numeric-user","deny-accelerator-environment","deny-api-socket","deny-compose-interpolation","deny-deploy-controls","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-generic-resources","deny-gpu-access","deny-include","deny-inline-configs","deny-label-file","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-identity-labels","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-supplemental-groups","deny-volumes-from"]'
@@ -37,6 +39,24 @@ stat_stable_identity() {
 stat_identity() {
   stable=$(stat_stable_identity "$1") || return 1
   printf '%s\n' "$stable" | awk -F'|' '{ print $1 "|" $2 "|" $3 "|" $4 }'
+}
+
+stat_nlink() {
+  if stat -c '%h' "$1" >/dev/null 2>&1; then
+    stat -c '%h' "$1"
+  else
+    stat -f '%l' "$1"
+  fi
+}
+
+trusted_os() {
+  if [ -x /usr/bin/uname ]; then
+    /usr/bin/uname -s
+  elif [ -x /bin/uname ]; then
+    /bin/uname -s
+  else
+    return 1
+  fi
 }
 
 sha256_stream() {
@@ -87,6 +107,23 @@ assert_no_symlink_components() {
     [ ! -L "$cursor" ] || die "Snapshot path contains a symlink component: $cursor"
     stat_fields "$cursor" >/dev/null 2>&1 || die "Snapshot path component is missing: $cursor"
   done
+}
+
+assert_authority_directory() {
+  authority_directory=$1
+  authority_owner=$2
+  authority_label=$3
+  assert_no_symlink_components "$authority_directory"
+  [ -d "$authority_directory" ] && [ ! -L "$authority_directory" ] \
+    || die "$authority_label must be a canonical authority-owned directory."
+  [ "$(CDPATH= cd -- "$authority_directory" && pwd -P)" = "$authority_directory" ] \
+    || die "$authority_label is not canonical."
+  authority_identity=$(stat_identity "$authority_directory") \
+    || die "$authority_label identity is unavailable."
+  authority_uid=$(printf '%s\n' "$authority_identity" | awk -F'|' '{ print $3 }')
+  authority_mode=$(printf '%s\n' "$authority_identity" | awk -F'|' '{ print $4 }')
+  [ "$authority_uid" = "$authority_owner" ] && [ $((authority_mode & 18)) -eq 0 ] \
+    || die "$authority_label must be authority-owned and non-group/world-writable."
 }
 
 [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die "Hosted workload lock must be a regular non-symlink file."
@@ -208,10 +245,12 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       and (.slug | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.slug as $slug | .aliases | type == "array" and . == (unique | sort)
         and all(.[]; type == "string" and test("^[a-z][a-z0-9-]{1,62}$") and . != $slug))
-      and (.canonicalHost | type == "string" and test("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"))
+      and (.canonicalHost | type == "string" and length <= 253 and test("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"))
       and (.canonicalHost | split(".")[0]) == .slug
       and ((.canonicalHost | split(".")[1:] | join(".")) as $suffix
-        | .hosts == ([.canonicalHost] + [.aliases[] | if $suffix == "" then . else . + "." + $suffix end]))
+        | ([.canonicalHost] + [.aliases[] | if $suffix == "" then . else . + "." + $suffix end]) as $expected_hosts
+        | .hosts == $expected_hosts
+          and all($expected_hosts[]; length <= 253))
       and (.port | type == "number" and floor == . and . >= 1 and . <= 65535));
   def canonical_routes:
     [
@@ -293,7 +332,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       and .[0] as $core_environment_record
       | $core_environment_record.snapshot != true
       and $core_environment_record.path == $lock.coreEnvFile
-      and ([256, 384] | index($core_environment_record.mode)) != null)
+      and ([256, 384, 416] | index($core_environment_record.mode)) != null)
     and (($core_records | map(.path) | sort) == ($lock.coreFiles | unique | sort))
     and all($lock.workloads[];
       . as $workload
@@ -422,9 +461,46 @@ lock_directory_mode=$(printf '%s\n' "$lock_directory_identity" | awk -F'|' '{ pr
 [ "$(jq_lock -r '.snapshotGenerationIdentity.uid | tostring')" = "$deployment_uid" ] || die "Snapshot generation must be owned by the deployment identity."
 core_environment_uid=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .uid')
 core_environment_mode=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .mode')
-[ "$core_environment_uid" = "$deployment_uid" ] \
-  && { [ "$core_environment_mode" = 256 ] || [ "$core_environment_mode" = 384 ]; } \
-  || die "Core environment must be deployment-owned with mode 0400 or 0600."
+core_environment_path=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .path')
+core_environment_sha256=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .sha256')
+if [ "$core_environment_path" = "$RELEASE_ROOT/.env" ] \
+    && [ "$core_environment_uid" = "$deployment_uid" ] \
+    && { [ "$core_environment_mode" = 256 ] || [ "$core_environment_mode" = 384 ]; }; then
+  :
+else
+  host_os=$(trusted_os) || die "Target-local core environment authority cannot determine the host OS safely."
+  case "$host_os" in
+    Linux)
+      authority_root=/srv/platform-infrastructure
+      authority_uid=0
+      ;;
+    Darwin)
+      [ -n "${HOSTED_TEST_INFRASTRUCTURE_ROOT:-}" ] \
+        || die "Target-local core environment authority is unavailable outside Linux."
+      authority_root=$HOSTED_TEST_INFRASTRUCTURE_ROOT
+      authority_uid=$deployment_uid
+      ;;
+    *) die "Target-local core environment authority is unavailable on this host OS." ;;
+  esac
+  assert_safe_absolute_path "$authority_root"
+  release_id=$(basename -- "$RELEASE_ROOT")
+  printf '%s\n' "$release_id" | grep -Eq '^([a-f0-9]{40}|[a-f0-9]{64})-[a-f0-9]{64}$' \
+    || die "Target-local release identifier is invalid."
+  expected_release_root=$authority_root/releases/$release_id
+  expected_state_root=$authority_root/release-states/$release_id-$core_environment_sha256
+  [ "$RELEASE_ROOT" = "$expected_release_root" ] \
+    && [ "$core_environment_path" = "$expected_state_root/environment.env" ] \
+    && [ "$core_environment_uid" = "$authority_uid" ] \
+    && [ "$core_environment_mode" = 416 ] \
+    && [ "$(stat_nlink "$core_environment_path")" = 1 ] \
+    || die "Core environment is neither deployment-owned nor the exact target-local release-state authority."
+  assert_authority_directory "$(dirname -- "$authority_root")" "$authority_uid" "Platform service root"
+  assert_authority_directory "$authority_root" "$authority_uid" "Platform infrastructure root"
+  assert_authority_directory "$authority_root/releases" "$authority_uid" "Immutable release store"
+  assert_authority_directory "$RELEASE_ROOT" "$authority_uid" "Immutable release root"
+  assert_authority_directory "$authority_root/release-states" "$authority_uid" "Release-state store"
+  assert_authority_directory "$expected_state_root" "$authority_uid" "Release-state root"
+fi
 
 count=$(jq_lock '.files | length')
 index=0

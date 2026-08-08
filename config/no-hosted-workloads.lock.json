@@ -6,8 +6,8 @@
   "workloads": [],
   "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "coreSemanticPolicy": {
-    "schema": "platform-no-hosted-core-capability-policy/v1",
-    "sha256": "03fe5fa325885f61b61c26e1ac4bfdc241cbf3d661309d670c5efc4ab3910783"
+    "schema": "platform-no-hosted-core-capability-policy/v2",
+    "sha256": "a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a"
   },
   "projectName": "platform_infra_vps",
   "protectedResourceNames": {
@@ -15,11 +15,9 @@
       "enterprise_traefik_routes"
     ],
     "networks": [
-      "enterprise_net",
       "platform_bus",
       "platform_cache",
       "platform_db_admin",
-      "platform_docker_control",
       "platform_edge",
       "platform_egress",
       "platform_observability",
@@ -29,16 +27,22 @@
     ],
     "secrets": [
       "alertmanager_webhook_token",
-      "backup_signing_keys",
       "control_center_database_url",
       "control_center_vault_keys",
+      "docker_action_backup_catalog",
+      "docker_action_backup_job_execute",
+      "docker_action_backup_offsite_sync",
+      "docker_action_backup_prune_apply",
+      "docker_action_backup_prune_plan",
+      "docker_action_evidence_runtime_snapshot",
+      "docker_action_restore_drill_full",
+      "docker_action_runtime_intent_trust_key",
       "grafana_admin_password",
       "keycloak_admin_password",
       "keycloak_db_password",
       "mariadb_root_password",
       "minio_root_password",
       "nats_password",
-      "phpmyadmin_control_password",
       "postgres_superuser_password",
       "projects_gateway_signing_keys",
       "redis_password",
@@ -47,20 +51,16 @@
     "services": [
       "alertmanager",
       "backup-scheduler",
-      "cadvisor",
+      "broker-auth-bootstrap",
       "control-center",
-      "docker-socket-proxy",
+      "docker-action-activation-sidecar",
+      "docker-action-broker",
       "grafana",
       "keycloak",
-      "local-dns",
-      "local-registry",
       "loki",
       "mariadb",
       "minio",
       "nats",
-      "node-exporter",
-      "phpmyadmin",
-      "phppgadmin",
       "platform-alert-dispatcher",
       "postgres",
       "project-router",
@@ -71,18 +71,23 @@
       "waf"
     ],
     "volumes": [
+      "backup_scheduler_jobs",
       "backup_scheduler_logs",
+      "docker_action_activation_cas",
+      "docker_action_broker_socket",
+      "docker_action_broker_state",
       "enterprise_alertmanager_data",
       "enterprise_grafana_data",
       "enterprise_keycloak_data",
-      "enterprise_local_registry_data",
       "enterprise_loki_data",
       "enterprise_mariadb_data",
       "enterprise_minio_data",
       "enterprise_nats_data",
       "enterprise_postgres_data",
       "enterprise_prometheus_data",
-      "enterprise_redis_data"
+      "enterprise_redis_data",
+      "nats_auth_config",
+      "redis_auth_config"
     ]
   }
 }

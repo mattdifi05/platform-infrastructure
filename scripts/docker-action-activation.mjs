@@ -3,8 +3,9 @@ import crypto from "node:crypto";
 import { canonicalJson } from "./docker-action-contract.mjs";
 
 export const ACTIVATION_POLICY_SCHEMA = "platform.docker-runtime-activation-policy/v1";
-export const ACTIVATION_PAYLOAD_SCHEMA = "platform.docker-runtime-activation/v1";
-export const ACTIVATION_PAYLOAD_TYPE = "application/vnd.platform.docker-runtime-activation.v1+json";
+export const ACTIVATION_PAYLOAD_SCHEMA = "platform.docker-runtime-activation/v2";
+export const ACTIVATION_PAYLOAD_TYPE = "application/vnd.platform.docker-runtime-activation.v2+json";
+export const DAST_CHAIN_SCHEMA = "platform.docker-dast-chain/v2";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const LOGICAL_ID = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -59,14 +60,14 @@ export function verifyActivationEnvelope(rawEnvelope, policyValue, expected, { n
   try {
     envelope = JSON.parse(bytes.toString("utf8"));
   } catch {
-    fail(403, "activation bundle is not JSON");
+    fail(403, "activation envelope is not JSON");
   }
   if (!constantEqual(bytes, Buffer.from(`${canonicalJson(envelope)}\n`))) {
-    fail(403, "activation bundle is not exact canonical JSON");
+    fail(403, "activation envelope is not exact canonical JSON");
   }
-  exactKeys(plainObject(envelope, "activation bundle"), ["payload", "payloadType", "signatures"], "activation bundle");
+  exactKeys(plainObject(envelope, "activation envelope"), ["payload", "payloadType", "signatures"], "activation envelope");
   if (envelope.payloadType !== ACTIVATION_PAYLOAD_TYPE || !Array.isArray(envelope.signatures) || envelope.signatures.length !== 1) {
-    fail(403, "activation bundle type or signature count is invalid");
+    fail(403, "activation envelope type or signature count is invalid");
   }
   const signature = plainObject(envelope.signatures[0], "activation signature");
   exactKeys(signature, ["keyid", "sig"], "activation signature");
@@ -88,10 +89,22 @@ export function verifyActivationEnvelope(rawEnvelope, policyValue, expected, { n
   const normalized = normalizeActivationPayload(payload, policy, { now });
   bindExpected(normalized, expected);
   const envelopeSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
-  if (!constantEqual(envelopeSha256, String(expected?.activationBundleSha256 ?? ""))) {
+  if (!constantEqual(envelopeSha256, String(expected?.activationEnvelopeSha256 ?? ""))) {
     fail(403, "activation CAS digest does not match the trusted context");
   }
   const dastChainSha256 = crypto.createHash("sha256").update(canonicalJson(normalized.dast)).digest("hex");
+  const typedDigests = [
+    envelopeSha256,
+    normalized.releaseBundleSha256,
+    normalized.dast.providerReceiptSha256,
+    normalized.dastAuthorizationSha256,
+    dastChainSha256,
+    normalized.releaseBundleManifestSha256,
+    normalized.treeSha256,
+  ];
+  if (new Set(typedDigests).size !== typedDigests.length) {
+    fail(403, "activation typed digest identities collide");
+  }
   return Object.freeze({ ...normalized, dastChainSha256, envelopeSha256 });
 }
 
@@ -113,6 +126,7 @@ function normalizeActivationPayload(value, policy, { now }) {
     "candidateId",
     "combinedRenderSha256",
     "dast",
+    "dastAuthorizationSha256",
     "environment",
     "expiresAt",
     "generation",
@@ -122,12 +136,15 @@ function normalizeActivationPayload(value, policy, { now }) {
     "notBefore",
     "previousActiveSha256",
     "releaseId",
+    "releaseBundleManifestSha256",
+    "releaseBundleSha256",
     "requestId",
     "runtimeIntentId",
     "schema",
     "sourceRenderSha256",
     "subject",
     "targetId",
+    "treeSha256",
   ], "activation payload");
   if (payload.schema !== ACTIVATION_PAYLOAD_SCHEMA) fail(403, "activation payload schema is invalid");
   for (const [name, value] of [
@@ -142,7 +159,15 @@ function normalizeActivationPayload(value, policy, { now }) {
   if (!UUID_V4.test(String(payload.requestId ?? "")) || !NONCE.test(String(payload.nonce ?? ""))) {
     fail(403, "activation request identity is invalid");
   }
-  for (const name of ["sourceRenderSha256", "combinedRenderSha256", "previousActiveSha256"]) {
+  for (const name of [
+    "sourceRenderSha256",
+    "combinedRenderSha256",
+    "previousActiveSha256",
+    "releaseBundleSha256",
+    "releaseBundleManifestSha256",
+    "dastAuthorizationSha256",
+    "treeSha256",
+  ]) {
     if (!SHA256.test(String(payload[name] ?? ""))) fail(403, `activation ${name} is invalid`);
   }
   if (payload.issuer !== policy.issuer || payload.subject !== policy.subject
@@ -159,31 +184,79 @@ function normalizeActivationPayload(value, policy, { now }) {
 
   const dast = plainObject(payload.dast, "activation DAST chain");
   exactKeys(dast, [
-    "archiveSha256",
-    "bundleSha256",
-    "manifestSha256",
+    "commitSha",
+    "consumerChallengeSha256",
     "providerMetadataSha256",
+    "providerReceiptSha256",
     "providerRunId",
-    "reportSha256",
+    "providerRunAttempt",
+    "reportArtifactArchiveSha256",
+    "reportArtifactId",
+    "reportEvidenceSha256",
+    "repository",
+    "runtimeIntentSha256",
+    "runtimeInventorySha256",
+    "scanRequestSha256",
+    "schema",
     "sigstoreBundleSha256",
     "sigstoreSubject",
+    "target",
+    "targetServingInventoryHash",
+    "treeSha",
     "verdict",
   ], "activation DAST chain");
+  if (dast.schema !== DAST_CHAIN_SCHEMA) fail(403, "activation DAST chain schema is invalid");
   for (const name of [
-    "archiveSha256",
-    "bundleSha256",
-    "manifestSha256",
+    "consumerChallengeSha256",
     "providerMetadataSha256",
-    "reportSha256",
+    "providerReceiptSha256",
+    "reportArtifactArchiveSha256",
+    "reportEvidenceSha256",
+    "runtimeIntentSha256",
+    "runtimeInventorySha256",
+    "scanRequestSha256",
     "sigstoreBundleSha256",
+    "targetServingInventoryHash",
   ]) {
     if (!SHA256.test(String(dast[name] ?? ""))) fail(403, `activation DAST ${name} is invalid`);
   }
-  if (!LOGICAL_ID.test(String(dast.providerRunId ?? "")) || dast.verdict !== "pass"
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(dast.repository ?? ""))
+    || !/^[a-f0-9]{40}$/.test(String(dast.commitSha ?? ""))
+    || !/^[a-f0-9]{40}$/.test(String(dast.treeSha ?? ""))) {
+    fail(403, "activation DAST repository, commit or tree is invalid");
+  }
+  let target;
+  try {
+    target = new URL(String(dast.target ?? ""));
+  } catch {
+    fail(403, "activation DAST target is invalid");
+  }
+  if (target.protocol !== "https:" || target.username || target.password || target.search
+    || target.hash || target.pathname !== "/" || dast.target !== target.origin) {
+    fail(403, "activation DAST target is invalid");
+  }
+  if (!isPositiveDecimalString(dast.providerRunId)
+    || !Number.isSafeInteger(dast.providerRunAttempt) || dast.providerRunAttempt < 1
+    || !isPositiveDecimalString(dast.reportArtifactId)
+    || dast.verdict !== "pass"
     || dast.sigstoreSubject !== policy.dastSigstoreSubject) {
-    fail(403, "activation DAST provider run, verdict or Sigstore subject is invalid");
+    fail(403, "activation DAST provider run, report artifact, verdict or Sigstore subject is invalid");
+  }
+  const derivedTreeSha256 = crypto.createHash("sha256")
+    .update("platform-git-tree-sha1/v1\0", "utf8")
+    .update(dast.treeSha, "utf8")
+    .digest("hex");
+  if (!constantEqual(payload.treeSha256, derivedTreeSha256)) {
+    fail(403, "activation tree SHA256 is not derived from the DAST Git tree");
   }
   return Object.freeze({ ...payload, dast: Object.freeze({ ...dast }) });
+}
+
+function isPositiveDecimalString(value) {
+  const text = String(value ?? "");
+  const number = Number(text);
+  return /^[1-9][0-9]*$/.test(text) && Number.isSafeInteger(number) && number >= 1
+    && String(number) === text;
 }
 
 function bindExpected(payload, expected) {
@@ -198,11 +271,22 @@ function bindExpected(payload, expected) {
     runtimeIntentId: expected?.runtimeIntentId,
     sourceRenderSha256: expected?.sourceRenderSha256,
     targetId: expected?.targetId,
+    treeSha256: expected?.treeSha256,
   };
   for (const [name, value] of Object.entries(expectedValues)) {
     const actual = name === "dastChainSha256" ? dastChainSha256 : payload[name];
     if (typeof value === "number" ? actual !== value : !constantEqual(String(actual ?? ""), String(value ?? ""))) {
       fail(403, `activation ${name} does not match the trusted runtime context`);
+    }
+  }
+  for (const name of [
+    "dastAuthorizationSha256",
+    "releaseBundleManifestSha256",
+    "releaseBundleSha256",
+  ]) {
+    if (Object.hasOwn(expected ?? {}, name)
+      && !constantEqual(String(payload[name] ?? ""), String(expected[name] ?? ""))) {
+      fail(403, `activation ${name} does not match the trusted release context`);
     }
   }
 }

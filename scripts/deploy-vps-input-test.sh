@@ -36,10 +36,14 @@ const dockerActionFixtures = await import(pathToFileURL(
   process.env.DOCKER_ACTION_FIXTURES_PATH ?? `${process.env.FIXTURE_ROOT}/scripts/docker-action-v2-fixtures.mjs`,
 ));
 const bundlePolicy = await import(pathToFileURL(`${process.env.FIXTURE_ROOT}/scripts/activation-bundle.mjs`));
+const dastAuthorizationPolicy = await import(pathToFileURL(
+  `${process.env.FIXTURE_ROOT}/scripts/dast-activation-authorization.mjs`,
+));
 const runtimePolicy = await import(pathToFileURL(`${process.env.FIXTURE_ROOT}/scripts/runtime-intent-policy.mjs`));
 const { buildActivationRequest, buildTrustedReleaseContext } = requestPolicy;
 const { activationRequestSha256 } = receiptPolicy;
 const { exactNoHostedLockBytes, validateActivationBundleManifest } = bundlePolicy;
+const { dastActivationChainSha256 } = dastAuthorizationPolicy;
 const { canonicalJson, runtimeIntentSha256 } = runtimePolicy;
 
 const directory = process.env.FIXTURE_DIR;
@@ -216,7 +220,10 @@ const provider = writeJson("provider.json", {
   status: "completed",
   conclusion: "success",
 });
-const dast = writeJson("dast.json", {
+const dastProviderMetadataSha256 = "2".repeat(64);
+const dastSigstoreBundleSha256 = "3".repeat(64);
+const dastSigstoreSubject = `dast-provider-verification.json@sha256:${"4".repeat(64)}`;
+const dastDocument = {
   version: 1,
   kind: "platform-dast-verification/v1",
   status: "passed",
@@ -225,11 +232,28 @@ const dast = writeJson("dast.json", {
   treeSha,
   runtimeIntentSha256: deploymentDocument.runtimeIntentSha256,
   generatedAt: "2026-07-21T00:00:00.000Z",
-  target: { url: "https://staging.example.com/", origin: "https://staging.example.com" },
-  report: {
-    name: "zap-baseline.json",
-    sha256: "e".repeat(64),
-    sizeBytes: 4096,
+  target: "https://staging.example.com",
+  scanRequestSha256: "0".repeat(64),
+  runtimeInventorySha256: "8".repeat(64),
+  targetServingInventoryHash: "7".repeat(64),
+  reportArtifact: {
+    id: "456789",
+    name: "dast-scan-request-789012-3",
+    archiveSha256: "6".repeat(64),
+    repository,
+    runId: "789012",
+    runAttempt: 3,
+  },
+  reportEvidenceSha256: "e".repeat(64),
+  provider: {
+    repository: policy.trustedProducer.repository,
+    workflowPath: policy.trustedProducer.workflowPath,
+    workflowSha: policy.trustedProducer.workflowSha,
+    sourceRef: policy.trustedProducer.sourceRef,
+    event: policy.trustedProducer.event,
+    runId: "987654",
+    runAttempt: 2,
+    job: "dast-countersign",
   },
   consumerChallenge: {
     consumerRepository: repository,
@@ -238,13 +262,47 @@ const dast = writeJson("dast.json", {
     consumerJob: "deploy-vps",
     challengeNonce: "d".repeat(64),
   },
-});
+};
+const dastProviderReceipt = writeJson("dast-provider-receipt.json", dastDocument);
+const dastChain = {
+  schema: "platform.docker-dast-chain/v2",
+  repository,
+  commitSha,
+  treeSha,
+  target: dastDocument.target,
+  runtimeIntentSha256: deploymentDocument.runtimeIntentSha256,
+  runtimeInventorySha256: dastDocument.runtimeInventorySha256,
+  targetServingInventoryHash: dastDocument.targetServingInventoryHash,
+  consumerChallengeSha256: hash(Buffer.from(canonicalJson(dastDocument.consumerChallenge))),
+  scanRequestSha256: dastDocument.scanRequestSha256,
+  providerReceiptSha256: dastProviderReceipt.sha256,
+  providerMetadataSha256: dastProviderMetadataSha256,
+  providerRunId: dastDocument.provider.runId,
+  providerRunAttempt: dastDocument.provider.runAttempt,
+  reportArtifactId: dastDocument.reportArtifact.id,
+  reportArtifactArchiveSha256: dastDocument.reportArtifact.archiveSha256,
+  reportEvidenceSha256: dastDocument.reportEvidenceSha256,
+  sigstoreBundleSha256: dastSigstoreBundleSha256,
+  sigstoreSubject: dastSigstoreSubject,
+  verdict: "pass",
+};
+const dastAuthorizationDocument = {
+  schema: "platform-dast-activation-authorization/v1",
+  status: "READY",
+  consumerChallenge: structuredClone(dastDocument.consumerChallenge),
+  chain: dastChain,
+  chainSha256: dastActivationChainSha256(dastChain),
+  generatedAt: "2026-07-21T00:01:00.000Z",
+};
+const dastAuthorization = writeJson("dast-authorization.json", dastAuthorizationDocument);
 const context = buildTrustedReleaseContext({
   deploymentReceipt: deploymentDocument,
   artifactReceiptSha256: artifact.sha256,
   deploymentReceiptSha256: deployment.sha256,
   providerMetadataSha256: provider.sha256,
-  dastReceiptSha256: dast.sha256,
+  dastProviderReceiptSha256: dastProviderReceipt.sha256,
+  dastAuthorizationSha256: dastAuthorization.sha256,
+  dastChainSha256: dastAuthorizationDocument.chainSha256,
   providerRunId: "123456",
   providerRunAttempt: 2,
   providerChallenge: "d".repeat(64),
@@ -254,7 +312,8 @@ const requestId = `activation:${deployment.sha256}:${releaseContextSha256}`;
 const entryHashes = {
   "artifact-verification.json": artifact.sha256,
   "combined-compose.json": runtimeIntent.combinedComposeSha256,
-  "dast-admission.json": dast.sha256,
+  "dast-activation-authorization.json": dastAuthorization.sha256,
+  "dast-provider-verification.json": dastProviderReceipt.sha256,
   "environment.env": runtimeIntent.environmentSha256,
   "exact-source-archive.tar": runtimeIntent.sourceArchiveSha256,
   "hosted-workloads.lock.json": hash(exactNoHostedLockBytes()),
@@ -263,7 +322,7 @@ const entryHashes = {
   "trusted-provider-run.json": provider.sha256,
 };
 const manifest = {
-  schema: "platform-activation-bundle-manifest/v1",
+  schema: "platform-activation-bundle-manifest/v2",
   requestId,
   releaseContextSha256,
   runtimeIntentSha256: deploymentDocument.runtimeIntentSha256,
@@ -284,19 +343,29 @@ const activationRequest = buildActivationRequest({
   deploymentReceiptSha256: deployment.sha256,
   providerMetadata: provider,
   providerMetadataSha256: provider.sha256,
-  dastReceipt: dast,
-  dastReceiptSha256: dast.sha256,
+  dastProviderReceipt,
+  dastProviderReceiptSha256: dastProviderReceipt.sha256,
+  dastAuthorization,
+  dastAuthorizationSha256: dastAuthorization.sha256,
+  dastProviderMetadataSha256,
+  dastSigstoreBundleSha256,
+  dastSigstoreSubject,
   bundleManifest: manifestArtifact,
-  bundleDescriptor: {
-    schema: "platform-activation-bundle-descriptor/v1",
+  releaseBundleDescriptor: {
+    schema: "platform-activation-bundle-descriptor/v2",
     sha256: "e".repeat(64),
     sizeBytes: 4096,
     manifestSha256,
   },
-  activationAdmission: {
-    schema: "platform-activation-admission-descriptor/v1",
+  dockerActivationEnvelope: {
+    schema: "platform-docker-runtime-activation-envelope-descriptor/v1",
     sha256: "f".repeat(64),
     sizeBytes: 8192,
+    payloadType: "application/vnd.platform.docker-runtime-activation.v2+json",
+    runtimeIntentId: "runtime.production",
+    generation: 7,
+    dastAuthorizationSha256: dastAuthorization.sha256,
+    dastChainSha256: dastAuthorizationDocument.chainSha256,
   },
   repository,
   commitSha,
@@ -311,15 +380,17 @@ const activationRequest = buildActivationRequest({
 });
 const activationNow = Date.now();
 const activationReceipt = {
-  schema: "platform-activation-receipt/v2",
+  schema: "platform-activation-receipt/v3",
   status: "ACTIVE",
   activatedAt: new Date(activationNow - 60_000).toISOString(),
   requestId: activationRequest.requestId,
   requestSha256: activationRequestSha256(activationRequest),
   releaseContextSha256: activationRequest.releaseContextSha256,
   runtimeIntentSha256: activationRequest.runtimeIntentSha256,
-  bundleSha256: activationRequest.bundle.sha256,
-  activationAdmissionSha256: activationRequest.activationAdmission.sha256,
+  releaseBundleSha256: activationRequest.releaseBundle.sha256,
+  dockerActivationEnvelopeSha256: activationRequest.dockerActivationEnvelope.sha256,
+  dastAuthorizationSha256: activationRequest.releaseContext.receipts.dastAuthorizationSha256,
+  dastChainSha256: activationRequest.releaseContext.dastChainSha256,
   deploymentTarget: activationRequest.deploymentTarget,
   broker: activationRequest.privilegedRuntime.activationBroker,
   activeReceipt: null,
@@ -330,7 +401,8 @@ const activationReceipt = {
   })),
 };
 const activeReceipt = dockerActionFixtures.buildRawActiveReceiptV2({ now: activationNow });
-activeReceipt.activationBundleSha256 = activationRequest.bundle.sha256;
+activeReceipt.activationBundleSha256 = activationRequest.dockerActivationEnvelope.sha256;
+activeReceipt.generation = activationRequest.dockerActivationEnvelope.generation;
 activeReceipt.releaseId = activationRequest.dockerRuntime.releaseId;
 activeReceipt.candidateId = activationRequest.dockerRuntime.candidateId;
 activeReceipt.targetId = activationRequest.dockerRuntime.targetId;
@@ -338,7 +410,7 @@ activeReceipt.treeSha256 = activationRequest.dockerRuntime.treeSha256;
 activeReceipt.environment = activationRequest.deploymentTarget.environment;
 activeReceipt.sourceRenderSha256 = activationRequest.releaseContext.sourceRenderSha256;
 activeReceipt.combinedRenderSha256 = activationRequest.releaseContext.combinedRenderSha256;
-activeReceipt.dastChainSha256 = activationRequest.releaseContext.receipts.dastSha256;
+activeReceipt.dastChainSha256 = activationRequest.releaseContext.dastChainSha256;
 for (const container of Object.values(activeReceipt.resources.containers)) {
   container.labels["com.platform.runtime.candidate-id"] = activeReceipt.candidateId;
   container.labels["com.platform.runtime.source-render-sha256"] = activeReceipt.sourceRenderSha256;
@@ -346,6 +418,7 @@ for (const container of Object.values(activeReceipt.resources.containers)) {
 const normalizedActiveReceipt = dockerActionContract.normalizeActiveReceipt(activeReceipt, {
   now: activationNow,
 });
+activationReceipt.activatedAt = activeReceipt.issuedAt;
 activationReceipt.activeReceipt = activeReceipt;
 activationReceipt.activeReceiptSha256 = dockerActionContract.sha256(
   dockerActionContract.canonicalJson(normalizedActiveReceipt),
@@ -355,7 +428,12 @@ writeJson("fixture.json", {
   artifactSha256: artifact.sha256,
   deploymentSha256: deployment.sha256,
   providerSha256: provider.sha256,
-  dastSha256: dast.sha256,
+  dastProviderReceiptSha256: dastProviderReceipt.sha256,
+  dastAuthorizationSha256: dastAuthorization.sha256,
+  dastProviderMetadataSha256,
+  dastSigstoreBundleSha256,
+  dastSigstoreSubject,
+  dastChainSha256: dastAuthorizationDocument.chainSha256,
   environmentSha256: runtimeIntent.environmentSha256,
   manifestSha256,
   commitSha,
@@ -408,14 +486,23 @@ run_client() {
     DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256="$(fixture providerSha256)" \
     DEPLOY_TRUSTED_PROVIDER_RUN_ID=123456 \
     DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT=2 \
-    DEPLOY_DAST_RECEIPT_PATH="$TMP/dast.json" \
-    DEPLOY_DAST_RECEIPT_SHA256="$(fixture dastSha256)" \
-    DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH="$TMP/bundle-manifest.json" \
-    DEPLOY_ACTIVATION_BUNDLE_SHA256="$(printf 'e%.0s' $(seq 1 64))" \
-    DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES=4096 \
-    DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256="$(fixture manifestSha256)" \
-    DEPLOY_ACTIVATION_ADMISSION_SHA256="$(printf 'f%.0s' $(seq 1 64))" \
-    DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES=8192 \
+    DEPLOY_DAST_PROVIDER_RECEIPT_PATH="$TMP/dast-provider-receipt.json" \
+    DEPLOY_DAST_PROVIDER_RECEIPT_SHA256="$(fixture dastProviderReceiptSha256)" \
+    DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH="$TMP/dast-authorization.json" \
+    DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256="$(fixture dastAuthorizationSha256)" \
+    DEPLOY_DAST_PROVIDER_METADATA_SHA256="$(fixture dastProviderMetadataSha256)" \
+    DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256="$(fixture dastSigstoreBundleSha256)" \
+    DEPLOY_DAST_SIGSTORE_SUBJECT="$(fixture dastSigstoreSubject)" \
+    DEPLOY_DAST_CHAIN_SHA256="$(fixture dastChainSha256)" \
+    DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH="$TMP/bundle-manifest.json" \
+    DEPLOY_RELEASE_BUNDLE_SHA256="$(printf 'e%.0s' $(seq 1 64))" \
+    DEPLOY_RELEASE_BUNDLE_SIZE_BYTES=4096 \
+    DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256="$(fixture manifestSha256)" \
+    DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256="$(printf 'f%.0s' $(seq 1 64))" \
+    DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES=8192 \
+    DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE=application/vnd.platform.docker-runtime-activation.v2+json \
+    DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID=runtime.production \
+    DEPLOY_DOCKER_ACTIVATION_GENERATION=7 \
     DEPLOY_CONSUMER_RUN_ID=789012 \
     DEPLOY_CONSUMER_RUN_ATTEMPT=3 \
     "$@"
@@ -445,10 +532,13 @@ expect_reject remote-multiple-at run_client env DEPLOY_REMOTE=deploy@example@int
 expect_reject wrong-target-host run_client env DEPLOY_REMOTE=deploy@attacker.internal sh "$TEST_ROOT/scripts/deploy-vps.sh"
 expect_reject short-commit run_client env DEPLOY_RELEASE_SHA=abc sh "$TEST_ROOT/scripts/deploy-vps.sh"
 expect_reject wrong-artifact-hash run_client env DEPLOY_ARTIFACT_RECEIPT_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_reject wrong-dast-hash run_client env DEPLOY_DAST_RECEIPT_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_reject wrong-manifest-hash run_client env DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_reject missing-sidecar-digest run_client env -u DEPLOY_ACTIVATION_ADMISSION_SHA256 sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_reject missing-cas-digest run_client env -u DEPLOY_ACTIVATION_BUNDLE_SHA256 sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject wrong-dast-provider-receipt-hash run_client env DEPLOY_DAST_PROVIDER_RECEIPT_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject wrong-dast-authorization-hash run_client env DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject wrong-release-manifest-hash run_client env DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject wrong-dast-chain-hash run_client env DEPLOY_DAST_CHAIN_SHA256="$(printf '0%.0s' $(seq 1 64))" sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject missing-envelope-digest run_client env -u DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256 sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject missing-release-bundle-digest run_client env -u DEPLOY_RELEASE_BUNDLE_SHA256 sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_reject legacy-dast-receipt-only run_client env -u DEPLOY_DAST_PROVIDER_RECEIPT_PATH DEPLOY_DAST_RECEIPT_PATH="$TMP/dast-provider-receipt.json" sh "$TEST_ROOT/scripts/deploy-vps.sh"
 ln -s "$TMP/ssh-key" "$TMP/ssh-key-link"
 expect_reject symlink-ssh-key run_client env DEPLOY_SSH_KEY_PATH="$TMP/ssh-key-link" sh "$TEST_ROOT/scripts/deploy-vps.sh"
 
@@ -462,19 +552,25 @@ grep -Fx 'GlobalKnownHostsFile=/dev/null' "$FAKE_SSH_ARGS" >/dev/null
 node -e '
 const fs=require("fs");
 const request=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-if (request.schema!=="platform-activation-request/v2") process.exit(1);
+if (request.schema!=="platform-activation-request/v3") process.exit(1);
 if (!/^activation:[a-f0-9]{64}:[a-f0-9]{64}$/.test(request.requestId)) process.exit(1);
-if (request.bundle.sha256!=="e".repeat(64)) process.exit(1);
+if (request.releaseBundle.sha256!=="e".repeat(64)) process.exit(1);
+if (request.dockerActivationEnvelope.sha256!=="f".repeat(64)) process.exit(1);
+if (request.dockerActivationEnvelope.payloadType!=="application/vnd.platform.docker-runtime-activation.v2+json") process.exit(1);
+if (request.releaseContext.receipts.dastProviderSha256===request.releaseContext.receipts.dastAuthorizationSha256) process.exit(1);
+if (request.releaseContext.dastChainSha256!==request.dockerActivationEnvelope.dastChainSha256) process.exit(1);
+if (Object.hasOwn(request,"activationAdmission") || Object.hasOwn(request,"bundle")) process.exit(1);
 if (Object.hasOwn(request,"artifacts")) process.exit(1);
 ' "$FAKE_SSH_STDIN"
 [ "$(wc -c < "$FAKE_SSH_STDIN" | tr -d ' ')" -lt 1048576 ]
-if grep -Eq 'base64|exact-source-archive\.tar|remote_dir|git (fetch|pull|checkout)|sh -s' "$FAKE_SSH_STDIN"; then
-  echo "FAIL: small broker request contains a legacy shell/archive/checkout transport" >&2
+if grep -Eq 'base64|exact-source-archive\.tar|dast-countersign|https://staging\.example\.com|remote_dir|git (fetch|pull|checkout)|sh -s' \
+  "$FAKE_SSH_STDIN"; then
+  echo "FAIL: small broker request contains raw DAST/provider evidence or a legacy transport" >&2
   exit 1
 fi
 printf 'PASS\tfixed-broker-small-json-request\n'
 
-jq '.bundleSha256 = ("0" * 64)' "$TMP/broker-receipt.json" > "$TMP/tampered-broker-receipt.json"
+jq '.dockerActivationEnvelopeSha256 = ("0" * 64)' "$TMP/broker-receipt.json" > "$TMP/tampered-broker-receipt.json"
 rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
 if FAKE_SSH_RECEIPT_OVERRIDE="$TMP/tampered-broker-receipt.json" run_client sh "$TEST_ROOT/scripts/deploy-vps.sh" >/dev/null 2>&1; then
   echo "FAIL: mismatched broker receipt was accepted" >&2
@@ -504,4 +600,4 @@ for forbidden in 'sh -s' 'git ' 'docker ' 'scp ' 'sftp ' 'cloudflare-origin-lock
 done
 printf 'PASS\tno-remote-checkout-staging-or-candidate-privilege\n'
 
-printf 'deploy VPS input tests passed 18/18\n'
+printf 'deploy VPS input tests passed 21/21\n'

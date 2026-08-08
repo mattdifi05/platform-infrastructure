@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
-export const CORE_SEMANTIC_POLICY_SCHEMA = "platform-no-hosted-core-capability-policy/v1";
+export const CORE_SEMANTIC_POLICY_SCHEMA = "platform-no-hosted-core-capability-policy/v2";
 
 const CORE_SEMANTIC_POLICY = {
   schema: CORE_SEMANTIC_POLICY_SCHEMA,
@@ -3168,6 +3169,2205 @@ const CORE_SEMANTIC_POLICY = {
   },
 };
 
+// Generated from the SHA-pinned nine-overlay `backup` render.  The legacy
+// descriptor above remains as historical detail for the unchanged services;
+// these closed overrides are the authoritative post-Broker/Release topology.
+const CURRENT_CORE_SERVICE_NAMES = [
+  "alertmanager",
+  "backup-scheduler",
+  "broker-auth-bootstrap",
+  "control-center",
+  "docker-action-activation-sidecar",
+  "docker-action-broker",
+  "grafana",
+  "keycloak",
+  "loki",
+  "mariadb",
+  "minio",
+  "nats",
+  "platform-alert-dispatcher",
+  "postgres",
+  "project-router",
+  "prometheus",
+  "promtail",
+  "redis",
+  "traefik",
+  "waf",
+];
+
+Object.assign(CORE_SEMANTIC_POLICY.secretFiles, {
+  docker_action_backup_catalog: "secrets/docker_action_backup_catalog.txt",
+  docker_action_backup_job_execute: "secrets/docker_action_backup_job_execute.txt",
+  docker_action_backup_offsite_sync: "secrets/docker_action_backup_offsite_sync.txt",
+  docker_action_backup_prune_apply: "secrets/docker_action_backup_prune_apply.txt",
+  docker_action_backup_prune_plan: "secrets/docker_action_backup_prune_plan.txt",
+  docker_action_evidence_runtime_snapshot: "secrets/docker_action_evidence_runtime_snapshot.txt",
+  docker_action_restore_drill_full: "secrets/docker_action_restore_drill_full.txt",
+  docker_action_runtime_intent_trust_key: "secrets/docker_action_runtime_intent_trust_key.txt",
+});
+
+Object.assign(CORE_SEMANTIC_POLICY.physicalVolumeNames, {
+  backup_scheduler_jobs: "platform_infra_vps_backup_scheduler_jobs",
+  backup_scheduler_logs: "platform_infra_vps_backup_scheduler_logs",
+  docker_action_activation_cas: "platform_infra_vps_docker_action_activation_cas",
+  docker_action_broker_socket: "platform_infra_vps_docker_action_broker_socket",
+  docker_action_broker_state: "platform_infra_vps_docker_action_broker_state",
+  nats_auth_config: "enterprise_nats_auth_config",
+  redis_auth_config: "enterprise_redis_auth_config",
+});
+CORE_SEMANTIC_POLICY.externalVolumeNames = ["enterprise_mariadb_data"];
+
+const currentEnvironmentAuthority =
+  CORE_SEMANTIC_POLICY.serviceEnvironmentAuthority.services;
+currentEnvironmentAuthority["backup-scheduler"] = {
+  present: true,
+  entries: {
+    BACKUP_SCHEDULER_CRON_FILE: { literal: "/run/platform/backup-scheduler/crontabs/root" },
+    BACKUP_SCHEDULER_ENV_FILE: { literal: "/run/platform/backup-scheduler/backup-scheduler.env" },
+    BACKUP_SCHEDULER_JOBS_DIR: { literal: "/var/www/project-state/backup-jobs" },
+    BACKUP_SCHEDULER_LOG_DIR: { literal: "/var/log/platform" },
+    DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: {
+      variable: "DOCKER_ACTION_ACTIVE_RECEIPT_SHA256",
+      required: "set admitted active receipt sha256",
+    },
+    DOCKER_ACTION_BROKER_SOCKET: { literal: "/run/platform/docker-action-broker/broker.sock" },
+    DOCKER_ACTION_COMBINED_RENDER_SHA256: {
+      variable: "DOCKER_ACTION_COMBINED_RENDER_SHA256",
+      required: "set exact final combined render sha256",
+    },
+    DOCKER_ACTION_RUNTIME_INTENT_ID: {
+      variable: "DOCKER_ACTION_RUNTIME_INTENT_ID",
+      required: "set admitted runtime intent id",
+    },
+  },
+};
+currentEnvironmentAuthority["broker-auth-bootstrap"] = { present: false, entries: {} };
+currentEnvironmentAuthority["docker-action-activation-sidecar"] = {
+  present: true,
+  entries: {
+    ACTIVATION_CAS: { literal: "/run/platform/docker-action-activation/by-bundle-sha256" },
+    ACTIVATION_INBOX: { literal: "/run/platform/provider-activation/inbox" },
+  },
+};
+currentEnvironmentAuthority["docker-action-broker"] = {
+  present: true,
+  entries: {
+    DOCKER_ACTION_ACTIVE_RECEIPT_FILE: {
+      literal: "/run/platform/docker-action-trust/active-receipt.json",
+    },
+    DOCKER_ACTION_BROKER_SOCKET: { literal: "/run/platform/docker-action-broker/broker.sock" },
+    DOCKER_ACTION_RUNTIME_INTENT_FILE: {
+      literal: "/run/platform/docker-action-trust/runtime-intent.json",
+    },
+    DOCKER_ACTION_RUNTIME_INTENT_TRUST_KEY_FILE: {
+      literal: "/run/secrets/docker_action_runtime_intent_trust_key",
+    },
+  },
+};
+currentEnvironmentAuthority.nats = { present: false, entries: {} };
+currentEnvironmentAuthority.redis.entries.REDIS_USERNAME = { literal: "platform" };
+
+const controlCenterEnvironment = currentEnvironmentAuthority["control-center"].entries;
+for (const [name, fallback] of Object.entries({
+  BACKUP_QUEUE_LEDGER_MAX_ENTRIES: "4096",
+  BACKUP_QUEUE_LOCK_TIMEOUT_MS: "2000",
+  BACKUP_QUEUE_MAX_CONCURRENCY: "1",
+  BACKUP_QUEUE_MAX_OUTSTANDING: "32",
+  BACKUP_QUEUE_MAX_PER_PRINCIPAL: "4",
+  BACKUP_QUEUE_MAX_SCAN_ENTRIES: "4096",
+  BACKUP_QUEUE_RATE_WINDOW_SECONDS: "900",
+  BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS: "30",
+  BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS: "200",
+})) {
+  controlCenterEnvironment[name] = { variable: name, fallback };
+}
+controlCenterEnvironment.PROJECT_BACKUP_JOBS_DIR = {
+  literal: "/var/www/project-state/backup-jobs",
+};
+controlCenterEnvironment.CONTROL_CENTER_OIDC_JWKS_URI = {
+  variable: "CONTROL_CENTER_OIDC_JWKS_URI",
+  fallback: "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs",
+  template: "${CONTROL_CENTER_OIDC_JWKS_URI:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs}",
+};
+controlCenterEnvironment.CONTROL_CENTER_OIDC_TOKEN_ENDPOINT = {
+  variable: "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
+  fallback: "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token",
+  template: "${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}",
+};
+controlCenterEnvironment.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS = {
+  variable: "CONTROL_CENTER_SESSION_MAX_AGE_SECONDS",
+  fallback: "900",
+};
+
+const projectRouterEnvironment = currentEnvironmentAuthority["project-router"].entries;
+for (const removed of [
+  "NODE_PROJECT_HOSTS",
+  "NODE_PROJECT_UPSTREAMS",
+  "PHP_PROJECT_UPSTREAMS",
+  "PROJECT_UPSTREAMS",
+  "STATIC_PROJECT_UPSTREAMS",
+]) delete projectRouterEnvironment[removed];
+projectRouterEnvironment.PROJECT_ROUTER_WORKLOAD_LOCK_MODE = { literal: "required" };
+currentEnvironmentAuthority.waf.entries.MODSEC_AUDIT_LOG_PARTS = { literal: "AKZ" };
+
+Object.assign(CORE_SEMANTIC_POLICY.serviceImages, {
+  "backup-scheduler": null,
+  "broker-auth-bootstrap": "platform/ops:local",
+  "docker-action-activation-sidecar": null,
+  "docker-action-broker": null,
+  "project-router": "platform/project-router:local",
+});
+Object.assign(CORE_SEMANTIC_POLICY.serviceImageVariables, {
+  "backup-scheduler": null,
+  "broker-auth-bootstrap": "PLATFORM_OPS_IMAGE",
+  "docker-action-activation-sidecar": null,
+  "docker-action-broker": null,
+  "project-router": "PROJECT_ROUTER_IMAGE",
+});
+
+// Closed maps mechanically extracted from the SHA-pinned canonical Compose
+// renderer. Dynamic values are validated and projected before the render
+// digest; these maps describe every residual service and field exactly.
+const CURRENT_CLOSED_AUTHORITY = {
+  "topLevelFields": [
+    "configs",
+    "name",
+    "networks",
+    "secrets",
+    "services",
+    "volumes",
+    "x-default-logging",
+    "x-runtime-app",
+    "x-runtime-control",
+    "x-runtime-core",
+    "x-runtime-observability"
+  ],
+  "configFields": {
+    "enterprise_traefik_routes": [
+      "content",
+      "name"
+    ]
+  },
+  "secretFields": {
+    "alertmanager_webhook_token": [
+      "file",
+      "name"
+    ],
+    "control_center_database_url": [
+      "file",
+      "name"
+    ],
+    "control_center_vault_keys": [
+      "file",
+      "name"
+    ],
+    "docker_action_backup_catalog": [
+      "file",
+      "name"
+    ],
+    "docker_action_backup_job_execute": [
+      "file",
+      "name"
+    ],
+    "docker_action_backup_offsite_sync": [
+      "file",
+      "name"
+    ],
+    "docker_action_backup_prune_apply": [
+      "file",
+      "name"
+    ],
+    "docker_action_backup_prune_plan": [
+      "file",
+      "name"
+    ],
+    "docker_action_evidence_runtime_snapshot": [
+      "file",
+      "name"
+    ],
+    "docker_action_restore_drill_full": [
+      "file",
+      "name"
+    ],
+    "docker_action_runtime_intent_trust_key": [
+      "file",
+      "name"
+    ],
+    "grafana_admin_password": [
+      "file",
+      "name"
+    ],
+    "keycloak_admin_password": [
+      "file",
+      "name"
+    ],
+    "keycloak_db_password": [
+      "file",
+      "name"
+    ],
+    "mariadb_root_password": [
+      "file",
+      "name"
+    ],
+    "minio_root_password": [
+      "file",
+      "name"
+    ],
+    "nats_password": [
+      "file",
+      "name"
+    ],
+    "postgres_superuser_password": [
+      "file",
+      "name"
+    ],
+    "projects_gateway_signing_keys": [
+      "file",
+      "name"
+    ],
+    "redis_password": [
+      "file",
+      "name"
+    ],
+    "smtp_password": [
+      "file",
+      "name"
+    ]
+  },
+  "networkFields": {
+    "platform_bus": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_cache": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_db_admin": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_edge": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_egress": [
+      "enable_ipv6",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_observability": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_postgres": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_routing": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ],
+    "platform_storage": [
+      "internal",
+      "ipam",
+      "labels",
+      "name"
+    ]
+  },
+  "volumeFields": {
+    "backup_scheduler_jobs": [
+      "name"
+    ],
+    "backup_scheduler_logs": [
+      "name"
+    ],
+    "docker_action_activation_cas": [
+      "name"
+    ],
+    "docker_action_broker_socket": [
+      "name"
+    ],
+    "docker_action_broker_state": [
+      "name"
+    ],
+    "enterprise_alertmanager_data": [
+      "name"
+    ],
+    "enterprise_grafana_data": [
+      "name"
+    ],
+    "enterprise_keycloak_data": [
+      "name"
+    ],
+    "enterprise_loki_data": [
+      "name"
+    ],
+    "enterprise_mariadb_data": [
+      "external",
+      "name"
+    ],
+    "enterprise_minio_data": [
+      "name"
+    ],
+    "enterprise_nats_data": [
+      "name"
+    ],
+    "enterprise_postgres_data": [
+      "name"
+    ],
+    "enterprise_prometheus_data": [
+      "name"
+    ],
+    "enterprise_redis_data": [
+      "name"
+    ],
+    "nats_auth_config": [
+      "name"
+    ],
+    "redis_auth_config": [
+      "name"
+    ]
+  },
+  "serviceFields": {
+    "alertmanager": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "group_add",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "backup-scheduler": [
+      "blkio_config",
+      "cap_drop",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "network_mode",
+      "pids_limit",
+      "profiles",
+      "read_only",
+      "restart",
+      "secrets",
+      "security_opt",
+      "tmpfs",
+      "ulimits",
+      "user",
+      "volumes"
+    ],
+    "broker-auth-bootstrap": [
+      "blkio_config",
+      "build",
+      "cap_add",
+      "cap_drop",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "image",
+      "init",
+      "mem_limit",
+      "mem_reservation",
+      "network_mode",
+      "pids_limit",
+      "read_only",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "control-center": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "expose",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "read_only",
+      "restart",
+      "secrets",
+      "security_opt",
+      "tmpfs",
+      "ulimits",
+      "volumes",
+      "working_dir"
+    ],
+    "docker-action-activation-sidecar": [
+      "blkio_config",
+      "cap_drop",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "environment",
+      "image",
+      "init",
+      "mem_limit",
+      "mem_reservation",
+      "network_mode",
+      "pids_limit",
+      "profiles",
+      "read_only",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "user",
+      "volumes"
+    ],
+    "docker-action-broker": [
+      "blkio_config",
+      "cap_drop",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "mem_limit",
+      "mem_reservation",
+      "network_mode",
+      "pids_limit",
+      "profiles",
+      "read_only",
+      "restart",
+      "secrets",
+      "security_opt",
+      "tmpfs",
+      "ulimits",
+      "user",
+      "volumes"
+    ],
+    "grafana": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "keycloak": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "loki": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "mariadb": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "minio": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "nats": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "user",
+      "volumes"
+    ],
+    "platform-alert-dispatcher": [
+      "blkio_config",
+      "cap_drop",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "environment",
+      "expose",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "read_only",
+      "restart",
+      "secrets",
+      "security_opt",
+      "tmpfs",
+      "ulimits",
+      "user"
+    ],
+    "postgres": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "project-router": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "expose",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "read_only",
+      "restart",
+      "security_opt",
+      "tmpfs",
+      "ulimits",
+      "volumes",
+      "working_dir"
+    ],
+    "prometheus": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "promtail": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "redis": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "secrets",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "traefik": [
+      "blkio_config",
+      "command",
+      "configs",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "entrypoint",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ],
+    "waf": [
+      "blkio_config",
+      "command",
+      "container_name",
+      "cpu_shares",
+      "cpus",
+      "depends_on",
+      "entrypoint",
+      "environment",
+      "healthcheck",
+      "image",
+      "init",
+      "logging",
+      "mem_limit",
+      "mem_reservation",
+      "networks",
+      "pids_limit",
+      "ports",
+      "restart",
+      "security_opt",
+      "ulimits",
+      "volumes"
+    ]
+  },
+  "serviceResources": {
+    "alertmanager": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cpus": 0.25,
+      "cpu_shares": 512,
+      "group_add": [
+        "1000"
+      ],
+      "init": true,
+      "mem_limit": "134217728",
+      "mem_reservation": "33554432",
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      }
+    },
+    "backup-scheduler": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 1,
+      "cpu_shares": 1024,
+      "init": true,
+      "mem_limit": "536870912",
+      "mem_reservation": "134217728",
+      "network_mode": "none",
+      "pids_limit": 256,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "user": "0:0"
+    },
+    "broker-auth-bootstrap": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cap_add": [
+        "CHOWN"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 0.25,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "134217728",
+      "mem_reservation": "33554432",
+      "network_mode": "none",
+      "pids_limit": 64,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "control-center": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cpus": 1,
+      "cpu_shares": 1024,
+      "expose": [
+        "8080"
+      ],
+      "init": true,
+      "mem_limit": "536870912",
+      "mem_reservation": "134217728",
+      "pids_limit": 384,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "working_dir": "/app"
+    },
+    "docker-action-activation-sidecar": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 0.25,
+      "cpu_shares": 1024,
+      "init": true,
+      "mem_limit": "134217728",
+      "mem_reservation": "33554432",
+      "network_mode": "none",
+      "pids_limit": 64,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "user": "0:0"
+    },
+    "docker-action-broker": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 0.5,
+      "cpu_shares": 1024,
+      "init": true,
+      "mem_limit": "536870912",
+      "mem_reservation": "134217728",
+      "network_mode": "none",
+      "pids_limit": 256,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "/root:rw,noexec,nosuid,nodev,size=16m"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "user": "0:0"
+    },
+    "grafana": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cpus": 0.5,
+      "cpu_shares": 512,
+      "init": true,
+      "mem_limit": "402653184",
+      "mem_reservation": "100663296",
+      "pids_limit": 256,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      }
+    },
+    "keycloak": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 1.5,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "1342177280",
+      "mem_reservation": "402653184",
+      "pids_limit": 768,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "loki": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cpus": 0.5,
+      "cpu_shares": 512,
+      "init": true,
+      "mem_limit": "536870912",
+      "mem_reservation": "134217728",
+      "pids_limit": 320,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      }
+    },
+    "mariadb": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 1.5,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "1073741824",
+      "mem_reservation": "268435456",
+      "pids_limit": 768,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "minio": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 1,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "805306368",
+      "mem_reservation": "201326592",
+      "pids_limit": 384,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "nats": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 0.25,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "134217728",
+      "mem_reservation": "33554432",
+      "pids_limit": 192,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "user": "1000:1000"
+    },
+    "platform-alert-dispatcher": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 0.2,
+      "cpu_shares": 512,
+      "expose": [
+        "3000"
+      ],
+      "init": true,
+      "mem_limit": "134217728",
+      "mem_reservation": "33554432",
+      "pids_limit": 128,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=16m"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      },
+      "user": "1000:1000"
+    },
+    "postgres": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 1,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "1073741824",
+      "mem_reservation": "268435456",
+      "pids_limit": 768,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "project-router": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cpus": 0.5,
+      "cpu_shares": 1024,
+      "expose": [
+        "8080"
+      ],
+      "init": true,
+      "mem_limit": "201326592",
+      "mem_reservation": "50331648",
+      "pids_limit": 192,
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=32m"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      },
+      "working_dir": "/app"
+    },
+    "prometheus": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cpus": 0.5,
+      "cpu_shares": 512,
+      "init": true,
+      "mem_limit": "536870912",
+      "mem_reservation": "134217728",
+      "pids_limit": 320,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      }
+    },
+    "promtail": {
+      "blkio_config": {
+        "weight": 400
+      },
+      "cpus": 0.25,
+      "cpu_shares": 512,
+      "init": true,
+      "mem_limit": "201326592",
+      "mem_reservation": "50331648",
+      "pids_limit": 192,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 8192,
+          "hard": 8192
+        }
+      }
+    },
+    "redis": {
+      "blkio_config": {
+        "weight": 600
+      },
+      "cpus": 0.5,
+      "cpu_shares": 768,
+      "init": true,
+      "mem_limit": "268435456",
+      "mem_reservation": "67108864",
+      "pids_limit": 192,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "traefik": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cpus": 0.5,
+      "cpu_shares": 1024,
+      "init": true,
+      "mem_limit": "268435456",
+      "mem_reservation": "67108864",
+      "pids_limit": 192,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    },
+    "waf": {
+      "blkio_config": {
+        "weight": 700
+      },
+      "cpus": 1,
+      "cpu_shares": 1024,
+      "init": true,
+      "mem_limit": "402653184",
+      "mem_reservation": "100663296",
+      "pids_limit": 384,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "ulimits": {
+        "nofile": {
+          "soft": 16384,
+          "hard": 16384
+        }
+      }
+    }
+  },
+  "serviceContainerNames": {
+    "alertmanager": "enterprise-alertmanager",
+    "backup-scheduler": "enterprise-backup-scheduler",
+    "broker-auth-bootstrap": "enterprise-broker-auth-bootstrap",
+    "control-center": "enterprise-control-center",
+    "docker-action-activation-sidecar": "enterprise-docker-action-activation-sidecar",
+    "docker-action-broker": "enterprise-docker-action-broker",
+    "grafana": "enterprise-grafana",
+    "keycloak": "enterprise-keycloak",
+    "loki": "enterprise-loki",
+    "mariadb": "mariadb",
+    "minio": "enterprise-minio",
+    "nats": "enterprise-nats",
+    "platform-alert-dispatcher": "enterprise-platform-alert-dispatcher",
+    "postgres": "enterprise-postgres",
+    "project-router": "enterprise-project-router",
+    "prometheus": "enterprise-prometheus",
+    "promtail": "enterprise-promtail",
+    "redis": "enterprise-redis",
+    "traefik": "enterprise-traefik",
+    "waf": "enterprise-waf"
+  },
+  "serviceRestartPolicies": {
+    "alertmanager": "always",
+    "backup-scheduler": "unless-stopped",
+    "broker-auth-bootstrap": "no",
+    "control-center": "always",
+    "docker-action-activation-sidecar": "no",
+    "docker-action-broker": "unless-stopped",
+    "grafana": "always",
+    "keycloak": "always",
+    "loki": "always",
+    "mariadb": "always",
+    "minio": "always",
+    "nats": "always",
+    "platform-alert-dispatcher": "always",
+    "postgres": "always",
+    "project-router": "always",
+    "prometheus": "always",
+    "promtail": "always",
+    "redis": "always",
+    "traefik": "always",
+    "waf": "always"
+  },
+  "serviceProfiles": {
+    "alertmanager": null,
+    "backup-scheduler": [
+      "backup"
+    ],
+    "broker-auth-bootstrap": null,
+    "control-center": null,
+    "docker-action-activation-sidecar": [
+      "backup"
+    ],
+    "docker-action-broker": [
+      "backup"
+    ],
+    "grafana": null,
+    "keycloak": null,
+    "loki": null,
+    "mariadb": null,
+    "minio": null,
+    "nats": null,
+    "platform-alert-dispatcher": null,
+    "postgres": null,
+    "project-router": null,
+    "prometheus": null,
+    "promtail": null,
+    "redis": null,
+    "traefik": null,
+    "waf": null
+  },
+  "serviceDependencies": {
+    "alertmanager": [
+      "platform-alert-dispatcher"
+    ],
+    "backup-scheduler": [
+      "docker-action-broker"
+    ],
+    "broker-auth-bootstrap": [],
+    "control-center": [
+      "keycloak",
+      "postgres"
+    ],
+    "docker-action-activation-sidecar": [],
+    "docker-action-broker": [
+      "docker-action-activation-sidecar"
+    ],
+    "grafana": [
+      "loki",
+      "prometheus"
+    ],
+    "keycloak": [
+      "postgres"
+    ],
+    "loki": [
+      "alertmanager"
+    ],
+    "mariadb": [],
+    "minio": [],
+    "nats": [
+      "broker-auth-bootstrap"
+    ],
+    "platform-alert-dispatcher": [],
+    "postgres": [],
+    "project-router": [
+      "control-center"
+    ],
+    "prometheus": [
+      "alertmanager"
+    ],
+    "promtail": [
+      "loki"
+    ],
+    "redis": [
+      "broker-auth-bootstrap"
+    ],
+    "traefik": [],
+    "waf": [
+      "traefik"
+    ]
+  },
+  "serviceNetworks": {
+    "alertmanager": [
+      "platform_observability"
+    ],
+    "backup-scheduler": [],
+    "broker-auth-bootstrap": [],
+    "control-center": [
+      "platform_db_admin",
+      "platform_egress",
+      "platform_observability",
+      "platform_routing"
+    ],
+    "docker-action-activation-sidecar": [],
+    "docker-action-broker": [],
+    "grafana": [
+      "platform_observability"
+    ],
+    "keycloak": [
+      "platform_egress",
+      "platform_observability",
+      "platform_postgres",
+      "platform_routing"
+    ],
+    "loki": [
+      "platform_observability"
+    ],
+    "mariadb": [
+      "platform_db_admin"
+    ],
+    "minio": [
+      "platform_storage"
+    ],
+    "nats": [
+      "platform_bus"
+    ],
+    "platform-alert-dispatcher": [
+      "platform_egress",
+      "platform_observability"
+    ],
+    "postgres": [
+      "platform_db_admin",
+      "platform_postgres"
+    ],
+    "project-router": [
+      "platform_routing"
+    ],
+    "prometheus": [
+      "platform_observability"
+    ],
+    "promtail": [
+      "platform_observability"
+    ],
+    "redis": [
+      "platform_cache"
+    ],
+    "traefik": [
+      "platform_edge",
+      "platform_egress",
+      "platform_observability",
+      "platform_routing"
+    ],
+    "waf": [
+      "platform_edge"
+    ]
+  },
+  "serviceHealthchecks": {
+    "alertmanager": {
+      "test": [
+        "CMD-SHELL",
+        "test -r /run/secrets/alertmanager_webhook_token && wget -q -O /dev/null http://127.0.0.1:9093/-/ready"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "backup-scheduler": {
+      "test": [
+        "CMD-SHELL",
+        "test -s /run/platform/backup-scheduler/crontabs/root"
+      ],
+      "timeout": "5s",
+      "interval": "30s",
+      "retries": 5
+    },
+    "broker-auth-bootstrap": null,
+    "control-center": {
+      "test": [
+        "CMD-SHELL",
+        "node -e \"fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "docker-action-activation-sidecar": null,
+    "docker-action-broker": {
+      "test": [
+        "CMD",
+        "node",
+        "/opt/platform-docker-broker/docker-action-readiness.mjs",
+        "--require-trusted-activation"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 5
+    },
+    "grafana": {
+      "test": [
+        "CMD-SHELL",
+        "wget -q -O /dev/null http://127.0.0.1:3000/api/health"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "keycloak": {
+      "test": [
+        "CMD-SHELL",
+        "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"
+      ],
+      "timeout": "5s",
+      "interval": "20s",
+      "retries": 15,
+      "start_period": "1m0s"
+    },
+    "loki": {
+      "test": [
+        "CMD",
+        "/usr/bin/loki",
+        "-version"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 15
+    },
+    "mariadb": {
+      "test": [
+        "CMD-SHELL",
+        "mariadb -uroot -p\"$$(cat /run/secrets/mariadb_root_password)\" -N -e 'select 1' >/dev/null"
+      ],
+      "timeout": "3s",
+      "interval": "5s",
+      "retries": 30
+    },
+    "minio": {
+      "test": [
+        "CMD-SHELL",
+        "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "nats": {
+      "test": [
+        "CMD-SHELL",
+        "wget -q -O /dev/null http://127.0.0.1:8222/healthz"
+      ],
+      "timeout": "5s",
+      "interval": "10s",
+      "retries": 10
+    },
+    "platform-alert-dispatcher": {
+      "test": [
+        "CMD-SHELL",
+        "node -e \"fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      ],
+      "timeout": "5s",
+      "interval": "20s",
+      "retries": 10,
+      "start_period": "15s"
+    },
+    "postgres": {
+      "test": [
+        "CMD-SHELL",
+        "pg_isready -U \"$${POSTGRES_USER}\" -d postgres"
+      ],
+      "timeout": "5s",
+      "interval": "10s",
+      "retries": 10
+    },
+    "project-router": {
+      "test": [
+        "CMD-SHELL",
+        "node -e \"fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "prometheus": {
+      "test": [
+        "CMD-SHELL",
+        "wget -q -O /dev/null http://127.0.0.1:9090/-/ready"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 10
+    },
+    "promtail": {
+      "test": [
+        "CMD-SHELL",
+        "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9080; printf \"GET /ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"
+      ],
+      "timeout": "5s",
+      "interval": "20s",
+      "retries": 10
+    },
+    "redis": {
+      "test": [
+        "CMD-SHELL",
+        "redis-cli --user \"$${REDIS_USERNAME}\" --pass \"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" --no-auth-warning ping | grep PONG"
+      ],
+      "timeout": "5s",
+      "interval": "10s",
+      "retries": 10
+    },
+    "traefik": {
+      "test": [
+        "CMD",
+        "traefik",
+        "healthcheck",
+        "--ping"
+      ],
+      "timeout": "5s",
+      "interval": "15s",
+      "retries": 5
+    },
+    "waf": {
+      "test": [
+        "CMD-SHELL",
+        "nginx -t >/dev/null 2>&1 && { curl -ksS -o /dev/null http://127.0.0.1:8080/; code=$$?; [ $$code -eq 0 ] || [ $$code -eq 22 ]; }"
+      ],
+      "timeout": "5s",
+      "interval": "20s",
+      "retries": 10,
+      "start_period": "20s"
+    }
+  },
+  "serviceProcessModel": {
+    "alertmanager": {
+      "entrypoint": null,
+      "command": [
+        "--config.file=/etc/alertmanager/alertmanager.yml",
+        "--storage.path=/alertmanager"
+      ]
+    },
+    "backup-scheduler": {
+      "entrypoint": [
+        "/opt/platform-backup-scheduler/backup-scheduler.sh"
+      ],
+      "command": null
+    },
+    "broker-auth-bootstrap": {
+      "entrypoint": [
+        "node",
+        "/broker/render-workload-broker-config.mjs"
+      ],
+      "command": [
+        "all",
+        "--lock",
+        "/run/platform/hosted-workloads.lock.json",
+        "--secretsRoot",
+        "/run/secrets",
+        "--redisPlatformPasswordFile",
+        "/run/secrets/redis_password",
+        "--redisOutput",
+        "/out/redis/redis-users.acl",
+        "--natsPlatformPasswordFile",
+        "/run/secrets/nats_password",
+        "--natsOutput",
+        "/out/nats/nats-server.conf",
+        "--natsUid",
+        "1000",
+        "--natsGid",
+        "1000"
+      ]
+    },
+    "control-center": {
+      "entrypoint": null,
+      "command": [
+        "node",
+        "/app/server.mjs"
+      ]
+    },
+    "docker-action-activation-sidecar": {
+      "entrypoint": [
+        "/opt/provider-activation/materialize-dsse-cas"
+      ],
+      "command": null
+    },
+    "docker-action-broker": {
+      "entrypoint": [
+        "node",
+        "/opt/platform-docker-broker/docker-action-broker.mjs"
+      ],
+      "command": null
+    },
+    "grafana": {
+      "entrypoint": null,
+      "command": null
+    },
+    "keycloak": {
+      "entrypoint": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "command": [
+        "export KC_BOOTSTRAP_ADMIN_PASSWORD=\"$$(cat \"$${KC_BOOTSTRAP_ADMIN_PASSWORD_FILE}\")\"; export KC_DB_PASSWORD=\"$$(cat \"$${KC_DB_PASSWORD_FILE}\")\"; exec /opt/keycloak/bin/kc.sh start --http-port=8080 --import-realm"
+      ]
+    },
+    "loki": {
+      "entrypoint": null,
+      "command": [
+        "-config.file=/etc/loki/config.yml"
+      ]
+    },
+    "mariadb": {
+      "entrypoint": null,
+      "command": null
+    },
+    "minio": {
+      "entrypoint": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "command": [
+        "export MINIO_ROOT_PASSWORD=\"$$(cat \"$${MINIO_ROOT_PASSWORD_FILE}\")\"; exec minio server /data --address \":9000\" --console-address \":9001\""
+      ]
+    },
+    "nats": {
+      "entrypoint": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "command": [
+        "cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf"
+      ]
+    },
+    "platform-alert-dispatcher": {
+      "entrypoint": null,
+      "command": null
+    },
+    "postgres": {
+      "entrypoint": [
+        "/usr/local/bin/platform-postgres-entrypoint"
+      ],
+      "command": null
+    },
+    "project-router": {
+      "entrypoint": null,
+      "command": [
+        "node",
+        "/app/server.mjs"
+      ]
+    },
+    "prometheus": {
+      "entrypoint": null,
+      "command": [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        "--storage.tsdb.retention.time=15d",
+        "--web.enable-lifecycle"
+      ]
+    },
+    "promtail": {
+      "entrypoint": null,
+      "command": [
+        "-config.file=/etc/promtail/config.yml"
+      ]
+    },
+    "redis": {
+      "entrypoint": null,
+      "command": [
+        "sh",
+        "-ec",
+        "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"
+      ]
+    },
+    "traefik": {
+      "entrypoint": null,
+      "command": [
+        "--configFile=/etc/traefik/traefik.edge-http.yml"
+      ]
+    },
+    "waf": {
+      "entrypoint": null,
+      "command": null
+    }
+  },
+  "buildDockerfiles": {
+    "alertmanager": null,
+    "backup-scheduler": null,
+    "broker-auth-bootstrap": "docker/ops.Dockerfile",
+    "control-center": null,
+    "docker-action-activation-sidecar": null,
+    "docker-action-broker": null,
+    "grafana": null,
+    "keycloak": null,
+    "loki": null,
+    "mariadb": null,
+    "minio": null,
+    "nats": null,
+    "platform-alert-dispatcher": null,
+    "postgres": null,
+    "project-router": null,
+    "prometheus": null,
+    "promtail": null,
+    "redis": null,
+    "traefik": null,
+    "waf": null
+  },
+  "serviceBuildAuthority": {
+    "alertmanager": null,
+    "backup-scheduler": null,
+    "broker-auth-bootstrap": {
+      "context": "<ROOT>",
+      "dockerfile": "docker/ops.Dockerfile",
+      "args": {
+        "NODE_IMAGE": "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606"
+      }
+    },
+    "control-center": null,
+    "docker-action-activation-sidecar": null,
+    "docker-action-broker": null,
+    "grafana": null,
+    "keycloak": null,
+    "loki": null,
+    "mariadb": null,
+    "minio": null,
+    "nats": null,
+    "platform-alert-dispatcher": null,
+    "postgres": null,
+    "project-router": null,
+    "prometheus": null,
+    "promtail": null,
+    "redis": null,
+    "traefik": null,
+    "waf": null
+  },
+  "serviceSecretGrants": {
+    "alertmanager": [
+      "alertmanager_webhook_token"
+    ],
+    "backup-scheduler": [
+      "docker_action_backup_catalog",
+      "docker_action_backup_job_execute",
+      "docker_action_backup_offsite_sync",
+      "docker_action_backup_prune_apply",
+      "docker_action_backup_prune_plan",
+      "docker_action_restore_drill_full"
+    ],
+    "broker-auth-bootstrap": [
+      "nats_password",
+      "redis_password"
+    ],
+    "control-center": [
+      "control_center_database_url",
+      "control_center_vault_keys",
+      "mariadb_root_password",
+      "postgres_superuser_password",
+      "projects_gateway_signing_keys"
+    ],
+    "docker-action-activation-sidecar": [],
+    "docker-action-broker": [
+      "docker_action_backup_catalog",
+      "docker_action_backup_job_execute",
+      "docker_action_backup_offsite_sync",
+      "docker_action_backup_prune_apply",
+      "docker_action_backup_prune_plan",
+      "docker_action_evidence_runtime_snapshot",
+      "docker_action_restore_drill_full",
+      "docker_action_runtime_intent_trust_key"
+    ],
+    "grafana": [
+      "grafana_admin_password"
+    ],
+    "keycloak": [
+      "keycloak_admin_password",
+      "keycloak_db_password"
+    ],
+    "loki": [],
+    "mariadb": [
+      "mariadb_root_password"
+    ],
+    "minio": [
+      "minio_root_password"
+    ],
+    "nats": [],
+    "platform-alert-dispatcher": [
+      "alertmanager_webhook_token",
+      "smtp_password"
+    ],
+    "postgres": [
+      "keycloak_db_password",
+      "postgres_superuser_password"
+    ],
+    "project-router": [],
+    "prometheus": [],
+    "promtail": [],
+    "redis": [
+      "redis_password"
+    ],
+    "traefik": [],
+    "waf": []
+  },
+  "serviceConfigGrants": {
+    "alertmanager": [],
+    "backup-scheduler": [],
+    "broker-auth-bootstrap": [],
+    "control-center": [],
+    "docker-action-activation-sidecar": [],
+    "docker-action-broker": [],
+    "grafana": [],
+    "keycloak": [],
+    "loki": [],
+    "mariadb": [],
+    "minio": [],
+    "nats": [],
+    "platform-alert-dispatcher": [],
+    "postgres": [],
+    "project-router": [],
+    "prometheus": [],
+    "promtail": [],
+    "redis": [],
+    "traefik": [
+      {
+        "source": "enterprise_traefik_routes",
+        "target": "/etc/traefik/dynamic/routes.yml"
+      }
+    ],
+    "waf": []
+  },
+  "tmpfsRules": {
+    "alertmanager": [],
+    "backup-scheduler": [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m",
+      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m"
+    ],
+    "broker-auth-bootstrap": [],
+    "control-center": [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m"
+    ],
+    "docker-action-activation-sidecar": [],
+    "docker-action-broker": [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m",
+      "/root:rw,noexec,nosuid,nodev,size=16m"
+    ],
+    "grafana": [],
+    "keycloak": [],
+    "loki": [],
+    "mariadb": [],
+    "minio": [],
+    "nats": [],
+    "platform-alert-dispatcher": [
+      "/tmp:rw,noexec,nosuid,nodev,size=16m"
+    ],
+    "postgres": [],
+    "project-router": [
+      "/tmp:rw,noexec,nosuid,nodev,size=32m"
+    ],
+    "prometheus": [],
+    "promtail": [],
+    "redis": [],
+    "traefik": [],
+    "waf": []
+  },
+  "serviceUsers": {
+    "alertmanager": null,
+    "backup-scheduler": "0:0",
+    "broker-auth-bootstrap": null,
+    "control-center": null,
+    "docker-action-activation-sidecar": "0:0",
+    "docker-action-broker": "0:0",
+    "grafana": null,
+    "keycloak": null,
+    "loki": null,
+    "mariadb": null,
+    "minio": null,
+    "nats": "1000:1000",
+    "platform-alert-dispatcher": "1000:1000",
+    "postgres": null,
+    "project-router": null,
+    "prometheus": null,
+    "promtail": null,
+    "redis": null,
+    "traefik": null,
+    "waf": null
+  },
+  "servicesWithDefaultLogging": [
+    "alertmanager",
+    "backup-scheduler",
+    "control-center",
+    "grafana",
+    "keycloak",
+    "loki",
+    "mariadb",
+    "minio",
+    "nats",
+    "platform-alert-dispatcher",
+    "postgres",
+    "project-router",
+    "prometheus",
+    "promtail",
+    "redis",
+    "traefik",
+    "waf"
+  ],
+  "requiredReadOnly": [
+    "backup-scheduler",
+    "broker-auth-bootstrap",
+    "control-center",
+    "docker-action-activation-sidecar",
+    "docker-action-broker",
+    "platform-alert-dispatcher",
+    "project-router"
+  ],
+  "requiredCapDropAll": [
+    "backup-scheduler",
+    "broker-auth-bootstrap",
+    "docker-action-activation-sidecar",
+    "docker-action-broker",
+    "platform-alert-dispatcher"
+  ],
+  "requiredSecurityOpt": [
+    "alertmanager",
+    "backup-scheduler",
+    "broker-auth-bootstrap",
+    "control-center",
+    "docker-action-activation-sidecar",
+    "docker-action-broker",
+    "grafana",
+    "keycloak",
+    "loki",
+    "mariadb",
+    "minio",
+    "nats",
+    "platform-alert-dispatcher",
+    "postgres",
+    "project-router",
+    "prometheus",
+    "promtail",
+    "redis",
+    "traefik",
+    "waf"
+  ]
+};
+
+CORE_SEMANTIC_POLICY.exactAuthorityShape = {
+  topLevelFields: CURRENT_CLOSED_AUTHORITY.topLevelFields,
+  configFields: CURRENT_CLOSED_AUTHORITY.configFields,
+  secretFields: CURRENT_CLOSED_AUTHORITY.secretFields,
+  networkFields: CURRENT_CLOSED_AUTHORITY.networkFields,
+  volumeFields: CURRENT_CLOSED_AUTHORITY.volumeFields,
+  serviceFields: CURRENT_CLOSED_AUTHORITY.serviceFields,
+  serviceResources: CURRENT_CLOSED_AUTHORITY.serviceResources,
+};
+CORE_SEMANTIC_POLICY.serviceContainerNames =
+  CURRENT_CLOSED_AUTHORITY.serviceContainerNames;
+CORE_SEMANTIC_POLICY.serviceRestartPolicies =
+  CURRENT_CLOSED_AUTHORITY.serviceRestartPolicies;
+CORE_SEMANTIC_POLICY.serviceProfiles = CURRENT_CLOSED_AUTHORITY.serviceProfiles;
+CORE_SEMANTIC_POLICY.serviceDependencies =
+  CURRENT_CLOSED_AUTHORITY.serviceDependencies;
+CORE_SEMANTIC_POLICY.serviceNetworks = CURRENT_CLOSED_AUTHORITY.serviceNetworks;
+CORE_SEMANTIC_POLICY.serviceHealthchecks =
+  CURRENT_CLOSED_AUTHORITY.serviceHealthchecks;
+CORE_SEMANTIC_POLICY.serviceProcessModel =
+  CURRENT_CLOSED_AUTHORITY.serviceProcessModel;
+CORE_SEMANTIC_POLICY.buildDockerfiles =
+  CURRENT_CLOSED_AUTHORITY.buildDockerfiles;
+CORE_SEMANTIC_POLICY.serviceSecretGrants =
+  CURRENT_CLOSED_AUTHORITY.serviceSecretGrants;
+CORE_SEMANTIC_POLICY.serviceConfigGrants =
+  CURRENT_CLOSED_AUTHORITY.serviceConfigGrants;
+CORE_SEMANTIC_POLICY.tmpfsRules = CURRENT_CLOSED_AUTHORITY.tmpfsRules;
+CORE_SEMANTIC_POLICY.servicesWithDefaultLogging =
+  CURRENT_CLOSED_AUTHORITY.servicesWithDefaultLogging;
+CORE_SEMANTIC_POLICY.requiredServiceControls = {
+  capDropAll: CURRENT_CLOSED_AUTHORITY.requiredCapDropAll,
+  numericUsers: Object.fromEntries(
+    Object.entries(CURRENT_CLOSED_AUTHORITY.serviceUsers)
+      .filter(([, user]) => user !== null),
+  ),
+  readOnly: CURRENT_CLOSED_AUTHORITY.requiredReadOnly,
+  securityOpt: CURRENT_CLOSED_AUTHORITY.requiredSecurityOpt,
+};
+
+const currentServiceSet = new Set(CURRENT_CORE_SERVICE_NAMES);
+const closeCurrentServiceMap = (source) => Object.fromEntries(
+  CURRENT_CORE_SERVICE_NAMES.map((name) => [name, source[name]]),
+);
+CORE_SEMANTIC_POLICY.serviceEnvironmentAuthority.services =
+  closeCurrentServiceMap(CORE_SEMANTIC_POLICY.serviceEnvironmentAuthority.services);
+CORE_SEMANTIC_POLICY.serviceImages =
+  closeCurrentServiceMap(CORE_SEMANTIC_POLICY.serviceImages);
+CORE_SEMANTIC_POLICY.serviceImageVariables =
+  closeCurrentServiceMap(CORE_SEMANTIC_POLICY.serviceImageVariables);
+
+const currentSecretNames = Object.keys(CURRENT_CLOSED_AUTHORITY.secretFields);
+CORE_SEMANTIC_POLICY.secretFiles = Object.fromEntries(
+  currentSecretNames.map((name) => [name, CORE_SEMANTIC_POLICY.secretFiles[name]]),
+);
+CORE_SEMANTIC_POLICY.secretFileVariables = Object.fromEntries(
+  Object.entries(CORE_SEMANTIC_POLICY.secretFileVariables)
+    .filter(([name]) => currentSecretNames.includes(name)),
+);
+const currentNetworkNames = Object.keys(CURRENT_CLOSED_AUTHORITY.networkFields);
+CORE_SEMANTIC_POLICY.physicalNetworkNames = Object.fromEntries(
+  currentNetworkNames.map((name) => [name, CORE_SEMANTIC_POLICY.physicalNetworkNames[name]]),
+);
+CORE_SEMANTIC_POLICY.networkLabels = Object.fromEntries(
+  currentNetworkNames.map((name) => [name, CORE_SEMANTIC_POLICY.networkLabels[name]]),
+);
+const currentVolumeNames = Object.keys(CURRENT_CLOSED_AUTHORITY.volumeFields);
+CORE_SEMANTIC_POLICY.physicalVolumeNames = Object.fromEntries(
+  currentVolumeNames.map((name) => [name, CORE_SEMANTIC_POLICY.physicalVolumeNames[name]]),
+);
+CORE_SEMANTIC_POLICY.hostBindExceptions =
+  CORE_SEMANTIC_POLICY.hostBindExceptions.filter(([serviceName]) =>
+    currentServiceSet.has(serviceName));
+
+CORE_SEMANTIC_POLICY.currentAuthority = {
+  schema: "platform-no-hosted-exact-render-authority/v2",
+  serviceNames: CURRENT_CORE_SERVICE_NAMES,
+  privilegedServices: [
+    "broker-auth-bootstrap",
+    "docker-action-activation-sidecar",
+    "docker-action-broker",
+  ],
+  serviceFieldCount: 427,
+  serviceBuildAuthority: CURRENT_CLOSED_AUTHORITY.serviceBuildAuthority,
+  networkFields: {
+    platform_bus: ["internal", "ipam", "labels", "name"],
+    platform_cache: ["internal", "ipam", "labels", "name"],
+    platform_db_admin: ["internal", "ipam", "labels", "name"],
+    platform_edge: ["internal", "ipam", "labels", "name"],
+    platform_egress: ["enable_ipv6", "ipam", "labels", "name"],
+    platform_observability: ["internal", "ipam", "labels", "name"],
+    platform_postgres: ["internal", "ipam", "labels", "name"],
+    platform_routing: ["internal", "ipam", "labels", "name"],
+    platform_storage: ["internal", "ipam", "labels", "name"],
+  },
+  volumeFields: {
+    backup_scheduler_jobs: ["name"],
+    backup_scheduler_logs: ["name"],
+    docker_action_activation_cas: ["name"],
+    docker_action_broker_socket: ["name"],
+    docker_action_broker_state: ["name"],
+    enterprise_alertmanager_data: ["name"],
+    enterprise_grafana_data: ["name"],
+    enterprise_keycloak_data: ["name"],
+    enterprise_loki_data: ["name"],
+    enterprise_mariadb_data: ["external", "name"],
+    enterprise_minio_data: ["name"],
+    enterprise_nats_data: ["name"],
+    enterprise_postgres_data: ["name"],
+    enterprise_prometheus_data: ["name"],
+    enterprise_redis_data: ["name"],
+    nats_auth_config: ["name"],
+    redis_auth_config: ["name"],
+  },
+  nodeBuildImageDefault: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
+  normalizedRenderSha256: "60917b31cf817d8f569befda5e3a728a40bd97b9eb1067c562c5b3b03a7c6737",
+};
+
 const CORE_SEMANTIC_POLICY_BYTES = `${JSON.stringify(CORE_SEMANTIC_POLICY)}\n`;
 export const coreSemanticPolicyDescriptor = CORE_SEMANTIC_POLICY;
 export const coreSemanticPolicySha256 = crypto
@@ -3601,10 +5801,22 @@ function projectedPortRules(serviceName, environment) {
     const http = parsedPublishedBind(envOr(environment, "WAF_HTTP_BIND", "0.0.0.0:80"));
     const https = parsedPublishedBind(envOr(environment, "WAF_HTTPS_BIND", "0.0.0.0:443"));
     if (!http || !https) return null;
-    return [
+    const rules = [
       { ...http, protocol: "tcp", target: 8080 },
       { ...https, protocol: "tcp", target: 8443 },
     ];
+    const bindingKeys = rules.map((rule) =>
+      `${rule.hostIp}\u0000${rule.protocol}\u0000${rule.published}`);
+    if (!allUnique(bindingKeys)
+        || rules.some((rule) => {
+          const host = rule.hostIp.startsWith("[") && rule.hostIp.endsWith("]")
+            ? rule.hostIp.slice(1, -1)
+            : rule.hostIp;
+          return host !== "" && isIP(host) === 0;
+        })) {
+      return null;
+    }
+    return rules;
   }
   return CORE_SEMANTIC_POLICY.servicePortRules[serviceName] ?? [];
 }
@@ -3748,7 +5960,9 @@ function validateExactAuthorityShape(config, violations) {
   }
   const declaredFieldCount = Object.values(authority.serviceFields)
     .reduce((count, fields) => count + (Array.isArray(fields) ? fields.length : 0), 0);
-  if (declaredFieldCount !== 482) violations.push("policy:service-field-count");
+  if (declaredFieldCount !== CORE_SEMANTIC_POLICY.currentAuthority.serviceFieldCount) {
+    violations.push("policy:service-field-count");
+  }
   for (const [serviceName, service] of Object.entries(config.services || {})) {
     const expectedFields = authority.serviceFields[serviceName];
     const expectedResources = authority.serviceResources[serviceName];
@@ -4231,6 +6445,796 @@ function parseArguments(argv) {
   };
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (plainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function exactKeys(value, keys) {
+  return plainObject(value) && sameJson(Object.keys(value).sort(), [...keys].sort());
+}
+
+const RUNTIME_IDENTITY_LABELS = {
+  PLATFORM_RUNTIME_CANDIDATE_ID: "com.platform.runtime.candidate-id",
+  PLATFORM_RUNTIME_COMMIT: "com.platform.runtime.commit",
+  PLATFORM_RUNTIME_TREE: "com.platform.runtime.tree",
+  PLATFORM_RUNTIME_DEPLOYMENT_ID: "com.platform.runtime.deployment-id",
+  PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: "com.platform.runtime.source-render-sha256",
+  PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "com.platform.runtime.workload-lock-sha256",
+};
+
+function runtimeIdentityProjection(environment) {
+  const entries = Object.entries(RUNTIME_IDENTITY_LABELS);
+  const present = entries.filter(([variable]) => {
+    const value = environment.get(variable);
+    return typeof value === "string" && value.length > 0;
+  });
+  if (present.length === 0) return { active: false, labels: {}, valid: true };
+  if (present.length !== entries.length) return { active: true, labels: {}, valid: false };
+  const values = Object.fromEntries(entries.map(([variable]) => [variable, environment.get(variable)]));
+  const valid = /^[a-f0-9]{64}$/.test(values.PLATFORM_RUNTIME_CANDIDATE_ID)
+    && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(values.PLATFORM_RUNTIME_COMMIT)
+    && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(values.PLATFORM_RUNTIME_TREE)
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(values.PLATFORM_RUNTIME_DEPLOYMENT_ID)
+    && /^[a-f0-9]{64}$/.test(values.PLATFORM_RUNTIME_SOURCE_RENDER_SHA256)
+    && /^[a-f0-9]{64}$/.test(values.PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256);
+  return {
+    active: true,
+    labels: Object.fromEntries(entries.map(([variable, label]) => [label, values[variable]])),
+    valid,
+  };
+}
+
+function validHostname(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 253
+    && value.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}
+
+function allUnique(values) {
+  return values.length === new Set(values).size;
+}
+
+function currentPinnedImage(environment, repositoryVariable, shaVariable) {
+  const repository = environment.get(repositoryVariable);
+  const sha256 = environment.get(shaVariable);
+  if (typeof repository !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}$/.test(repository)
+      || repository.includes("@")
+      || typeof sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(sha256)) {
+    return null;
+  }
+  return `${repository}@sha256:${sha256}`;
+}
+
+function currentExpectedImage(serviceName, environment) {
+  if (serviceName === "broker-auth-bootstrap") {
+    const image = environment.get("PLATFORM_OPS_IMAGE");
+    return typeof image === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,254}@sha256:[a-f0-9]{64}$/.test(image)
+      && image.indexOf("@") === image.lastIndexOf("@")
+      ? image
+      : null;
+  }
+  if (serviceName === "docker-action-activation-sidecar") {
+    return currentPinnedImage(
+      environment,
+      "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY",
+      "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256",
+    );
+  }
+  if (serviceName === "docker-action-broker") {
+    return currentPinnedImage(
+      environment,
+      "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY",
+      "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256",
+    );
+  }
+  if (serviceName === "backup-scheduler") {
+    return currentPinnedImage(
+      environment,
+      "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY",
+      "PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256",
+    );
+  }
+  const variable = CORE_SEMANTIC_POLICY.serviceImageVariables[serviceName];
+  return variable
+    ? envOr(environment, variable, CORE_SEMANTIC_POLICY.serviceImages[serviceName])
+    : CORE_SEMANTIC_POLICY.serviceImages[serviceName];
+}
+
+function addExactViolation(violations, serviceName, field, observed, expected) {
+  if (!sameStructuredJson(observed, expected)) {
+    violations.push(`${serviceName}:${field}-exact`);
+  }
+}
+
+function rawSocketMounts(service) {
+  return Array.isArray(service?.volumes)
+    ? service.volumes.filter((mount) =>
+      plainObject(mount)
+      && mount.type === "bind"
+      && ["/run/docker.sock", "/var/run/docker.sock"].includes(mount.source))
+    : [];
+}
+
+function semanticMounts(service) {
+  if (!Array.isArray(service?.volumes)) return null;
+  return service.volumes.map((mount) => ({
+    readOnly: mount?.read_only === true,
+    source: String(mount?.source ?? ""),
+    target: String(mount?.target ?? ""),
+    type: String(mount?.type ?? ""),
+  })).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+}
+
+function exactSemanticMounts(violations, serviceName, service, expected) {
+  addExactViolation(
+    violations,
+    serviceName,
+    "mount-inventory",
+    semanticMounts(service),
+    [...expected].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right))),
+  );
+}
+
+function validateCurrentPrivilegedServices(
+  config,
+  rootDirectory,
+  environment,
+  violations,
+) {
+  const bootstrap = config.services?.["broker-auth-bootstrap"];
+  const sidecar = config.services?.["docker-action-activation-sidecar"];
+  const broker = config.services?.["docker-action-broker"];
+  for (const [name, service] of [
+    ["broker-auth-bootstrap", bootstrap],
+    ["docker-action-activation-sidecar", sidecar],
+    ["docker-action-broker", broker],
+  ]) {
+    if (!plainObject(service)) {
+      violations.push(`${name}:missing`);
+      continue;
+    }
+    addExactViolation(violations, name, "network-mode", service.network_mode, "none");
+    addExactViolation(violations, name, "read-only", service.read_only, true);
+    addExactViolation(
+      violations,
+      name,
+      "security-opt",
+      service.security_opt,
+      ["no-new-privileges:true"],
+    );
+    addExactViolation(violations, name, "cap-drop", service.cap_drop, ["ALL"]);
+    if (Object.hasOwn(service, "networks") || Object.hasOwn(service, "ports")
+        || Object.hasOwn(service, "expose")) {
+      violations.push(`${name}:network-surface`);
+    }
+  }
+
+  if (plainObject(bootstrap)) {
+    addExactViolation(violations, "broker-auth-bootstrap", "restart", bootstrap.restart, "no");
+    addExactViolation(violations, "broker-auth-bootstrap", "cap-add", bootstrap.cap_add, ["CHOWN"]);
+    addExactViolation(violations, "broker-auth-bootstrap", "entrypoint", bootstrap.entrypoint, [
+      "node",
+      "/broker/render-workload-broker-config.mjs",
+    ]);
+    addExactViolation(violations, "broker-auth-bootstrap", "command", bootstrap.command, [
+      "all",
+      "--lock",
+      "/run/platform/hosted-workloads.lock.json",
+      "--secretsRoot",
+      "/run/secrets",
+      "--redisPlatformPasswordFile",
+      "/run/secrets/redis_password",
+      "--redisOutput",
+      "/out/redis/redis-users.acl",
+      "--natsPlatformPasswordFile",
+      "/run/secrets/nats_password",
+      "--natsOutput",
+      "/out/nats/nats-server.conf",
+      "--natsUid",
+      "1000",
+      "--natsGid",
+      "1000",
+    ]);
+    if (Object.hasOwn(bootstrap, "user") || Object.hasOwn(bootstrap, "profiles")
+        || Object.hasOwn(bootstrap, "depends_on") || Object.hasOwn(bootstrap, "healthcheck")) {
+      violations.push("broker-auth-bootstrap:lifecycle-surface");
+    }
+    const sources = Array.isArray(bootstrap.secrets)
+      ? bootstrap.secrets.map((grant) => grant?.source).sort()
+      : [];
+    addExactViolation(
+      violations,
+      "broker-auth-bootstrap",
+      "secret-sources",
+      sources,
+      ["nats_password", "redis_password"],
+    );
+    if (rawSocketMounts(bootstrap).length !== 0) {
+      violations.push("broker-auth-bootstrap:raw-docker-socket");
+    }
+    exactSemanticMounts(violations, "broker-auth-bootstrap", bootstrap, [
+      {
+        type: "bind",
+        source: path.join(rootDirectory, "scripts/render-workload-broker-config.mjs"),
+        target: "/broker/render-workload-broker-config.mjs",
+        readOnly: true,
+      },
+      {
+        type: "bind",
+        source: path.join(rootDirectory, "scripts/workload-broker-policy.mjs"),
+        target: "/broker/workload-broker-policy.mjs",
+        readOnly: true,
+      },
+      {
+        type: "bind",
+        source: path.join(rootDirectory, "config/no-hosted-workloads.lock.json"),
+        target: "/run/platform/hosted-workloads.lock.json",
+        readOnly: true,
+      },
+      { type: "volume", source: "redis_auth_config", target: "/out/redis", readOnly: false },
+      { type: "volume", source: "nats_auth_config", target: "/out/nats", readOnly: false },
+    ]);
+  }
+
+  if (plainObject(sidecar)) {
+    addExactViolation(violations, "docker-action-activation-sidecar", "restart", sidecar.restart, "no");
+    addExactViolation(violations, "docker-action-activation-sidecar", "user", sidecar.user, "0:0");
+    addExactViolation(violations, "docker-action-activation-sidecar", "profiles", sidecar.profiles, ["backup"]);
+    addExactViolation(
+      violations,
+      "docker-action-activation-sidecar",
+      "entrypoint",
+      sidecar.entrypoint,
+      ["/opt/provider-activation/materialize-dsse-cas"],
+    );
+    addExactViolation(violations, "docker-action-activation-sidecar", "command", sidecar.command, null);
+    if (Object.hasOwn(sidecar, "cap_add") || Object.hasOwn(sidecar, "secrets")
+        || Object.hasOwn(sidecar, "depends_on") || Object.hasOwn(sidecar, "healthcheck")) {
+      violations.push("docker-action-activation-sidecar:authority-surface");
+    }
+    if (rawSocketMounts(sidecar).length !== 0) {
+      violations.push("docker-action-activation-sidecar:raw-docker-socket");
+    }
+    exactSemanticMounts(violations, "docker-action-activation-sidecar", sidecar, [
+      {
+        type: "bind",
+        source: String(environment.get("DOCKER_ACTION_ACTIVATION_INBOX") ?? ""),
+        target: "/run/platform/provider-activation/inbox",
+        readOnly: true,
+      },
+      {
+        type: "volume",
+        source: "docker_action_activation_cas",
+        target: "/run/platform/docker-action-activation/by-bundle-sha256",
+        readOnly: false,
+      },
+    ]);
+  }
+
+  if (plainObject(broker)) {
+    addExactViolation(violations, "docker-action-broker", "restart", broker.restart, "unless-stopped");
+    addExactViolation(violations, "docker-action-broker", "user", broker.user, "0:0");
+    addExactViolation(violations, "docker-action-broker", "profiles", broker.profiles, ["backup"]);
+    addExactViolation(violations, "docker-action-broker", "entrypoint", broker.entrypoint, [
+      "node",
+      "/opt/platform-docker-broker/docker-action-broker.mjs",
+    ]);
+    addExactViolation(violations, "docker-action-broker", "command", broker.command, null);
+    addExactViolation(violations, "docker-action-broker", "healthcheck", broker.healthcheck, {
+      test: [
+        "CMD",
+        "node",
+        "/opt/platform-docker-broker/docker-action-readiness.mjs",
+        "--require-trusted-activation",
+      ],
+      timeout: "5s",
+      interval: "15s",
+      retries: 5,
+    });
+    addExactViolation(violations, "docker-action-broker", "depends-on", broker.depends_on, {
+      "docker-action-activation-sidecar": {
+        condition: "service_completed_successfully",
+        required: true,
+      },
+    });
+    addExactViolation(violations, "docker-action-broker", "tmpfs", broker.tmpfs, [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m",
+      "/root:rw,noexec,nosuid,nodev,size=16m",
+    ]);
+    if (Object.hasOwn(broker, "cap_add")) violations.push("docker-action-broker:cap-add");
+    const socketMounts = rawSocketMounts(broker);
+    if (socketMounts.length !== 1
+        || socketMounts[0].target !== "/var/run/docker.sock"
+        || socketMounts[0].read_only !== true) {
+      violations.push("docker-action-broker:raw-docker-socket");
+    }
+    const expectedSecrets = [
+      "docker_action_backup_catalog",
+      "docker_action_backup_job_execute",
+      "docker_action_backup_offsite_sync",
+      "docker_action_backup_prune_apply",
+      "docker_action_backup_prune_plan",
+      "docker_action_evidence_runtime_snapshot",
+      "docker_action_restore_drill_full",
+      "docker_action_runtime_intent_trust_key",
+    ];
+    const grants = Array.isArray(broker.secrets) ? broker.secrets : [];
+    const sources = grants.map((grant) => grant?.source).sort();
+    addExactViolation(violations, "docker-action-broker", "secret-sources", sources, expectedSecrets);
+    if (grants.some((grant) => !plainObject(grant)
+        || grant.target !== grant.source
+        || grant.uid !== "0"
+        || grant.gid !== "0"
+        || grant.mode !== "0400")) {
+      violations.push("docker-action-broker:secret-mode");
+    }
+    exactSemanticMounts(violations, "docker-action-broker", broker, [
+      {
+        type: "bind",
+        source: "/var/run/docker.sock",
+        target: "/var/run/docker.sock",
+        readOnly: true,
+      },
+      {
+        type: "volume",
+        source: "docker_action_broker_socket",
+        target: "/run/platform/docker-action-broker",
+        readOnly: false,
+      },
+      {
+        type: "volume",
+        source: "docker_action_broker_state",
+        target: "/var/lib/platform/docker-action-broker",
+        readOnly: false,
+      },
+      {
+        type: "volume",
+        source: "backup_scheduler_jobs",
+        target: "/run/platform/backup-jobs",
+        readOnly: true,
+      },
+      {
+        type: "volume",
+        source: "docker_action_activation_cas",
+        target: "/run/platform/docker-action-activation/by-bundle-sha256",
+        readOnly: true,
+      },
+      {
+        type: "bind",
+        source: String(environment.get("DOCKER_ACTION_RUNTIME_INTENT_FILE") ?? ""),
+        target: "/run/platform/docker-action-trust/runtime-intent.json",
+        readOnly: true,
+      },
+      {
+        type: "bind",
+        source: String(environment.get("DOCKER_ACTION_ACTIVE_RECEIPT_FILE") ?? ""),
+        target: "/run/platform/docker-action-trust/active-receipt.json",
+        readOnly: true,
+      },
+    ]);
+  }
+
+  for (const name of [
+    "broker-auth-bootstrap",
+    "docker-action-activation-sidecar",
+    "docker-action-broker",
+  ]) {
+    const expected = currentExpectedImage(name, environment);
+    if (expected === null || config.services?.[name]?.image !== expected) {
+      violations.push(`${name}:image-identity`);
+    }
+  }
+}
+
+function normalizeBoundAuthorityPaths(value, bindings) {
+  if (Array.isArray(value)) return value.map((entry) => normalizeBoundAuthorityPaths(entry, bindings));
+  if (plainObject(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+      key,
+      normalizeBoundAuthorityPaths(entry, bindings),
+    ]));
+  }
+  if (typeof value !== "string") return value;
+  for (const [source, marker, descendants] of bindings) {
+    if (value === source) return marker;
+    if (descendants && value.startsWith(`${source}${path.sep}`)) {
+      return `${marker}${value.slice(source.length)}`;
+    }
+  }
+  return value;
+}
+
+function validateAndNormalizeTopLevel(config, lock, rootDirectory, environment, normalized, violations) {
+  const expectedInventory = lock?.protectedResourceNames;
+  for (const kind of ["configs", "networks", "secrets", "services", "volumes"]) {
+    if (!plainObject(config[kind])
+        || !Array.isArray(expectedInventory?.[kind])
+        || !sameJson(Object.keys(config[kind]).sort(), expectedInventory[kind])) {
+      violations.push(`${kind}:exact-inventory`);
+    }
+  }
+  if (config.name !== lock?.projectName) violations.push("document:name");
+  if (!sameJson(Object.keys(config.services ?? {}).sort(), CURRENT_CORE_SERVICE_NAMES)) {
+    violations.push("services:current-exact-inventory");
+  }
+
+  const runtimeIdentity = runtimeIdentityProjection(environment);
+  const renderedRuntimeLabels = config["x-platform-runtime-labels"];
+  if (!runtimeIdentity.valid
+      || (runtimeIdentity.active
+        ? !sameFlatObject(renderedRuntimeLabels, runtimeIdentity.labels)
+        : Object.hasOwn(config, "x-platform-runtime-labels"))) {
+    violations.push("document:runtime-identity-labels");
+  } else if (runtimeIdentity.active) {
+    delete normalized["x-platform-runtime-labels"];
+  }
+
+  const routeConfig = config.configs?.enterprise_traefik_routes;
+  const domain = envOr(environment, "DOMAIN", "localhost.com");
+  const portalHost = envOr(
+    environment,
+    "CONTROL_CENTER_HOST",
+    envOr(environment, "ADMIN_HOST", `portal.${domain}`),
+  );
+  const docsHost = envOr(environment, "DOCS_HOST", `docs.${domain}`);
+  const authHost = envOr(environment, "AUTH_HOST", `auth.${domain}`);
+  const expectedContent = CORE_SEMANTIC_POLICY.configContentLines.enterprise_traefik_routes
+    .join("\n")
+    .replace("__PORTAL_HOST__", portalHost)
+    .replace("__DOCS_HOST__", docsHost)
+    .replace("__AUTH_HOST__", authHost);
+  if (!exactKeys(routeConfig, ["content", "name"])
+      || ![domain, portalHost, docsHost, authHost].every(validHostname)
+      || routeConfig.name !== `${lock.projectName}_enterprise_traefik_routes`
+      || routeConfig.content !== expectedContent) {
+    violations.push("config:enterprise_traefik_routes:exact");
+  } else {
+    normalized.configs.enterprise_traefik_routes = {
+      content: "<validated-config-content>",
+      name: "<validated-config-name>",
+    };
+  }
+
+  const secretsRoot = path.resolve(rootDirectory, "secrets");
+  const secretFiles = [];
+  const secretPhysicalNames = [];
+  for (const [secretName, definition] of Object.entries(config.secrets ?? {})) {
+    const relative = CORE_SEMANTIC_POLICY.secretFiles[secretName];
+    const variable = CORE_SEMANTIC_POLICY.secretFileVariables[secretName];
+    const selected = variable ? envOr(environment, variable, relative) : relative;
+    const expectedFile = typeof selected === "string" ? path.resolve(rootDirectory, selected) : "";
+    const expectedName = `${lock.projectName}_${secretName}`;
+    const fileMode = secretName === "alertmanager_webhook_token" ? 0o640 : 0o600;
+    if (!exactKeys(definition, ["file", "name"])
+        || definition.name !== expectedName
+        || definition.file !== expectedFile
+        || !pathWithinRoot(expectedFile, secretsRoot)
+        || !filesystemPathAuthority(expectedFile, secretsRoot, {
+          expectedType: "file",
+          fileMode,
+        })) {
+      violations.push(`secret:${secretName}:exact-authority`);
+      continue;
+    }
+    normalized.secrets[secretName] = {
+      file: "<validated-secret-file>",
+      name: "<validated-secret-name>",
+    };
+    secretFiles.push(definition.file);
+    secretPhysicalNames.push(definition.name);
+  }
+  if (!allUnique(secretFiles)) violations.push("secrets:file-path-collision");
+  if (!allUnique(secretPhysicalNames)) violations.push("secrets:physical-name-collision");
+
+  const configPhysicalNames = Object.values(config.configs ?? {})
+    .map((definition) => definition?.name)
+    .filter((name) => typeof name === "string");
+  if (!allUnique(configPhysicalNames)) {
+    violations.push("configs:physical-name-collision");
+  }
+
+  const networkPrefix = envOr(environment, "PLATFORM_NETWORK_PREFIX", lock.projectName);
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(networkPrefix)) {
+    violations.push("networks:prefix");
+  }
+  const networkPhysicalNames = [];
+  for (const [networkName, definition] of Object.entries(config.networks ?? {})) {
+    const expectedName = `${networkPrefix}_${networkName.slice("platform_".length)}`;
+    const expectedFields = CORE_SEMANTIC_POLICY.currentAuthority.networkFields[networkName];
+    if (!Array.isArray(expectedFields)
+        || !exactKeys(definition, expectedFields)
+        || definition.name !== expectedName) {
+      violations.push(`network:${networkName}:name`);
+      continue;
+    }
+    normalized.networks[networkName].name = "<validated-network-name>";
+    networkPhysicalNames.push(definition.name);
+  }
+  if (!allUnique(networkPhysicalNames)) violations.push("networks:physical-name-collision");
+
+  const volumePhysicalNames = [];
+  for (const [volumeName, definition] of Object.entries(config.volumes ?? {})) {
+    let expectedName = CORE_SEMANTIC_POLICY.physicalVolumeNames[volumeName];
+    if (volumeName === "enterprise_mariadb_data") {
+      expectedName = envOr(environment, "MARIADB_DATA_VOLUME", expectedName);
+    }
+    const expectedFields = CORE_SEMANTIC_POLICY.currentAuthority.volumeFields[volumeName];
+    const physicalNameValid = typeof expectedName === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(expectedName)
+      && (volumeName !== "enterprise_mariadb_data" || expectedName.startsWith("enterprise_"));
+    if (!Array.isArray(expectedFields)
+        || !exactKeys(definition, expectedFields)
+        || !physicalNameValid
+        || definition.name !== expectedName) {
+      violations.push(`volume:${volumeName}:name`);
+      continue;
+    }
+    normalized.volumes[volumeName].name = "<validated-volume-name>";
+    volumePhysicalNames.push(definition.name);
+  }
+  if (!allUnique(volumePhysicalNames)) violations.push("volumes:physical-name-collision");
+}
+
+function validateCurrentEnvironmentSafety(serviceName, service, environment, violations) {
+  const serviceEnvironment = plainObject(service.environment) ? service.environment : {};
+  for (const key of CORE_SEMANTIC_POLICY.forbiddenInjectionEnvironmentKeys) {
+    if (Object.hasOwn(serviceEnvironment, key)) {
+      violations.push(`${serviceName}:environment-injection-${key}`);
+    }
+  }
+  if (serviceName === "control-center") {
+    for (const [key, expected] of Object.entries(
+      CORE_SEMANTIC_POLICY.controlCenterFixedSecurityEnvironment,
+    )) {
+      if (serviceEnvironment[key] !== expected) {
+        violations.push(`${serviceName}:environment-${key}`);
+      }
+    }
+  }
+  if (serviceName === "waf") {
+    for (const [key, expected] of Object.entries(
+      CORE_SEMANTIC_POLICY.wafFixedSecurityEnvironment,
+    )) {
+      if (serviceEnvironment[key] !== expected) {
+        violations.push(`${serviceName}:environment-${key}`);
+      }
+    }
+    for (const [key, projection] of Object.entries(
+      CORE_SEMANTIC_POLICY.wafProjectedSecurityEnvironment,
+    )) {
+      const expected = projectedSecurityValue(environment, projection);
+      if (!validProjectedSecurityValue(expected, projection)
+          || serviceEnvironment[key] !== expected) {
+        violations.push(`${serviceName}:environment-${key}`);
+      }
+    }
+    if (Number(serviceEnvironment.DETECTION_PARANOIA)
+        < Number(serviceEnvironment.BLOCKING_PARANOIA)) {
+      violations.push(`${serviceName}:environment-paranoia-order`);
+    }
+  }
+  if (serviceName === "backup-scheduler") {
+    for (const [key, projection] of Object.entries(
+      CORE_SEMANTIC_POLICY.backupSchedulerBooleanEnvironment,
+    )) {
+      if (!Object.hasOwn(serviceEnvironment, key)) continue;
+      const expected = projectedSecurityValue(environment, projection);
+      if (!["false", "true"].includes(expected) || serviceEnvironment[key] !== expected) {
+        violations.push(`${serviceName}:environment-${key}`);
+      }
+    }
+  }
+}
+
+function validateAndNormalizeServices(config, rootDirectory, environment, normalized, violations) {
+  const runtimeIdentity = runtimeIdentityProjection(environment);
+  for (const [serviceName, service] of Object.entries(config.services ?? {})) {
+    if (!plainObject(service)) continue;
+    if (!runtimeIdentity.valid
+        || (runtimeIdentity.active
+          ? !sameFlatObject(service.labels, runtimeIdentity.labels)
+          : Object.hasOwn(service, "labels"))) {
+      violations.push(`${serviceName}:runtime-identity-labels`);
+    } else if (runtimeIdentity.active) {
+      delete normalized.services[serviceName].labels;
+    }
+
+    const environmentProjection = expectedServiceEnvironment(serviceName, environment);
+    const environmentPresent = Object.hasOwn(service, "environment");
+    if (!environmentProjection.valid
+        || environmentPresent !== environmentProjection.present
+        || (environmentProjection.present
+          && !sameFlatObject(service.environment, environmentProjection.value))) {
+      violations.push(`${serviceName}:environment-authority`);
+    } else if (environmentPresent) {
+      normalized.services[serviceName].environment = { __validated__: serviceName };
+    }
+    validateCurrentEnvironmentSafety(serviceName, service, environment, violations);
+
+    const expectedImage = currentExpectedImage(serviceName, environment);
+    const localDefault = typeof expectedImage === "string"
+      && expectedImage.endsWith(":local")
+      && expectedImage === CORE_SEMANTIC_POLICY.serviceImages[serviceName];
+    if (typeof expectedImage !== "string"
+        || (!localDefault && !/@sha256:[a-f0-9]{64}$/.test(expectedImage))
+        || service.image !== expectedImage) {
+      violations.push(`${serviceName}:image-authority`);
+    } else {
+      normalized.services[serviceName].image = `<validated-image:${serviceName}>`;
+    }
+
+    if (serviceName === "waf") {
+      const allowed = projectedPortRules(serviceName, environment);
+      const observed = Array.isArray(service.ports)
+        ? service.ports.map(normalizedPort)
+        : null;
+      const key = (port) => canonicalJson(port);
+      if (!Array.isArray(observed)
+          || observed.some((port) => port === null)
+          || !Array.isArray(allowed)
+          || !sameJson(observed.map(key).sort(), allowed.map(key).sort())) {
+        violations.push("waf:ports-authority");
+      } else {
+        normalized.services.waf.ports = ["<validated-waf-ports>"];
+      }
+    }
+
+    if (serviceName === "prometheus") {
+      const retention = envOr(environment, "PROMETHEUS_RETENTION_TIME", "15d");
+      const expectedCommand = [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        `--storage.tsdb.retention.time=${retention}`,
+        "--web.enable-lifecycle",
+      ];
+      if (!/^[1-9][0-9]*(?:ms|[ywdhms])$/.test(retention)
+          || !sameJson(service.command, expectedCommand)) {
+        violations.push("prometheus:retention-authority");
+      } else {
+        normalized.services.prometheus.command[2] =
+          "--storage.tsdb.retention.time=<validated-retention>";
+      }
+    }
+
+    if (serviceName === "alertmanager") {
+      const gid = envOr(environment, "ALERTMANAGER_SECRET_GID", "1000");
+      if (!/^[1-9][0-9]{0,9}$/.test(gid)
+          || !sameJson(service.group_add, [gid])) {
+        violations.push("alertmanager:group-add-authority");
+      } else {
+        normalized.services.alertmanager.group_add = ["<validated-secret-gid>"];
+      }
+    }
+
+    if (serviceName === "broker-auth-bootstrap") {
+      const nodeImage = envOr(
+        environment,
+        "NODE_IMAGE",
+        CORE_SEMANTIC_POLICY.currentAuthority.nodeBuildImageDefault,
+      );
+      if (!/@sha256:[a-f0-9]{64}$/.test(nodeImage)
+          || !plainObject(service.build)
+          || !exactKeys(service.build, ["args", "context", "dockerfile"])
+          || service.build.context !== rootDirectory
+          || service.build.dockerfile !== "docker/ops.Dockerfile"
+          || !sameFlatObject(service.build.args, { NODE_IMAGE: nodeImage })) {
+        violations.push("broker-auth-bootstrap:build-authority");
+      } else {
+        normalized.services[serviceName].build.args.NODE_IMAGE = "<validated-node-image>";
+      }
+    }
+  }
+
+  const schedulerEnvironment = config.services?.["backup-scheduler"]?.environment ?? {};
+  if (!/^[a-f0-9]{64}$/.test(schedulerEnvironment.DOCKER_ACTION_ACTIVE_RECEIPT_SHA256 ?? "")
+      || !/^[a-f0-9]{64}$/.test(schedulerEnvironment.DOCKER_ACTION_COMBINED_RENDER_SHA256 ?? "")
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(
+        schedulerEnvironment.DOCKER_ACTION_RUNTIME_INTENT_ID ?? "",
+      )) {
+    violations.push("backup-scheduler:runtime-identity");
+  }
+
+  const siblingSource = path.resolve(rootDirectory, envOr(environment, "PHP_PROJECTS_DIR", "../src"));
+  const workspaceParent = path.resolve(rootDirectory, "..");
+  if (!pathWithinRoot(siblingSource, workspaceParent)
+      || siblingSource === workspaceParent
+      || !filesystemPathAuthority(siblingSource, workspaceParent, { expectedType: "directory" })) {
+    violations.push("paths:hosted-source-authority");
+  }
+  const activationInbox = environment.get("DOCKER_ACTION_ACTIVATION_INBOX");
+  const runtimeIntent = environment.get("DOCKER_ACTION_RUNTIME_INTENT_FILE");
+  const activeReceipt = environment.get("DOCKER_ACTION_ACTIVE_RECEIPT_FILE");
+  if (typeof activationInbox !== "string"
+      || path.resolve(activationInbox) !== activationInbox
+      || !activationInbox.startsWith("/srv/platform/provider-activation/")) {
+    violations.push("docker-action-activation-sidecar:inbox-source");
+  }
+  for (const [label, selected, fileName] of [
+    ["runtime-intent", runtimeIntent, "runtime-intent.json"],
+    ["active-receipt", activeReceipt, "active-receipt.json"],
+  ]) {
+    if (typeof selected !== "string"
+        || path.resolve(selected) !== selected
+        || path.dirname(selected) !== "/srv/platform/trust"
+        || path.basename(selected) !== fileName) {
+      violations.push(`docker-action-broker:${label}-source`);
+    }
+  }
+
+  for (const [serviceName, service] of Object.entries(config.services ?? {})) {
+    if (!Array.isArray(service?.volumes)) continue;
+    for (const mount of service.volumes) {
+      const source = mount?.source;
+      if (mount?.type !== "bind" || typeof source !== "string") continue;
+      if (source === rootDirectory || source.startsWith(`${rootDirectory}${path.sep}`)) {
+        if (!filesystemPathAuthority(source, rootDirectory, {
+          expectedType: bindTargetType(mount.target),
+          fileMode: bindTargetFileMode(mount.target),
+        })) {
+          violations.push(`${serviceName}:repository-bind-authority`);
+        }
+      }
+    }
+  }
+
+  const bindings = [
+    [rootDirectory, "<ROOT>", true],
+    [siblingSource, "<HOSTED_SOURCE>", true],
+    [activationInbox, "<ACTIVATION_INBOX>", false],
+    [runtimeIntent, "<RUNTIME_INTENT>", false],
+    [activeReceipt, "<ACTIVE_RECEIPT>", false],
+  ].filter(([source]) => typeof source === "string" && source.length > 0);
+  const rebound = normalizeBoundAuthorityPaths(normalized.services, bindings);
+  normalized.services = rebound;
+}
+
+export function evaluateCurrentNoHostedExactAuthority(
+  lock,
+  config,
+  rootDirectory,
+  environment = new Map(),
+) {
+  const violations = [];
+  if (!plainObject(config) || !plainObject(config.services)) {
+    return { normalizedSha256: null, violations: ["config-shape"] };
+  }
+  const normalized = structuredClone(config);
+  validateCurrentPrivilegedServices(config, rootDirectory, environment, violations);
+  validateAndNormalizeTopLevel(
+    config,
+    lock,
+    rootDirectory,
+    environment,
+    normalized,
+    violations,
+  );
+  validateAndNormalizeServices(
+    config,
+    rootDirectory,
+    environment,
+    normalized,
+    violations,
+  );
+  const normalizedSha256 = crypto
+    .createHash("sha256")
+    .update(`${canonicalJson(normalized)}\n`)
+    .digest("hex");
+  if (normalizedSha256 !== CORE_SEMANTIC_POLICY.currentAuthority.normalizedRenderSha256) {
+    violations.push("render:exact-authority-digest");
+  }
+  return { normalizedSha256, violations: [...new Set(violations)] };
+}
+
 export function validateNoHostedCoreAuthority(lock, config, rootDirectory, environment = new Map()) {
   const binding = lock?.coreSemanticPolicy;
   if (!plainObject(binding)
@@ -4244,7 +7248,13 @@ export function validateNoHostedCoreAuthority(lock, config, rootDirectory, envir
     protectedResourceNames: lock.protectedResourceNames,
     protectedNetworkNames: lock.protectedResourceNames?.networks,
   });
-  const violations = validateCoreCapabilityCeiling(config, rootDirectory, environment);
+  const exactAuthority = evaluateCurrentNoHostedExactAuthority(
+    lock,
+    config,
+    rootDirectory,
+    environment,
+  );
+  const violations = exactAuthority.violations;
   if (runtimeReport.status !== "passed") violations.unshift("runtime-isolation");
   return [...new Set(violations)];
 }

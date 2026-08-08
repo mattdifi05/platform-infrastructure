@@ -34,11 +34,18 @@ const run = (input, arguments_ = []) => spawnSync("/bin/sh", [script, ...argumen
 });
 
 try {
-  const request = Buffer.from('{"schema":"platform-activation-request/v1"}\n');
+  // The root-owned broker validates request semantics. This compatibility shim
+  // is intentionally schema-opaque and must preserve the exact bounded bytes.
+  const request = Buffer.from('{"schema":"platform-activation-request/v3"}\n');
   const accepted = run(request);
   assert.equal(accepted.status, 0, accepted.stderr.toString());
   assert.deepEqual(fs.readFileSync(brokerInput), request);
   assert.equal(fs.readFileSync(brokerArguments, "utf8"), "activate\n");
+
+  const opaque = Buffer.from("transport-opaque-non-json-fixture\n");
+  const opaqueAccepted = run(opaque);
+  assert.equal(opaqueAccepted.status, 0, opaqueAccepted.stderr.toString());
+  assert.deepEqual(fs.readFileSync(brokerInput), opaque, "transport shim parsed or rewrote broker-owned request bytes");
 
   fs.rmSync(brokerInput, { force: true });
   const extraArgument = run(request, ["attacker-path"]);

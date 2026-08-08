@@ -163,6 +163,44 @@ test("shell independently rejects a re-pinned undeclared worker route", () => {
   }
 });
 
+test("shell independently rejects derived route hosts longer than 253 bytes", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-route-length-")));
+  const suffix = ["s".repeat(63), "t".repeat(63), "u".repeat(63), "v".repeat(58)].join(".");
+  const canonicalHost = `aa.${suffix}`;
+  try {
+    const valid = createResolvedLock(path.join(root, "valid"), [{
+      id: "tenant",
+      serviceName: "tenant-web",
+      routes: [{ slug: "aa", host: canonicalHost, aliases: ["bb"], port: 3000 }],
+    }]);
+    assert.equal(`${"bb"}.${suffix}`.length, 253);
+    validateRawAndReadBundle(valid.lockPath);
+
+    for (const [alias, derivedLength] of [["bbb", 254], ["b".repeat(63), 314]]) {
+      const fixture = createResolvedLock(path.join(root, String(derivedLength)), [{
+        id: "tenant",
+        serviceName: "tenant-web",
+        routes: [{ slug: "aa", host: canonicalHost, aliases: ["bb"], port: 3000 }],
+      }]);
+      validateRawAndReadBundle(fixture.lockPath);
+      forgeDerivedRouteHost(fixture.lockPath, alias);
+      const forged = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
+      assert.equal(forged.state, "resolved");
+      assert.equal(Object.hasOwn(forged, "routes"), false);
+      for (const command of ["verify", "activation-bundle"]) {
+        const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, command], {
+          encoding: "utf8",
+          env: { ...process.env, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+        });
+        assert.notEqual(rejected.status, 0, `${command} accepted a ${derivedLength}-byte derived hostname`);
+        assert.match(rejected.stderr, /canonical route|route lineage/i);
+      }
+    }
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 test("shell binds the manifest snapshot workload id byte-exactly", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-id-exact-")));
   try {
@@ -478,6 +516,30 @@ function forgeManifestSnapshotId(lockPath, forgedId) {
   forgeManifestSnapshot(lockPath, (manifest) => {
     manifest.id = forgedId;
   });
+}
+
+function forgeDerivedRouteHost(lockPath, alias) {
+  const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  const workload = lock.workloads[0];
+  const route = workload.services[0].routes[0];
+  const suffix = route.canonicalHost.split(".").slice(1).join(".");
+  route.aliases = [alias];
+  route.hosts = [route.canonicalHost, `${alias}.${suffix}`];
+
+  fs.chmodSync(lock.snapshotGeneration, 0o700);
+  const manifestRecord = lock.files.find((record) =>
+    record.kind === "workload-manifest" && record.workloadId === workload.id);
+  const manifest = JSON.parse(fs.readFileSync(manifestRecord.path, "utf8"));
+  manifest.services[0].routes[0].aliases = [alias];
+  rewriteSnapshotRecord(lock, workload, manifestRecord, Buffer.from(JSON.stringify(manifest)));
+  fs.chmodSync(lock.snapshotGeneration, 0o500);
+
+  lock.workloadContentSha256 = workloadContentSha256(lock.files);
+  lock.rawPolicyWorkloadContentSha256 = lock.workloadContentSha256;
+  lock.rawPolicyReceipt.workloadContentSha256 = lock.workloadContentSha256;
+  lock.rawPolicySha256 = sha256(Buffer.from(JSON.stringify(stable(lock.rawPolicyReceipt))));
+  fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(lockPath, 0o600);
 }
 
 function forgeManifestSnapshot(lockPath, mutate) {

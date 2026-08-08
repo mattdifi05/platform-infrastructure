@@ -224,20 +224,25 @@ jobs:
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs
           node scripts/runtime-intent-policy.test.mjs
+          node --test scripts/hosted-preparation-provider-conformance.test.mjs
           node scripts/dast-admission-policy.test.mjs
+          node scripts/dast-activation-authorization.test.mjs
           node scripts/activation-bundle.test.mjs
           node scripts/activation-request.test.mjs
           node scripts/activation-receipt-policy.test.mjs
           node scripts/activation-promotion-policy.test.mjs
+          node scripts/docker-action-activation.test.mjs
+          node --test scripts/platform-release-context.test.mjs
           node --test scripts/dast-runtime-receipt-policy.test.mjs
           node --test scripts/dast-provider-countersign.test.mjs
+          node scripts/dast-deploy-sink.test.mjs
           node scripts/trusted-provider-run-policy.test.mjs
           node scripts/gh-verifier-workflow-policy.test.mjs
           node scripts/trusted-receipt-workflow.test.mjs
           node scripts/privileged-workflow-policy.test.mjs
           node scripts/ssh-host-key-policy.test.mjs
+          node scripts/t16-policy.mjs
           sh scripts/ops-image-trust-test.sh
-          sh scripts/cloudflare-origin-lock-ufw-test.sh
           sh scripts/release-compose-admission.test.sh
           sh scripts/deploy-vps-input-test.sh
           sh scripts/deploy-vps-order-test.sh
@@ -1149,11 +1154,17 @@ jobs:
           PROMOTER_RUN_ATTEMPT: ${{ steps.promoter.outputs.run_attempt }}
           DAST_RECEIPT: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
           DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}
+          DAST_PROVIDER_METADATA: ${{ runner.temp }}/dast-verification/dast-provider-run.json
+          DAST_PROVIDER_METADATA_SHA256: ${{ needs.dast-zap.outputs.dast_provider_metadata_sha256 }}
+          DAST_PROVIDER_ATTESTATION_BUNDLE: ${{ runner.temp }}/dast-verification/dast-provider-attestation.bundle.jsonl
+          DAST_PROVIDER_ATTESTATION_BUNDLE_SHA256: ${{ needs.dast-zap.outputs.dast_attestation_bundle_sha256 }}
         run: |
           test "$(sha256sum "$DAST_RECEIPT" | awk '{print $1}')" = "$DAST_RECEIPT_SHA256"
+          test "$(sha256sum "$DAST_PROVIDER_METADATA" | awk '{print $1}')" = "$DAST_PROVIDER_METADATA_SHA256"
+          test "$(sha256sum "$DAST_PROVIDER_ATTESTATION_BUNDLE" | awk '{print $1}')" = "$DAST_PROVIDER_ATTESTATION_BUNDLE_SHA256"
           test -z "$(find "$PROMOTED" -mindepth 1 ! -type f -print -quit)"
-          test "$(find "$PROMOTED" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5
-          for name in activation.bundle activation-bundle-manifest.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json; do
+          test "$(find "$PROMOTED" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 7
+          for name in release-activation.bundle release-activation-bundle-manifest.json docker-runtime-activation.dsse.json dast-activation-authorization.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json; do
             test -f "$PROMOTED/$name" && test ! -L "$PROMOTED/$name" && test -s "$PROMOTED/$name"
           done
           RESULT="${RUNNER_TEMP}/activation-promotion-result.json"
@@ -1161,16 +1172,26 @@ jobs:
             --policy governance/activation-promotion.json \
             --receipt "$PROMOTED/activation-promotion-receipt.json" \
             --providerMetadata "$PROMOTER_METADATA" \
-            --bundle "$PROMOTED/activation.bundle" \
-            --bundleManifest "$PROMOTED/activation-bundle-manifest.json" \
+            --releaseBundle "$PROMOTED/release-activation.bundle" \
+            --releaseBundleManifest "$PROMOTED/release-activation-bundle-manifest.json" \
+            --dockerActivationEnvelope "$PROMOTED/docker-runtime-activation.dsse.json" \
+            --dastAuthorization "$PROMOTED/dast-activation-authorization.json" \
+            --dastProviderReceipt "$DAST_RECEIPT" \
+            --dastProviderMetadata "$DAST_PROVIDER_METADATA" \
+            --dastProviderAttestationBundle "$DAST_PROVIDER_ATTESTATION_BUNDLE" \
             --activationAdmission "$PROMOTED/activation-admission.jsonl" \
             --trustedRoot "$PROMOTED/sigstore-trusted-root.json" \
-            --dastReceipt "$DAST_RECEIPT" \
             --repository "$GITHUB_REPOSITORY" \
             --consumerRunId "$GITHUB_RUN_ID" \
             --consumerRunAttempt "$GITHUB_RUN_ATTEMPT" \
             --providerRunId "$PROMOTER_RUN_ID" \
             --providerRunAttempt "$PROMOTER_RUN_ATTEMPT" > "$RESULT"
+          test -f "$RESULT" && test ! -L "$RESULT" && test -s "$RESULT"
+          test "$(wc -c < "$RESULT" | tr -d ' ')" -le 1048576
+          test "$(jq -er '.status' "$RESULT")" = READY
+          test "$(jq -er '.dastProviderReceiptSha256' "$RESULT")" = "$DAST_RECEIPT_SHA256"
+          test "$(jq -er '.dastAuthorizationSha256' "$RESULT")" = "$(sha256sum "$PROMOTED/dast-activation-authorization.json" | awk '{print $1}')"
+          test "$(jq -er '.dastChainSha256' "$RESULT")" = "$(jq -er '.chainSha256' "$PROMOTED/dast-activation-authorization.json")"
           printf 'result=%s\n' "$RESULT" >> "$GITHUB_OUTPUT"
       - name: Install and compare checksum-pinned DAST attestation verifier
         env:
@@ -1315,37 +1336,37 @@ jobs:
           DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
           DEPLOY_ADMISSION_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
-          DEPLOY_STAGING_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
-          DEPLOY_STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
-          DEPLOY_DAST_SCAN_REQUEST_PATH: ${{ runner.temp }}/dast-verification/dast-scan-request.json
-          DEPLOY_DAST_SCAN_REQUEST_SHA256: ${{ needs.dast-zap.outputs.dast_scan_request_sha256 }}
-          DEPLOY_DAST_REPORT_ARTIFACT_ID: ${{ needs.dast-zap.outputs.dast_report_artifact_id }}
-          DEPLOY_DAST_REPORT_ARTIFACT_SHA256: ${{ needs.dast-zap.outputs.dast_report_artifact_sha256 }}
-          DEPLOY_DAST_RECEIPT_PATH: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
-          DEPLOY_DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}
-          DEPLOY_DAST_PROVIDER_METADATA_PATH: ${{ runner.temp }}/dast-verification/dast-provider-run.json
-          DEPLOY_DAST_PROVIDER_METADATA_SHA256: ${{ needs.dast-zap.outputs.dast_provider_metadata_sha256 }}
-          DEPLOY_DAST_PROVIDER_RUN_ID: ${{ needs.dast-zap.outputs.dast_provider_run_id }}
-          DEPLOY_DAST_PROVIDER_RUN_ATTEMPT: ${{ needs.dast-zap.outputs.dast_provider_run_attempt }}
-          DEPLOY_DAST_ATTESTATION_BUNDLE_PATH: ${{ runner.temp }}/dast-verification/dast-provider-attestation.bundle.jsonl
-          DEPLOY_DAST_ATTESTATION_BUNDLE_SHA256: ${{ needs.dast-zap.outputs.dast_attestation_bundle_sha256 }}
-          DEPLOY_GH_VERIFIER_ARCHIVE_PATH: ${{ runner.temp }}/dast-verification/gh_2.93.0_linux_amd64.tar.gz
-          DEPLOY_RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
+          DEPLOY_DAST_PROVIDER_RECEIPT_PATH: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
+          DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH: ${{ runner.temp }}/promoted-activation/dast-activation-authorization.json
+          DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH: ${{ runner.temp }}/promoted-activation/release-activation-bundle-manifest.json
           DEPLOY_TRUSTED_PROVIDER_METADATA_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
           DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
           DEPLOY_ACTIVATION_PROMOTION_RESULT: ${{ steps.promotion.outputs.result }}
         run: |
-          PROMOTED="${RUNNER_TEMP}/promoted-activation"
           ACTIVATION_RECEIPT="${RUNNER_TEMP}/activation-receipt.json"
           umask 077
           export DEPLOY_ENVIRONMENT_SHA256="$(jq -er '.runtimeIntent.environmentSha256' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
-          export DEPLOY_ACTIVATION_BUNDLE_SHA256="$(jq -er '.bundle.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES="$(jq -er '.bundle.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256="$(jq -er '.bundle.manifestSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_ACTIVATION_ADMISSION_SHA256="$(jq -er '.activationAdmission.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES="$(jq -er '.activationAdmission.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DAST_PROVIDER_RECEIPT_SHA256="$(jq -er '.dastProviderReceiptSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256="$(jq -er '.dastAuthorizationSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DAST_CHAIN_SHA256="$(jq -er '.dastChainSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DAST_PROVIDER_METADATA_SHA256="$(jq -er '.chain.providerMetadataSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          export DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256="$(jq -er '.chain.sigstoreBundleSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          export DEPLOY_DAST_SIGSTORE_SUBJECT="$(jq -er '.chain.sigstoreSubject' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          export DEPLOY_RELEASE_BUNDLE_SHA256="$(jq -er '.releaseBundle.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_RELEASE_BUNDLE_SIZE_BYTES="$(jq -er '.releaseBundle.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256="$(jq -er '.releaseBundle.manifestSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256="$(jq -er '.dockerActivationEnvelope.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES="$(jq -er '.dockerActivationEnvelope.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE="$(jq -er '.dockerActivationEnvelope.payloadType' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID="$(jq -er '.dockerActivationEnvelope.runtimeIntentId' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_DOCKER_ACTIVATION_GENERATION="$(jq -er '.dockerActivationEnvelope.generation' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          test "$DEPLOY_DAST_PROVIDER_RECEIPT_SHA256" = "${{ needs.dast-zap.outputs.dast_receipt_sha256 }}"
+          test "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256" = "$(sha256sum "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH" | awk '{print $1}')"
+          test "$DEPLOY_DAST_CHAIN_SHA256" = "$(jq -er '.chainSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          test "$DEPLOY_DAST_PROVIDER_METADATA_SHA256" = "${{ needs.dast-zap.outputs.dast_provider_metadata_sha256 }}"
+          test "$DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256" = "${{ needs.dast-zap.outputs.dast_attestation_bundle_sha256 }}"
           OPS_IMAGE="$(jq -er '.opsRunner.image' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
           docker pull "$OPS_IMAGE"
           OPS_RESULT="$(sh ./scripts/ops-image-trust.sh)"
@@ -1357,26 +1378,34 @@ jobs:
             -v "$DEPLOY_ARTIFACT_RECEIPT_PATH:/run/platform-deploy/artifact-verification.json:ro" \
             -v "$DEPLOY_ADMISSION_RECEIPT_PATH:/run/platform-deploy/trusted-deployment-admission.json:ro" \
             -v "$DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:/run/platform-deploy/trusted-provider-run.json:ro" \
-            -v "$DEPLOY_DAST_RECEIPT_PATH:/run/platform-deploy/dast-admission.json:ro" \
-            -v "$PROMOTED/activation-bundle-manifest.json:/run/platform-deploy/activation-bundle-manifest.json:ro" \
+            -v "$DEPLOY_DAST_PROVIDER_RECEIPT_PATH:/run/platform-deploy/dast-provider-verification.json:ro" \
+            -v "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH:/run/platform-deploy/dast-activation-authorization.json:ro" \
+            -v "$DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH:/run/platform-deploy/release-activation-bundle-manifest.json:ro" \
             -e DEPLOY_REMOTE -e DEPLOY_SSH_PORT -e DEPLOY_REPO -e DEPLOY_RELEASE_SHA -e DEPLOY_RELEASE_TREE \
             -e DEPLOY_ARTIFACT_RECEIPT_SHA256 -e DEPLOY_ADMISSION_RECEIPT_SHA256 \
             -e DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256 -e DEPLOY_TRUSTED_PROVIDER_RUN_ID -e DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT \
-            -e DEPLOY_DAST_RECEIPT_SHA256 \
+            -e DEPLOY_DAST_PROVIDER_RECEIPT_SHA256 -e DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256 -e DEPLOY_DAST_CHAIN_SHA256 \
+            -e DEPLOY_DAST_PROVIDER_METADATA_SHA256 -e DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256 -e DEPLOY_DAST_SIGSTORE_SUBJECT \
             -e DEPLOY_ENVIRONMENT_SHA256 \
-            -e DEPLOY_ACTIVATION_BUNDLE_SHA256 -e DEPLOY_ACTIVATION_BUNDLE_SIZE_BYTES -e DEPLOY_ACTIVATION_BUNDLE_MANIFEST_SHA256 \
-            -e DEPLOY_ACTIVATION_ADMISSION_SHA256 -e DEPLOY_ACTIVATION_ADMISSION_SIZE_BYTES \
+            -e DEPLOY_RELEASE_BUNDLE_SHA256 -e DEPLOY_RELEASE_BUNDLE_SIZE_BYTES -e DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256 \
+            -e DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256 -e DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES \
+            -e DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE -e DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID -e DEPLOY_DOCKER_ACTIVATION_GENERATION \
             -e DEPLOY_CONSUMER_RUN_ID="$GITHUB_RUN_ID" -e DEPLOY_CONSUMER_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             -e DEPLOY_ARTIFACT_RECEIPT_PATH=/run/platform-deploy/artifact-verification.json \
             -e DEPLOY_ADMISSION_RECEIPT_PATH=/run/platform-deploy/trusted-deployment-admission.json \
             -e DEPLOY_TRUSTED_PROVIDER_METADATA_PATH=/run/platform-deploy/trusted-provider-run.json \
-            -e DEPLOY_DAST_RECEIPT_PATH=/run/platform-deploy/dast-admission.json \
-            -e DEPLOY_ACTIVATION_BUNDLE_MANIFEST_PATH=/run/platform-deploy/activation-bundle-manifest.json \
+            -e DEPLOY_DAST_PROVIDER_RECEIPT_PATH=/run/platform-deploy/dast-provider-verification.json \
+            -e DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH=/run/platform-deploy/dast-activation-authorization.json \
+            -e DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH=/run/platform-deploy/release-activation-bundle-manifest.json \
             "$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"
           test -f "$ACTIVATION_RECEIPT" && test ! -L "$ACTIVATION_RECEIPT" && test -s "$ACTIVATION_RECEIPT"
           test "$(wc -c < "$ACTIVATION_RECEIPT" | tr -d ' ')" -le 16777216
-          test "$(jq -er '.schema' "$ACTIVATION_RECEIPT")" = platform-activation-receipt/v2
+          test "$(jq -er '.schema' "$ACTIVATION_RECEIPT")" = platform-activation-receipt/v3
           test "$(jq -er '.status' "$ACTIVATION_RECEIPT")" = ACTIVE
+          test "$(jq -er '.releaseBundleSha256' "$ACTIVATION_RECEIPT")" = "$DEPLOY_RELEASE_BUNDLE_SHA256"
+          test "$(jq -er '.dockerActivationEnvelopeSha256' "$ACTIVATION_RECEIPT")" = "$DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256"
+          test "$(jq -er '.dastAuthorizationSha256' "$ACTIVATION_RECEIPT")" = "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256"
+          test "$(jq -er '.dastChainSha256' "$ACTIVATION_RECEIPT")" = "$DEPLOY_DAST_CHAIN_SHA256"
           printf 'activation_status=ACTIVE activation_receipt_sha256=%s\n' \
             "$(sha256sum "$ACTIVATION_RECEIPT" | awk '{print $1}')"
       - name: Upload exact run-bound activation receipt

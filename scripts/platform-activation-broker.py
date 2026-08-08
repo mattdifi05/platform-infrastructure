@@ -28,13 +28,18 @@ FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 HEX64 = re.compile(r"^[a-f0-9]{64}$")
 GIT_OBJECT = re.compile(r"^([a-f0-9]{40}|[a-f0-9]{64})$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
-SERVICE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+RELEASE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,254}$")
+SERVICE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+PINNED_IMAGE = re.compile(
+    r"^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$"
+)
 CONTEXT_KEYS = {
     "schema", "repository", "commitSha", "treeSha", "sourceArchiveSha256",
     "releaseId", "releaseRoot", "stateId", "stateRoot", "environmentFile",
     "environmentSha256", "projectName", "decisionId", "provider", "receipts",
-    "runtimeIntentSha256", "subjects", "hostedLockSha256", "noHosted",
-    "coreRenderSha256", "combinedRenderSha256",
+    "dastChainSha256", "runtimeIntentSha256", "subjects", "hostedLockSha256",
+    "noHosted", "sourceRenderSha256", "combinedRenderSha256",
+    "persistentVolumes",
 }
 JOURNAL_KEYS = {
     "version", "state", "transactionId", "phase", "detail", "projectName",
@@ -144,9 +149,10 @@ def validate_parent_chain(candidate: str, owner: int) -> None:
     while current != "/":
         chain.append(current)
         current = os.path.dirname(current)
+    allowed_owners = {owner} if production() else {0, owner}
     for pathname in reversed(chain):
         details = os.lstat(pathname)
-        if stat.S_ISLNK(details.st_mode) or details.st_uid != owner or (details.st_mode & 0o022) != 0:
+        if stat.S_ISLNK(details.st_mode) or details.st_uid not in allowed_owners or (details.st_mode & 0o022) != 0:
             raise BrokerError(f"Immutable release path component is unsafe: {pathname}.")
 
 
@@ -205,7 +211,12 @@ def acquire_lock(directory: str, uid: int, gid: int) -> tuple[int, os.stat_resul
     except OSError as error:
         if error.errno != errno.EEXIST:
             raise BrokerError(f"Activation mutex could not be created safely: {error.strerror}.") from error
-        descriptor = os.open(target, flags)
+        try:
+            descriptor = os.open(target, flags)
+        except OSError as open_error:
+            raise BrokerError(
+                f"Activation mutex could not be opened safely: {open_error.strerror}."
+            ) from open_error
     opened = os.fstat(descriptor)
     named = safe_regular(target, expected_owner, expected_mode)
     if opened.st_dev != named.st_dev or opened.st_ino != named.st_ino:
@@ -276,22 +287,55 @@ def validate_context(document: object, path_value: str) -> dict:
         raise BrokerError("Trusted release context has an open or incomplete schema.")
     assert isinstance(document, dict)
     sha_fields = [
-        "sourceArchiveSha256", "environmentSha256", "runtimeIntentSha256",
-        "hostedLockSha256", "coreRenderSha256", "combinedRenderSha256",
+        "sourceArchiveSha256", "environmentSha256", "dastChainSha256",
+        "runtimeIntentSha256", "sourceRenderSha256", "combinedRenderSha256",
     ]
     if (
-        document["schema"] != "platform-trusted-release-context/v1"
+        document["schema"] != "platform-trusted-release-context/v3"
         or document["projectName"] != "platform_infra_vps"
         or not isinstance(document["noHosted"], bool)
         or not all(isinstance(document[key], str) and HEX64.fullmatch(document[key]) for key in sha_fields)
+        or document["sourceRenderSha256"] == document["combinedRenderSha256"]
+        or (
+            document["hostedLockSha256"] is not None
+            if document["noHosted"]
+            else not isinstance(document["hostedLockSha256"], str)
+            or not HEX64.fullmatch(document["hostedLockSha256"])
+        )
         or not isinstance(document["commitSha"], str) or not GIT_OBJECT.fullmatch(document["commitSha"])
         or not isinstance(document["treeSha"], str) or not GIT_OBJECT.fullmatch(document["treeSha"])
-        or not isinstance(document["releaseId"], str) or not IDENTIFIER.fullmatch(document["releaseId"])
-        or not isinstance(document["stateId"], str) or not IDENTIFIER.fullmatch(document["stateId"])
+        or not isinstance(document["releaseId"], str) or not RELEASE_IDENTIFIER.fullmatch(document["releaseId"])
+        or not isinstance(document["stateId"], str) or not RELEASE_IDENTIFIER.fullmatch(document["stateId"])
         or not isinstance(document["decisionId"], str) or not IDENTIFIER.fullmatch(document["decisionId"])
         or not isinstance(document["subjects"], list) or not document["subjects"]
     ):
         raise BrokerError("Trusted release context identity is invalid.")
+    if (
+        not exact_keys(document["provider"], {"metadataSha256", "runId", "attempt", "challenge"})
+        or not isinstance(document["provider"]["metadataSha256"], str)
+        or not HEX64.fullmatch(document["provider"]["metadataSha256"])
+        or not isinstance(document["provider"]["runId"], str)
+        or not IDENTIFIER.fullmatch(document["provider"]["runId"])
+        or not isinstance(document["provider"]["attempt"], int)
+        or isinstance(document["provider"]["attempt"], bool)
+        or document["provider"]["attempt"] < 1
+        or not isinstance(document["provider"]["challenge"], str)
+        or not HEX64.fullmatch(document["provider"]["challenge"])
+    ):
+        raise BrokerError("Trusted release context provider admission is invalid.")
+    receipt_keys = {
+        "artifactSha256", "deploymentSha256", "dastProviderSha256",
+        "dastAuthorizationSha256",
+    }
+    if (
+        not exact_keys(document["receipts"], receipt_keys)
+        or not all(
+            isinstance(document["receipts"][key], str)
+            and HEX64.fullmatch(document["receipts"][key])
+            for key in receipt_keys
+        )
+    ):
+        raise BrokerError("Trusted release context receipt admission is invalid.")
     expected_context_path = os.path.join(document["stateRoot"], "trusted-release-context.json")
     if expected_context_path != path_value or os.path.basename(document["stateRoot"]) != document["stateId"]:
         raise BrokerError("Trusted release context path/state identity mismatch.")
@@ -304,11 +348,55 @@ def validate_context(document: object, path_value: str) -> dict:
             not exact_keys(subject, {"serviceName", "imageReference", "imageId"})
             or not isinstance(subject["serviceName"], str) or not SERVICE.fullmatch(subject["serviceName"])
             or subject["serviceName"] in seen
-            or not isinstance(subject["imageReference"], str) or len(subject["imageReference"]) < 3
+            or not isinstance(subject["imageReference"], str)
+            or not PINNED_IMAGE.fullmatch(subject["imageReference"])
             or not isinstance(subject["imageId"], str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", subject["imageId"])
         ):
             raise BrokerError("Trusted release subject map is invalid.")
         seen.add(subject["serviceName"])
+    scheduler = [item for item in subjects if item["serviceName"] == "backup-scheduler"]
+    if (
+        len(scheduler) != 1
+        or not re.fullmatch(
+            r"[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)*/platform-infrastructure-backup-scheduler@sha256:[a-f0-9]{64}",
+            scheduler[0]["imageReference"],
+        )
+    ):
+        raise BrokerError("Trusted release context must bind the dedicated backup scheduler image.")
+    volumes = document["persistentVolumes"]
+    if not isinstance(volumes, list) or len(volumes) != 1:
+        raise BrokerError("Trusted release context must bind one exact persistent volume.")
+    volume = volumes[0]
+    if (
+        not exact_keys(
+            volume,
+            {"name", "createdAt", "driver", "scope", "options", "labels", "mountpoint", "owner"},
+        )
+        or volume["name"] != "enterprise_local_registry_data"
+        or volume["driver"] != "local"
+        or volume["scope"] != "local"
+        or not isinstance(volume["createdAt"], str)
+        or not volume["createdAt"]
+        or not exact_keys(volume["options"], set())
+        or not exact_keys(
+            volume["labels"],
+            {"platform.infrastructure.managed", "platform.infrastructure.purpose"},
+        )
+        or volume["labels"]["platform.infrastructure.managed"] != "true"
+        or volume["labels"]["platform.infrastructure.purpose"] != "local-registry"
+        or not isinstance(volume["mountpoint"], str)
+        or not volume["mountpoint"].startswith("/")
+        or "//" in volume["mountpoint"]
+        or ".." in volume["mountpoint"].split("/")
+        or not volume["mountpoint"].endswith("/enterprise_local_registry_data/_data")
+        or not exact_keys(volume["owner"], {"uid", "gid", "mode"})
+        or volume["owner"]["uid"] != 0
+        or volume["owner"]["gid"] != 0
+        or not isinstance(volume["owner"]["mode"], str)
+        or not re.fullmatch(r"0[0-7]{3}", volume["owner"]["mode"])
+        or int(volume["owner"]["mode"], 8) & 0o022
+    ):
+        raise BrokerError("Trusted release context persistent volume identity is invalid.")
     return document
 
 
@@ -477,7 +565,7 @@ def receipt_from_commit(
         if context["noHosted"]:
             raise BrokerError("Hosted commit conflicts with no-hosted release intent.")
         lock_sha = context["hostedLockSha256"]
-        core_sha = context["coreRenderSha256"]
+        core_sha = context["sourceRenderSha256"]
         combined_sha = context["combinedRenderSha256"]
         expected_names = [item["serviceName"] for item in context["subjects"]]
         if service_names != expected_names:
@@ -487,14 +575,14 @@ def receipt_from_commit(
         raw = stable_read_file(no_hosted_path, 0 if production() else os.getuid(), 0o644)
         assert raw is not None
         lock_sha = sha256_bytes(raw)
-        core_sha = context["coreRenderSha256"]
-        combined_sha = core_sha
+        core_sha = context["sourceRenderSha256"]
+        combined_sha = context["combinedRenderSha256"] if context["noHosted"] else core_sha
         subject_names = {item["serviceName"] for item in context["subjects"]}
         if not service_names or any(name not in subject_names for name in service_names):
             raise BrokerError("No-hosted service set is not a trusted core subject subset.")
     elif actual_state == "stopped":
         lock_sha = context["hostedLockSha256"]
-        core_sha = context["coreRenderSha256"]
+        core_sha = context["sourceRenderSha256"]
         combined_sha = context["combinedRenderSha256"]
         if service_names or any(receipts.get(key) for key in ["containerReceipts", "networkReceipts", "volumeReceipts"]):
             raise BrokerError("Stopped receipt cannot claim active services or Engine resources.")
@@ -708,6 +796,16 @@ def dispatch(
 
 
 def sanitize_environment(uid: int, broker_fd: int, token: str, supervisor_pid: int) -> dict[str, str]:
+    if not production():
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PLATFORM_ACTIVATION_BROKER_FD": str(broker_fd),
+                "PLATFORM_ACTIVATION_BROKER_TOKEN": token,
+                "PLATFORM_ACTIVATION_SUPERVISOR_PID": str(supervisor_pid),
+            }
+        )
+        return environment
     account = pwd.getpwuid(uid)
     environment = {
         "PATH": FIXED_PATH,
@@ -868,6 +966,12 @@ def client(fd_text: str, token: str, action: str, arguments: list[str]) -> int:
     if not response.get("ok"):
         raise BrokerError(str(response.get("error", "Broker request failed.")))
     result = response.get("result")
+    if (
+        not production()
+        and action == "commit"
+        and os.environ.get("HOSTED_TEST_LOSE_COMMIT_ACK") == "1"
+    ):
+        raise BrokerError("Injected loss of the durable commit acknowledgement.")
     if action == "firewall":
         if result.get("stdout"):
             sys.stdout.write(result["stdout"])

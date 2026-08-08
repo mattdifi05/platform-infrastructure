@@ -3,9 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
+SYSTEM_NAME=$(/usr/bin/uname -s)
+if [[ "$SYSTEM_NAME" == Linux ]]; then
+  PRIVILEGED_STATE_BROKER=/usr/local/libexec/platform-activation-broker
+else
+  PRIVILEGED_STATE_BROKER=$SCRIPT_DIR/platform-activation-broker.py
+fi
+PRIVILEGED_STATE_BROKER_SHA256=
 ACTION=activate
 PROJECT_NAME=
 ENV_FILE=
+RELEASE_CONTEXT=
+RELEASE_CONTEXT_JSON=
+RELEASE_CONTEXT_SHA256=
+RELEASE_ENVIRONMENT_FILE=
+RELEASE_ENVIRONMENT_SHA256=
 LOCK=
 NO_HOSTED=0
 CONFIRM=
@@ -18,6 +30,8 @@ DAEMON_ID=
 PARENT_TRANSACTION_ID=${PLATFORM_ACTIVATION_TRANSACTION_ID:-}
 PARENT_EXPECTED_DAEMON_ID=${PLATFORM_ACTIVATION_EXPECTED_DAEMON_ID:-}
 PARENT_STATE_DIR=${PLATFORM_ACTIVATION_STATE_DIR:-}
+BROKER_FD=${PLATFORM_ACTIVATION_BROKER_FD:-}
+BROKER_TOKEN=${PLATFORM_ACTIVATION_BROKER_TOKEN:-}
 TEMP_DIRECTORY=
 CORE_MODEL=
 CORE_MODEL_SHA256=
@@ -31,6 +45,7 @@ declare -a CORE_SERVICES=()
 usage() {
   cat >&2 <<'EOF'
 Usage: core-stack-activation-gate.sh --project-name NAME --env-file FILE
+       --release-context ABSOLUTE_TRUSTED_RELEASE_CONTEXT
        (--lock ABSOLUTE_VERIFIED_LOCK | --no-hosted-workloads)
        [--action validate|activate|stop]
        --confirm ACTIVATE-CORE-STACK
@@ -61,6 +76,11 @@ while (($#)); do
       ENV_FILE=$2
       shift 2
       ;;
+    --release-context)
+      (($# >= 2)) || usage
+      RELEASE_CONTEXT=$2
+      shift 2
+      ;;
     --lock)
       (($# >= 2)) || usage
       LOCK=$2
@@ -86,6 +106,7 @@ done
   exit 64
 }
 [[ -n "$ENV_FILE" ]] || usage
+[[ -n "$RELEASE_CONTEXT" ]] || usage
 [[ "$CONFIRM" == ACTIVATE-CORE-STACK ]] || {
   printf '%s\n' "Core activation gate requires --confirm ACTIVATE-CORE-STACK." >&2
   exit 64
@@ -104,7 +125,9 @@ else
     exit 64
   }
 fi
-[[ "$PARENT_TRANSACTION_ID" =~ ^[a-f0-9]{64}$ && "$PARENT_EXPECTED_DAEMON_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$ && -n "$PARENT_STATE_DIR" ]] || {
+[[ "$PARENT_TRANSACTION_ID" =~ ^[a-f0-9]{64}$ \
+    && "$PARENT_EXPECTED_DAEMON_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$ \
+    && -n "$PARENT_STATE_DIR" && -n "$BROKER_FD" && -n "$BROKER_TOKEN" ]] || {
   printf '%s\n' "Core activation is internal to one authenticated platform transaction." >&2
   exit 64
 }
@@ -144,6 +167,61 @@ sha256_file() {
   fi
 }
 
+verify_privileged_broker() {
+  local identity uid mode links
+  [[ -f "$PRIVILEGED_STATE_BROKER" && ! -L "$PRIVILEGED_STATE_BROKER" ]] || return 1
+  if [[ "$SYSTEM_NAME" == Linux ]]; then
+    [[ "$PRIVILEGED_STATE_BROKER" == /usr/local/libexec/platform-activation-broker ]] || return 1
+  else
+    [[ "$PRIVILEGED_STATE_BROKER" == "$INFRA_ROOT"/scripts/platform-activation-broker.py ]] || return 1
+  fi
+  identity=$(stat -f '%u|%Lp|%l' "$PRIVILEGED_STATE_BROKER" 2>/dev/null \
+    || stat -c '%u|%a|%h' "$PRIVILEGED_STATE_BROKER") || return 1
+  IFS='|' read -r uid mode links <<< "$identity"
+  if [[ "$SYSTEM_NAME" == Linux ]]; then
+    [[ "$uid" == 0 ]] || return 1
+  else
+    [[ "$uid" == "$(id -u)" ]] || return 1
+  fi
+  (( (8#$mode & 8#022) == 0 )) || return 1
+  [[ "$links" == 1 && "$(sha256_file "$PRIVILEGED_STATE_BROKER")" == "$PRIVILEGED_STATE_BROKER_SHA256" ]]
+}
+
+broker_client() {
+  local action=$1
+  shift
+  verify_privileged_broker || return 1
+  "$PRIVILEGED_STATE_BROKER" client "$BROKER_FD" "$BROKER_TOKEN" "$action" "$@"
+}
+
+assert_broker_session() {
+  local response
+  response=$(broker_client ping) || return 1
+  printf '%s' "$response" | jq -e \
+    --arg coordinator "$PARENT_STATE_DIR" \
+    --arg version "platform-activation-broker/v1" '
+      .version == $version
+      and .coordinator == $coordinator
+      and (.supervisorPid | type == "number" and . > 1)
+    ' >/dev/null
+}
+
+verify_release_context_unchanged() {
+  local current current_context_sha current_environment_sha canonical_environment
+  current=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || return 1
+  current_context_sha=$(sha256_file "$RELEASE_CONTEXT") || return 1
+  canonical_environment=$(canonical_file "$ENV_FILE") || return 1
+  current_environment_sha=$(sha256_file "$ENV_FILE") || return 1
+  [[ "$current" == "$RELEASE_CONTEXT_JSON" \
+      && "$current_context_sha" == "$RELEASE_CONTEXT_SHA256" \
+      && "$canonical_environment" == "$RELEASE_ENVIRONMENT_FILE" \
+      && "$ENV_FILE" == "$RELEASE_ENVIRONMENT_FILE" \
+      && "$current_environment_sha" == "$RELEASE_ENVIRONMENT_SHA256" ]] || {
+    printf '%s\n' "Trusted release context or environment changed between core activation stages." >&2
+    return 1
+  }
+}
+
 load_lock_bundle() {
   HOSTED_WORKLOAD_ALLOW_RESOLVED=0 \
     sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
@@ -167,6 +245,7 @@ validate_lock_bundle() {
 render_core_model() {
   local output=$1
   if (( NO_HOSTED == 1 )); then
+    PLATFORM_TRUSTED_RELEASE_CONTEXT="$RELEASE_CONTEXT" \
     COMPOSE_ENV_FILE="$ENV_FILE" \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     HOSTED_WORKLOAD_LOCK= \
@@ -176,6 +255,7 @@ render_core_model() {
     HOSTED_WORKLOAD_PREPARE_RESOLVED=0 \
       bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$output"
   else
+    PLATFORM_TRUSTED_RELEASE_CONTEXT="$RELEASE_CONTEXT" \
     COMPOSE_ENV_FILE="$ENV_FILE" \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     HOSTED_WORKLOAD_LOCK= \
@@ -218,6 +298,8 @@ verify_model() {
 
 verify_inputs() {
   local current_bundle
+  assert_broker_session || return 1
+  verify_release_context_unchanged || return 1
   verify_model || {
     printf '%s\n' "Pinned core Compose model changed or is no longer core-only." >&2
     return 1
@@ -387,33 +469,67 @@ for command in awk bash docker jq node sh sleep stat timeout; do
   require_command "$command"
 done
 
-parent_journal=$(node "$SCRIPT_DIR/platform-activation-state.mjs" read "$PARENT_STATE_DIR" journal.json) || exit 70
-printf '%s' "$parent_journal" | jq -e \
+PRIVILEGED_STATE_BROKER_SHA256=$(sha256_file "$PRIVILEGED_STATE_BROKER") || exit 70
+verify_privileged_broker || {
+  printf '%s\n' "Privileged activation broker is not the immutable fixed helper." >&2
+  exit 70
+}
+assert_broker_session || {
+  printf '%s\n' "Core activation did not inherit the authenticated platform broker session." >&2
+  exit 70
+}
+
+RELEASE_CONTEXT_JSON=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || exit 70
+RELEASE_CONTEXT_SHA256=$(sha256_file "$RELEASE_CONTEXT") || exit 70
+RELEASE_ENVIRONMENT_FILE=$(printf '%s' "$RELEASE_CONTEXT_JSON" | jq -er '.environmentFile') || exit 70
+if [[ "$ENV_FILE" != /* ]]; then
+  ENV_FILE="$INFRA_ROOT/$ENV_FILE"
+fi
+[[ "$ENV_FILE" == "$RELEASE_ENVIRONMENT_FILE" ]] || {
+  printf '%s\n' "Compose env file is not the exact environment file authenticated by the trusted release context." >&2
+  exit 70
+}
+ENV_FILE=$(canonical_file "$ENV_FILE") || {
+  printf '%s\n' "Trusted release environment must be an exact canonical regular file." >&2
+  exit 70
+}
+[[ "$ENV_FILE" == "$RELEASE_ENVIRONMENT_FILE" ]] || {
+  printf '%s\n' "Trusted release environment canonical identity changed." >&2
+  exit 70
+}
+RELEASE_ENVIRONMENT_SHA256=$(sha256_file "$ENV_FILE") || exit 70
+printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e \
+  --arg releaseRoot "$INFRA_ROOT" \
+  --arg environmentFile "$ENV_FILE" \
+  --arg environmentSha256 "$RELEASE_ENVIRONMENT_SHA256" \
+  --arg projectName "$PROJECT_NAME" \
+  --arg coordinator "$PARENT_STATE_DIR" '
+    .releaseRoot == $releaseRoot
+    and .environmentFile == $environmentFile
+    and .environmentSha256 == $environmentSha256
+    and .projectName == $projectName
+    and .activationCoordinatorRoot == $coordinator
+  ' >/dev/null || {
+    printf '%s\n' "Trusted release context does not bind this exact core release, environment, project and coordinator." >&2
+    exit 70
+  }
+
+broker_snapshot=$(broker_client snapshot) || exit 70
+printf '%s' "$broker_snapshot" | jq -e \
   --arg transactionId "$PARENT_TRANSACTION_ID" \
-  --arg project "$PROJECT_NAME" '
-    .version == 2 and .state == "pending"
-    and .transactionId == $transactionId
-    and .projectName == $project
-    and .phase == "intent"
+  --arg project "$PROJECT_NAME" \
+  --arg releaseContextPath "$RELEASE_CONTEXT" \
+  --arg releaseContextSha256 "$RELEASE_CONTEXT_SHA256" '
+    .journal.version == 2 and .journal.state == "pending"
+    and .journal.transactionId == $transactionId
+    and .journal.projectName == $project
+    and .journal.releaseContextPath == $releaseContextPath
+    and .journal.releaseContextSha256 == $releaseContextSha256
+    and .journal.phase == "intent"
   ' >/dev/null || {
     printf '%s\n' "Core activation parent journal does not match this transaction." >&2
     exit 70
   }
-
-if [[ "$ENV_FILE" != /* ]]; then
-  ENV_FILE="$INFRA_ROOT/$ENV_FILE"
-fi
-ENV_FILE=$(canonical_file "$ENV_FILE") || {
-  printf '%s\n' "Compose env file must be an exact canonical regular file under the repository-owned project directory." >&2
-  exit 70
-}
-case "$ENV_FILE" in
-  "$INFRA_ROOT"/*) ;;
-  *)
-    printf '%s\n' "Compose env file is outside the repository-owned project directory." >&2
-    exit 70
-    ;;
-esac
 
 if (( NO_HOSTED == 0 )); then
   LOCK=$(canonical_file "$LOCK") || {
@@ -476,6 +592,7 @@ if [[ "$ACTION" == stop ]]; then
   verify_inputs
   MUTATION_STARTED=1
   stop_and_prove_core
+  verify_inputs
   GATE_COMPLETE=1
   MUTATION_STARTED=0
   printf 'Proven stopped core service set for project %s: %s\n' "$PROJECT_NAME" "${CORE_SERVICES[*]}"
@@ -490,6 +607,8 @@ start_core_services
 verify_inputs
 verify_daemon
 verify_core_running
+verify_inputs
+verify_daemon
 GATE_COMPLETE=1
 MUTATION_STARTED=0
 printf 'Core activation gate completed for project %s and services: %s\n' "$PROJECT_NAME" "${CORE_SERVICES[*]}"

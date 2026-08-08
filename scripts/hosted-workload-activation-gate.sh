@@ -29,6 +29,11 @@ VERIFY_TIMEOUT=${HOSTED_VERIFY_TIMEOUT_SECONDS:-120}
 STOP_TIMEOUT=${HOSTED_STOP_TIMEOUT_SECONDS:-120}
 MUTATION_STARTED=0
 GATE_COMPLETE=0
+COMMIT_ATTEMPTED=0
+COMMIT_TARGET_STATE=
+COMMIT_EXPECTED_MODEL_SHA=
+COMMIT_EXPECTED_SERVICES='[]'
+COMMIT_RECONCILIATION=none
 ROLLBACK_RUNNING=0
 TEMP_DIRECTORY=
 CURRENT_MODEL=
@@ -49,6 +54,8 @@ CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
 EXPECTED_DAEMON_ID=
 RELEASE_CONTEXT_JSON=
 RELEASE_CONTEXT_SHA256=
+RELEASE_ENVIRONMENT_FILE=
+RELEASE_ENVIRONMENT_SHA256=
 RELEASE_REPOSITORY=
 RELEASE_COMMIT_SHA=
 RELEASE_TREE_SHA=
@@ -244,6 +251,24 @@ assert_broker_session() {
     ' >/dev/null
 }
 
+assert_mutex_identity() {
+  # The privileged supervisor, not this unprivileged gate, owns the mutex
+  # descriptor. A challenge-bound ping proves this process is still attached
+  # to that supervisor and the exact global coordinator.
+  assert_broker_session
+}
+
+state_read_optional() {
+  local name=$1 snapshot selector
+  case "$name" in
+    journal.json) selector=.journal ;;
+    active.json) selector=.active ;;
+    *) return 1 ;;
+  esac
+  snapshot=$(broker_client snapshot) || return 1
+  printf '%s' "$snapshot" | jq -c "$selector // empty"
+}
+
 verify_privileged_helper() {
   local helper=$1 expected_sha=$2 identity uid mode links
   [[ -f "$helper" && ! -L "$helper" ]] || return 1
@@ -283,6 +308,88 @@ journal_phase() {
     JOURNAL=$(broker_client advance "$TRANSACTION_ID" "$JOURNAL_PHASE" "$phase" "$detail") || return 1
   fi
   JOURNAL_PHASE=$phase
+}
+
+commit_active_receipt() {
+  local target_state=$1 model=$2 detail=$3 lock_path= model_sha= result services_json
+  shift 3
+  services_json=$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort') || return 1
+  if [[ "$target_state" == hosted ]]; then
+    lock_path=$LOCK
+  fi
+  if [[ "$target_state" != stopped ]]; then
+    model_sha=$(sha256_file "$model") || return 1
+  fi
+  COMMIT_ATTEMPTED=1
+  COMMIT_TARGET_STATE=$target_state
+  COMMIT_EXPECTED_MODEL_SHA=$model_sha
+  COMMIT_EXPECTED_SERVICES=$services_json
+  if ! result=$(jq -cn \
+    --argjson serviceNames "$services_json" \
+    --argjson containerReceipts "$CONTAINER_RECEIPTS" \
+    --argjson networkReceipts "$NETWORK_RECEIPTS" \
+    --argjson volumeReceipts "$VOLUME_RECEIPTS" \
+    '{serviceNames: $serviceNames, containerReceipts: $containerReceipts,
+      networkReceipts: $networkReceipts, volumeReceipts: $volumeReceipts}' \
+    | broker_client commit \
+      "$TRANSACTION_ID" "$JOURNAL_PHASE" "$RELEASE_CONTEXT" "$EXPECTED_DAEMON_ID" \
+      "$target_state" "$lock_path" "$model_sha" "$detail"); then
+    reconcile_commit_outcome && return 0
+    return 1
+  fi
+  JOURNAL=$(printf '%s' "$result" | jq -c '.journal') || return 1
+  ACTIVE_RECEIPT=$(printf '%s' "$result" | jq -c '.active') || return 1
+  JOURNAL_PHASE=complete
+}
+
+reconcile_commit_outcome() {
+  local snapshot
+  COMMIT_RECONCILIATION=ambiguous
+  if [[ "$SYSTEM_NAME" != Linux && "${HOSTED_TEST_COMMIT_SNAPSHOT_UNAVAILABLE:-0}" == 1 ]]; then
+    return 2
+  fi
+  snapshot=$(broker_client snapshot) || return 2
+  if printf '%s' "$snapshot" | jq -e \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg targetState "$COMMIT_TARGET_STATE" \
+    --arg contextPath "$RELEASE_CONTEXT" \
+    --arg contextSha256 "$RELEASE_CONTEXT_SHA256" \
+    --arg daemonId "$EXPECTED_DAEMON_ID" \
+    --arg modelSha256 "$COMMIT_EXPECTED_MODEL_SHA" \
+    --argjson services "$COMMIT_EXPECTED_SERVICES" '
+      .journal.version == 2
+      and .journal.state == "complete"
+      and .journal.phase == "complete"
+      and .journal.transactionId == $transactionId
+      and .journal.actualState == $targetState
+      and .active.version == 2
+      and .active.state == $targetState
+      and .active.releaseContextPath == $contextPath
+      and .active.releaseContextSha256 == $contextSha256
+      and .active.daemonId == $daemonId
+      and .active.serviceNames == $services
+      and (if $targetState == "stopped" then
+        .active.modelSha256 == null
+      else
+        .active.modelSha256 == $modelSha256
+      end)
+    ' >/dev/null; then
+    JOURNAL=$(printf '%s' "$snapshot" | jq -c '.journal') || return 2
+    ACTIVE_RECEIPT=$(printf '%s' "$snapshot" | jq -c '.active') || return 2
+    JOURNAL_PHASE=complete
+    COMMIT_RECONCILIATION=committed
+    return 0
+  fi
+  if printf '%s' "$snapshot" | jq -e \
+    --arg transactionId "$TRANSACTION_ID" '
+      .journal.version == 2
+      and .journal.state == "pending"
+      and .journal.transactionId == $transactionId
+    ' >/dev/null; then
+    COMMIT_RECONCILIATION=pending
+    return 1
+  fi
+  return 2
 }
 
 unique_array() {
@@ -448,6 +555,7 @@ verify_extension_records() {
 
 render_model() {
   local lock_path=$1 output=$2
+  PLATFORM_TRUSTED_RELEASE_CONTEXT="$RELEASE_CONTEXT" \
   COMPOSE_ENV_FILE="$ENV_FILE" \
   COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   HOSTED_WORKLOAD_LOCK="$lock_path" \
@@ -461,6 +569,7 @@ render_model() {
 
 render_core_model() {
   local lock_path=$1 output=$2
+  PLATFORM_TRUSTED_RELEASE_CONTEXT="$RELEASE_CONTEXT" \
   COMPOSE_ENV_FILE="$ENV_FILE" \
   COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   HOSTED_WORKLOAD_LOCK= \
@@ -474,6 +583,7 @@ render_core_model() {
 
 render_no_hosted_model() {
   local output=$1
+  PLATFORM_TRUSTED_RELEASE_CONTEXT="$RELEASE_CONTEXT" \
   COMPOSE_ENV_FILE="$ENV_FILE" \
   COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   HOSTED_WORKLOAD_LOCK= \
@@ -897,59 +1007,9 @@ remove_stale_project_containers() {
   fi
 }
 
-write_active_receipt() {
-  local target_state=$1 lock_sha=$2 core_sha=$3 combined_sha=$4 model=$5
-  shift 5
-  local services_json receipt
-  services_json=$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')
-  receipt=$(jq -cn \
-    --arg state "$target_state" \
-    --arg projectName "$PROJECT_NAME" \
-    --arg daemonId "$EXPECTED_DAEMON_ID" \
-    --arg releaseContextSha256 "$RELEASE_CONTEXT_SHA256" \
-    --arg releaseContextPath "$RELEASE_CONTEXT" \
-    --arg repository "$RELEASE_REPOSITORY" \
-    --arg commitSha "$RELEASE_COMMIT_SHA" \
-    --arg treeSha "$RELEASE_TREE_SHA" \
-    --arg sourceArchiveSha256 "$RELEASE_SOURCE_ARCHIVE_SHA256" \
-    --arg releaseId "$RELEASE_ID" \
-    --arg stateId "$RELEASE_STATE_ID" \
-    --arg decisionId "$RELEASE_DECISION_ID" \
-    --arg runtimeIntentSha256 "$RUNTIME_CANDIDATE_ID" \
-    --arg lockPath "$LOCK" \
-    --arg lockSha256 "$lock_sha" \
-    --arg coreRenderSha256 "$core_sha" \
-    --arg combinedRenderSha256 "$combined_sha" \
-    --arg modelSha256 "$(sha256_file "$model")" \
-    --argjson serviceNames "$services_json" \
-    '{
-      version: 2,
-      state: $state,
-      projectName: $projectName,
-      daemonId: $daemonId,
-      releaseContextSha256: $releaseContextSha256,
-      releaseContextPath: $releaseContextPath,
-      repository: $repository,
-      commitSha: $commitSha,
-      treeSha: $treeSha,
-      sourceArchiveSha256: $sourceArchiveSha256,
-      releaseId: $releaseId,
-      stateId: $stateId,
-      decisionId: $decisionId,
-      runtimeIntentSha256: $runtimeIntentSha256,
-      lockPath: (if $lockPath == "" then null else $lockPath end),
-      lockSha256: $lockSha256,
-      coreRenderSha256: $coreRenderSha256,
-      combinedRenderSha256: $combinedRenderSha256,
-      modelSha256: $modelSha256,
-      serviceNames: $serviceNames
-    }')
-  state_write active.json "$receipt"
-  ACTIVE_RECEIPT=$receipt
-}
-
 recover_pending_transaction() {
   local previous_journal=$1 previous_state_id retained_context_path retained_context retained_context_sha
+  local pending_transaction pending_phase recovery
   [[ "$RECOVER_PENDING" == 1 ]] || {
     printf '%s\n' "A durable pending activation exists; rerun with --recover-pending for fail-closed reconciliation." >&2
     return 1
@@ -958,7 +1018,7 @@ recover_pending_transaction() {
     --arg project "$PROJECT_NAME" '
     .version == 2 and .state == "pending" and .projectName == $project
     and (.transactionId | type == "string" and test("^[a-f0-9]{64}$"))
-    and (.stateId | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"))
+    and (.stateId | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]{7,254}$"))
   ' >/dev/null || return 1
   previous_state_id=$(printf '%s' "$previous_journal" | jq -r '.stateId')
   retained_context_path=$(dirname -- "$RELEASE_STATE_ROOT")/$previous_state_id/trusted-release-context.json
@@ -987,55 +1047,14 @@ recover_pending_transaction() {
       return 1
     }
   stop_entire_project_for_recovery || return 1
-  TRANSACTION_ID=$(node "$SCRIPT_DIR/platform-activation-state.mjs" nonce)
-  journal_phase recovered "pending transaction was fail-closed by proving the entire Compose project stopped"
-  ACTIVE_RECEIPT=$(jq -cn \
-    --arg projectName "$PROJECT_NAME" \
-    --arg daemonId "$EXPECTED_DAEMON_ID" \
-    --arg releaseContextSha256 "$RELEASE_CONTEXT_SHA256" \
-    --arg releaseContextPath "$RELEASE_CONTEXT" \
-    --arg repository "$RELEASE_REPOSITORY" \
-    --arg commitSha "$RELEASE_COMMIT_SHA" \
-    --arg treeSha "$RELEASE_TREE_SHA" \
-    --arg sourceArchiveSha256 "$RELEASE_SOURCE_ARCHIVE_SHA256" \
-    --arg releaseId "$RELEASE_ID" \
-    --arg stateId "$RELEASE_STATE_ID" \
-    --arg decisionId "$RELEASE_DECISION_ID" \
-    --arg runtimeIntentSha256 "$RUNTIME_CANDIDATE_ID" '
-    {version: 2, state: "stopped", projectName: $projectName, daemonId: $daemonId,
-     releaseContextSha256: $releaseContextSha256, releaseContextPath: $releaseContextPath,
-     repository: $repository,
-     commitSha: $commitSha, treeSha: $treeSha, sourceArchiveSha256: $sourceArchiveSha256,
-     releaseId: $releaseId, stateId: $stateId, decisionId: $decisionId,
-     runtimeIntentSha256: $runtimeIntentSha256,
-     lockPath: null, lockSha256: null, coreRenderSha256: null,
-     combinedRenderSha256: null, modelSha256: null, serviceNames: []}')
-  state_write active.json "$ACTIVE_RECEIPT"
-}
-
-rollback_previous() {
-  [[ -n "$PREVIOUS_LOCK" ]] || return 1
-  printf '%s\n' "Previous-release rollback requires its retained trusted release context and is not admitted by the current release context." >&2
-  return 1
-  # The code below remains unreachable until the retained release-context
-  # interface supplies the previous immutable root and image subjects.
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
-  stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}" || return 1
-  create_services "$PREVIOUS_RUNTIME_MODEL" "${PREVIOUS_ALL_SERVICES[@]}" || return 1
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
-  verify_ownership "$PREVIOUS_LOCK" "$PREVIOUS_RUNTIME_MODEL" || return 1
-  firewall apply "$PREVIOUS_LOCK" || return 1
-  firewall verify "$PREVIOUS_LOCK" || return 1
-  verify_ownership "$PREVIOUS_LOCK" "$PREVIOUS_RUNTIME_MODEL" || return 1
-  start_services_ordered "$PREVIOUS_RUNTIME_MODEL" \
-    "$(printf '%s' "$PREVIOUS_BUNDLE" | jq -r '.lockSha256')" \
-    "${PREVIOUS_ALL_SERVICES[@]}" || return 1
-  verify_running_services "$PREVIOUS_RUNTIME_MODEL" \
-    "$(printf '%s' "$PREVIOUS_BUNDLE" | jq -r '.lockSha256')" \
-    "${PREVIOUS_ALL_SERVICES[@]}" || return 1
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
-  verify_ownership "$PREVIOUS_LOCK" "$PREVIOUS_RUNTIME_MODEL" || return 1
-  firewall verify "$PREVIOUS_LOCK" || return 1
+  pending_transaction=$(printf '%s' "$previous_journal" | jq -r '.transactionId') || return 1
+  pending_phase=$(printf '%s' "$previous_journal" | jq -r '.phase') || return 1
+  recovery=$(broker_client recover-stop \
+    "$pending_transaction" "$pending_phase" "$retained_context_path" "$EXPECTED_DAEMON_ID" \
+    "pending transaction was fail-closed by proving the entire Compose project stopped") || return 1
+  JOURNAL=$(printf '%s' "$recovery" | jq -c '.journal') || return 1
+  ACTIVE_RECEIPT=$(printf '%s' "$recovery" | jq -c '.active') || return 1
+  JOURNAL_PHASE=complete
 }
 
 rollback_no_hosted() {
@@ -1066,16 +1085,46 @@ stop_all_known_and_prove() {
 
 cleanup() {
   local status=$?
+  local service
+  local -a committed_services=()
   trap - EXIT HUP INT TERM
   set +e
-  if (( status != 0 && MUTATION_STARTED == 1 && GATE_COMPLETE == 0 && ROLLBACK_RUNNING == 0 )) && [[ "$ACTION" == activate ]]; then
+  if (( status != 0 && COMMIT_ATTEMPTED == 1 && GATE_COMPLETE == 0 )); then
+    if reconcile_commit_outcome; then
+      GATE_COMPLETE=1
+      MUTATION_STARTED=0
+      status=0
+      printf '%s\n' "Lost activation commit acknowledgement was reconciled from the durable broker snapshot." >&2
+    fi
+  fi
+  if [[ "$COMMIT_RECONCILIATION" == ambiguous ]]; then
+    status=75
+    printf '%s\n' "Activation commit outcome is ambiguous; runtime rollback is forbidden until broker state is reconciled." >&2
+  elif (( status != 0 && MUTATION_STARTED == 1 && GATE_COMPLETE == 0 && ROLLBACK_RUNNING == 0 )) && [[ "$ACTION" == activate ]]; then
     ROLLBACK_RUNNING=1
-    if rollback_previous || rollback_no_hosted; then
-      status=71
-      printf '%s\n' "Activation failed; the previous verified or canonical no-hosted state was restored." >&2
+    if rollback_no_hosted; then
+      while IFS= read -r service; do
+        [[ -n "$service" ]] && committed_services+=("$service")
+      done < <(jq -r '.services | keys[]' "$FALLBACK_RUNTIME_MODEL")
+      if commit_active_receipt no-hosted "$FALLBACK_RUNTIME_MODEL" \
+        "activation failed; canonical no-hosted rollback was proven" "${committed_services[@]}"; then
+        GATE_COMPLETE=1
+        status=71
+        printf '%s\n' "Activation failed; the previous verified or canonical no-hosted state was restored." >&2
+      else
+        status=73
+        printf '%s\n' "Activation rollback ran, but its durable broker receipt could not be committed." >&2
+      fi
     elif stop_all_known_and_prove; then
-      status=72
-      printf '%s\n' "Activation and verified rollback failed; every known hosted service is proven stopped and firewall enforcement was retained." >&2
+      if commit_active_receipt stopped "$CURRENT_RUNTIME_MODEL" \
+        "activation and rollback failed; every known service was proven stopped"; then
+        GATE_COMPLETE=1
+        status=72
+        printf '%s\n' "Activation and verified rollback failed; every known hosted service is proven stopped and firewall enforcement was retained." >&2
+      else
+        status=73
+        printf '%s\n' "Known services were stopped, but the durable stopped receipt could not be committed." >&2
+      fi
     else
       status=73
       printf '%s\n' "Activation failed and a complete hosted stop is not proven; existing firewall enforcement remains active." >&2
@@ -1085,9 +1134,6 @@ cleanup() {
     printf '%s\n' "Hosted stop failed and is not proven; firewall enforcement remains active." >&2
   elif (( status != 0 )); then
     status=70
-  fi
-  if [[ -n "$TRANSACTION_ID" && -d "$STATE_DIR" ]] && { (( GATE_COMPLETE == 1 )) || [[ "$status" == 71 || "$status" == 72 ]]; }; then
-    journal_phase complete "process-exit-status=$status gate-complete=$GATE_COMPLETE" >/dev/null 2>&1 || true
   fi
   [[ -z "$TEMP_DIRECTORY" || ! -d "$TEMP_DIRECTORY" ]] || rm -rf "$TEMP_DIRECTORY"
   exit "$status"
@@ -1114,24 +1160,29 @@ EXPECTED_DAEMON_ID=$(daemon_id) || {
 }
 assert_daemon_identity || exit 70
 
+RELEASE_CONTEXT_JSON=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || exit 70
+RELEASE_CONTEXT_SHA256=$(sha256_file "$RELEASE_CONTEXT") || exit 70
+RELEASE_ENVIRONMENT_FILE=$(printf '%s' "$RELEASE_CONTEXT_JSON" | jq -er '.environmentFile') || exit 70
 if [[ "$ENV_FILE" != /* ]]; then
   ENV_FILE="$INFRA_ROOT/$ENV_FILE"
 fi
-ENV_FILE=$(canonical_file "$ENV_FILE") || {
-  printf '%s\n' "Compose env file must be an exact canonical regular file under the repository-owned project directory." >&2
+[[ "$ENV_FILE" == "$RELEASE_ENVIRONMENT_FILE" ]] || {
+  printf '%s\n' "Compose env file is not the exact environment file authenticated by the trusted release context." >&2
   exit 70
 }
-case "$ENV_FILE" in
-  "$INFRA_ROOT"/*) ;;
-  *) printf '%s\n' "Compose env file is outside the repository-owned project directory." >&2; exit 70 ;;
-esac
-
-RELEASE_CONTEXT_JSON=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || exit 70
-RELEASE_CONTEXT_SHA256=$(sha256_file "$RELEASE_CONTEXT") || exit 70
+ENV_FILE=$(canonical_file "$ENV_FILE") || {
+  printf '%s\n' "Trusted release environment must be an exact canonical regular file." >&2
+  exit 70
+}
+[[ "$ENV_FILE" == "$RELEASE_ENVIRONMENT_FILE" ]] || {
+  printf '%s\n' "Trusted release environment canonical identity changed." >&2
+  exit 70
+}
+RELEASE_ENVIRONMENT_SHA256=$(sha256_file "$ENV_FILE") || exit 70
 printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e \
   --arg releaseRoot "$INFRA_ROOT" \
   --arg environmentFile "$ENV_FILE" \
-  --arg environmentSha256 "$(sha256_file "$ENV_FILE")" \
+  --arg environmentSha256 "$RELEASE_ENVIRONMENT_SHA256" \
   --arg projectName "$PROJECT_NAME" '
     .releaseRoot == $releaseRoot
     and .environmentFile == $environmentFile
@@ -1164,8 +1215,8 @@ verify_privileged_helpers || {
   printf '%s\n' "Privileged activation helpers are not immutable release-owned files." >&2
   exit 70
 }
-if [[ -z "${PLATFORM_ACTIVATION_LOCK_FD:-}" ]]; then
-  exec sudo -n "$PRIVILEGED_STATE_BROKER" acquire \
+if [[ -z "$BROKER_FD" || -z "$BROKER_TOKEN" ]]; then
+  exec sudo -n "$PRIVILEGED_STATE_BROKER" supervise \
     "$STATE_DIR" "$0" "${ORIGINAL_ARGUMENTS[@]}"
 fi
 assert_mutex_identity || exit 75
@@ -1315,11 +1366,9 @@ fi
 printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e \
   --argjson noHosted "$([[ "$NO_HOSTED" == 1 ]] && printf true || printf false)" \
   --arg lockSha256 "$CURRENT_LOCK_SHA256" \
-  --arg coreRenderSha256 "$CURRENT_CORE_SHA256" \
   --arg combinedRenderSha256 "$CURRENT_COMBINED_SHA256" '
     .noHosted == $noHosted
-    and .hostedLockSha256 == $lockSha256
-    and .coreRenderSha256 == $coreRenderSha256
+    and (if $noHosted then .hostedLockSha256 == null else .hostedLockSha256 == $lockSha256 end)
     and .combinedRenderSha256 == $combinedRenderSha256
   ' >/dev/null || {
     printf '%s\n' "Trusted release context does not bind the exact hosted/no-hosted lock and renders." >&2
@@ -1339,8 +1388,7 @@ if [[ "$ACTION" == stop ]]; then
   journal_phase intent "stop exact current service set"
   MUTATION_STARTED=1
   stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
-  write_active_receipt stopped "$CURRENT_LOCK_SHA256" "$CURRENT_CORE_SHA256" "$CURRENT_COMBINED_SHA256" "$CURRENT_RUNTIME_MODEL"
-  journal_phase complete "exact current service set proven stopped"
+  commit_active_receipt stopped "$CURRENT_RUNTIME_MODEL" "exact current service set proven stopped"
   GATE_COMPLETE=1
   MUTATION_STARTED=0
   printf 'Proven stopped hosted/extension service set: %s\n' "${CURRENT_ALL_SERVICES[*]}"
@@ -1356,7 +1404,13 @@ journal_phase intent "core, platform extension and hosted union transition"
 MUTATION_STARTED=1
 assert_mutex_identity
 
-core_arguments=(--action validate --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" --confirm ACTIVATE-CORE-STACK)
+core_arguments=(
+  --action validate
+  --project-name "$PROJECT_NAME"
+  --env-file "$ENV_FILE"
+  --release-context "$RELEASE_CONTEXT"
+  --confirm ACTIVATE-CORE-STACK
+)
 if (( NO_HOSTED == 1 )); then
   core_arguments+=(--no-hosted-workloads)
 else
@@ -1378,6 +1432,7 @@ remove_stale_project_containers
 assert_mutex_identity
 journal_phase quiesced "entire project plus current/previous union proven stopped; stale services removed"
 
+journal_phase creating "exact current hosted/extension container creation authorized"
 create_services "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
 assert_mutex_identity
 journal_phase created "exact current hosted/extension containers created stopped"
@@ -1404,11 +1459,9 @@ if (( RUN_POSTDEPLOY == 1 )); then
   sh "$SCRIPT_DIR/vps-postdeploy.sh" "$ENV_FILE"
   journal_phase postdeploy-verified "fixed repository postdeploy verification completed under the activation mutex"
 fi
-write_active_receipt \
+commit_active_receipt \
   "$([[ "$NO_HOSTED" == 1 ]] && printf no-hosted || printf hosted)" \
-  "$CURRENT_LOCK_SHA256" "$CURRENT_CORE_SHA256" "$CURRENT_COMBINED_SHA256" \
-  "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
-journal_phase complete "active receipt committed"
+  "$CURRENT_RUNTIME_MODEL" "active receipt committed" "${CURRENT_ALL_SERVICES[@]}"
 GATE_COMPLETE=1
 MUTATION_STARTED=0
 printf 'Platform activation transaction completed for project %s: %s\n' "$PROJECT_NAME" "${CURRENT_ALL_SERVICES[*]}"

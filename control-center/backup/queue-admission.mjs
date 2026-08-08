@@ -259,12 +259,56 @@ export function finishBackupJob({
       updatedAt: finishedAt,
       finishedAt,
       resultSummary: String(summary || (terminalStatus === "done" ? "Job completed." : "Job failed.")).slice(0, 500),
-      ...(exitCode === null || exitCode === "" ? {} : { exitCode: boundedInteger(exitCode, 1, 0, 255, "job exit code") }),
     };
+    if (exitCode === null || exitCode === "") delete terminalJob.exitCode;
+    else terminalJob.exitCode = boundedInteger(exitCode, 1, 0, 255, "job exit code");
     writeJsonAtomic(runningPath, terminalJob);
     renameSync(runningPath, terminalPath);
     const pruned = pruneTerminalJobsUnlocked(root, logDir, policy, timestampMs(now));
     return Object.freeze({ finished: true, job: parseBackupJobDocument(terminalJob), terminalPath, pruned: Object.freeze(pruned) });
+  });
+}
+
+export function markBackupJobOutcomeUnknown({
+  jobsDir,
+  jobId,
+  summary,
+  exitCode = 74,
+  policy: policyInput = {},
+  now = Date.now(),
+}) {
+  const policy = normalizeBackupQueuePolicy(policyInput);
+  const root = prepareQueueRoot(jobsDir);
+  const normalizedId = requireJobId(jobId);
+  const normalizedExitCode = boundedInteger(exitCode, 74, 74, 74, "unknown-outcome exit code");
+  const normalizedSummary = String(summary || "").trim().slice(0, 500);
+  if (!/manual-reconciliation/i.test(normalizedSummary)) {
+    throw admissionError(
+      "invalid_unknown_summary",
+      "Unknown backup outcomes must explicitly require manual-reconciliation.",
+      422,
+    );
+  }
+  return withQueueLock(root, policy, () => {
+    const runningPath = queueFilePath(root, "running", normalizedId);
+    const entry = readQueueEntry(runningPath, "running");
+    if (!entry) throw admissionError("running_job_missing", "Running backup job was not found.", 409);
+    const unknownJob = {
+      ...entry.raw,
+      status: "running",
+      updatedAt: new Date(timestampMs(now)).toISOString(),
+      finishedAt: null,
+      resultSummary: normalizedSummary,
+      exitCode: normalizedExitCode,
+    };
+    delete unknownJob.logPath;
+    writeJsonAtomic(runningPath, unknownJob);
+    return Object.freeze({
+      marked: true,
+      exitCode: normalizedExitCode,
+      job: Object.freeze({ ...parseBackupJobDocument(unknownJob), exitCode: normalizedExitCode }),
+      runningPath,
+    });
   });
 }
 

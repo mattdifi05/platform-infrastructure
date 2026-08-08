@@ -228,6 +228,61 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.match(stderr, /rejected project metadata for oversized-demo: PROJECT_METADATA_UNSIGNED/);
 });
 
+test("project-router survives an upstream timeout after response headers", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "project-router-partial-timeout-"));
+  const upstream = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    if (req.url === "/slow") {
+      res.write("partial");
+      return;
+    }
+    res.end("complete");
+  });
+  await listen(upstream);
+
+  const routerPort = await freePort();
+  const child = spawn(process.execPath, [routerScript], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PROJECT_ROUTER_PORT: String(routerPort),
+      PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS: "50",
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: path.join(root, "missing.lock.json"),
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "optional",
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(upstream)}`,
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: `127.0.0.1:${serverPort(upstream)}`,
+      PROJECT_ROUTER_TEST_ALLOW_LOOPBACK: "true",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  t.after(async () => {
+    await stopChild(child);
+    await closeServer(upstream);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  await waitForHealth(routerPort);
+  const partial = await httpGetOutcome(routerPort, "portal.localhost.com", "/slow");
+  assert.equal(partial.statusCode, 200);
+  assert.equal(partial.body, "partial");
+  assert.equal(partial.complete, false, "a timed-out partial upstream response was reported as complete");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(child.exitCode, null, stderr);
+
+  const health = await httpGet(routerPort, "portal.localhost.com", "/__health");
+  assert.equal(health.statusCode, 200);
+  const complete = await httpGet(routerPort, "portal.localhost.com", "/fast");
+  assert.equal(complete.statusCode, 200);
+  assert.equal(complete.body, "complete");
+  assert.doesNotMatch(stderr, /ERR_HTTP_HEADERS_SENT|Unhandled 'error' event/);
+});
+
 test("project-router explicit lock-required mode rejects a missing lock and Compose enables it", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "project-router-lock-required-"));
   const routerPort = await freePort();
@@ -695,6 +750,36 @@ test("project-router enforces the exact 61-byte workload-id boundary before rout
   }
 });
 
+test("project-router route-lock parser enforces derived host length at 253 bytes", () => {
+  const suffix = ["s".repeat(63), "t".repeat(63), "u".repeat(63), "v".repeat(58)].join(".");
+  const canonicalHost = `aa.${suffix}`;
+  const withAlias = (alias) => {
+    const lock = verifiedRouteLock();
+    const route = {
+      owner: "fixture-app",
+      slug: "aa",
+      aliases: [alias],
+      canonicalHost,
+      hosts: [canonicalHost, `${alias}.${suffix}`],
+      port: 3000,
+    };
+    lock.workloads[0].services[0].routes = [route];
+    lock.routes = [routeFixture({ ...route, workloadId: "fixture-app" })];
+    return lock;
+  };
+
+  assert.equal(`${"bb"}.${suffix}`.length, 253);
+  assert.equal(parseHostedRouteLock(withAlias("bb")).routes.get("aa"), "http://fixture-app-web:3000");
+  for (const [alias, derivedLength] of [["bbb", 254], ["b".repeat(63), 314]]) {
+    assert.equal(`${alias}.${suffix}`.length, derivedLength);
+    assert.throws(
+      () => parseHostedRouteLock(withAlias(alias)),
+      /canonical route lineage|route declarations/i,
+      `${derivedLength}-byte derived hostname passed the router lock parser`,
+    );
+  }
+});
+
 test("exact route owners preserve non-colliding and single-owner textual prefixes", () => {
   const nonColliding = verifiedRouteLock();
   nonColliding.workloads = [
@@ -1125,6 +1210,44 @@ function httpGet(port, host, requestPath) {
       res.on("end", () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
     });
     req.on("error", reject);
+    req.end();
+  });
+}
+
+function httpGetOutcome(port, host, requestPath) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let response;
+    const finish = (complete, error) => {
+      if (settled || !response) return;
+      settled = true;
+      resolve({
+        statusCode: response.statusCode,
+        body: Buffer.concat(response.chunks).toString("utf8"),
+        complete,
+        error: error?.code || error?.message || "",
+      });
+    };
+    const req = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: requestPath,
+      method: "GET",
+      headers: { host },
+    }, (res) => {
+      response = { statusCode: res.statusCode, chunks: [] };
+      res.on("data", (chunk) => response.chunks.push(chunk));
+      res.once("end", () => finish(true));
+      res.once("aborted", () => finish(false, new Error("upstream response aborted")));
+      res.once("error", (error) => finish(false, error));
+    });
+    req.once("error", (error) => {
+      if (response) finish(false, error);
+      else if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
     req.end();
   });
 }

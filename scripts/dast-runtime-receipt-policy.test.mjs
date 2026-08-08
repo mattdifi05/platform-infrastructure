@@ -91,6 +91,10 @@ const releaseSubjects = [
     image: `ghcr.io/owner/platform-infrastructure-control-center@sha256:${"6".repeat(64)}`,
   },
   {
+    key: "PLATFORM_BACKUP_SCHEDULER_IMAGE",
+    image: `ghcr.io/owner/platform-infrastructure-backup-scheduler@sha256:${"8".repeat(64)}`,
+  },
+  {
     key: "PROJECT_ROUTER_IMAGE",
     image: `ghcr.io/owner/platform-infrastructure-project-router@sha256:${"7".repeat(64)}`,
   },
@@ -109,6 +113,56 @@ const artifactReceipt = {
   manifestSha256: "9".repeat(64),
   sbomSha256: "a".repeat(64),
   subjects: releaseSubjects,
+  subjectVerificationReceipts: [
+    {
+      key: releaseSubjects[0].key,
+      image: releaseSubjects[0].image,
+      registry: {
+        rootDigest: `sha256:${"6".repeat(64)}`,
+        descriptorSha256: "6".repeat(64),
+        platforms: [{
+          platform: "linux/amd64",
+          digest: `sha256:${"d".repeat(64)}`,
+          size: 100,
+          imageId: `sha256:${"2".repeat(64)}`,
+          configSize: 50,
+          manifestArtifactSha256: "1".repeat(64),
+        }],
+      },
+    },
+    {
+      key: releaseSubjects[1].key,
+      image: releaseSubjects[1].image,
+      registry: {
+        rootDigest: `sha256:${"8".repeat(64)}`,
+        descriptorSha256: "8".repeat(64),
+        platforms: [{
+          platform: "linux/amd64",
+          digest: `sha256:${"e".repeat(64)}`,
+          size: 100,
+          imageId: `sha256:${"5".repeat(64)}`,
+          configSize: 50,
+          manifestArtifactSha256: "2".repeat(64),
+        }],
+      },
+    },
+    {
+      key: releaseSubjects[2].key,
+      image: releaseSubjects[2].image,
+      registry: {
+        rootDigest: `sha256:${"7".repeat(64)}`,
+        descriptorSha256: "7".repeat(64),
+        platforms: [{
+          platform: "linux/amd64",
+          digest: `sha256:${"f".repeat(64)}`,
+          size: 100,
+          imageId: `sha256:${"4".repeat(64)}`,
+          configSize: 50,
+          manifestArtifactSha256: "3".repeat(64),
+        }],
+      },
+    },
+  ],
   provenance: {
     verificationFingerprint: "b".repeat(64),
     manifestVerificationFingerprint: "c".repeat(64),
@@ -122,8 +176,8 @@ const opsRunner = {
   providerAttested: true,
 };
 const runtimeIntent = {
-  version: 1,
-  kind: "platform-runtime-intent/v1",
+  version: 2,
+  kind: "platform-runtime-intent/v2",
   repository,
   commitSha,
   treeSha,
@@ -131,14 +185,27 @@ const runtimeIntent = {
   projectName: "platform_infra_vps",
   environmentSha256: "3".repeat(64),
   hostedWorkloadLockSha256: null,
-  coreComposeSha256: "4".repeat(64),
+  sourceRenderSha256: "4".repeat(64),
   combinedComposeSha256: "5".repeat(64),
+  persistentVolumes: [{
+    name: "enterprise_local_registry_data",
+    createdAt: generatedAt,
+    driver: "local",
+    scope: "local",
+    options: {},
+    labels: {
+      "platform.infrastructure.managed": "true",
+      "platform.infrastructure.purpose": "local-registry",
+    },
+    mountpoint: "/var/lib/docker/volumes/enterprise_local_registry_data/_data",
+    owner: { uid: 0, gid: 0, mode: "0755" },
+  }],
   services: [
     {
       service: "backup-scheduler",
-      image: opsRunner.image,
-      admission: { kind: "ops-runner" },
-      expectedLocalImageId: opsRunner.imageId,
+      image: releaseSubjects[1].image,
+      admission: { kind: "artifact-subject", subjectKey: releaseSubjects[1].key },
+      expectedLocalImageId: `sha256:${"5".repeat(64)}`,
     },
     {
       service: "control-center",
@@ -148,8 +215,8 @@ const runtimeIntent = {
     },
     {
       service: "project-router",
-      image: releaseSubjects[1].image,
-      admission: { kind: "artifact-subject", subjectKey: releaseSubjects[1].key },
+      image: releaseSubjects[2].image,
+      admission: { kind: "artifact-subject", subjectKey: releaseSubjects[2].key },
       expectedLocalImageId: `sha256:${"4".repeat(64)}`,
     },
     {
@@ -188,6 +255,31 @@ const deploymentReceipt = {
   producer: provider,
   consumerChallenge,
   opsRunner,
+  deploymentTarget: {
+    environment: "production",
+    host: "vps.platform-infrastructure.test",
+    projectName: "platform_infra_vps",
+  },
+  privilegedRuntime: {
+    activationBroker: {
+      path: "/usr/local/libexec/platform-activation-broker",
+      version: 1,
+      sha256: "a".repeat(64),
+      providerAttested: true,
+    },
+    originFirewallHelper: {
+      path: "/usr/local/libexec/platform-origin-firewall",
+      version: 1,
+      sha256: "b".repeat(64),
+      providerAttested: true,
+    },
+    workloadEgressHelper: {
+      path: "/usr/local/libexec/platform-workload-egress-firewall",
+      version: 1,
+      sha256: "c".repeat(64),
+      providerAttested: true,
+    },
+  },
 };
 const deploymentReceiptSha256 = "2".repeat(64);
 const targetServingServices = ["control-center", "project-router", "traefik"];
@@ -205,7 +297,7 @@ const activeRuntime = canonicalActiveRuntime({
     {
       service: "project-router",
       containerId: "3".repeat(64),
-      image: releaseSubjects[1].image,
+      image: releaseSubjects[2].image,
       imageId: `sha256:${"4".repeat(64)}`,
       state: "running",
       health: "healthy",

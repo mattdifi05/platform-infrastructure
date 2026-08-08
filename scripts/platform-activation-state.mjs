@@ -3,6 +3,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const PRODUCTION_ACTIVATION_COORDINATOR = "/srv/platform-infrastructure/platform-activation";
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -19,6 +22,64 @@ function exactStateDirectory(value) {
   }
   if ((stat.mode & 0o777) !== 0o700) fail("Activation state directory must use mode 0700.");
   return directory;
+}
+
+function exactUnmountedStateDirectory(value, boundary) {
+  const input = String(value || "");
+  const directory = path.resolve(input);
+  const stat = fs.lstatSync(directory, { throwIfNoEntry: false });
+  if (!path.isAbsolute(input) || path.normalize(input) !== input
+      || !stat?.isDirectory() || stat.isSymbolicLink()) {
+    fail("Activation mount-overlap state directory must be one canonical real directory.");
+  }
+  if (fs.realpathSync.native(directory) !== directory) {
+    fail("Activation mount-overlap state directory must be canonical.");
+  }
+  if (boundary.directory !== null && directory !== boundary.directory) {
+    fail("Activation mount-overlap state directory is not the fixed platform coordinator.");
+  }
+  if (stat.uid !== boundary.expectedOwner) {
+    fail("Activation mount-overlap state directory has the wrong owner.");
+  }
+  if ((stat.mode & 0o777) !== boundary.mode) {
+    fail(`Activation mount-overlap state directory must use mode 0${boundary.mode.toString(8)}.`);
+  }
+  return directory;
+}
+
+function assertUnmountedBoundary({ platform, directory, expectedOwner, mode }) {
+  return Object.freeze({ platform, directory, expectedOwner, mode });
+}
+
+const PRODUCTION_ASSERT_UNMOUNTED_BOUNDARY = assertUnmountedBoundary({
+  platform: process.platform,
+  directory: process.platform === "linux" ? PRODUCTION_ACTIVATION_COORDINATOR : null,
+  expectedOwner: process.platform === "linux" ? 0 : (process.getuid?.() ?? 0),
+  mode: process.platform === "linux" ? 0o750 : 0o700,
+});
+
+export function createAssertUnmountedTestValidator(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)
+      || JSON.stringify(Object.keys(options).sort()) !== JSON.stringify(["expectedOwner", "infrastructureRoot"])) {
+    fail("Test mount-overlap boundary must use the exact closed dependency schema.");
+  }
+  const infrastructureRoot = String(options.infrastructureRoot ?? "");
+  if (!path.isAbsolute(infrastructureRoot) || path.normalize(infrastructureRoot) !== infrastructureRoot) {
+    fail("Test mount-overlap infrastructure root must be canonical and absolute.");
+  }
+  if (!Number.isSafeInteger(options.expectedOwner) || options.expectedOwner < 0) {
+    fail("Test mount-overlap expected owner must be one non-negative integer.");
+  }
+  const boundary = assertUnmountedBoundary({
+    platform: "linux",
+    directory: path.join(infrastructureRoot, "platform-activation"),
+    expectedOwner: options.expectedOwner,
+    mode: 0o750,
+  });
+  return (directory, modelPaths) => {
+    const exactDirectory = exactUnmountedStateDirectory(directory, boundary);
+    assertUnmounted(exactDirectory, modelPaths);
+  };
 }
 
 function overlaps(left, right) {
@@ -158,23 +219,33 @@ function stableRead(directory, name, optional) {
   }
 }
 
-const [command, directoryArgument, name] = process.argv.slice(2);
-if (command === "nonce") {
-  process.stdout.write(`${crypto.randomBytes(32).toString("hex")}\n`);
-  process.exit(0);
+function main() {
+  const [command, directoryArgument, name] = process.argv.slice(2);
+  if (command === "nonce") {
+    process.stdout.write(`${crypto.randomBytes(32).toString("hex")}\n`);
+    return;
+  }
+  if (command === "assert-unmounted") {
+    if (!name) fail("At least one Compose model is required for mount-overlap validation.");
+    const directory = exactUnmountedStateDirectory(
+      directoryArgument,
+      PRODUCTION_ASSERT_UNMOUNTED_BOUNDARY,
+    );
+    assertUnmounted(directory, process.argv.slice(4));
+    return;
+  }
+  const directory = exactStateDirectory(directoryArgument);
+  if (command === "write") {
+    atomicWrite(directory, name, fs.readFileSync(0, "utf8"));
+  } else if (command === "read") {
+    stableRead(directory, name, false);
+  } else if (command === "read-optional") {
+    stableRead(directory, name, true);
+  } else if (command === "ensure-lock") {
+    ensureLock(directory);
+  } else {
+    fail("Usage: platform-activation-state.mjs nonce | write|read|read-optional STATE_DIR journal.json|active.json | ensure-lock STATE_DIR | assert-unmounted STATE_DIR MODEL...");
+  }
 }
-const directory = exactStateDirectory(directoryArgument);
-if (command === "write") {
-  atomicWrite(directory, name, fs.readFileSync(0, "utf8"));
-} else if (command === "read") {
-  stableRead(directory, name, false);
-} else if (command === "read-optional") {
-  stableRead(directory, name, true);
-} else if (command === "ensure-lock") {
-  ensureLock(directory);
-} else if (command === "assert-unmounted") {
-  if (!name) fail("At least one Compose model is required for mount-overlap validation.");
-  assertUnmounted(directory, process.argv.slice(4));
-} else {
-  fail("Usage: platform-activation-state.mjs nonce | write|read|read-optional STATE_DIR journal.json|active.json | ensure-lock STATE_DIR | assert-unmounted STATE_DIR MODEL...");
-}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

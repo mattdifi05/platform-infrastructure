@@ -72,7 +72,7 @@ services:
       - ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
     networks: !reset []
     healthcheck:
-      test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/platform/docker-action-broker/broker.sock').isSocket()?0:1)"]
+      test: ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs", "--require-trusted-activation"]
       interval: 15s
       timeout: 5s
       retries: 5

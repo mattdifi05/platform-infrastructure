@@ -5,6 +5,7 @@ import fs from "node:fs";
 const localSink = fs.readFileSync("scripts/deploy-vps.sh", "utf8");
 const remoteSink = fs.readFileSync("scripts/deploy-vps-remote.sh", "utf8");
 const workflow = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
+const opsDockerfile = fs.readFileSync("docker/ops.Dockerfile", "utf8");
 
 const dastJobStart = workflow.indexOf("\n  dast-zap:");
 const releaseAdmissionStart = workflow.indexOf("\n  release-admission:", dastJobStart);
@@ -27,204 +28,174 @@ function matches(text, pattern, message) {
   assert.match(text, pattern, message);
   checks += 1;
 }
-function before(text, earlier, later, message, start = 0) {
-  const earlierIndex = text.indexOf(earlier, start);
-  const laterIndex = text.indexOf(later, start);
-  assert.ok(earlierIndex >= start && laterIndex > earlierIndex, message);
+function before(text, earlier, later, message) {
+  const earlierIndex = text.indexOf(earlier);
+  const laterIndex = text.indexOf(later);
+  assert.ok(earlierIndex >= 0 && laterIndex > earlierIndex, message);
   checks += 1;
-  return { earlierIndex, laterIndex };
 }
 
-// The candidate run may emit only a non-authorizing scan request. A distinct
-// independent workflow run supplies the final receipt.
-has(dastJob, "--scanRequestOutput \"$DAST_SCAN_REQUEST\"", "candidate DAST job must emit a scan request");
-has(dastJob, "PENDING-PROVIDER-ATTESTATION", "candidate DAST request must remain non-authorizing");
-lacks(dastJob, "--receiptOutput", "candidate DAST job must not self-issue any authorizing receipt");
-has(dastJob, "id: upload-request", "request and raw reports must be uploaded for provider observation");
-has(dastJob, "dast_report_artifact_id: ${{ steps.upload-request.outputs.artifact-id }}",
-  "DAST job must export the immutable report artifact ID");
-has(dastJob, "dast_report_artifact_sha256: ${{ steps.upload-request.outputs.artifact-digest }}",
-  "DAST job must export the provider-observed report archive digest");
-has(dastJob, "-f \"inputs[mode]=dast-countersign\"", "independent provider must run in DAST countersign mode");
-has(dastJob, "test \"$TRUSTED_REPOSITORY\" != \"$GITHUB_REPOSITORY\"",
-  "candidate repository must not act as its own provider");
-for (const providerInput of [
+// The candidate run emits only a non-authorizing scan request. A distinct,
+// authenticated provider workflow produces the raw rich DAST receipt.
+for (const fragment of [
+  '--scanRequestOutput "$DAST_SCAN_REQUEST"',
+  "PENDING-PROVIDER-ATTESTATION",
+  "id: upload-request",
+  "dast_report_artifact_id: ${{ steps.upload-request.outputs.artifact-id }}",
+  "dast_report_artifact_sha256: ${{ steps.upload-request.outputs.artifact-digest }}",
+  '-f "inputs[mode]=dast-countersign"',
+  'test "$TRUSTED_REPOSITORY" != "$GITHUB_REPOSITORY"',
   "inputs[dast_scan_request_artifact]",
   "inputs[dast_scan_request_sha256]",
   "inputs[dast_report_artifact_id]",
   "inputs[dast_report_artifact_sha256]",
   "inputs[challenge_nonce]",
   "inputs[runtime_intent_sha256]",
-]) {
-  has(dastJob, providerInput, `${providerInput} must be bound into the independent provider dispatch`);
-}
-has(dastJob, "TRUSTED_RUN_METADATA=\"${RUNNER_TEMP}/dast-provider-run.json\"",
-  "the second provider run must have separately authenticated metadata");
-has(dastJob, "--metadata \"$TRUSTED_RUN_METADATA\"", "the second provider run metadata must be policy checked");
-has(dastJob, "Download independent provider DAST receipt and Sigstore bundle",
-  "the final provider receipt and Sigstore bundle must come from the independent run");
-has(dastJob, "dast-provider-attestation.bundle.jsonl", "the Sigstore bundle must be retained in the handoff");
-has(dastJob, "--attestationVerifier /usr/local/bin/gh",
-  "the provider receipt must be cryptographically verified before handoff");
+  'TRUSTED_RUN_METADATA="${RUNNER_TEMP}/dast-provider-run.json"',
+  '--metadata "$TRUSTED_RUN_METADATA"',
+  "Download independent provider DAST receipt and Sigstore bundle",
+  "dast-provider-attestation.bundle.jsonl",
+  "--attestationVerifier /usr/local/bin/gh",
+]) has(dastJob, fragment, `DAST provider boundary is missing ${fragment}`);
+lacks(dastJob, "--receiptOutput", "candidate DAST job must not self-issue an authorizing receipt");
 
-// Every trust input is mandatory at the deploy sink and is wired from the
-// exact DAST/provider job outputs.
-for (const variable of [
-  "DEPLOY_DAST_SCAN_REQUEST_PATH",
-  "DEPLOY_DAST_SCAN_REQUEST_SHA256",
-  "DEPLOY_DAST_REPORT_ARTIFACT_ID",
-  "DEPLOY_DAST_REPORT_ARTIFACT_SHA256",
-  "DEPLOY_DAST_RECEIPT_PATH",
-  "DEPLOY_DAST_RECEIPT_SHA256",
-  "DEPLOY_DAST_PROVIDER_METADATA_PATH",
-  "DEPLOY_DAST_PROVIDER_METADATA_SHA256",
-  "DEPLOY_DAST_PROVIDER_RUN_ID",
-  "DEPLOY_DAST_PROVIDER_RUN_ATTEMPT",
-  "DEPLOY_DAST_ATTESTATION_BUNDLE_PATH",
-  "DEPLOY_DAST_ATTESTATION_BUNDLE_SHA256",
-  "DEPLOY_GH_VERIFIER_ARCHIVE_PATH",
-]) {
-  has(localSink, variable, `${variable} must be mandatory at deploy-vps.sh`);
-  has(deployJob, `${variable}:`, `${variable} must be handed to deploy-vps.sh`);
-}
-has(localSink, "stable_dast_scan_request=\"$request_dir/dast-scan-request.json\"",
-  "the scan request needs an independent stable snapshot");
-has(localSink, "stable_dast_receipt=\"$request_dir/dast-verification.json\"",
-  "the provider receipt needs an independent stable snapshot");
-has(localSink, "[ \"$(hash_file \"$stable_dast_scan_request\")\" = \"$DAST_SCAN_REQUEST_SHA256\" ]",
-  "the stable scan request digest must be checked");
-has(localSink, "[ \"$(hash_file \"$stable_dast_receipt\")\" = \"$DAST_RECEIPT_SHA256\" ]",
-  "the stable provider receipt digest must be checked");
-has(localSink, "[ \"$(hash_file \"$stable_dast_provider_metadata\")\" = \"$DAST_PROVIDER_METADATA_SHA256\" ]",
-  "the second-run metadata digest must be checked");
-has(localSink, "[ \"$(hash_file \"$stable_dast_attestation_bundle\")\" = \"$DAST_ATTESTATION_BUNDLE_SHA256\" ]",
-  "the Sigstore bundle digest must be checked");
-matches(localSink, /GH_VERIFIER_ARCHIVE_SHA256=[a-f0-9]{64}/,
-  "the local sink must checksum-pin the attestation verifier archive");
-has(localSink, "--reportArtifactId \"$DAST_REPORT_ARTIFACT_ID\"",
-  "the local replay must bind the exact artifact ID");
-has(localSink, "--reportArtifactSha256 \"$DAST_REPORT_ARTIFACT_SHA256\"",
-  "the local replay must bind the provider-observed archive digest");
-has(localSink, "--dastProviderMetadata \"$stable_dast_provider_metadata\"",
-  "the local replay must bind second-run metadata");
-has(localSink, "--dastAttestationBundle \"$stable_dast_attestation_bundle\"",
-  "the local replay must bind the Sigstore bundle");
-has(localSink, "--attestationVerifier \"$stable_gh_verifier\"",
-  "the local replay must use the checksum-pinned verifier");
-
-// The complete evidence set, including the verifier, must cross the SSH
-// boundary and be revalidated on the destination.
-for (const transport of [
-  "PLATFORM_DAST_SCAN_REQUEST_SHA256_B64",
-  "PLATFORM_DAST_REPORT_ARTIFACT_ID_B64",
-  "PLATFORM_DAST_REPORT_ARTIFACT_SHA256_B64",
-  "PLATFORM_DAST_RECEIPT_SHA256_B64",
-  "PLATFORM_DAST_PROVIDER_METADATA_SHA256_B64",
-  "PLATFORM_DAST_PROVIDER_RUN_ID_B64",
-  "PLATFORM_DAST_PROVIDER_RUN_ATTEMPT_B64",
-  "PLATFORM_DAST_ATTESTATION_BUNDLE_SHA256_B64",
-  "PLATFORM_DAST_SCAN_REQUEST_B64",
-  "PLATFORM_DAST_RECEIPT_B64",
-  "PLATFORM_DAST_PROVIDER_METADATA_B64",
-  "PLATFORM_DAST_ATTESTATION_BUNDLE_B64",
-  "PLATFORM_GH_VERIFIER_ARCHIVE_B64",
-]) {
-  has(localSink, transport, `${transport} must be included in the SSH request`);
-  has(remoteSink, transport, `${transport} must be consumed by the remote sink`);
-}
-has(remoteSink, "[ \"$(hash_file \"$dast_scan_request\")\" = \"$dast_scan_request_sha256\" ]",
-  "remote sink must hash the separate scan request");
-has(remoteSink, "[ \"$(hash_file \"$dast_provider_metadata\")\" = \"$dast_provider_metadata_sha256\" ]",
-  "remote sink must hash the second-run provider metadata");
-has(remoteSink, "[ \"$(hash_file \"$dast_attestation_bundle\")\" = \"$dast_attestation_bundle_sha256\" ]",
-  "remote sink must hash the Sigstore bundle");
-has(remoteSink, ".reportArtifact.id == $artifactId and .reportArtifact.archiveSha256 == $artifactSha256",
-  "remote schema gate must bind both report artifact ID and archive digest");
-has(remoteSink, ".validatedReportEvidence == $scanRequest[0].reportEvidence",
-  "remote schema gate must bind provider-observed evidence to the request");
-has(remoteSink, ".semanticVerdict == .validatedReportEvidence.semanticVerdict",
-  "remote schema gate must reject a self-asserted divergent semantic verdict");
-has(remoteSink, ".providerValidation == {", "remote schema gate must require provider validation");
-has(remoteSink, "parser:\"platform-provider-zap-report-set/v1\"",
-  "remote schema gate must require the independent provider parser");
-has(remoteSink, "keys == [\"html\",\"json\",\"xml\"]",
-  "remote schema gate must require the complete exact report file set");
-has(remoteSink, ".provider.repository != $repo and .provider.job == \"dast-countersign\"",
-  "remote receipt must identify an independent second provider run");
-has(remoteSink, ".status == \"completed\" and .conclusion == \"success\"",
-  "remote second-run metadata must authenticate a successful completed provider run");
-
-// Sigstore verification is explicit and offline against the transferred
-// bundle, with exact workflow identity and receipt subject digest.
-has(remoteSink, "\"$gh_verifier\" attestation verify \"$dast_receipt\"",
-  "remote sink must cryptographically verify the final receipt");
-for (const verifierArgument of [
-  "--signer-workflow",
-  "--source-digest",
-  "--signer-digest",
-  "--source-ref",
-  "--cert-oidc-issuer https://token.actions.githubusercontent.com",
-  "--predicate-type https://slsa.dev/provenance/v1",
-  "--deny-self-hosted-runners",
-  "--bundle \"$dast_attestation_bundle\"",
-]) {
-  has(remoteSink, verifierArgument, `${verifierArgument} must constrain remote attestation verification`);
-}
-has(remoteSink, ".verificationResult.signature.certificate",
-  "remote sink must inspect the verified certificate");
-has(remoteSink, ".verificationResult.verifiedTimestamps",
-  "remote sink must require verified transparency timestamps");
-has(remoteSink, ".digest.sha256 == $digest",
-  "remote sink must bind the attestation subject to the exact receipt digest");
-
-// Ordering: the complete Node policy (which invokes the pinned verifier) runs
-// locally before SSH. The destination verifies the attestation before fetching
-// or checking out code, then replays the full Node policy from that exact
-// checkout before any production mutation.
-const localPolicyOrder = before(
-  localSink,
-  "node \"$SCRIPT_DIR/dast-runtime-receipt-policy.mjs\"",
-  "ssh \"$@\" \"$REMOTE\" 'sh -s'",
-  "local DAST policy and cryptographic verification must finish before SSH",
-);
-before(
-  localSink,
-  "--attestationVerifier \"$stable_gh_verifier\"",
-  "ssh \"$@\" \"$REMOTE\" 'sh -s'",
-  "the pinned local verifier must be selected before SSH",
-  localPolicyOrder.earlierIndex,
-);
-before(
+// Promotion v2 consumes the complete provider evidence locally. Its output is
+// bounded and projects only the exact authorization identities needed by the
+// immutable deploy client.
+for (const fragment of [
+  '--releaseBundle "$PROMOTED/release-activation.bundle"',
+  '--releaseBundleManifest "$PROMOTED/release-activation-bundle-manifest.json"',
+  '--dockerActivationEnvelope "$PROMOTED/docker-runtime-activation.dsse.json"',
+  '--dastAuthorization "$PROMOTED/dast-activation-authorization.json"',
+  '--dastProviderReceipt "$DAST_RECEIPT"',
+  '--dastProviderMetadata "$DAST_PROVIDER_METADATA"',
+  '--dastProviderAttestationBundle "$DAST_PROVIDER_ATTESTATION_BUNDLE"',
+  'test "$(wc -c < "$RESULT" | tr -d \' \')" -le 1048576',
+  'test "$(jq -er \'.dastChainSha256\' "$RESULT")" = "$(jq -er \'.chainSha256\' "$PROMOTED/dast-activation-authorization.json")"',
+]) has(deployJob, fragment, `promotion v2 boundary is missing ${fragment}`);
+has(
   deployJob,
-  "node ./scripts/dast-runtime-receipt-policy.mjs",
-  "- name: Install SSH key",
-  "workflow revalidation must finish before installing or using SSH credentials",
-);
-const remoteCryptoOrder = before(
-  remoteSink,
-  "\"$gh_verifier\" attestation verify \"$dast_receipt\"",
-  "git fetch --no-tags origin \"$release_sha\"",
-  "remote cryptographic verification must finish before git fetch",
-);
-before(
-  remoteSink,
-  ".digest.sha256 == $digest",
-  "git fetch --no-tags origin \"$release_sha\"",
-  "verified attestation subject binding must finish before git fetch",
-  remoteCryptoOrder.earlierIndex,
-);
-const remoteReplayOrder = before(
-  remoteSink,
-  "node ./scripts/dast-runtime-receipt-policy.mjs",
-  "rollback_required=1",
-  "remote full policy replay must finish before the production mutation boundary",
-);
-before(
-  remoteSink,
-  "--attestationVerifier \"$gh_verifier\"",
-  "rollback_required=1",
-  "remote replay must use the pinned verifier before production mutation",
-  remoteReplayOrder.earlierIndex,
+  "release-activation.bundle release-activation-bundle-manifest.json docker-runtime-activation.dsse.json dast-activation-authorization.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json",
+  "promoted artifact must contain the exact seven-file flat set",
 );
 
-process.stdout.write(`DAST deploy sink policy tests passed ${checks}/${checks}\n`);
+const sshInstall = deployJob.indexOf("- name: Install SSH key");
+const promotion = deployJob.indexOf("node ./scripts/activation-promotion-policy.mjs");
+const providerReplay = deployJob.lastIndexOf("node ./scripts/dast-runtime-receipt-policy.mjs");
+assert.ok(promotion >= 0 && providerReplay >= 0 && sshInstall > promotion && sshInstall > providerReplay,
+  "provider replay and promotion must both finish before SSH credentials are installed");
+checks += 1;
+
+// The isolated ops runner receives exactly the closed local projection. Raw
+// reports, provider metadata, Sigstore material, bundle and envelope stay out.
+const dockerStart = deployJob.indexOf("docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges");
+const dockerEnd = deployJob.indexOf('"$OPS_IMAGE_ID" deploy-vps > "$ACTIVATION_RECEIPT"', dockerStart);
+assert.ok(dockerStart >= 0 && dockerEnd > dockerStart, "trusted ops invocation is missing");
+checks += 1;
+const opsInvocation = deployJob.slice(dockerStart, dockerEnd);
+for (const mounted of [
+  "/run/platform-deploy/ssh-key:ro",
+  "/run/platform-deploy/known-hosts:ro",
+  "/run/platform-deploy/artifact-verification.json:ro",
+  "/run/platform-deploy/trusted-deployment-admission.json:ro",
+  "/run/platform-deploy/trusted-provider-run.json:ro",
+  "/run/platform-deploy/dast-provider-verification.json:ro",
+  "/run/platform-deploy/dast-activation-authorization.json:ro",
+  "/run/platform-deploy/release-activation-bundle-manifest.json:ro",
+]) has(opsInvocation, mounted, `ops mount allowlist is missing ${mounted}`);
+const mountCount = (opsInvocation.match(/^\s+-v\s+/gm) ?? []).length;
+assert.equal(mountCount, 8, "ops runner must have exactly eight read-only mounts");
+checks += 1;
+assert.doesNotMatch(opsInvocation,
+  /dast-scan-request|dast-provider-run|dast-provider-attestation|sigstore-trusted-root|docker-runtime-activation\.dsse|release-activation\.bundle/,
+  "raw/provider/CAS material must not cross into the ops runner");
+checks += 1;
+
+// The immutable client consumes the new typed identities and rejects the old
+// generic bundle/admission and raw DAST evidence vocabulary.
+for (const variable of [
+  "DEPLOY_DAST_PROVIDER_RECEIPT_PATH",
+  "DEPLOY_DAST_PROVIDER_RECEIPT_SHA256",
+  "DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH",
+  "DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256",
+  "DEPLOY_DAST_PROVIDER_METADATA_SHA256",
+  "DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256",
+  "DEPLOY_DAST_SIGSTORE_SUBJECT",
+  "DEPLOY_DAST_CHAIN_SHA256",
+  "DEPLOY_RELEASE_BUNDLE_MANIFEST_PATH",
+  "DEPLOY_RELEASE_BUNDLE_SHA256",
+  "DEPLOY_RELEASE_BUNDLE_SIZE_BYTES",
+  "DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256",
+  "DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256",
+  "DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES",
+  "DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE",
+  "DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID",
+  "DEPLOY_DOCKER_ACTIVATION_GENERATION",
+]) has(localSink, variable, `${variable} must be mandatory in the immutable client`);
+for (const argument of [
+  '--dastProviderReceipt "$DAST_PROVIDER_RECEIPT"',
+  '--dastProviderReceiptSha256 "$DAST_PROVIDER_RECEIPT_SHA256"',
+  '--dastAuthorization "$DAST_ACTIVATION_AUTHORIZATION"',
+  '--dastAuthorizationSha256 "$DAST_ACTIVATION_AUTHORIZATION_SHA256"',
+  '--dastProviderMetadataSha256 "$DAST_PROVIDER_METADATA_SHA256"',
+  '--dastSigstoreBundleSha256 "$DAST_SIGSTORE_BUNDLE_SHA256"',
+  '--dastSigstoreSubject "$DAST_SIGSTORE_SUBJECT"',
+  '--releaseBundleSha256 "$RELEASE_BUNDLE_SHA256"',
+  '--dockerActivationEnvelopeSha256 "$DOCKER_ACTIVATION_ENVELOPE_SHA256"',
+]) has(localSink, argument, `activation request v3 producer is missing ${argument}`);
+has(localSink, "node \"$SCRIPT_ROOT/activation-receipt-policy.mjs\"", "client must validate receipt v3 locally");
+has(localSink, "'/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate'", "SSH sink must be the fixed root broker only");
+has(localSink, '< "$request" > "$receipt"', "only the bounded request may cross SSH stdin");
+lacks(localSink, "PLATFORM_DAST_SCAN_REQUEST", "raw scan request must not cross SSH");
+lacks(localSink, "PLATFORM_DAST_PROVIDER_METADATA", "DAST provider metadata must not cross SSH");
+lacks(localSink, "PLATFORM_DAST_ATTESTATION_BUNDLE", "DAST Sigstore material must not cross SSH");
+lacks(localSink, "git fetch", "immutable client must not fetch or checkout on the remote host");
+lacks(localSink, "docker compose", "immutable client must not mutate Docker directly");
+before(localSink, "node \"$SCRIPT_ROOT/activation-request.mjs\"", "ssh \"$@\" -- \"$REMOTE\"", "request v3 must be validated and emitted before SSH");
+before(localSink, "ssh \"$@\" -- \"$REMOTE\"", "node \"$SCRIPT_ROOT/activation-receipt-policy.mjs\"", "receipt v3 must be validated after the broker response");
+
+// The compatibility shim is a bounded stdin transport to one provider-owned
+// root binary. It contains no candidate checkout, Docker, or evidence replay.
+has(remoteSink, "BROKER=/usr/local/libexec/platform-activation-broker", "remote shim broker path is not fixed");
+has(remoteSink, "MAX_REQUEST_BYTES=1048576", "remote shim request size is not bounded");
+has(remoteSink, "/bin/dd if=/dev/stdin", "remote shim must consume stdin only");
+has(remoteSink, 'exec "$SUDO" -n "$BROKER" activate < "$request"', "remote shim must exec only the fixed root broker");
+for (const forbidden of [
+  "git fetch",
+  "git checkout",
+  "docker ",
+  "compose",
+  "DAST_RECEIPT",
+  "ATTESTATION_BUNDLE",
+  "PROVIDER_METADATA",
+  "base64",
+  "curl ",
+]) lacks(remoteSink, forbidden, `remote shim must not contain ${forbidden}`);
+
+// Workflow validates and records the four semantically distinct receipt v3
+// identities; no binary bundle, envelope or DAST evidence is sent over SSH.
+for (const binding of [
+  "platform-activation-receipt/v3",
+  ".releaseBundleSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_RELEASE_BUNDLE_SHA256",
+  ".dockerActivationEnvelopeSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256",
+  ".dastAuthorizationSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256",
+  ".dastChainSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_CHAIN_SHA256",
+]) has(deployJob, binding, `receipt v3 sink is missing ${binding}`);
+assert.equal((workflow.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? []).length, 1,
+  "workflow must contain exactly one trusted production mutation sink");
+checks += 1;
+matches(remoteSink, /\[ "\$size" -gt 0 \] && \[ "\$size" -le "\$MAX_REQUEST_BYTES" \]/,
+  "remote shim must enforce both non-empty and maximum request bounds");
+const executableClosure = opsDockerfile.slice(
+  opsDockerfile.indexOf("&& chmod 0555"),
+  opsDockerfile.indexOf("\n\nWORKDIR"),
+);
+for (const runtimeModule of [
+  "/opt/platform-infrastructure/scripts/dast-activation-authorization.mjs",
+  "/opt/platform-infrastructure/scripts/docker-action-activation.mjs",
+  "/opt/platform-infrastructure/scripts/docker-action-contract.mjs",
+  "/opt/platform-infrastructure/scripts/ssh-known-host-endpoint.sh",
+  "/opt/platform-infrastructure/scripts/pinned-ssh-host-key.mjs",
+]) has(executableClosure, runtimeModule, `ops executable closure is missing ${runtimeModule}`);
+
+process.stdout.write(`DAST deploy sink v3 policy tests passed ${checks}/${checks}\n`);

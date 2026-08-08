@@ -26,6 +26,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((rows, value, index
   return rows;
 }, []));
 if (args.extractedRoot) {
+  if (process.env.TEST_REJECT_IMMUTABLE_ROOT === "1") process.exit(1);
   if (!fs.statSync(args.extractedRoot).isDirectory()) process.exit(1);
 } else {
   const actual = crypto.createHash("sha256").update(fs.readFileSync(args.archive)).digest("hex");
@@ -207,6 +208,20 @@ result=$(trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh")
 [ "$(printf '%s' "$result" | jq -r '.sourceArchiveSha256')" = "$SOURCE_ARCHIVE_SHA" ]
 printf 'PASS\tprovider-receipt-and-local-image-positive-path\n'
 
+[ ! -e "$FIXTURE_ROOT/.git" ]
+TEST_FAKE_RELEASE_SHA=$(printf 'c%.0s' $(seq 1 40))
+export TEST_FAKE_RELEASE_SHA
+immutable_result=$(trust_env env PLATFORM_IMMUTABLE_RELEASE_ROOT=1 sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh")
+unset TEST_FAKE_RELEASE_SHA
+[ "$(printf '%s' "$immutable_result" | jq -r '.sourceArchiveSha256')" = "$SOURCE_ARCHIVE_SHA" ]
+printf 'PASS\timmutable-no-git-release-root-positive-path\n'
+
+TEST_REJECT_IMMUTABLE_ROOT=1
+export TEST_REJECT_IMMUTABLE_ROOT
+expect_reject_without_docker immutable-root-tamper \
+  trust_env env PLATFORM_IMMUTABLE_RELEASE_ROOT=1 sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_REJECT_IMMUTABLE_ROOT
+
 inner_env node "$FIXTURE_ROOT/scripts/infra-ops.mjs" trusted-deployment-admission-check >/dev/null
 printf 'PASS\timmutable-snapshot-inner-admission-positive-path\n'
 
@@ -287,6 +302,7 @@ trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" testing-hygiene
 grep -Fx -- '--pull=never' "$TMP/docker-run-args" >/dev/null
 grep -Fx -- "$IMAGE_ID" "$TMP/docker-run-args" >/dev/null
 grep -F -- ":/run/platform-input/infra-source.tar:ro" "$TMP/docker-run-args" >/dev/null
+grep -Fx -- 'PLATFORM_GIT_REPOSITORY=owner/repo' "$TMP/docker-run-args" >/dev/null
 if grep -Fx -- "$IMAGE" "$TMP/docker-run-args" >/dev/null; then
   echo "FAIL: wrapper executed the digest alias instead of the admitted local image ID" >&2
   exit 1
@@ -420,8 +436,17 @@ fi
 printf 'PASS\tno-wrapper-build-label-or-host-bypass\n'
 
 prepare_runs=$(grep -c 'docker run --rm --pull=never' "$ROOT/scripts/prepare-hosted-workloads.sh")
-prepare_ids=$(grep -c '"$OPS_IMAGE_ID" hosted-workload-contract ' "$ROOT/scripts/prepare-hosted-workloads.sh")
-[ "$prepare_runs" -ge 2 ] && [ "$prepare_ids" -eq "$prepare_runs" ]
+prepare_ids=$(grep -Ec '^[[:space:]]+"\$OPS_IMAGE_ID" (hosted-workload-contract|scripts/hosted-workload-source-policy\.rb)' \
+  "$ROOT/scripts/prepare-hosted-workloads.sh")
+[ "$prepare_runs" -eq 3 ] && [ "$prepare_ids" -eq 3 ]
+grep -F '"$OPS_IMAGE_ID" scripts/hosted-workload-source-policy.rb --lock "$resolved"' \
+  "$ROOT/scripts/prepare-hosted-workloads.sh" >/dev/null
+grep -F 'current=$(sh "$SCRIPT_DIR/ops-image-trust.sh")' \
+  "$ROOT/scripts/prepare-hosted-workloads.sh" >/dev/null
+if grep -Eq 'git -C "\$INFRA_ROOT"' "$ROOT/scripts/prepare-hosted-workloads.sh"; then
+  echo "FAIL: hosted preparation bypasses immutable-root admission with a direct Git-only recheck" >&2
+  exit 1
+fi
 if grep -Eq 'platform/ops:local|docker build|"\$OPS_IMAGE" scripts/' "$ROOT/scripts/prepare-hosted-workloads.sh"; then
   echo "FAIL: hosted preparation retains a mutable or caller-selected execution path" >&2
   exit 1

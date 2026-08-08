@@ -288,7 +288,8 @@ export class PersistentReplayStore {
       || activation.targetId !== trusted?.intent?.targetId
       || activation.sourceRenderSha256 !== trusted?.receipt?.sourceRenderSha256
       || activation.combinedRenderSha256 !== trusted?.receipt?.combinedRenderSha256
-      || activation.dastChainSha256 !== trusted?.receipt?.dastChainSha256) {
+      || activation.dastChainSha256 !== trusted?.receipt?.dastChainSha256
+      || activation.treeSha256 !== trusted?.receipt?.treeSha256) {
       throw brokerError(403, "provider/admin activation does not bind the trusted runtime context");
     }
     const next = {
@@ -3130,7 +3131,7 @@ async function defaultTrustedContextProvider({ now }) {
     parentRoot: DEFAULT_ACTIVATION_CAS_ROOT,
   });
   const activation = verifyActivationEnvelope(activationBytes, policy, {
-    activationBundleSha256: trusted.intent.activationBundleSha256,
+    activationEnvelopeSha256: trusted.intent.activationBundleSha256,
     candidateId: trusted.receipt.candidateId,
     combinedRenderSha256: trusted.receipt.combinedRenderSha256,
     dastChainSha256: trusted.receipt.dastChainSha256,
@@ -3140,6 +3141,7 @@ async function defaultTrustedContextProvider({ now }) {
     runtimeIntentId: trusted.intent.intentId,
     sourceRenderSha256: trusted.receipt.sourceRenderSha256,
     targetId: trusted.receipt.targetId,
+    treeSha256: trusted.receipt.treeSha256,
   }, { now });
   return Object.freeze({ ...trusted, activation });
 }

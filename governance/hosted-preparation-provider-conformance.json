@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "kind": "platform-hosted-preparation-provider-conformance/v1",
+  "status": "EXTERNAL-PENDING",
+  "reason": "No independent provider has supplied the signed preliminary authorization, target-root preparation receipt, and final deployment admission conformance chain.",
+  "selfAssertedEvidenceAccepted": false,
+  "dag": [
+    "provider-signed-preparation-authorization/v1",
+    "target-root-signed-preparation-receipt/v1",
+    "provider-final-deployment-admission/v1"
+  ],
+  "providerInvariant": [
+    "authorization-has-no-final-output-bindings",
+    "receipt-binds-the-exact-authorization-envelope",
+    "final-admission-binds-the-exact-receipt-output-projection",
+    "candidate-cannot-mint-authoritative-evidence"
+  ],
+  "authorization": {
+    "payloadType": "application/vnd.platform.hosted-preparation-authorization.v1+json",
+    "maxLifetimeSeconds": 900,
+    "providerKeyId": null,
+    "providerPublicKeyPem": null
+  },
+  "receipt": {
+    "payloadType": "application/vnd.platform.hosted-preparation-receipt.v1+json",
+    "maxLifetimeSeconds": 14400
+  },
+  "trustedProducer": {
+    "repository": null,
+    "workflowPath": null,
+    "workflowSha": null,
+    "sourceRef": null,
+    "event": null
+  },
+  "preparationBroker": {
+    "path": "/usr/local/libexec/platform-hosted-preparation-broker",
+    "version": null,
+    "sha256": null,
+    "providerAttested": true
+  },
+  "requiredProjectName": "platform_infra_vps",
+  "requiredFinalAdmissionKind": "platform-trusted-deployment-admission/v1",
+  "requiredRuntimeIntentKind": "platform-runtime-intent/v2"
+}

@@ -78,6 +78,38 @@ testRunner("v2 broker exposes no obsolete fixed-engine execution surface", () =>
   assert.equal(Object.hasOwn(broker, "executeFixedWorkerAction"), false);
 });
 
+testRunner("v2 activation admission maps the legacy CAS field to the DSSE envelope and binds the tree", (t) => {
+  const root = tempDir(t);
+  const rawReceipt = buildRawActiveReceiptV2({ now: NOW });
+  rawReceipt.generation = 1;
+  const { trusted: baseTrusted } = buildFixtureTrustedContextV2({
+    allowedActions: ["backup.prune.plan"],
+    now: NOW,
+    rawReceipt,
+  });
+  const trusted = withFixtureActivation(baseTrusted, 2700);
+  const store = createReplayStore(root, "e".repeat(48));
+  store.admitActivation(trusted.activation, trusted);
+
+  const active = readJson(path.join(root, "active-activation.json"));
+  assert.equal(active.envelopeSha256, trusted.intent.activationBundleSha256);
+  assert.notEqual(trusted.activation.releaseBundleSha256, active.envelopeSha256);
+  assert.throws(
+    () => store.admitActivation({
+      ...trusted.activation,
+      envelopeSha256: trusted.activation.releaseBundleSha256,
+    }, trusted),
+    /trusted runtime context/,
+  );
+  assert.throws(
+    () => store.admitActivation({
+      ...trusted.activation,
+      treeSha256: "f".repeat(64),
+    }, trusted),
+    /trusted runtime context/,
+  );
+});
+
 testRunner("v2 broker Dockerfile is the exact immutable runtime import closure", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const dockerfile = fs.readFileSync(
@@ -92,6 +124,7 @@ testRunner("v2 broker Dockerfile is the exact immutable runtime import closure",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-activation.mjs /opt/platform-docker-broker/docker-action-activation.mjs",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-helper-plan.mjs /opt/platform-docker-broker/docker-action-helper-plan.mjs",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-broker.mjs /opt/platform-docker-broker/docker-action-broker.mjs",
+    "COPY scripts/docker-action-readiness.mjs /opt/platform-docker-broker/docker-action-readiness.mjs",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker.mjs /opt/platform-docker-worker/docker-action-worker.mjs",
     "COPY --chown=0:0 --chmod=0400 policy/docker-action-activation-policy.json /opt/platform-docker-broker/docker-action-activation-policy.json",
     'ENTRYPOINT ["node","/opt/platform-docker-broker/docker-action-broker.mjs"]',
@@ -105,6 +138,7 @@ testRunner("v2 broker Dockerfile is the exact immutable runtime import closure",
     "scripts/docker-action-broker.mjs",
     "scripts/docker-action-contract.mjs",
     "scripts/docker-action-helper-plan.mjs",
+    "scripts/docker-action-readiness.mjs",
     "scripts/docker-action-worker.mjs",
   ]);
   for (const source of copiedModules) {
@@ -10412,6 +10446,7 @@ function withFixtureActivation(trusted, index) {
       activationId: `activation-${index}`,
       candidateId: trusted.intent.candidateId,
       combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      dastAuthorizationSha256: "9".repeat(64),
       dastChainSha256: trusted.receipt.dastChainSha256,
       environment: trusted.intent.environment,
       envelopeSha256: trusted.intent.activationBundleSha256,
@@ -10419,10 +10454,13 @@ function withFixtureActivation(trusted, index) {
       nonce: Buffer.alloc(32, (index % 255) + 1).toString("base64url"),
       previousActiveSha256: "0".repeat(64),
       releaseId: trusted.intent.releaseId,
+      releaseBundleManifestSha256: "8".repeat(64),
+      releaseBundleSha256: "7".repeat(64),
       requestId: `123e4567-e89b-42d3-a456-${String(index).padStart(12, "0")}`,
       runtimeIntentId: trusted.intent.intentId,
       sourceRenderSha256: trusted.receipt.sourceRenderSha256,
       targetId: trusted.intent.targetId,
+      treeSha256: trusted.receipt.treeSha256,
     }),
   });
 }

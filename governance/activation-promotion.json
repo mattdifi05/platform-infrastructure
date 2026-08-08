@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "EXTERNAL-PENDING",
-  "requiredReceiptKind": "platform-activation-promotion/v1",
+  "requiredReceiptKind": "platform-activation-promotion/v2",
   "selfAssertedAnnotationsAccepted": false,
   "trustedRootSha256": null,
   "trustedProducer": {

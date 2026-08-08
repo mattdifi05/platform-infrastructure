@@ -42,7 +42,7 @@ try {
     expectedEntryHashes,
   });
 
-  assert.equal(result.schema, "platform-activation-bundle-descriptor/v1");
+  assert.equal(result.schema, "platform-activation-bundle-descriptor/v2");
   assert.match(result.sha256, /^[a-f0-9]{64}$/);
   assert.match(result.manifestSha256, /^[a-f0-9]{64}$/);
   assert.equal(result.sizeBytes, fs.statSync(outputPath).size);
@@ -53,6 +53,8 @@ try {
   );
   const bundle = fs.readFileSync(outputPath);
   assert.ok(bundle.subarray(0, ACTIVATION_BUNDLE_MAGIC.length).equals(ACTIVATION_BUNDLE_MAGIC));
+  assert.equal(bundle.subarray(0, Buffer.byteLength("PLATFORM-ACTIVATION-BUNDLE-V1\n")).toString("ascii")
+    === "PLATFORM-ACTIVATION-BUNDLE-V1\n", false);
   const manifestLength = Number(bundle.readBigUInt64BE(ACTIVATION_BUNDLE_MAGIC.length));
   const manifestStart = ACTIVATION_BUNDLE_MAGIC.length + 8;
   assert.equal(
@@ -73,6 +75,22 @@ try {
     ...result.manifest,
     entries: result.manifest.entries.slice().reverse(),
   }), /sorted fixed names/);
+  assert.equal(result.manifest.schema, "platform-activation-bundle-manifest/v2");
+  assert.equal(names.includes("dast-admission.json"), false);
+  assert.equal(names.includes("dast-provider-verification.json"), true);
+  assert.equal(names.includes("dast-activation-authorization.json"), true);
+  assert.throws(() => validateActivationBundleManifest({
+    ...result.manifest,
+    schema: "platform-activation-bundle-manifest/v1",
+  }), /schema/);
+  assert.throws(() => validateActivationBundleManifest({
+    ...result.manifest,
+    entries: result.manifest.entries.map((entry) => (
+      entry.name === "dast-provider-verification.json"
+        ? { ...entry, name: "dast-admission.json" }
+        : entry
+    )).sort((left, right) => left.name.localeCompare(right.name)),
+  }), /fixed names/);
   assert.throws(() => validateActivationBundleManifest({
     ...result.manifest,
     entries: result.manifest.entries.map((entry) => (
@@ -97,7 +115,7 @@ try {
     expectedEntryHashes: { "environment.env": "e".repeat(64) },
   }), /differs from its admitted SHA256/);
 
-  process.stdout.write("activation bundle tests passed 14/14\n");
+  process.stdout.write("activation bundle tests passed 21/21\n");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

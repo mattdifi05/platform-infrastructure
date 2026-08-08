@@ -7,6 +7,8 @@ services:
   local-registry:
     image: ${REGISTRY_IMAGE:-registry:3@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33}
     container_name: enterprise-local-registry
+    profiles:
+      - local-runtime-disabled
     restart: unless-stopped
     network_mode: bridge
     ports:
@@ -25,7 +27,6 @@ services:
       - ./traefik/dynamic/project-routes.yml:/etc/traefik/dynamic/project-routes.yml:ro
 
   local-dns:
-    profiles: !reset []
     ports:
       - "${LOCAL_DNS_BIND:-192.168.1.164}:53:53/udp"
       - "${LOCAL_DNS_BIND:-192.168.1.164}:53:53/tcp"

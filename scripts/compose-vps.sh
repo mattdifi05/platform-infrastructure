@@ -5,8 +5,25 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 PREPARE_RESOLVED=${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}
+TRUSTED_RELEASE_CONTEXT=${PLATFORM_TRUSTED_RELEASE_CONTEXT:-}
 CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
 REQUEST_MODE=invalid
+
+trusted_host_os() {
+  if [[ -x /usr/bin/uname ]]; then
+    /usr/bin/uname -s
+  elif [[ -x /bin/uname ]]; then
+    /bin/uname -s
+  else
+    return 1
+  fi
+}
+
+HOST_OS=$(trusted_host_os) || {
+  printf '%s\n' "The VPS Compose wrapper cannot determine the host OS safely." >&2
+  exit 1
+}
+case "$HOST_OS" in Linux|Darwin) ;; *) printf 'Unsupported host OS: %s\n' "$HOST_OS" >&2; exit 1 ;; esac
 
 if (( $# == 1 )) && [[ "$1" == runtime-isolation-envelope ]]; then
   REQUEST_MODE=runtime-isolation-envelope
@@ -87,6 +104,14 @@ fd_object_identity() {
   printf '%s|%s\n' "$inode" "$uid"
 }
 
+fd_nlink() {
+  if stat -c '%h' "$1" >/dev/null 2>&1; then
+    stat -c '%h' "$1"
+  else
+    stat -f '%l' "$1"
+  fi
+}
+
 first_handoff_fd=50
 next_handoff_fd=$first_handoff_fd
 handoff_files=()
@@ -97,6 +122,11 @@ HANDOFF_REFERENCE=
 SNAPSHOT_REFERENCES=()
 SNAPSHOT_SHA256=
 SNAPSHOT_SOURCE_IDENTITY=
+TRUSTED_RELEASE_CONTEXT_JSON=
+TRUSTED_RELEASE_CONTEXT_SHA256=
+TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY=
+PREPARE_ENVIRONMENT_AUTHORITY_PATHS=()
+PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES=()
 
 cleanup_handoff() {
   local item
@@ -131,7 +161,7 @@ open_read_once_snapshot() {
   source_before=$(fd_identity "$source_reference")
   IFS='|' read -r source_device source_inode source_uid source_mode <<< "$source_before"
   [[ "$source_inode" = "$path_inode" && "$source_uid" = "$path_uid"
-      && ( "$OSTYPE" = darwin* || "$source_device" = "$path_device" ) ]] || {
+      && ( "$HOST_OS" = Darwin || "$source_device" = "$path_device" ) ]] || {
     printf '%s source identity changed before snapshot: %s\n' "$label" "$source" >&2
     return 1
   }
@@ -181,10 +211,183 @@ open_read_once_snapshot() {
   SNAPSHOT_SOURCE_IDENTITY=$path_before
 }
 
+validate_trusted_release_context() {
+  local environment_source=$1 environment_sha256=$2
+  local context_parent context_canonical context_snapshot_reference
+  local validated_json initial_sha256 initial_identity
+  [[ "$TRUSTED_RELEASE_CONTEXT" = /*
+      && "$TRUSTED_RELEASE_CONTEXT" != *[!A-Za-z0-9_./-]*
+      && "$TRUSTED_RELEASE_CONTEXT" != *//*
+      && "$TRUSTED_RELEASE_CONTEXT" != */../*
+      && "$TRUSTED_RELEASE_CONTEXT" != */..
+      && "$TRUSTED_RELEASE_CONTEXT" != */./*
+      && "$TRUSTED_RELEASE_CONTEXT" != */. ]] || {
+    printf '%s\n' "PLATFORM_TRUSTED_RELEASE_CONTEXT must be one canonical absolute path." >&2
+    return 1
+  }
+  context_parent=$(CDPATH= cd -- "$(dirname -- "$TRUSTED_RELEASE_CONTEXT")" && pwd -P) || return 1
+  context_canonical=$context_parent/$(basename -- "$TRUSTED_RELEASE_CONTEXT")
+  [[ "$context_canonical" = "$TRUSTED_RELEASE_CONTEXT"
+      && -f "$TRUSTED_RELEASE_CONTEXT" && ! -L "$TRUSTED_RELEASE_CONTEXT" ]] || {
+    printf '%s\n' "Trusted release context path is not one canonical regular file." >&2
+    return 1
+  }
+  open_read_once_snapshot "$TRUSTED_RELEASE_CONTEXT" "trusted release context" 1 || return 1
+  context_snapshot_reference=${SNAPSHOT_REFERENCES[0]}
+  initial_sha256=$SNAPSHOT_SHA256
+  initial_identity=$SNAPSHOT_SOURCE_IDENTITY
+  validated_json=$(node "$ROOT_DIR/scripts/platform-release-context.mjs" read "$TRUSTED_RELEASE_CONTEXT") || {
+    printf '%s\n' "Trusted release context validation failed." >&2
+    return 1
+  }
+  printf '%s' "$validated_json" | jq -e \
+    --slurpfile rawContext "$context_snapshot_reference" \
+    --arg releaseRoot "$ROOT_DIR" \
+    --arg projectName "$PROJECT_NAME" \
+    --arg environmentFile "$environment_source" \
+    --arg environmentSha256 "$environment_sha256" '
+      ($rawContext | length) == 1
+      and (del(.activationCoordinatorRoot) == $rawContext[0])
+      and .releaseRoot == $releaseRoot
+      and .projectName == $projectName
+      and .environmentFile == $environmentFile
+      and .environmentSha256 == $environmentSha256
+    ' >/dev/null || {
+    printf '%s\n' "Trusted release context does not bind this exact release, project and environment snapshot." >&2
+    return 1
+  }
+  open_read_once_snapshot "$TRUSTED_RELEASE_CONTEXT" "trusted release context initial revalidation" 0 || return 1
+  [[ "$SNAPSHOT_SHA256" = "$initial_sha256"
+      && "$SNAPSHOT_SOURCE_IDENTITY" = "$initial_identity" ]] || {
+    printf '%s\n' "Trusted release context identity or digest changed during initial validation." >&2
+    return 1
+  }
+  TRUSTED_RELEASE_CONTEXT_JSON=$validated_json
+  TRUSTED_RELEASE_CONTEXT_SHA256=$initial_sha256
+  TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY=$initial_identity
+}
+
+revalidate_trusted_release_context() {
+  local current_json
+  [[ -n "$TRUSTED_RELEASE_CONTEXT_JSON" ]] || return 0
+  open_read_once_snapshot "$TRUSTED_RELEASE_CONTEXT" "trusted release context final revalidation" 0 || return 1
+  [[ "$SNAPSHOT_SHA256" = "$TRUSTED_RELEASE_CONTEXT_SHA256"
+      && "$SNAPSHOT_SOURCE_IDENTITY" = "$TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY" ]] || {
+    printf '%s\n' "Trusted release context identity or digest changed during render." >&2
+    return 1
+  }
+  current_json=$(node "$ROOT_DIR/scripts/platform-release-context.mjs" read "$TRUSTED_RELEASE_CONTEXT") || return 1
+  [[ "$current_json" = "$TRUSTED_RELEASE_CONTEXT_JSON" ]] || {
+    printf '%s\n' "Trusted release context semantic authority changed during render." >&2
+    return 1
+  }
+}
+
+record_secure_prepare_directory() {
+  local candidate=$1 label=$2 expected_uid=$3
+  local canonical identity _device _inode uid mode
+  [[ -d "$candidate" && ! -L "$candidate" ]] || {
+    printf '%s must be one canonical directory.\n' "$label" >&2
+    return 1
+  }
+  canonical=$(CDPATH= cd -- "$candidate" && pwd -P) || return 1
+  [[ "$canonical" = "$candidate" ]] || {
+    printf '%s must not traverse symbolic or non-canonical ancestors.\n' "$label" >&2
+    return 1
+  }
+  identity=$(fd_identity "$candidate")
+  IFS='|' read -r _device _inode uid mode <<< "$identity"
+  [[ "$uid" = "$expected_uid" ]] && (( (mode & 18) == 0 )) || {
+    printf '%s must be authority-owned and not group/world writable.\n' "$label" >&2
+    return 1
+  }
+  PREPARE_ENVIRONMENT_AUTHORITY_PATHS+=("$candidate")
+  PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES+=("$identity")
+}
+
+validate_prepare_release_state_environment() {
+  local environment_source=$1 environment_sha256=$2
+  local infrastructure_root expected_uid release_store release_id state_store state_root state_id index
+  local -a authority_arguments
+  PREPARE_ENVIRONMENT_AUTHORITY_PATHS=()
+  PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES=()
+  if [[ "$HOST_OS" = Linux ]]; then
+    infrastructure_root=/srv/platform-infrastructure
+    expected_uid=0
+    record_secure_prepare_directory /srv "Platform service root" "$expected_uid" || return 1
+  elif [[ "$HOST_OS" = Darwin
+      && -n "${HOSTED_TEST_INFRASTRUCTURE_ROOT:-}"
+      && "$HOSTED_TEST_INFRASTRUCTURE_ROOT" = /* ]]; then
+    # macOS has no production /srv tree. This seam is ignored on Linux and is
+    # limited to exercising the same closed authority in the local test harness.
+    infrastructure_root=$HOSTED_TEST_INFRASTRUCTURE_ROOT
+    expected_uid=$(id -u)
+  else
+    printf '%s\n' "Prepare-time release-state authority is available only on the target Linux host." >&2
+    return 1
+  fi
+  [[ "$infrastructure_root" != *[!A-Za-z0-9_./-]*
+      && "$infrastructure_root" != *//*
+      && "$infrastructure_root" != */../*
+      && "$infrastructure_root" != */..
+      && "$infrastructure_root" != */./*
+      && "$infrastructure_root" != */. ]] || {
+    printf '%s\n' "Prepare-time infrastructure root is not canonical." >&2
+    return 1
+  }
+  release_store=$infrastructure_root/releases
+  release_id=$(basename -- "$ROOT_DIR")
+  state_store=$infrastructure_root/release-states
+  state_root=$(dirname -- "$environment_source")
+  state_id=$(basename -- "$state_root")
+  [[ "$ROOT_DIR" = "$release_store/$release_id"
+      && "$release_id" =~ ^([a-f0-9]{40}|[a-f0-9]{64})-[a-f0-9]{64}$
+      && "$environment_source" = "$state_store/$state_id/environment.env"
+      && "$state_id" = "$release_id-$environment_sha256" ]] || {
+    printf '%s\n' "Prepare-time core environment is not the exact SHA-bound target release-state environment." >&2
+    return 1
+  }
+  record_secure_prepare_directory "$infrastructure_root" "Platform infrastructure root" "$expected_uid" || return 1
+  record_secure_prepare_directory "$release_store" "Immutable release store" "$expected_uid" || return 1
+  record_secure_prepare_directory "$ROOT_DIR" "Immutable release root" "$expected_uid" || return 1
+  record_secure_prepare_directory "$state_store" "Release-state store" "$expected_uid" || return 1
+  record_secure_prepare_directory "$state_root" "Release-state directory" "$expected_uid" || return 1
+  [[ "$env_uid" = "$expected_uid" && "$env_mode" = 416 ]] || {
+    printf '%s\n' "Prepare-time release environment must be authority-owned with exact mode 0640." >&2
+    return 1
+  }
+  authority_arguments=(prepare-environment-authority
+    --envFile "$environment_source" --sha256 "$environment_sha256" --releaseRoot "$ROOT_DIR")
+  if [[ "$HOST_OS" = Darwin ]]; then
+    authority_arguments+=(--testInfrastructureRoot "$infrastructure_root")
+  fi
+  node "$ROOT_DIR/scripts/hosted-workload-contract.mjs" "${authority_arguments[@]}" || {
+    printf '%s\n' "Prepare-time release environment failed the authoritative contract validator." >&2
+    return 1
+  }
+  for (( index=0; index<${#PREPARE_ENVIRONMENT_AUTHORITY_PATHS[@]}; index+=1 )); do
+    [[ "${PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES[$index]}" = "$(fd_identity "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}")" ]] || return 1
+  done
+}
+
+revalidate_prepare_release_state_environment() {
+  local index
+  ((${#PREPARE_ENVIRONMENT_AUTHORITY_PATHS[@]} > 0)) || return 0
+  for (( index=0; index<${#PREPARE_ENVIRONMENT_AUTHORITY_PATHS[@]}; index+=1 )); do
+    [[ -d "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}"
+        && ! -L "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}"
+        && "$(CDPATH= cd -- "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}" && pwd -P)" = "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}"
+        && "$(fd_identity "${PREPARE_ENVIRONMENT_AUTHORITY_PATHS[$index]}")" = "${PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES[$index]}" ]] || {
+      printf '%s\n' "Prepare-time release-state directory authority changed during render." >&2
+      return 1
+    }
+  done
+}
+
 # This wrapper is deliberately read-only. Production mutation is admitted only
 # by deploy-vps-remote.sh after the release, host, origin and network gates.
 case "${1:-}" in
-  config|events|images|logs|ls|port|ps|top|version) ;;
+  config|events|images|logs|ls|port|ps|runtime-isolation-envelope|top|version) ;;
   *)
     echo "Compose mutation command '${1:-<missing>}' is disabled: production activation must use the trusted deploy-vps workflow." >&2
     exit 64
@@ -209,6 +412,40 @@ ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[2]}
 ENV_SEMANTIC_REFERENCE=${SNAPSHOT_REFERENCES[3]}
 ENV_SNAPSHOT_SHA256=$SNAPSHOT_SHA256
 ENV_SOURCE_IDENTITY=$SNAPSHOT_SOURCE_IDENTITY
+env_parent=$(CDPATH= cd -- "$(dirname -- "$ENV_SOURCE_FILE")" && pwd -P)
+env_canonical_source=$env_parent/$(basename -- "$ENV_SOURCE_FILE")
+IFS='|' read -r _env_device _env_inode env_uid env_mode <<< "$ENV_SOURCE_IDENTITY"
+[[ "$env_canonical_source" = "$ENV_SOURCE_FILE"
+    && ! -L "$ENV_SOURCE_FILE"
+    && "$(fd_nlink "$ENV_SOURCE_FILE")" = 1 ]] || {
+  printf '%s\n' "Core environment must be one canonical non-linked regular file." >&2
+  exit 1
+}
+if [[ "$env_canonical_source" = "$ROOT_DIR/.env" ]]; then
+  [[ "$env_uid" = "$(id -u)"
+      && ( "$env_mode" = 256 || "$env_mode" = 384 ) ]] || {
+    printf '%s\n' "Default core environment must be deployment-owned and mode 0400 or 0600." >&2
+    exit 1
+  }
+  if [[ -n "$TRUSTED_RELEASE_CONTEXT" ]]; then
+    validate_trusted_release_context "$env_canonical_source" "$ENV_SNAPSHOT_SHA256" || exit 1
+  fi
+else
+  if [[ -n "$TRUSTED_RELEASE_CONTEXT" ]]; then
+    validate_trusted_release_context "$env_canonical_source" "$ENV_SNAPSHOT_SHA256" || exit 1
+    IFS='|' read -r _context_device _context_inode context_uid _context_mode \
+      <<< "$TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY"
+    [[ "$env_uid" = "$context_uid" && "$env_mode" = 416 ]] || {
+      printf '%s\n' "Trusted release environment must share the context owner and exact mode 0640." >&2
+      exit 1
+    }
+  elif [[ "$PREPARE_RESOLVED" = 1 ]]; then
+    validate_prepare_release_state_environment "$env_canonical_source" "$ENV_SNAPSHOT_SHA256" || exit 1
+  else
+    printf '%s\n' "A non-default activation environment requires one exact trusted release context." >&2
+    exit 1
+  fi
+fi
 
 env_path_value() {
   local key=$1 source value
@@ -281,19 +518,6 @@ if [[ "$PREPARE_RESOLVED" = 0 && -z "$workload_lock" && "$workload_mode" = no-ho
   exit 1
 fi
 
-if [[ -z "$workload_lock" && "$PREPARE_RESOLVED" = 0 ]]; then
-  env_parent=$(CDPATH= cd -- "$(dirname -- "$ENV_SOURCE_FILE")" && pwd -P)
-  env_canonical_source=$env_parent/$(basename -- "$ENV_SOURCE_FILE")
-  IFS='|' read -r _env_device _env_inode env_uid env_mode <<< "$ENV_SOURCE_IDENTITY"
-  [[ "$env_canonical_source" = "$ROOT_DIR/.env"
-      && ! -L "$ENV_SOURCE_FILE"
-      && "$env_uid" = "$(id -u)"
-      && ( "$env_mode" = 256 || "$env_mode" = 384 ) ]] || {
-    printf '%s\n' "No-hosted core environment must be canonical, deployment-owned and mode 0400 or 0600." >&2
-    exit 1
-  }
-fi
-
 canonical_existing_file() {
   local candidate=$1 parent base
   [[ "$candidate" = /* ]] || candidate="$ROOT_DIR/$candidate"
@@ -331,7 +555,7 @@ open_locked_handoff() {
   before=$(fd_identity "$source_reference")
   IFS='|' read -r actual_device actual_inode actual_uid actual_mode <<< "$before"
   [[ "$actual_inode" = "$expected_inode" && "$actual_uid" = "$expected_uid"
-      && ( "$OSTYPE" = darwin* || "$actual_device" = "$expected_device" ) ]] || {
+      && ( "$HOST_OS" = Darwin || "$actual_device" = "$expected_device" ) ]] || {
     printf 'Locked handoff object identity changed: %s\n' "$source" >&2
     return 1
   }
@@ -459,7 +683,7 @@ if [[ -n "$workload_lock" ]]; then
       and (.device | type == "string" and test("^[0-9]+$"))
       and (.inode | type == "string" and test("^[0-9]+$"))
       and (.uid | type == "string" and test("^[0-9]+$"))
-      and ([256, 384] | index($record.mode)) != null;
+      and ([256, 384, 416] | index($record.mode)) != null;
     def network_record($projectName):
       type == "object"
       and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
@@ -545,10 +769,24 @@ if [[ -n "$workload_lock" ]]; then
     printf '%s\n' "Hosted workload core environment record differs from the selected env file." >&2
     exit 1
   }
-  [[ "$core_env_uid" = "$(id -u)" && ( "$core_env_mode" = 256 || "$core_env_mode" = 384 ) ]] || {
-    printf '%s\n' "Hosted workload core environment must be deployment-owned with mode 0400 or 0600." >&2
-    exit 1
-  }
+  if [[ -n "$TRUSTED_RELEASE_CONTEXT_JSON" ]]; then
+    IFS='|' read -r _context_device _context_inode context_uid _context_mode \
+      <<< "$TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY"
+    [[ "$core_env_uid" = "$context_uid" && "$core_env_mode" = 416 ]] || {
+      printf '%s\n' "Hosted workload release environment must share the context owner and exact mode 0640." >&2
+      exit 1
+    }
+  elif ((${#PREPARE_ENVIRONMENT_AUTHORITY_PATHS[@]} > 0)); then
+    [[ "$core_env_uid" = "$env_uid" && "$core_env_mode" = 416 ]] || {
+      printf '%s\n' "Hosted workload prepare environment must retain exact release-state authority." >&2
+      exit 1
+    }
+  else
+    [[ "$core_env_uid" = "$(id -u)" && ( "$core_env_mode" = 256 || "$core_env_mode" = 384 ) ]] || {
+      printf '%s\n' "Hosted workload default environment must be deployment-owned with mode 0400 or 0600." >&2
+      exit 1
+    }
+  fi
   [[ "$core_env_sha" = "$ENV_SNAPSHOT_SHA256"
       && "$ENV_SOURCE_IDENTITY" = "$core_env_device|$core_env_inode|$core_env_uid|$core_env_mode" ]] || {
     printf '%s\n' "Hosted workload core environment snapshot mismatches the activation bundle." >&2
@@ -576,7 +814,7 @@ else
     no_hosted_lock_semantic_reference=${SNAPSHOT_REFERENCES[2]}
     no_hosted_lock_sha256=$SNAPSHOT_SHA256
     no_hosted_lock_source_identity=$SNAPSHOT_SOURCE_IDENTITY
-    [[ "$no_hosted_lock_sha256" = 84f0b7b111d285e4ad6827e71f55cbc0fc64febf484c6ba8e057579622584924 ]] || {
+    [[ "$no_hosted_lock_sha256" = 61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0 ]] || {
       printf '%s\n' "Canonical no-hosted lock raw digest mismatch." >&2
       exit 1
     }
@@ -591,18 +829,18 @@ else
       and .brokerPolicySha256 == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
       and (.coreSemanticPolicy | type == "object")
       and ((.coreSemanticPolicy | keys | sort) == ["schema", "sha256"])
-      and .coreSemanticPolicy.schema == "platform-no-hosted-core-capability-policy/v1"
-      and .coreSemanticPolicy.sha256 == "03fe5fa325885f61b61c26e1ac4bfdc241cbf3d661309d670c5efc4ab3910783"
+      and .coreSemanticPolicy.schema == "platform-no-hosted-core-capability-policy/v2"
+      and .coreSemanticPolicy.sha256 == "a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a"
       and .projectName == "platform_infra_vps"
       and (.protectedResourceNames | type == "object")
       and ((.protectedResourceNames | keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
       and ([.protectedResourceNames.configs, .protectedResourceNames.networks, .protectedResourceNames.secrets, .protectedResourceNames.services, .protectedResourceNames.volumes]
         | map(type == "array") | all)
       and (.protectedResourceNames.configs | length) == 1
-      and (.protectedResourceNames.networks | length) == 11
-      and (.protectedResourceNames.secrets | length) == 15
-      and (.protectedResourceNames.services | length) == 24
-      and (.protectedResourceNames.volumes | length) == 12
+      and (.protectedResourceNames.networks | length) == 9
+      and (.protectedResourceNames.secrets | length) == 21
+      and (.protectedResourceNames.services | length) == 20
+      and (.protectedResourceNames.volumes | length) == 17
       and all(.protectedResourceNames[]; . == (unique | sort) and all(.[]; type == "string" and length > 0))
       and (.protectedResourceNames.services | index("php-apache")) == null
     ' "$no_hosted_lock_validation_reference" >/dev/null || {
@@ -782,6 +1020,8 @@ open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment revalidation" 0
   printf '%s\n' "Core environment identity or digest changed during render." >&2
   exit 1
 }
+revalidate_trusted_release_context || exit 1
+revalidate_prepare_release_state_environment || exit 1
 
 if [[ "$PREPARE_RESOLVED" = 0 ]]; then
   if [[ -n "$workload_lock" ]]; then

@@ -17,6 +17,8 @@ const ROUTE_SLUG = /^[a-z][a-z0-9-]{1,62}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/;
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
+const PRODUCTION_INFRASTRUCTURE_ROOT = "/srv/platform-infrastructure";
+const TARGET_LOCAL_AUTHORITY = Symbol("target-local-core-environment-authority");
 export const HOSTED_WORKLOAD_LOCK_VERSION = 4;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v4";
 const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-dependencies", "bind-bounded-local-logging", "bind-closed-service-schema", "bind-exact-healthcheck", "bind-exact-security-opt", "bind-exact-ulimits", "bind-exact-volume-mounts", "bind-firewall-gated-restart", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volume-driver", "bind-owned-volumes", "bind-platform-extension-records", "bind-private-pid-numeric-user", "deny-accelerator-environment", "deny-api-socket", "deny-compose-interpolation", "deny-deploy-controls", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-generic-resources", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-label-file", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
@@ -76,6 +78,40 @@ function sha256File(filePath) {
 
 function sha256Bytes(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function targetLocalAuthority({ infrastructureRoot, expectedOwner, testOnly = false }) {
+  return Object.freeze({
+    [TARGET_LOCAL_AUTHORITY]: testOnly,
+    infrastructureRoot,
+    expectedOwner,
+    serviceRoot: path.dirname(infrastructureRoot),
+    releaseStore: path.join(infrastructureRoot, "releases"),
+    releaseStateStore: path.join(infrastructureRoot, "release-states"),
+  });
+}
+
+const PRODUCTION_TARGET_LOCAL_AUTHORITY = process.platform === "linux"
+  ? targetLocalAuthority({
+    infrastructureRoot: PRODUCTION_INFRASTRUCTURE_ROOT,
+    expectedOwner: 0,
+  })
+  : null;
+
+export function createTargetLocalCoreEnvironmentTestAuthority(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)
+      || JSON.stringify(Object.keys(options).sort()) !== JSON.stringify(["expectedOwner", "infrastructureRoot"])) {
+    invalid("Target-local core environment test authority requires exact infrastructureRoot and expectedOwner options.");
+  }
+  const infrastructureRoot = path.resolve(exactText(options.infrastructureRoot, "test infrastructure root"));
+  if (!Number.isSafeInteger(options.expectedOwner) || options.expectedOwner < 0) {
+    invalid("Target-local core environment test authority owner is invalid.");
+  }
+  return targetLocalAuthority({
+    infrastructureRoot,
+    expectedOwner: options.expectedOwner,
+    testOnly: true,
+  });
 }
 
 function stable(value) {
@@ -396,6 +432,81 @@ function fileIdentity(filePath) {
   return { device: String(stat.dev), inode: String(stat.ino), uid: String(stat.uid), mode: Number(stat.mode & 0o777n) };
 }
 
+function assertAuthorityDirectory(candidate, label, expectedOwner) {
+  const details = fs.lstatSync(candidate, { throwIfNoEntry: false });
+  if (!details?.isDirectory() || details.isSymbolicLink()
+      || fs.realpathSync.native(candidate) !== candidate
+      || details.uid !== expectedOwner || (details.mode & 0o022) !== 0) {
+    invalid(`${label} must be a canonical authority-owned non-group/world-writable directory.`);
+  }
+}
+
+function coreReleaseRoot(coreFiles, label = "core Compose files") {
+  if (!Array.isArray(coreFiles) || coreFiles.length === 0) invalid(`${label} are missing.`);
+  const releaseRoot = path.dirname(path.resolve(exactText(coreFiles[0], `${label} path`)));
+  if (coreFiles.some((file) => path.dirname(path.resolve(exactText(file, `${label} path`))) !== releaseRoot)) {
+    invalid(`${label} must share one exact release root.`);
+  }
+  return releaseRoot;
+}
+
+function assertTargetLocalCoreEnvironmentAuthority(record, authority = PRODUCTION_TARGET_LOCAL_AUTHORITY, releaseRoot) {
+  if (!authority || (authority !== PRODUCTION_TARGET_LOCAL_AUTHORITY && authority[TARGET_LOCAL_AUTHORITY] !== true)) {
+    invalid("Target-local core environment authority is unavailable outside its fixed production boundary.");
+  }
+  const canonicalReleaseRoot = path.resolve(exactText(releaseRoot, "core release root"));
+  const releaseId = path.basename(canonicalReleaseRoot);
+  const environmentPath = path.resolve(exactText(record?.path, "core environment path"));
+  const digest = exactText(record?.sha256, "core environment digest");
+  const stateRoot = path.dirname(environmentPath);
+  const stateId = path.basename(stateRoot);
+  const expectedPath = path.join(authority.releaseStateStore, stateId, "environment.env");
+  const releaseIdPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})-[a-f0-9]{64}$/;
+  if (!SHA256.test(digest)
+      || !releaseIdPattern.test(releaseId)
+      || canonicalReleaseRoot !== releaseRoot
+      || canonicalReleaseRoot !== path.join(authority.releaseStore, releaseId)
+      || environmentPath !== record.path
+      || environmentPath !== expectedPath
+      || !SAFE_PATH.test(environmentPath)
+      || environmentPath.includes("//")
+      || stateId !== `${releaseId}-${digest}`
+      || String(record.uid) !== String(authority.expectedOwner)
+      || Number(record.mode) !== 0o640) {
+    invalid("Core environment is not the exact target-local release-state authority.");
+  }
+  assertNoSymlinkPathComponents(environmentPath, "target-local core environment");
+  const details = fs.lstatSync(environmentPath, { throwIfNoEntry: false });
+  if (!details?.isFile() || details.isSymbolicLink() || details.nlink !== 1
+      || details.uid !== authority.expectedOwner || (details.mode & 0o777) !== 0o640
+      || fs.realpathSync.native(environmentPath) !== environmentPath) {
+    invalid("Target-local core environment must be one authority-owned mode-0640 single regular file.");
+  }
+  assertAuthorityDirectory(authority.serviceRoot, "Platform service root", authority.expectedOwner);
+  assertAuthorityDirectory(authority.infrastructureRoot, "Platform infrastructure root", authority.expectedOwner);
+  assertAuthorityDirectory(authority.releaseStore, "Immutable release store", authority.expectedOwner);
+  assertAuthorityDirectory(canonicalReleaseRoot, "Immutable release root", authority.expectedOwner);
+  assertAuthorityDirectory(authority.releaseStateStore, "Release-state store", authority.expectedOwner);
+  assertAuthorityDirectory(stateRoot, "Release-state root", authority.expectedOwner);
+  return true;
+}
+
+function assertCoreEnvironmentAuthority(record, authority = PRODUCTION_TARGET_LOCAL_AUTHORITY, releaseRoot) {
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : String(record.uid);
+  if (record.path === path.join(releaseRoot, ".env")
+      && String(record.uid) === effectiveUid && [0o400, 0o600].includes(Number(record.mode))) return true;
+  return assertTargetLocalCoreEnvironmentAuthority(record, authority, releaseRoot);
+}
+
+export function verifyPrepareEnvironmentAuthority({ envFile, sha256, releaseRoot, authority } = {}) {
+  const expectedSha256 = exactText(sha256, "expected core environment digest");
+  if (!SHA256.test(expectedSha256)) invalid("Expected core environment digest is invalid.");
+  const record = fileRecord(path.resolve(exactText(envFile, "core environment path")), "core-environment");
+  if (record.sha256 !== expectedSha256) invalid("Core environment digest differs from the prepare authority request.");
+  assertTargetLocalCoreEnvironmentAuthority(record, authority, path.resolve(exactText(releaseRoot, "core release root")));
+  return true;
+}
+
 function sameIdentity(actual, expected) {
   return actual.device === String(expected?.device)
     && actual.inode === String(expected?.inode)
@@ -499,7 +610,7 @@ function workloadManifestSemantics(workload) {
   };
 }
 
-function verifyWorkloadRecordBindings(lock) {
+function verifyWorkloadRecordBindings(lock, coreEnvironmentAuthority) {
   if (!Array.isArray(lock.workloads)) invalid("Hosted workload lock has no workloads array.");
   assertNonPrefixCollidingWorkloadIds(lock.workloads.map((workload) => workload?.id));
   const records = lock.files;
@@ -511,10 +622,7 @@ function verifyWorkloadRecordBindings(lock) {
   if (catalogRecord.snapshot !== true || coreEnvironmentRecord.snapshot === true || coreEnvironmentRecord.path !== lock.coreEnvFile) {
     invalid("Hosted workload catalog or core environment role is not bound to its file record.");
   }
-  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : String(coreEnvironmentRecord.uid);
-  if (String(coreEnvironmentRecord.uid) !== effectiveUid || ![0o400, 0o600].includes(Number(coreEnvironmentRecord.mode))) {
-    invalid("Hosted workload core environment must be deployment-owned with mode 0400 or 0600.");
-  }
+  assertCoreEnvironmentAuthority(coreEnvironmentRecord, coreEnvironmentAuthority, coreReleaseRoot(lock.coreFiles));
   const coreRecords = records.filter((record) => record.kind === "core-compose" && record.snapshot !== true);
   const coreRecordPaths = coreRecords.map((record) => record.path).sort();
   if (!Array.isArray(lock.coreFiles) || new Set(lock.coreFiles).size !== lock.coreFiles.length
@@ -663,6 +771,9 @@ function normalizeRoute(route, serviceName, workloadId) {
   }
   const suffix = labels.slice(1).join(".");
   const hosts = [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)];
+  if (hosts.some((host) => host.length > 253)) {
+    invalid(`Derived route host for ${slug} must be an exact normalized DNS hostname.`);
+  }
   return { owner: workloadId, slug, aliases, canonicalHost, hosts, port };
 }
 
@@ -829,6 +940,7 @@ export function deriveCanonicalRoutes(workloads) {
             || canonicalHost !== route.canonicalHost
             || canonicalHost.split(".")[0] !== route.slug
             || !same(route.hosts, expectedHosts)
+            || expectedHosts.some((host) => host.length > 253)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
             || [route.slug, ...aliases].some((name) => routeNames.has(name))
@@ -869,7 +981,7 @@ function verifyCanonicalRouteLineage(lock) {
   return true;
 }
 
-export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook, snapshotAccessHook }) {
+export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook, snapshotAccessHook, coreEnvironmentAuthority }) {
   const snapshot = createSnapshotGeneration(path.resolve(requiredText(snapshotRoot, "snapshot root")), snapshotAccessHook);
   const activationPath = path.resolve(activationLockPath ?? path.join(path.dirname(snapshot.root), "hosted-workloads.lock.json"));
   if (path.dirname(activationPath) !== path.dirname(snapshot.root)) {
@@ -882,10 +994,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   }
   const root = physicalRoot(workloadRoot, "workload root");
   const coreEnvironmentRecord = fileRecord(path.resolve(coreEnvFile), "core-environment");
-  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : String(coreEnvironmentRecord.uid);
-  if (String(coreEnvironmentRecord.uid) !== effectiveUid || ![0o400, 0o600].includes(Number(coreEnvironmentRecord.mode))) {
-    invalid("Hosted workload core environment must be deployment-owned with mode 0400 or 0600.");
-  }
+  assertCoreEnvironmentAuthority(coreEnvironmentRecord, coreEnvironmentAuthority, coreReleaseRoot(coreFiles));
   const records = [catalogRecord, coreEnvironmentRecord];
   for (const coreFile of coreFiles) records.push(fileRecord(path.resolve(coreFile), "core-compose"));
   const ids = new Set();
@@ -1686,7 +1795,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   return { routes: routes.sort((a, b) => a.canonicalHost.localeCompare(b.canonicalHost)) };
 }
 
-export function verifyLockFiles(lock) {
+export function verifyLockFiles(lock, { coreEnvironmentAuthority } = {}) {
   if (lock?.version !== HOSTED_WORKLOAD_LOCK_VERSION || lock?.validatorVersion !== HOSTED_WORKLOAD_VALIDATOR_VERSION) {
     invalid(`Hosted workload lock must use schema ${HOSTED_WORKLOAD_LOCK_VERSION} and validator ${HOSTED_WORKLOAD_VALIDATOR_VERSION}.`);
   }
@@ -1739,7 +1848,7 @@ export function verifyLockFiles(lock) {
     const { bytes } = readStableRegularFile(record.path, `locked ${record.kind}`);
     if (sha256Bytes(bytes) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);
   }
-  verifyWorkloadRecordBindings(lock);
+  verifyWorkloadRecordBindings(lock, coreEnvironmentAuthority);
   const expectedContent = workloadContentSha256(lock.files);
   if (!SHA256.test(String(lock.workloadContentSha256 ?? "")) || lock.workloadContentSha256 !== expectedContent) {
     invalid("Hosted workload content digest does not match its verified snapshot records.");
@@ -1908,6 +2017,23 @@ function writeJson(filePath, value) {
 function main() {
   const command = process.argv[2];
   const args = parseArgs(process.argv.slice(3));
+  if (command === "prepare-environment-authority") {
+    let authority;
+    if (args.testInfrastructureRoot !== undefined) {
+      if (process.platform === "linux") invalid("Target-local test authority is forbidden on Linux.");
+      authority = createTargetLocalCoreEnvironmentTestAuthority({
+        infrastructureRoot: path.resolve(requiredText(args.testInfrastructureRoot, "--testInfrastructureRoot")),
+        expectedOwner: process.getuid(),
+      });
+    }
+    verifyPrepareEnvironmentAuthority({
+      envFile: path.resolve(requiredText(args.envFile, "--envFile")),
+      sha256: requiredText(args.sha256, "--sha256"),
+      releaseRoot: path.resolve(requiredText(args.releaseRoot, "--releaseRoot")),
+      authority,
+    });
+    return;
+  }
   if (command === "resolve") {
     const lock = resolveCatalog({
       catalogPath: path.resolve(requiredText(args.catalog, "--catalog")),
@@ -1978,7 +2104,7 @@ function main() {
     process.stdout.write(`${lock.workloads.map((workload) => workload.environmentPath).join("\n")}\n`);
     return;
   }
-  invalid("Usage: hosted-workload-contract.mjs resolve|verify-render|verify-lock|verify-activation-render|compose-files|env-files");
+  invalid("Usage: hosted-workload-contract.mjs prepare-environment-authority|resolve|verify-render|verify-lock|verify-activation-render|compose-files|env-files");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {

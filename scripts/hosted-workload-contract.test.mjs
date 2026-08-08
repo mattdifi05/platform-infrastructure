@@ -5,12 +5,16 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
+  createTargetLocalCoreEnvironmentTestAuthority,
+  deriveCanonicalRoutes,
   resolveCatalog,
   validateGlobalRouteOwnership,
   validateRenderedWorkloads,
   validateWorkloadEnvironmentText,
   validateWorkloadManifest,
+  verifyPrepareEnvironmentAuthority,
   verifyLockFiles,
   verifyRawPolicyReceipt,
 } from "./hosted-workload-contract.mjs";
@@ -129,6 +133,44 @@ test("exact hardened workload render passes", () => {
     port: 3000,
     upstream: "http://example-app-web:3000",
   }]);
+});
+
+test("derived route hosts enforce the exact 253-byte DNS boundary", () => {
+  const suffix = ["s".repeat(63), "t".repeat(63), "u".repeat(63), "v".repeat(58)].join(".");
+  const canonicalHost = `aa.${suffix}`;
+  assert.equal(canonicalHost.length, 253);
+
+  const manifestDocument = (alias) => ({
+    version: 1,
+    id: "tenant",
+    composeFile: "compose.yaml",
+    services: [{
+      name: "tenant-web",
+      role: "web",
+      routes: [{ slug: "aa", host: canonicalHost, aliases: [alias], port: 3000 }],
+    }],
+  });
+  const valid = validateWorkloadManifest(manifestDocument("bb"));
+  assert.equal(valid.services[0].routes[0].hosts[1].length, 253);
+  assert.doesNotThrow(() => deriveCanonicalRoutes([valid]));
+
+  for (const [alias, derivedLength] of [["bbb", 254], ["b".repeat(63), 314]]) {
+    assert.equal(`${alias}.${suffix}`.length, derivedLength);
+    assert.throws(
+      () => validateWorkloadManifest(manifestDocument(alias)),
+      /DNS hostname|route host|route declarations/i,
+      `${derivedLength}-byte derived hostname passed manifest admission`,
+    );
+
+    const forged = structuredClone(valid);
+    forged.services[0].routes[0].aliases = [alias];
+    forged.services[0].routes[0].hosts = [canonicalHost, `${alias}.${suffix}`];
+    assert.throws(
+      () => deriveCanonicalRoutes([forged]),
+      /route lineage|route declarations/i,
+      `${derivedLength}-byte derived hostname passed verified route lineage`,
+    );
+  }
 });
 test("build context is rejected", () => {
   const combined = combinedFixture();
@@ -254,7 +296,10 @@ test("Compose wrapper rejects caller-controlled scaling flags before execution",
       },
     });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /caller-controlled scaling is forbidden/i);
+    assert.match(
+      result.stderr,
+      /caller-controlled scaling is forbidden|Compose mutation command 'up' is disabled/i,
+    );
     assert.equal(fs.existsSync(marker), false);
   } finally {
     removeFixtureTree(root);
@@ -282,7 +327,10 @@ test("Compose wrapper is render-only and canonical-project-bound in no-hosted mo
         },
       });
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /render-only|canonical project/i);
+      assert.match(
+        result.stderr,
+        /render-only|canonical project|Compose mutation command 'up' is disabled/i,
+      );
       assert.equal(fs.existsSync(marker), false);
     }
   } finally {
@@ -1138,7 +1186,7 @@ function catalogFixture(root, appRoot = path.join(root, "workloads", "example-ap
     version: 1,
     workloads: [{ manifest: "example-app/manifest.json", environmentFile: "example-app/workload.env" }],
   }));
-  const coreEnvFile = path.join(root, "core.env");
+  const coreEnvFile = path.join(root, ".env");
   const coreFile = path.join(root, "compose.core.yaml");
   fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n");
   fs.chmodSync(coreEnvFile, 0o600);
@@ -1157,6 +1205,154 @@ function removeFixtureTree(root) {
   makeDirectoriesWritable(root);
   fs.rmSync(root, { recursive: true, force: true });
 }
+
+test("mount-overlap validation accepts only the fixed root-owned-mode coordinator boundary", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "activation-unmounted-boundary-")));
+  try {
+    const infrastructureRoot = path.join(root, "platform-infrastructure");
+    const coordinator = path.join(infrastructureRoot, "platform-activation");
+    const wrongCoordinator = path.join(infrastructureRoot, "not-platform-activation");
+    const retainedCoordinator = path.join(infrastructureRoot, "retained-platform-activation");
+    const model = path.join(root, "model.json");
+    fs.mkdirSync(coordinator, { recursive: true, mode: 0o750 });
+    fs.chmodSync(coordinator, 0o750);
+    fs.mkdirSync(wrongCoordinator, { mode: 0o750 });
+    fs.chmodSync(wrongCoordinator, 0o750);
+    fs.writeFileSync(model, `${JSON.stringify({ services: {} })}\n`, { mode: 0o600 });
+    const implementation = pathToFileURL(path.join(import.meta.dirname, "platform-activation-state.mjs")).href;
+    const invoke = (directory, expectedOwner = process.getuid()) => spawnSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `import { createAssertUnmountedTestValidator } from ${JSON.stringify(implementation)};
+const validate = createAssertUnmountedTestValidator({
+  infrastructureRoot: ${JSON.stringify(infrastructureRoot)},
+  expectedOwner: ${expectedOwner},
+});
+
+validate(${JSON.stringify(directory)}, [${JSON.stringify(model)}]);`,
+    ], { encoding: "utf8" });
+
+    assert.equal(invoke(coordinator).status, 0);
+
+    const wrongPath = invoke(wrongCoordinator);
+    assert.notEqual(wrongPath.status, 0);
+    assert.match(wrongPath.stderr, /fixed platform coordinator/i);
+
+    const wrongOwner = invoke(coordinator, process.getuid() + 1);
+    assert.notEqual(wrongOwner.status, 0);
+    assert.match(wrongOwner.stderr, /wrong owner/i);
+
+    fs.chmodSync(coordinator, 0o700);
+    const wrongMode = invoke(coordinator);
+    assert.notEqual(wrongMode.status, 0);
+    assert.match(wrongMode.stderr, /mode 0750/i);
+    fs.chmodSync(coordinator, 0o750);
+
+    fs.renameSync(coordinator, retainedCoordinator);
+    fs.symlinkSync(retainedCoordinator, coordinator);
+    const symlink = invoke(coordinator);
+    assert.notEqual(symlink.status, 0);
+    assert.match(symlink.stderr, /canonical real directory/i);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("prepare environment authority accepts only the exact target-local release-state identity", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-target-env-")));
+  try {
+    const infrastructureRoot = path.join(root, "platform-infrastructure");
+    const releaseId = `${"1".repeat(40)}-${"2".repeat(64)}`;
+    const releaseStore = path.join(infrastructureRoot, "releases");
+    const releaseRoot = path.join(releaseStore, releaseId);
+    const stateStore = path.join(infrastructureRoot, "release-states");
+    const environmentBytes = Buffer.from("CORE_VALUE=fixture\n");
+    const environmentSha256 = crypto.createHash("sha256").update(environmentBytes).digest("hex");
+    const stateRoot = path.join(stateStore, `${releaseId}-${environmentSha256}`);
+    const environmentFile = path.join(stateRoot, "environment.env");
+    for (const directory of [infrastructureRoot, releaseStore, releaseRoot, stateStore, stateRoot]) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o750 });
+      fs.chmodSync(directory, 0o750);
+    }
+    fs.writeFileSync(environmentFile, environmentBytes, { mode: 0o640 });
+    fs.chmodSync(environmentFile, 0o640);
+    const authority = createTargetLocalCoreEnvironmentTestAuthority({
+      infrastructureRoot,
+      expectedOwner: process.getuid(),
+    });
+    const verify = (overrides = {}) => verifyPrepareEnvironmentAuthority({
+      envFile: environmentFile,
+      sha256: environmentSha256,
+      releaseRoot,
+      authority,
+      ...overrides,
+    });
+
+    assert.equal(verify(), true);
+    assert.throws(() => verify({ sha256: "f".repeat(64) }), /digest differs/i);
+    if (process.platform === "linux") {
+      const forbiddenLinuxSeam = spawnSync(process.execPath, [
+        path.join(import.meta.dirname, "hosted-workload-contract.mjs"),
+        "prepare-environment-authority",
+        "--envFile", environmentFile,
+        "--sha256", environmentSha256,
+        "--releaseRoot", releaseRoot,
+        "--testInfrastructureRoot", infrastructureRoot,
+      ], {
+        encoding: "utf8",
+        env: { ...process.env, OSTYPE: "darwin" },
+      });
+      assert.notEqual(forbiddenLinuxSeam.status, 0);
+      assert.match(forbiddenLinuxSeam.stderr, /test authority is forbidden on Linux/i);
+    }
+
+    const otherReleaseId = `${"3".repeat(40)}-${"4".repeat(64)}`;
+    const otherReleaseRoot = path.join(releaseStore, otherReleaseId);
+    fs.mkdirSync(otherReleaseRoot, { mode: 0o750 });
+    fs.chmodSync(otherReleaseRoot, 0o750);
+    assert.throws(() => verify({ releaseRoot: otherReleaseRoot }), /exact target-local/i);
+
+    const wrongStateRoot = path.join(stateStore, `unexpected-${environmentSha256}`);
+    const wrongStateEnvironment = path.join(wrongStateRoot, "environment.env");
+    fs.mkdirSync(wrongStateRoot, { mode: 0o750 });
+    fs.chmodSync(wrongStateRoot, 0o750);
+    fs.writeFileSync(wrongStateEnvironment, environmentBytes, { mode: 0o640 });
+    fs.chmodSync(wrongStateEnvironment, 0o640);
+    assert.throws(() => verify({ envFile: wrongStateEnvironment }), /exact target-local/i);
+
+    const wrongOwnerAuthority = createTargetLocalCoreEnvironmentTestAuthority({
+      infrastructureRoot,
+      expectedOwner: process.getuid() + 1,
+    });
+    assert.throws(() => verify({ authority: wrongOwnerAuthority }), /exact target-local|authority-owned/i);
+
+    fs.chmodSync(environmentFile, 0o600);
+    assert.throws(() => verify(), /exact target-local/i);
+    fs.chmodSync(environmentFile, 0o640);
+
+    const hardLink = path.join(stateRoot, "environment.link");
+    fs.linkSync(environmentFile, hardLink);
+    assert.throws(() => verify(), /single regular file/i);
+    fs.unlinkSync(hardLink);
+
+    fs.chmodSync(stateStore, 0o770);
+    assert.throws(() => verify(), /non-group\/world-writable/i);
+    fs.chmodSync(stateStore, 0o750);
+
+    fs.chmodSync(root, 0o770);
+    assert.throws(() => verify(), /Platform service root.*non-group\/world-writable/i);
+    fs.chmodSync(root, 0o700);
+
+    const retainedEnvironment = path.join(stateRoot, "environment.retained");
+    fs.renameSync(environmentFile, retainedEnvironment);
+    fs.symlinkSync(retainedEnvironment, environmentFile);
+    assert.throws(() => verify(), /symlink|safely/i);
+    fs.unlinkSync(environmentFile);
+    fs.renameSync(retainedEnvironment, environmentFile);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
 
 function executablePath(name) {
   const result = spawnSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" });
@@ -1237,7 +1433,7 @@ test("workload resolver rejects prefix-colliding ids independent of secret decla
       }));
       if (reversed) entries.reverse();
       const catalogPath = path.join(root, "catalog.json");
-      const coreEnvFile = path.join(root, "core.env");
+      const coreEnvFile = path.join(root, ".env");
       const coreFile = path.join(root, "compose.core.yaml");
       fs.writeFileSync(catalogPath, JSON.stringify({ version: 1, workloads: entries }));
       fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n", { mode: 0o600 });
@@ -1276,7 +1472,7 @@ test("resolver preserves billing plus billingapi and one billing textual child r
       entries.push({ manifest: `${id}/manifest.json`, environmentFile: `${id}/workload.env` });
     }
     const catalogPath = path.join(root, "catalog.json");
-    const coreEnvFile = path.join(root, "core.env");
+    const coreEnvFile = path.join(root, ".env");
     const coreFile = path.join(root, "compose.core.yaml");
     fs.writeFileSync(catalogPath, JSON.stringify({ version: 1, workloads: entries }));
     fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n", { mode: 0o600 });
@@ -1704,6 +1900,11 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
     assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
     const contractScript = path.join(import.meta.dirname, "hosted-workload-contract.mjs");
+    const shellFixtureDirectory = path.join(root, "scripts");
+    const shellFixture = path.join(shellFixtureDirectory, "hosted-workload-lock.sh");
+    fs.mkdirSync(shellFixtureDirectory);
+    fs.copyFileSync(path.join(import.meta.dirname, "hosted-workload-lock.sh"), shellFixture);
+    fs.chmodSync(shellFixture, 0o755);
     const valid = spawnSync(process.execPath, [contractScript, "compose-files", "--lock", lockPath, "--allowResolved", "true"], { encoding: "utf8" });
     assert.equal(valid.status, 0, valid.stderr);
     assert.equal(valid.stdout.trim(), lock.workloads[0].composePath);
@@ -1722,14 +1923,14 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     assert.ok(shaExecutable, "a SHA-256 utility is required by the host lock reader test");
     fs.symlinkSync(shaExecutable, path.join(minimalBin, shaCommand));
     assert.equal(fs.existsSync(path.join(minimalBin, "node")), false);
-    const shellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
+    const shellReader = spawnSync("/bin/sh", [shellFixture, lockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
     });
     assert.equal(shellReader.status, 0, shellReader.stderr);
     assert.equal(shellReader.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
     const bundleReader = spawnSync("/bin/sh", [
-      path.join(import.meta.dirname, "hosted-workload-lock.sh"),
+      shellFixture,
       lockPath,
       "activation-bundle",
     ], {
@@ -1752,7 +1953,7 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     verifiedActivation.combinedRenderSha256 = "d".repeat(64);
     verifiedActivation.routes = [];
     fs.writeFileSync(verifiedActivation.activationLockPath, `${JSON.stringify(verifiedActivation, null, 2)}\n`, { mode: 0o600 });
-    const finalShellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), verifiedActivation.activationLockPath, "compose-records"], {
+    const finalShellReader = spawnSync("/bin/sh", [shellFixture, verifiedActivation.activationLockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
     });
@@ -1797,7 +1998,7 @@ fi
 exec "$HOSTED_TEST_REAL_JQ" "$@"
 `, { mode: 0o755 });
     const lockInode = fs.statSync(lockPath).ino;
-    const transient = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
+    const transient = spawnSync("/bin/sh", [shellFixture, lockPath, "compose-records"], {
       encoding: "utf8",
       env: {
         PATH: minimalBin,
@@ -1818,7 +2019,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     }
     assert.equal(fs.statSync(lockPath).ino, lockInode);
 
-    const raced = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
+    const raced = spawnSync("/bin/sh", [shellFixture, lockPath, "compose-records"], {
       encoding: "utf8",
       env: {
         PATH: minimalBin,
@@ -1846,7 +2047,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     assert.notEqual(rejected.status, 0);
     assert.doesNotMatch(rejected.stdout, /hostile\.yaml/);
     assert.match(rejected.stderr, /activation pointers are not exactly bound/);
-    const shellRejected = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
+    const shellRejected = spawnSync("/bin/sh", [shellFixture, lockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
     });
@@ -1860,8 +2061,50 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
 test("compose wrapper uses one activation bundle and hands verified bytes through persistent descriptors", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-fd-handoff-")));
   try {
-    const workloadRoot = path.join(root, "workloads");
-    const fixture = catalogFixture(root);
+    const commitSha = "1".repeat(40);
+    const sourceArchiveSha256 = "2".repeat(64);
+    const releaseId = `${commitSha}-${sourceArchiveSha256}`;
+    const targetLocalFixture = process.platform !== "linux";
+    const releaseStore = path.join(root, "releases");
+    const releaseRoot = path.join(releaseStore, releaseId);
+    const releaseScripts = path.join(releaseRoot, "scripts");
+    const releaseStates = path.join(root, "release-states");
+    fs.mkdirSync(releaseScripts, { recursive: true, mode: 0o700 });
+    fs.chmodSync(releaseRoot, 0o700);
+    fs.mkdirSync(releaseStates, { mode: 0o700 });
+    for (const name of [
+      "compose-vps.sh",
+      "hosted-workload-contract.mjs",
+      "hosted-workload-lock.sh",
+      "platform-release-context.mjs",
+      "workload-broker-policy.mjs",
+    ]) {
+      fs.copyFileSync(path.join(import.meta.dirname, name), path.join(releaseScripts, name));
+    }
+    for (const name of ["compose-vps.sh", "hosted-workload-lock.sh", "platform-release-context.mjs"]) {
+      fs.chmodSync(path.join(releaseScripts, name), 0o755);
+    }
+    const composeWrapper = path.join(releaseScripts, "compose-vps.sh");
+    const workloadRoot = path.join(releaseRoot, "workloads");
+    const fixture = catalogFixture(releaseRoot);
+    const environmentBytes = fs.readFileSync(fixture.coreEnvFile);
+    const environmentSha256 = crypto.createHash("sha256").update(environmentBytes).digest("hex");
+    const stateId = targetLocalFixture ? `${releaseId}-${environmentSha256}` : null;
+    const stateRoot = targetLocalFixture ? path.join(releaseStates, stateId) : null;
+    const environmentFile = targetLocalFixture ? path.join(stateRoot, "environment.env") : fixture.coreEnvFile;
+    let coreEnvironmentAuthority;
+    if (targetLocalFixture) {
+      fs.mkdirSync(stateRoot, { mode: 0o700 });
+      fs.chmodSync(stateRoot, 0o700);
+      fs.writeFileSync(environmentFile, environmentBytes, { mode: 0o640 });
+      fs.chmodSync(environmentFile, 0o640);
+      fs.unlinkSync(fixture.coreEnvFile);
+      fixture.coreEnvFile = environmentFile;
+      coreEnvironmentAuthority = createTargetLocalCoreEnvironmentTestAuthority({
+        infrastructureRoot: root,
+        expectedOwner: process.getuid(),
+      });
+    }
     const lockPath = path.join(root, "lock.json");
     const lock = resolveCatalog({
       ...fixture,
@@ -1870,6 +2113,7 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
       projectName: "platform_infra_vps",
       snapshotRoot: path.join(root, "snapshots"),
       activationLockPath: lockPath,
+      ...(coreEnvironmentAuthority ? { coreEnvironmentAuthority } : {}),
     });
     fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
     const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
@@ -1885,8 +2129,14 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
     assert.ok(realJq, "jq is required by the descriptor handoff race test");
     assert.ok(realSha, "a SHA-256 utility is required by the descriptor handoff race test");
     fs.mkdirSync(fakeBin);
+    fs.writeFileSync(
+      path.join(fakeBin, "uname"),
+      `#!/bin/sh\nprintf '${process.platform === "linux" ? "Darwin" : "Linux"}\\n'\n`,
+      { mode: 0o755 },
+    );
     const dockerNoSwap = path.join(root, "docker-no-swap");
     const dockerCoreEnvSwap = path.join(root, "docker-core-env-swap");
+    const dockerArguments = path.join(root, "docker-arguments.txt");
     const dockerRender = path.join(root, "docker-render.json");
     fs.writeFileSync(dockerRender, `${JSON.stringify({
       name: "platform_infra_vps",
@@ -1899,6 +2149,7 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
 set -euo pipefail
 fixture_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+printf '%s\n' "$@" > "$fixture_root/docker-arguments.txt"
 generation=${JSON.stringify(lock.snapshotGeneration)}
 original_generation=${JSON.stringify(originalGeneration)}
 compose_basename=${JSON.stringify(composeBasename)}
@@ -1951,6 +2202,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     const sharedEnvironment = {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH}`,
+      OSTYPE: process.platform === "linux" ? "darwin" : "linux-gnu",
       COMPOSE_ENV_FILE: fixture.coreEnvFile,
       COMPOSE_PROJECT_NAME: "platform_infra_vps",
       HOSTED_WORKLOAD_LOCK: lockPath,
@@ -1966,6 +2218,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       HOSTED_TEST_HASH_RACE_MARKER: path.join(root, "hash-race-fired"),
       HOSTED_TEST_LOCK_READER_COUNT: path.join(root, "lock-reader-count"),
       HOSTED_TEST_CORE_ENV: fixture.coreEnvFile,
+      HOSTED_TEST_INFRASTRUCTURE_ROOT: root,
       HOSTED_TEST_RENDER_JSON: JSON.stringify({
         name: "platform_infra_vps",
         configs: {},
@@ -1983,7 +2236,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       TMPDIR: root,
     };
     fs.writeFileSync(dockerNoSwap, "1\n", { mode: 0o600 });
-    const prepareConfig = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    const prepareConfig = spawnSync("/bin/bash", [composeWrapper, "config", "--format", "json"], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_WORKLOAD_PREPARE_RESOLVED: "1", HOSTED_TEST_NO_SWAP: "1" },
     });
@@ -1992,7 +2245,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     fs.unlinkSync(capture);
     fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
     for (const arguments_ of [["up", "-d"], ["start"]]) {
-      const prepareMutation = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), ...arguments_], {
+      const prepareMutation = spawnSync("/bin/bash", [composeWrapper, ...arguments_], {
         encoding: "utf8",
         env: { ...sharedEnvironment, HOSTED_WORKLOAD_PREPARE_RESOLVED: "1", HOSTED_TEST_NO_SWAP: "1" },
       });
@@ -2000,31 +2253,93 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       assert.match(prepareMutation.stderr, /limited to the exact prepare-time config render/i);
       assert.equal(fs.existsSync(capture), false);
     }
-    const resolvedRejected = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    const resolvedRejected = spawnSync("/bin/bash", [composeWrapper, "config", "--format", "json"], {
       encoding: "utf8",
       env: sharedEnvironment,
     });
     assert.notEqual(resolvedRejected.status, 0);
     assert.equal(fs.existsSync(capture), false);
     promoteFixtureLock(lockPath, `${sharedEnvironment.HOSTED_TEST_RENDER_JSON}\n`);
+    const verifiedLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    let activationEnvironment = sharedEnvironment;
+    if (targetLocalFixture) {
+      const contextPath = path.join(stateRoot, "trusted-release-context.json");
+      const trustedContext = {
+      schema: "platform-trusted-release-context/v3",
+      repository: "example.invalid/platform-infrastructure",
+      commitSha,
+      treeSha: "3".repeat(40),
+      sourceArchiveSha256,
+      releaseId,
+      releaseRoot,
+      stateId,
+      stateRoot,
+      environmentFile,
+      environmentSha256,
+      projectName: "platform_infra_vps",
+      decisionId: "decision-descriptor-fixture",
+      provider: {
+        metadataSha256: "4".repeat(64),
+        runId: "provider-descriptor-fixture",
+        attempt: 1,
+        challenge: "5".repeat(64),
+      },
+      receipts: {
+        artifactSha256: "6".repeat(64),
+        deploymentSha256: "7".repeat(64),
+        dastProviderSha256: "8".repeat(64),
+        dastAuthorizationSha256: "9".repeat(64),
+      },
+      dastChainSha256: "a".repeat(64),
+      runtimeIntentSha256: "b".repeat(64),
+      subjects: [{
+        serviceName: "backup-scheduler",
+        imageReference: `example.invalid/platform-infrastructure-backup-scheduler@sha256:${"c".repeat(64)}`,
+        imageId: `sha256:${"d".repeat(64)}`,
+      }],
+      hostedLockSha256: crypto.createHash("sha256").update(fs.readFileSync(lockPath)).digest("hex"),
+      noHosted: false,
+      sourceRenderSha256: "e".repeat(64),
+      combinedRenderSha256: verifiedLock.combinedRenderSha256,
+      persistentVolumes: [{
+        name: "enterprise_local_registry_data",
+        createdAt: "2026-08-08T00:00:00.000Z",
+        driver: "local",
+        scope: "local",
+        options: {},
+        labels: {
+          "platform.infrastructure.managed": "true",
+          "platform.infrastructure.purpose": "local-registry",
+        },
+        mountpoint: "/var/lib/docker/volumes/enterprise_local_registry_data/_data",
+        owner: { uid: 0, gid: 0, mode: "0755" },
+      }],
+      };
+      fs.writeFileSync(contextPath, `${JSON.stringify(trustedContext)}\n`, { mode: 0o640 });
+      fs.chmodSync(contextPath, 0o640);
+      activationEnvironment = {
+        ...sharedEnvironment,
+        PLATFORM_TRUSTED_RELEASE_CONTEXT: contextPath,
+      };
+    }
     fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
     const runtimeIdentityEnvelope = spawnSync("/bin/bash", [
-      path.join(import.meta.dirname, "compose-vps.sh"),
+      composeWrapper,
       "runtime-isolation-envelope",
     ], {
       encoding: "utf8",
-      env: { ...sharedEnvironment, HOSTED_TEST_NO_SWAP: "1" },
+      env: { ...activationEnvironment, HOSTED_TEST_NO_SWAP: "1" },
     });
     assert.notEqual(runtimeIdentityEnvelope.status, 0);
     assert.match(runtimeIdentityEnvelope.stderr, /runtime identity|deferred to the Release boundary/i);
     assert.equal(fs.existsSync(capture), false);
     const envelopeConsumer = spawnSync("/bin/bash", [
-      path.join(import.meta.dirname, "compose-vps.sh"),
+      composeWrapper,
       "runtime-isolation-envelope",
     ], {
       encoding: "utf8",
       env: {
-        ...sharedEnvironment,
+        ...activationEnvironment,
         HOSTED_TEST_NO_SWAP: "1",
         PLATFORM_RUNTIME_CANDIDATE_ID: "",
         PLATFORM_RUNTIME_COMMIT: "",
@@ -2035,32 +2350,26 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       },
     });
     assert.equal(envelopeConsumer.status, 0, envelopeConsumer.stderr);
-    const runtimeIsolationEnvelope = JSON.parse(envelopeConsumer.stdout);
-    const verifiedLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-    assert.deepEqual(Object.keys(runtimeIsolationEnvelope).sort(), [
+    const envelope = JSON.parse(envelopeConsumer.stdout);
+    assert.deepEqual(Object.keys(envelope).sort(), [
       "config", "lockSha256", "projectName", "protectedResourceNames", "version",
     ]);
-    assert.equal(runtimeIsolationEnvelope.version, 1);
-    assert.equal(runtimeIsolationEnvelope.projectName, verifiedLock.projectName);
-    assert.equal(
-      runtimeIsolationEnvelope.lockSha256,
-      crypto.createHash("sha256").update(fs.readFileSync(lockPath)).digest("hex"),
-    );
-    assert.deepEqual(runtimeIsolationEnvelope.protectedResourceNames, {
-      configs: [],
-      networks: ["platform_postgres"],
-      secrets: [],
-      services: [],
-      volumes: [],
-    });
-    assert.deepEqual(runtimeIsolationEnvelope.config, JSON.parse(sharedEnvironment.HOSTED_TEST_RENDER_JSON));
-    assert.match(fs.readFileSync(capture, "utf8"), /example-app-web/);
+    assert.equal(envelope.version, 1);
+    assert.equal(envelope.projectName, "platform_infra_vps");
+    assert.equal(envelope.lockSha256, crypto.createHash("sha256").update(fs.readFileSync(lockPath)).digest("hex"));
+    assert.deepEqual(envelope.protectedResourceNames, verifiedLock.rawPolicyReceipt.protectedResourceNames);
+    assert.deepEqual(envelope.config, JSON.parse(fs.readFileSync(dockerRender, "utf8")));
+    assert.equal(fs.existsSync(capture), true);
+    const renderedArguments = fs.readFileSync(dockerArguments, "utf8").trim().split("\n");
+    assert.deepEqual(renderedArguments.slice(-5), ["--profile", "backup", "config", "--format", "json"]);
+    assert.equal(renderedArguments.filter((argument) => argument === "config").length, 1);
+    assert.equal(renderedArguments.some((argument) => /^(?:up|pull|build|start|stop|restart|down|create)$/.test(argument)), false);
     assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
     fs.unlinkSync(capture);
     fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
-    const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    const queryRace = spawnSync("/bin/bash", [composeWrapper, "config", "--format", "json"], {
       encoding: "utf8",
-      env: { ...sharedEnvironment, HOSTED_TEST_QUERY_SWAP: "1" },
+      env: { ...activationEnvironment, HOSTED_TEST_QUERY_SWAP: "1" },
     });
     assert.notEqual(queryRace.status, 0);
     assert.match(queryRace.stderr, /handoff (?:object|path) (?:identity changed|could not be opened)/i);
@@ -2097,9 +2406,9 @@ exit "$status"
 
     fs.rmSync(dockerNoSwap, { force: true });
     fs.writeFileSync(dockerCoreEnvSwap, "1\n", { mode: 0o600 });
-    const consumer = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    const consumer = spawnSync("/bin/bash", [composeWrapper, "config", "--format", "json"], {
       encoding: "utf8",
-      env: { ...sharedEnvironment, HOSTED_TEST_CORE_ENV_SWAP: "1" },
+      env: { ...activationEnvironment, HOSTED_TEST_CORE_ENV_SWAP: "1" },
     });
     assert.notEqual(consumer.status, 0);
     assert.match(consumer.stderr, /Core environment identity or digest changed during render\./);
@@ -2162,7 +2471,13 @@ if [[ "\${1:-}" == network && "\${2:-}" == ls ]]; then
 fi
 exit 2
 `, { mode: 0o755 });
-    const verifier = path.join(import.meta.dirname, "hosted-workload-network-ownership.sh");
+    const verifierDirectory = path.join(root, "scripts");
+    fs.mkdirSync(verifierDirectory);
+    for (const name of ["hosted-workload-network-ownership.sh", "hosted-workload-lock.sh"]) {
+      fs.copyFileSync(path.join(import.meta.dirname, name), path.join(verifierDirectory, name));
+      fs.chmodSync(path.join(verifierDirectory, name), 0o755);
+    }
+    const verifier = path.join(verifierDirectory, "hosted-workload-network-ownership.sh");
     const environment = {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH}`,
@@ -2264,7 +2579,13 @@ exit 0
       HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
       HOSTED_TEST_DOCKER_LOG: dockerLog,
     };
-    const firewall = path.join(import.meta.dirname, "workload-egress-firewall.sh");
+    const firewallDirectory = path.join(root, "scripts");
+    fs.mkdirSync(firewallDirectory);
+    for (const name of ["workload-egress-firewall.sh", "hosted-workload-lock.sh"]) {
+      fs.copyFileSync(path.join(import.meta.dirname, name), path.join(firewallDirectory, name));
+      fs.chmodSync(path.join(firewallDirectory, name), 0o755);
+    }
+    const firewall = path.join(firewallDirectory, "workload-egress-firewall.sh");
     const run = (mode, extraEnvironment = {}) => spawnSync("/bin/sh", [
       firewall,
       mode,
@@ -2310,7 +2631,10 @@ exit 0
 });
 
 function activationGateFixture(root) {
-  const repository = path.join(root, "repository");
+  const commitSha = "1".repeat(40);
+  const sourceArchiveSha256 = "3".repeat(64);
+  const releaseId = `${commitSha}-${sourceArchiveSha256}`;
+  const repository = path.join(root, "releases", releaseId);
   const scripts = path.join(repository, "scripts");
   const config = path.join(repository, "config");
   const fixtures = path.join(repository, "fixtures");
@@ -2341,33 +2665,25 @@ function activationGateFixture(root) {
     copyExecutable(name);
   }
   if (process.platform === "linux") {
+    fs.copyFileSync(
+      path.join(import.meta.dirname, "platform-release-context.mjs"),
+      path.join(scripts, "platform-release-context-implementation.mjs"),
+    );
     fs.writeFileSync(path.join(scripts, "platform-release-context.mjs"), `#!/usr/bin/env node
-import fs from "node:fs";
-import path from "node:path";
+import process from "node:process";
+import { createPlatformReleaseContextTestReader } from "./platform-release-context-implementation.mjs";
 
-const [command, contextPath] = process.argv.slice(2);
-if (command !== "read" || !path.isAbsolute(contextPath) || path.normalize(contextPath) !== contextPath) process.exit(1);
-const details = fs.lstatSync(contextPath);
-if (!details.isFile() || details.isSymbolicLink() || details.nlink !== 1 || (details.mode & 0o777) !== 0o640) process.exit(1);
-const document = JSON.parse(fs.readFileSync(contextPath, "utf8"));
-const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
-  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
-const keys = [
-  "schema", "repository", "commitSha", "treeSha", "sourceArchiveSha256",
-  "releaseId", "releaseRoot", "stateId", "stateRoot", "environmentFile",
-  "environmentSha256", "projectName", "decisionId", "provider", "receipts",
-  "runtimeIntentSha256", "subjects", "hostedLockSha256", "noHosted",
-  "coreRenderSha256", "combinedRenderSha256",
-];
-if (!exactKeys(document, keys)
-    || document.schema !== "platform-trusted-release-context/v1"
-    || document.projectName !== "platform_infra_vps"
-    || path.join(document.stateRoot, "trusted-release-context.json") !== contextPath
-    || path.basename(document.stateRoot) !== document.stateId
-    || !Array.isArray(document.subjects) || document.subjects.length === 0
-    || document.subjects.some((subject) => !exactKeys(subject, ["serviceName", "imageReference", "imageId"]))) process.exit(1);
-const activationCoordinatorRoot = path.join(path.dirname(path.dirname(document.stateRoot)), "platform-activation");
-process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) + "\\n");
+try {
+  const [command, contextPath] = process.argv.slice(2);
+  if (command !== "read" || !contextPath) throw new Error("invalid invocation");
+  const reader = createPlatformReleaseContextTestReader({
+    infrastructureRoot: process.env.HOSTED_TEST_INFRASTRUCTURE_ROOT,
+    expectedOwner: process.getuid(),
+  });
+  process.stdout.write(JSON.stringify(reader(contextPath)) + "\\n");
+} catch {
+  process.exitCode = 1;
+}
 `, { mode: 0o755 });
   } else {
     copyExecutable("platform-release-context.mjs");
@@ -2377,17 +2693,17 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
     path.join(config, "no-hosted-workloads.lock.json"),
   );
 
-  const envFile = path.join(repository, "fixture.env");
   const currentLock = path.join(fixtures, "current.lock.json");
   const previousLock = path.join(fixtures, "previous.lock.json");
   const otherLock = path.join(fixtures, "other.lock.json");
+  const sourceModel = path.join(fixtures, "source.model.json");
   const noHostedModel = path.join(fixtures, "no-hosted.model.json");
   const currentModel = path.join(fixtures, "current.model.json");
   const previousModel = path.join(fixtures, "previous.model.json");
   const otherModel = path.join(fixtures, "other.model.json");
   const extensionServices = ["project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"];
-  const baseServices = ["core-service", ...extensionServices].sort();
-  const image = (name) => `example.invalid/${name}@sha256:${crypto.createHash("sha256").update(name).digest("hex")}`;
+  const baseServices = ["backup-scheduler", "core-service", ...extensionServices].sort();
+  const image = (name) => `example.invalid/${name === "backup-scheduler" ? "platform-infrastructure-backup-scheduler" : name}@sha256:${crypto.createHash("sha256").update(name).digest("hex")}`;
   const platformNetwork = "platform_routing";
   const baseModelValue = {
     services: Object.fromEntries(
@@ -2403,8 +2719,12 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
       },
     },
   };
+  const sourceModelValue = {
+    ...structuredClone(baseModelValue),
+    "x-platform-source-render": { schema: "fixture/v1" },
+  };
   const model = (workloadId, serviceName) => {
-    const networkName = `${workloadId.replaceAll("-", "_")}_private`;
+    const networkName = `${workloadId.replaceAll("-", "_")}_postgres`;
     const services = structuredClone(baseModelValue.services);
     services.postgres.networks[networkName] = null;
     services[serviceName] = {
@@ -2448,21 +2768,21 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
     },
     networkRecords: [{
       workloadId,
-      logicalName: `${workloadId.replaceAll("-", "_")}_private`,
-      physicalName: `platform_infra_vps_${workloadId.replaceAll("-", "_")}_private`,
+      logicalName: `${workloadId.replaceAll("-", "_")}_postgres`,
+      physicalName: `platform_infra_vps_${workloadId.replaceAll("-", "_")}_postgres`,
     }],
     serviceRecords: [{ workloadId, serviceName }],
     platformExtensionRecords: [{
       workloadId,
       serviceName: "postgres",
-      networkNames: [`${workloadId.replaceAll("-", "_")}_private`],
+      networkNames: [`${workloadId.replaceAll("-", "_")}_postgres`],
     }],
     routeRecords: [],
   });
-  fs.writeFileSync(envFile, `HOSTED_WORKLOAD_LOCK=${currentLock}\n`);
   fs.writeFileSync(currentLock, `${JSON.stringify(bundle("current-app", "current-app-web", "a", currentModelValue))}\n`, { mode: 0o600 });
   fs.writeFileSync(previousLock, `${JSON.stringify(bundle("previous-app", "previous-app-web", "b", previousModelValue))}\n`, { mode: 0o600 });
   fs.writeFileSync(otherLock, `${JSON.stringify(bundle("other-app", "other-app-web", "c", otherModelValue))}\n`, { mode: 0o600 });
+  fs.writeFileSync(sourceModel, modelText(sourceModelValue));
   fs.writeFileSync(noHostedModel, modelText(baseModelValue));
   fs.writeFileSync(currentModel, modelText(currentModelValue));
   fs.writeFileSync(previousModel, modelText(previousModelValue));
@@ -2470,15 +2790,22 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
   fs.writeFileSync(dockerState, `${JSON.stringify({ containers: {} })}\n`, { mode: 0o600 });
 
   const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
-  const noHostedLock = path.join(config, "no-hosted-workloads.lock.json");
-  const releaseContext = (stateId, modelValue, {
+  const releaseContext = (modelValue, {
     noHosted,
     hostedLockSha256,
     suffix,
   }) => {
-    const stateRoot = path.join(releaseStates, stateId);
+    const environmentBytes = Buffer.from(
+      `HOSTED_WORKLOAD_LOCK=${currentLock}\nHOSTED_FIXTURE_CONTEXT=${suffix}\n`,
+    );
+    const environmentSha256 = sha256(environmentBytes);
+    const effectiveStateId = `${releaseId}-${environmentSha256}`;
+    const stateRoot = path.join(releaseStates, effectiveStateId);
     fs.mkdirSync(stateRoot, { mode: 0o700 });
     fs.chmodSync(stateRoot, 0o700);
+    const environmentFile = path.join(stateRoot, "environment.env");
+    fs.writeFileSync(environmentFile, environmentBytes, { mode: 0o640 });
+    fs.chmodSync(environmentFile, 0o640);
     const contextPath = path.join(stateRoot, "trusted-release-context.json");
     const subjects = Object.entries(modelValue.services)
       .map(([serviceName, definition]) => ({
@@ -2488,17 +2815,17 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
       }))
       .sort((left, right) => left.serviceName.localeCompare(right.serviceName));
     const context = {
-      schema: "platform-trusted-release-context/v1",
+      schema: "platform-trusted-release-context/v3",
       repository: "example.invalid/platform-infrastructure",
-      commitSha: "1".repeat(40),
+      commitSha,
       treeSha: "2".repeat(40),
-      sourceArchiveSha256: "3".repeat(64),
-      releaseId: `release-fixture-${suffix}`,
+      sourceArchiveSha256,
+      releaseId,
       releaseRoot: repository,
-      stateId,
+      stateId: effectiveStateId,
       stateRoot,
-      environmentFile: envFile,
-      environmentSha256: sha256(fs.readFileSync(envFile)),
+      environmentFile,
+      environmentSha256,
       projectName: "platform_infra_vps",
       decisionId: `decision-fixture-${suffix}`,
       provider: {
@@ -2510,32 +2837,47 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
       receipts: {
         artifactSha256: "6".repeat(64),
         deploymentSha256: "7".repeat(64),
-        dastSha256: "8".repeat(64),
+        dastProviderSha256: "8".repeat(64),
+        dastAuthorizationSha256: "a".repeat(64),
       },
+      dastChainSha256: "b".repeat(64),
       runtimeIntentSha256: "9".repeat(64),
       subjects,
       hostedLockSha256,
       noHosted,
-      coreRenderSha256: sha256(modelText(baseModelValue)),
+      sourceRenderSha256: sha256(modelText(sourceModelValue)),
       combinedRenderSha256: sha256(modelText(modelValue)),
+      persistentVolumes: [{
+        name: "enterprise_local_registry_data",
+        createdAt: "2026-07-21T00:00:00.000Z",
+        driver: "local",
+        scope: "local",
+        options: {},
+        labels: {
+          "platform.infrastructure.managed": "true",
+          "platform.infrastructure.purpose": "local-registry",
+        },
+        mountpoint: "/var/lib/docker/volumes/enterprise_local_registry_data/_data",
+        owner: { uid: 0, gid: 0, mode: "0755" },
+      }],
     };
     fs.writeFileSync(contextPath, `${JSON.stringify(context)}\n`, { mode: 0o640 });
     fs.chmodSync(contextPath, 0o640);
-    return { contextPath, stateRoot };
+    return { contextPath, environmentFile, stateRoot };
   };
-  const currentRelease = releaseContext("state-fixture-hosted", currentModelValue, {
+  const currentRelease = releaseContext(currentModelValue, {
     noHosted: false,
     hostedLockSha256: "a".repeat(64),
     suffix: "hosted",
   });
-  const nextRelease = releaseContext("state-fixture-hosted-next", currentModelValue, {
+  const nextRelease = releaseContext(currentModelValue, {
     noHosted: false,
     hostedLockSha256: "a".repeat(64),
     suffix: "hosted-next",
   });
-  const noHostedRelease = releaseContext("state-fixture-zero", baseModelValue, {
+  const noHostedRelease = releaseContext(baseModelValue, {
     noHosted: true,
-    hostedLockSha256: sha256(fs.readFileSync(noHostedLock)),
+    hostedLockSha256: null,
     suffix: "zero",
   });
 
@@ -2611,7 +2953,10 @@ fi
 exit 0
 `, { mode: 0o755 });
   fs.writeFileSync(path.join(scripts, "vps-postdeploy.sh"), `#!/bin/sh
-test "$1" = "$HOSTED_TEST_ENV_FILE"
+case "$1" in
+  "$HOSTED_TEST_RELEASE_STATES"/*/environment.env) ;;
+  *) exit 1 ;;
+esac
 printf 'postdeploy:%s\\n' "$1" >> "$HOSTED_TEST_TRACE"
 if [ "\${HOSTED_TEST_PAUSE_AT:-}" = postdeploy ] && [ ! -e "$HOSTED_TEST_PAUSE_READY" ]; then
   printf 'postdeploy\\n' > "$HOSTED_TEST_PAUSE_READY"
@@ -2793,7 +3138,9 @@ process.exit(2);
     HOSTED_TEST_TRACE: log,
     HOSTED_TEST_DOCKER_STATE: dockerState,
     HOSTED_TEST_FIREWALL_MARKER: firewallMarker,
-    HOSTED_TEST_ENV_FILE: envFile,
+    HOSTED_TEST_ENV_FILE: currentRelease.environmentFile,
+    HOSTED_TEST_INFRASTRUCTURE_ROOT: root,
+    HOSTED_TEST_RELEASE_STATES: releaseStates,
     HOSTED_TEST_CURRENT_LOCK: currentLock,
     HOSTED_TEST_PREVIOUS_LOCK: previousLock,
     HOSTED_TEST_OTHER_LOCK: otherLock,
@@ -2810,13 +3157,17 @@ process.exit(2);
   };
   return {
     repository,
+    releaseId,
     gate: path.join(scripts, "hosted-workload-activation-gate.sh"),
-    envFile,
+    envFile: currentRelease.environmentFile,
     state: activationCoordinator,
     noHostedState: activationCoordinator,
     currentReleaseContext: currentRelease.contextPath,
+    currentEnvironmentFile: currentRelease.environmentFile,
     nextReleaseContext: nextRelease.contextPath,
+    nextEnvironmentFile: nextRelease.environmentFile,
     noHostedReleaseContext: noHostedRelease.contextPath,
+    noHostedEnvironmentFile: noHostedRelease.environmentFile,
     dockerState,
     currentLock,
     previousLock,
@@ -2834,10 +3185,13 @@ function activationGateArguments(fixture, ...extra) {
   const releaseContext = extra.includes("--no-hosted-workloads")
     ? fixture.noHostedReleaseContext
     : fixture.currentReleaseContext;
+  const environmentFile = extra.includes("--no-hosted-workloads")
+    ? fixture.noHostedEnvironmentFile
+    : fixture.currentEnvironmentFile;
   return [
     fixture.gate,
     "--project-name", "platform_infra_vps",
-    "--env-file", fixture.envFile,
+    "--env-file", environmentFile,
     "--release-context", releaseContext,
     ...extra,
     "--confirm", "ACTIVATE-HOSTED-WORKLOADS",
@@ -2847,6 +3201,9 @@ function activationGateArguments(fixture, ...extra) {
 function activationGateArgumentsForContext(fixture, releaseContext, ...extra) {
   const arguments_ = activationGateArguments(fixture, ...extra);
   arguments_[arguments_.indexOf("--release-context") + 1] = releaseContext;
+  if (releaseContext === fixture.nextReleaseContext) {
+    arguments_[arguments_.indexOf("--env-file") + 1] = fixture.nextEnvironmentFile;
+  }
   return arguments_;
 }
 
@@ -2934,7 +3291,10 @@ test("Compose wrapper rejects late global overlays and hosted mutation bypasses"
         },
       });
       assert.notEqual(result.status, 0, `${arguments_.join(" ")} unexpectedly passed`);
-      assert.match(result.stderr, /caller-controlled|exact internal config --format json|render-only/i);
+      assert.match(
+        result.stderr,
+        /caller-controlled|exact internal config --format json|render-only|Compose mutation command .* is disabled/i,
+      );
       assert.equal(fs.existsSync(marker), false, `${arguments_.join(" ")} reached Docker`);
     }
   } finally {
@@ -2990,6 +3350,30 @@ test("activation gate requires an explicit lock and the canonical global project
   }
 });
 
+test("activation gate rejects a byte-identical environment not authenticated by the release context", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-env-identity-")));
+  try {
+    const fixture = activationGateFixture(root);
+    const unboundEnvironment = path.join(fixture.repository, "unbound-environment.env");
+    fs.copyFileSync(fixture.currentEnvironmentFile, unboundEnvironment);
+    fs.chmodSync(unboundEnvironment, 0o640);
+    const arguments_ = activationGateArguments(fixture, "--lock", fixture.currentLock);
+    arguments_[arguments_.indexOf("--env-file") + 1] = unboundEnvironment;
+    const result = spawnSync("/bin/bash", arguments_, {
+      encoding: "utf8",
+      env: fixture.environment,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not the exact environment file authenticated by the trusted release context/i);
+    const dockerState = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
+    assert.deepEqual(dockerState.containers, {});
+    const trace = fs.existsSync(fixture.log) ? fs.readFileSync(fixture.log, "utf8") : "";
+    assert.doesNotMatch(trace, /firewall:|docker:.* compose .* create /);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 test("activation gate runs one canonical global transaction with core validation, firewall ordering and postdeploy", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-order-")));
   try {
@@ -3030,6 +3414,63 @@ test("activation gate runs one canonical global transaction with core validation
     assert.equal(active.projectName, "platform_infra_vps");
     assert.equal(active.state, "hosted");
     assert.deepEqual(active.serviceNames, fixture.currentServices);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("lost post-durable commit acknowledgement is reconciled before any rollback", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-lost-commit-ack-")));
+  try {
+    const fixture = activationGateFixture(root);
+    const result = spawnSync("/bin/bash", activationGateArguments(
+      fixture,
+      "--lock", fixture.currentLock,
+    ), {
+      encoding: "utf8",
+      env: { ...fixture.environment, HOSTED_TEST_LOSE_COMMIT_ACK: "1" },
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /injected loss of the durable commit acknowledgement/i);
+    const journal = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
+    assert.equal(journal.state, "complete");
+    assert.equal(journal.phase, "complete");
+    assert.equal(active.state, "hosted");
+    assert.deepEqual(active.serviceNames, fixture.currentServices);
+    const trace = fs.readFileSync(fixture.log, "utf8");
+    assert.doesNotMatch(trace, /^firewall:--rollback:/m);
+    assert.equal((trace.match(/docker:.* compose .* create /g) || []).length, 1);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("an unavailable post-commit snapshot forbids rollback of an ambiguous durable outcome", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-ambiguous-commit-")));
+  try {
+    const fixture = activationGateFixture(root);
+    const result = spawnSync("/bin/bash", activationGateArguments(
+      fixture,
+      "--lock", fixture.currentLock,
+    ), {
+      encoding: "utf8",
+      env: {
+        ...fixture.environment,
+        HOSTED_TEST_LOSE_COMMIT_ACK: "1",
+        HOSTED_TEST_COMMIT_SNAPSHOT_UNAVAILABLE: "1",
+      },
+    });
+    assert.equal(result.status, 75, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /commit outcome is ambiguous; runtime rollback is forbidden/i);
+    const journal = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
+    assert.equal(journal.state, "complete");
+    assert.equal(active.state, "hosted");
+    assert.deepEqual(active.serviceNames, fixture.currentServices);
+    const trace = fs.readFileSync(fixture.log, "utf8");
+    assert.doesNotMatch(trace, /^firewall:--rollback:/m);
+    assert.equal((trace.match(/docker:.* compose .* create /g) || []).length, 1);
   } finally {
     removeFixtureTree(root);
   }
@@ -3101,7 +3542,7 @@ test("activation gate rejects missing, empty, extra or wrong platform-extension 
 test("SIGKILL at every activation boundary leaves a durable pending journal that can be recovered", () => {
   const phases = [
     ["intent", "intent", []],
-    ["quiesced", "quiesced", []],
+    ["quiesced", "creating", []],
     ["created", "created", []],
     ["firewall-active", "firewall-active", []],
     ["start", "firewall-active", []],
@@ -3123,7 +3564,7 @@ test("SIGKILL at every activation boundary leaves a durable pending journal that
       assert.equal(pending.version, 2);
       assert.equal(pending.state, "pending");
       assert.equal(pending.phase, expectedJournalPhase);
-      assert.equal(pending.releaseId, "release-fixture-hosted");
+      assert.equal(pending.releaseId, fixture.releaseId);
 
       const recovered = spawnSync("/bin/bash", activationGateArguments(
         fixture,
@@ -3155,7 +3596,7 @@ test("a new trusted release context can recover a pending transaction from the r
     );
     assert.equal(interrupted.signal, "SIGKILL");
     const pending = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
-    assert.equal(pending.releaseId, "release-fixture-hosted");
+    assert.equal(pending.releaseId, fixture.releaseId);
     const priorContextSha = pending.releaseContextSha256;
 
     const recovered = spawnSync("/bin/bash", activationGateArgumentsForContext(
@@ -3166,7 +3607,7 @@ test("a new trusted release context can recover a pending transaction from the r
     ), { encoding: "utf8", env: fixture.environment });
     assert.equal(recovered.status, 0, `${recovered.stdout}\n${recovered.stderr}`);
     const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
-    assert.equal(active.releaseId, "release-fixture-hosted-next");
+    assert.equal(active.releaseId, fixture.releaseId);
     assert.notEqual(active.releaseContextSha256, priorContextSha);
     assert.equal(active.state, "hosted");
     assert.deepEqual(active.serviceNames, fixture.currentServices);
@@ -3227,6 +3668,34 @@ test("activation failure restores the canonical no-hosted state by creating ever
       const container = Object.values(docker.containers).find((candidate) => candidate.service === service);
       assert.equal(container?.running, true, `${service} was not restored running`);
     }
+    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
+    assert.equal(active.state, "no-hosted");
+    assert.equal(active.coreRenderSha256, active.combinedRenderSha256);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("a supplied previous lock cannot mint a false previous-hosted rollback receipt", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-previous-fallback-")));
+  try {
+    const fixture = activationGateFixture(root);
+    const result = spawnSync("/bin/bash", activationGateArguments(
+      fixture,
+      "--lock", fixture.currentLock,
+      "--previous-lock", fixture.previousLock,
+    ), {
+      encoding: "utf8",
+      env: { ...fixture.environment, HOSTED_TEST_FAIL_SERVICE: "current-app-web" },
+    });
+    assert.equal(result.status, 71, `${result.stdout}\n${result.stderr}`);
+    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
+    assert.equal(active.state, "no-hosted");
+    assert.equal(active.releaseId, fixture.releaseId);
+    assert.notEqual(active.lockSha256, "b".repeat(64));
+    assert.deepEqual(active.serviceNames, fixture.baseServices);
+    const trace = fs.readFileSync(fixture.log, "utf8");
+    assert.doesNotMatch(trace, /docker:.* start .*cid-previous-app-web(?: |$)/);
   } finally {
     removeFixtureTree(root);
   }
@@ -3245,7 +3714,7 @@ test("hosted to explicit zero performs a real full-project transition and deacti
     const hostedActive = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
     assert.equal(hostedActive.state, "hosted");
     assert.equal(hostedActive.lockSha256, "a".repeat(64));
-    assert.equal(hostedActive.releaseId, "release-fixture-hosted");
+    assert.equal(hostedActive.releaseId, fixture.releaseId);
 
     fs.writeFileSync(fixture.log, "");
     const zero = spawnSync("/bin/bash", activationGateArguments(
@@ -3277,9 +3746,13 @@ test("hosted to explicit zero performs a real full-project transition and deacti
     );
     assert.ok(Object.values(docker.containers).every((container) => container.running));
     const active = JSON.parse(fs.readFileSync(path.join(fixture.noHostedState, "active.json"), "utf8"));
+    const noHostedContext = JSON.parse(fs.readFileSync(fixture.noHostedReleaseContext, "utf8"));
     assert.equal(active.state, "no-hosted");
-    assert.equal(active.releaseId, "release-fixture-zero");
+    assert.equal(active.releaseId, fixture.releaseId);
     assert.notEqual(active.releaseContextSha256, hostedActive.releaseContextSha256);
+    assert.equal(active.coreRenderSha256, noHostedContext.sourceRenderSha256);
+    assert.equal(active.combinedRenderSha256, noHostedContext.combinedRenderSha256);
+    assert.notEqual(active.coreRenderSha256, active.combinedRenderSha256);
     assert.deepEqual(active.serviceNames, fixture.baseServices);
   } finally {
     removeFixtureTree(root);
