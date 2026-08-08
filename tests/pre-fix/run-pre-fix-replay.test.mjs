@@ -17,6 +17,8 @@ import {
   computeSeedTreeSha256,
   createCaseInvocation,
   createSandboxPolicy,
+  deriveExecutionId,
+  issueRunId,
   loadRegistry,
   loadSandboxProfile,
   loadSourceMap,
@@ -32,6 +34,29 @@ import {
   verifyRegistrySourceMap,
   verifyTrackedSeeds,
 } from "./run-pre-fix-replay.mjs";
+
+test("runner issues 256-bit run ids and binds them into execution ids", () => {
+  const firstRunId = issueRunId();
+  const secondRunId = issueRunId();
+  assert.match(firstRunId, /^[0-9a-f]{64}$/);
+  assert.match(secondRunId, /^[0-9a-f]{64}$/);
+  assert.notEqual(firstRunId, secondRunId);
+
+  const identity = {
+    caseId: "FG-001",
+    runnerCommit: "1".repeat(40),
+    baselineCommit: BASELINE_COMMIT,
+    seedTreeSha256: "2".repeat(64),
+  };
+  const firstExecutionId = deriveExecutionId({ ...identity, runId: firstRunId });
+  assert.equal(firstExecutionId, deriveExecutionId({ ...identity, runId: firstRunId }));
+  assert.match(firstExecutionId, /^FG-001:[0-9a-f]{24}$/);
+  assert.notEqual(firstExecutionId, deriveExecutionId({ ...identity, runId: secondRunId }));
+  assert.throws(
+    () => deriveExecutionId({ ...identity, runId: "A".repeat(64) }),
+    /run_id.*64 lowercase hexadecimal/,
+  );
+});
 
 test("schema v2 registry preserves exactly 77 distinct FG identities", async () => {
   const definitions = await loadRegistry();
@@ -294,6 +319,24 @@ test("two committed representative replays have identical semantic evidence", {
     });
     assert.equal(first.summary.verdict, "PASS");
     assert.equal(second.summary.verdict, "PASS");
+    assert.match(first.summary.run_id, /^[0-9a-f]{64}$/);
+    assert.match(second.summary.run_id, /^[0-9a-f]{64}$/);
+    assert.notEqual(first.summary.run_id, second.summary.run_id);
+    for (const replay of [first, second]) {
+      for (const result of replay.results) {
+        assert.equal(result.run_id, replay.summary.run_id);
+        assert.equal(result.execution_id, deriveExecutionId({
+          caseId: result.case_id,
+          runId: replay.summary.run_id,
+          runnerCommit: replay.summary.runner.commit,
+          baselineCommit: replay.summary.baseline.commit,
+          seedTreeSha256: result.seed_tree_sha256,
+        }));
+        const executionLog = await readFile(path.join(replay.outputRoot, result.artifact_paths.log), "utf8");
+        const logHeader = JSON.parse(executionLog.split("\n", 1)[0]);
+        assert.equal(logHeader.run_id, replay.summary.run_id);
+      }
+    }
     assert.equal(first.summary.semantic_results_sha256, second.summary.semantic_results_sha256);
     assert.deepEqual(
       first.results.map(({ case_id, normalized_stdout_sha256, normalized_stderr_sha256 }) => ({ case_id, normalized_stdout_sha256, normalized_stderr_sha256 })),

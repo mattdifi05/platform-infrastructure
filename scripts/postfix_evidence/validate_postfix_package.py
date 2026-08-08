@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from scripts.postfix_evidence.common import (
     ByteBudget,
@@ -47,6 +47,19 @@ from scripts.postfix_evidence.common import (
     validate_manifest_snapshot,
     with_immutable_git_query_cache,
 )
+from scripts.postfix_evidence.native_pre_fix_replay_v2 import (
+    LEGACY_MODE,
+    NATIVE_MODE,
+    NATIVE_PACKAGE_DESCRIPTOR_PATH,
+    NATIVE_SCHEMA_NAME,
+    NATIVE_TRACKED_INPUT_ARCHIVE_PATHS,
+    NativeReplaySet,
+    classify_pre_fix_registry,
+    expected_native_package_paths,
+    native_input_hashes,
+    validate_native_packaged_replay_set,
+    validate_native_source_replay_set,
+)
 
 
 MIB = 1024 * 1024
@@ -67,6 +80,7 @@ EXECUTABLE_MAX_BYTES = 128 * MIB
 PACKAGE_MANIFEST_MAX_BYTES = 8 * MIB
 PACKAGE_FILE_MAX_BYTES = 16 * MIB
 PACKAGE_TOTAL_MAX_BYTES = 128 * MIB
+PACKAGE_NATIVE_TOTAL_MAX_BYTES = 896 * MIB
 
 
 HANDOFF_FILE_KEYS = (
@@ -123,9 +137,11 @@ HANDOFF_MANIFEST_ARCHIVE_PATH = "receipts/input/handoff/handoff-v1.json"
 TOOL_SOURCE_NAMES = (
     "build_postfix_package.py",
     "common.py",
+    "native_pre_fix_replay_v2.py",
     "render_postfix_replay.py",
     "validate_postfix_package.py",
     "handoff-v1.schema.json",
+    NATIVE_SCHEMA_NAME,
 )
 TOOL_SOURCE_PACKAGE_PATHS = {
     name: f"validators/{name}" for name in TOOL_SOURCE_NAMES
@@ -327,7 +343,7 @@ REPLAY_RECEIPT_PATHS = {
     "B": "receipts/replays/replay-b.json",
 }
 
-PACKAGE_STATIC_FILES = frozenset(
+PACKAGE_COMMON_STATIC_FILES = frozenset(
     {
         "README.md",
         "MANIFEST.sha256",
@@ -339,7 +355,6 @@ PACKAGE_STATIC_FILES = frozenset(
         "evidence/remediation/local_condition_closure.jsonl",
         "evidence/remediation/documentation_alignment_receipt.json",
         "evidence/test/test_receipt_registry_v1.jsonl",
-        "evidence/test/pre_fix_negative_receipt.json",
         "evidence/validation/canonical_candidate_registry.jsonl",
         "evidence/validation/semantic_completion_receipt.json",
         "evidence/validation/provider_live_residuals.jsonl",
@@ -358,6 +373,14 @@ PACKAGE_STATIC_FILES = frozenset(
         *TOOL_SOURCE_PACKAGE_PATHS.values(),
     }
 )
+PACKAGE_LEGACY_V1_STATIC_FILES = frozenset(
+    {*PACKAGE_COMMON_STATIC_FILES, "evidence/test/pre_fix_negative_receipt.json"}
+)
+PACKAGE_NATIVE_V2_STATIC_FILES = frozenset(
+    {*PACKAGE_COMMON_STATIC_FILES, *expected_native_package_paths()}
+)
+# Compatibility alias for callers/tests that inspect the legacy contract.
+PACKAGE_STATIC_FILES = PACKAGE_LEGACY_V1_STATIC_FILES
 
 
 @dataclass(frozen=True)
@@ -405,9 +428,11 @@ class ValidatedInputs:
     classification_rows: list[dict[str, Any]]
     fix_group_rows: list[dict[str, Any]]
     test_receipt_rows: list[dict[str, Any]]
+    pre_fix_mode: str
     pre_fix_receipt: dict[str, Any]
     pre_fix_test_definition_rows: list[dict[str, Any]]
     pre_fix_test_definition_bytes: bytes
+    native_pre_fix_replays: NativeReplaySet | None
     local_closure_rows: list[dict[str, Any]]
     documentation_receipt: dict[str, Any]
     semantic_receipt: dict[str, Any]
@@ -423,23 +448,56 @@ class ValidatedInputs:
 def expected_package_payload_paths(
     test_receipt_rows: list[dict[str, Any]],
     pre_fix_receipt: dict[str, Any],
+    *,
+    pre_fix_mode: str = LEGACY_MODE,
 ) -> frozenset[str]:
-    paths = set(PACKAGE_STATIC_FILES)
+    if pre_fix_mode == LEGACY_MODE:
+        paths = set(PACKAGE_LEGACY_V1_STATIC_FILES)
+    elif pre_fix_mode == NATIVE_MODE:
+        paths = set(PACKAGE_NATIVE_V2_STATIC_FILES)
+    else:
+        raise ContractError("package allowlist: unknown pre-fix evidence mode")
     paths.discard("MANIFEST.sha256")
     for index, row in enumerate(test_receipt_rows, start=1):
         receipt_id = row.get("receipt_id") if isinstance(row, dict) else None
         if not isinstance(receipt_id, str) or SAFE_RECEIPT_ID_RE.fullmatch(receipt_id) is None:
             raise ContractError(f"package allowlist: unsafe test receipt identity at row {index}")
         paths.add(f"evidence/test/logs/{receipt_id}.log")
-    executions = pre_fix_receipt.get("executions") if isinstance(pre_fix_receipt, dict) else None
-    if not isinstance(executions, list):
-        raise ContractError("package allowlist: pre-fix executions are missing")
-    for index, row in enumerate(executions, start=1):
-        group_id = row.get("group_id") if isinstance(row, dict) else None
-        if not isinstance(group_id, str) or re.fullmatch(r"FG-[0-9]{3}", group_id) is None:
-            raise ContractError(f"package allowlist: unsafe pre-fix group identity at row {index}")
-        paths.add(f"evidence/test/pre-fix/{group_id}.log")
+    if pre_fix_mode == LEGACY_MODE:
+        executions = (
+            pre_fix_receipt.get("executions")
+            if isinstance(pre_fix_receipt, dict)
+            else None
+        )
+        if not isinstance(executions, list):
+            raise ContractError("package allowlist: pre-fix executions are missing")
+        for index, row in enumerate(executions, start=1):
+            group_id = row.get("group_id") if isinstance(row, dict) else None
+            if (
+                not isinstance(group_id, str)
+                or re.fullmatch(r"FG-[0-9]{3}", group_id) is None
+            ):
+                raise ContractError(
+                    f"package allowlist: unsafe pre-fix group identity at row {index}"
+                )
+            paths.add(f"evidence/test/pre-fix/{group_id}.log")
     return frozenset(paths)
+
+
+def _require_exact_package_allowlist(
+    *,
+    observed: Iterable[str],
+    expected: Iterable[str],
+) -> None:
+    observed_paths = set(observed)
+    expected_paths = set(expected)
+    if observed_paths != expected_paths:
+        missing = sorted(expected_paths - observed_paths)
+        extra = sorted(observed_paths - expected_paths)
+        raise ContractError(
+            "package allowlist: missing or extra files "
+            f"(missing={missing}, extra={extra})"
+        )
 
 
 def _unique_rows(rows: list[dict[str, Any]], key: str, *, label: str) -> dict[str, dict[str, Any]]:
@@ -3005,6 +3063,7 @@ def _validate_dataset(
     classification_rows: list[dict[str, Any]],
     fix_group_rows: list[dict[str, Any]],
     test_receipt_rows: list[dict[str, Any]],
+    pre_fix_mode: str,
     pre_fix_receipt: dict[str, Any],
     pre_fix_test_definition_rows: list[dict[str, Any]],
     pre_fix_test_definition_bytes: bytes,
@@ -3020,6 +3079,7 @@ def _validate_dataset(
     final_commit: str,
     evidence_cutoff: str,
     semantic_receipt_sha256: str,
+    native_pre_fix_replays: NativeReplaySet | None = None,
     artifact_snapshots: dict[str, bytes] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, bytes], dict[str, bytes], dict[str, int]]:
     classification, external_or_live = _validate_classification(classification_rows, baseline, final_commit)
@@ -3052,18 +3112,29 @@ def _validate_dataset(
         final_commit,
         baseline.candidate_commit,
     )
-    pre_fix_logs = _validate_pre_fix_receipt(
-        pre_fix_receipt,
-        artifact_root,
-        baseline,
-        group_ids,
-        candidate_repo,
-        final_commit,
-        pre_fix_test_definition_rows,
-        pre_fix_test_definition_bytes,
-        artifact_snapshots=artifact_snapshots,
-        read_budget=log_budget,
-    )
+    if pre_fix_mode == LEGACY_MODE:
+        if native_pre_fix_replays is not None:
+            raise ContractError("pre-fix evidence: legacy/native state is ambiguous")
+        pre_fix_logs = _validate_pre_fix_receipt(
+            pre_fix_receipt,
+            artifact_root,
+            baseline,
+            group_ids,
+            candidate_repo,
+            final_commit,
+            pre_fix_test_definition_rows,
+            pre_fix_test_definition_bytes,
+            artifact_snapshots=artifact_snapshots,
+            read_budget=log_budget,
+        )
+    elif pre_fix_mode == NATIVE_MODE:
+        if native_pre_fix_replays is None:
+            raise ContractError("pre-fix evidence: native replay set is absent")
+        if set(native_pre_fix_replays.replays) != {"A", "B"}:
+            raise ContractError("pre-fix evidence: native replay set is incomplete")
+        pre_fix_logs = {}
+    else:
+        raise ContractError("pre-fix evidence: unsupported dispatch mode")
     pending_local_support = _validate_local_closures(
         local_closure_rows,
         baseline,
@@ -3139,6 +3210,22 @@ def validate_source_inputs(
         pre_fix_definition_bytes,
         label="pre-fix test-definition registry",
     )
+    pre_fix_mode = classify_pre_fix_registry(pre_fix_definition_rows)
+    native_pre_fix_replays: NativeReplaySet | None = None
+    if pre_fix_mode == NATIVE_MODE:
+        native_pre_fix_replays = validate_native_source_replay_set(
+            descriptor_bytes=snapshots["pre_fix_negative_receipt"],
+            handoff_root=handoff.parent,
+            registry_rows=pre_fix_definition_rows,
+            registry_bytes=pre_fix_definition_bytes,
+            group_map_rows=group_rows,
+            group_map_bytes=group_bytes,
+            candidate_repo=candidate_repo,
+            final_commit=final_commit,
+            final_tree=final_tree,
+            baseline_commit=baseline_data.candidate_commit,
+            baseline_tree=baseline_data.candidate_tree,
+        )
     closures = load_jsonl_bytes(snapshots["local_condition_closure"], label="local condition closure")
     documentation = load_json_bytes(
         snapshots["documentation_alignment_receipt"], label="documentation alignment receipt"
@@ -3155,6 +3242,7 @@ def validate_source_inputs(
         classification_rows=classification_rows,
         fix_group_rows=fix_group_rows,
         test_receipt_rows=test_rows,
+        pre_fix_mode=pre_fix_mode,
         pre_fix_receipt=pre_fix,
         pre_fix_test_definition_rows=pre_fix_definition_rows,
         pre_fix_test_definition_bytes=pre_fix_definition_bytes,
@@ -3170,6 +3258,7 @@ def validate_source_inputs(
         final_commit=final_commit,
         evidence_cutoff=handoff_value["evidence_cutoff_at"],
         semantic_receipt_sha256=semantic_receipt_sha256,
+        native_pre_fix_replays=native_pre_fix_replays,
     )
     return ValidatedInputs(
         baseline=baseline_data,
@@ -3194,9 +3283,11 @@ def validate_source_inputs(
         classification_rows=classification_rows,
         fix_group_rows=fix_group_rows,
         test_receipt_rows=test_rows,
+        pre_fix_mode=pre_fix_mode,
         pre_fix_receipt=pre_fix,
         pre_fix_test_definition_rows=pre_fix_definition_rows,
         pre_fix_test_definition_bytes=pre_fix_definition_bytes,
+        native_pre_fix_replays=native_pre_fix_replays,
         local_closure_rows=closures,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
@@ -3258,6 +3349,41 @@ def replay_source_snapshot_sha256(
     )
 
 
+def _validate_packaged_pre_fix_projection(
+    *,
+    pre_fix_mode: str,
+    source_pre_fix_bytes: bytes,
+    packaged_pre_fix_bytes: bytes,
+    packaged_pre_fix: dict[str, Any],
+) -> None:
+    source_pre_fix = load_json_bytes(
+        source_pre_fix_bytes,
+        label="archived pre-fix evidence",
+    )
+    if pre_fix_mode == LEGACY_MODE:
+        source_pre_fix = copy.deepcopy(source_pre_fix)
+        source_pre_fix["executions"] = sorted(
+            source_pre_fix["executions"], key=lambda row: row["group_id"]
+        )
+        for row in source_pre_fix["executions"]:
+            row["log"]["path"] = f"evidence/test/pre-fix/{row['group_id']}.log"
+        if source_pre_fix != packaged_pre_fix:
+            raise ContractError(
+                "package trust root: pre-fix receipt is not projected from archived input"
+            )
+        return
+    if pre_fix_mode == NATIVE_MODE:
+        if (
+            source_pre_fix_bytes != packaged_pre_fix_bytes
+            or source_pre_fix != packaged_pre_fix
+        ):
+            raise ContractError(
+                "package trust root: native replay descriptor is not byte-exact archived input"
+            )
+        return
+    raise ContractError("package trust root: unsupported pre-fix dispatch mode")
+
+
 def _validate_packaged_trust_roots(
     *,
     package_files: dict[str, bytes],
@@ -3270,7 +3396,9 @@ def _validate_packaged_trust_roots(
     classification_rows: list[dict[str, Any]],
     fix_rows: list[dict[str, Any]],
     test_rows: list[dict[str, Any]],
+    pre_fix_mode: str,
     pre_fix: dict[str, Any],
+    pre_fix_bytes: bytes,
     closure_rows: list[dict[str, Any]],
     documentation: dict[str, Any],
     semantic_bytes: bytes,
@@ -3411,18 +3539,12 @@ def _validate_packaged_trust_roots(
     if normalized_tests != test_rows:
         raise ContractError("package trust root: test receipts are not projected from archived input")
 
-    source_pre_fix = load_json_bytes(
-        handoff_payloads["pre_fix_negative_receipt"],
-        label="archived pre-fix receipt",
+    _validate_packaged_pre_fix_projection(
+        pre_fix_mode=pre_fix_mode,
+        source_pre_fix_bytes=handoff_payloads["pre_fix_negative_receipt"],
+        packaged_pre_fix_bytes=pre_fix_bytes,
+        packaged_pre_fix=pre_fix,
     )
-    source_pre_fix = copy.deepcopy(source_pre_fix)
-    source_pre_fix["executions"] = sorted(
-        source_pre_fix["executions"], key=lambda row: row["group_id"]
-    )
-    for row in source_pre_fix["executions"]:
-        row["log"]["path"] = f"evidence/test/pre-fix/{row['group_id']}.log"
-    if source_pre_fix != pre_fix:
-        raise ContractError("package trust root: pre-fix receipt is not projected from archived input")
 
     source_closures = load_jsonl_bytes(
         handoff_payloads["local_condition_closure"],
@@ -3476,6 +3598,10 @@ def _validate_packaged_trust_roots(
         TOOL_SOURCE_PACKAGE_PATHS["handoff-v1.schema.json"]
     ]:
         raise ContractError("package trust root: handoff schema copies differ")
+    if pre_fix_mode == NATIVE_MODE and package_files[
+        f"schemas/{NATIVE_SCHEMA_NAME}"
+    ] != package_files[TOOL_SOURCE_PACKAGE_PATHS[NATIVE_SCHEMA_NAME]]:
+        raise ContractError("package trust root: native replay schema copies differ")
     pre_fix_definition_bytes = handoff_payloads[
         "pre_fix_test_definition_registry"
     ]
@@ -3483,6 +3609,8 @@ def _validate_packaged_trust_roots(
         pre_fix_definition_bytes,
         label="archived pre-fix test-definition registry",
     )
+    if classify_pre_fix_registry(pre_fix_definition_rows) != pre_fix_mode:
+        raise ContractError("package trust root: pre-fix registry dispatch changed")
     return (
         expected_inputs,
         expected_tools,
@@ -3516,17 +3644,42 @@ def validate_package(
             pass
         else:
             raise ContractError(f"package: package must be external to the {label}")
+    preflight_registry_bytes = read_regular_under(
+        package,
+        HANDOFF_ARCHIVE_PATHS["pre_fix_test_definition_registry"],
+        label="package pre-fix registry dispatch",
+        max_bytes=HANDOFF_FILE_MAX_BYTES,
+    )
+    preflight_registry_rows = load_jsonl_bytes(
+        preflight_registry_bytes,
+        label="package pre-fix registry dispatch",
+    )
+    pre_fix_mode = classify_pre_fix_registry(preflight_registry_rows)
+    static_files = (
+        PACKAGE_LEGACY_V1_STATIC_FILES
+        if pre_fix_mode == LEGACY_MODE
+        else PACKAGE_NATIVE_V2_STATIC_FILES
+    )
     package_snapshot = validate_manifest_snapshot(
         package,
         exact=True,
-        required=PACKAGE_STATIC_FILES - {"MANIFEST.sha256"},
+        required=static_files - {"MANIFEST.sha256"},
         max_manifest_bytes=PACKAGE_MANIFEST_MAX_BYTES,
         max_file_bytes=PACKAGE_FILE_MAX_BYTES,
-        max_total_bytes=PACKAGE_TOTAL_MAX_BYTES,
+        max_total_bytes=(
+            PACKAGE_TOTAL_MAX_BYTES
+            if pre_fix_mode == LEGACY_MODE
+            else PACKAGE_NATIVE_TOTAL_MAX_BYTES
+        ),
         capture_all=True,
     )
     manifest = package_snapshot.rows
     package_files = package_snapshot.files
+    if (
+        package_files[HANDOFF_ARCHIVE_PATHS["pre_fix_test_definition_registry"]]
+        != preflight_registry_bytes
+    ):
+        raise ContractError("package: pre-fix registry changed during dispatch snapshot")
     for relative, payload in sorted(package_files.items()):
         scan_secret_bytes(payload, label=f"package file {relative}")
 
@@ -3545,7 +3698,9 @@ def validate_package(
         return load_jsonl_bytes(payload, label=label)
 
     baseline_data = _validate_baseline(baseline)
-    group_rows, group_hash, _ = _validate_group_map(group_map, baseline_data.reportable_ids)
+    group_rows, group_hash, group_bytes = _validate_group_map(
+        group_map, baseline_data.reportable_ids
+    )
     candidate_identity = json_at("receipts/candidate_identity.json", label="candidate identity")
     final_commit, final_tree = _validate_candidate(
         candidate_repo,
@@ -3576,14 +3731,24 @@ def validate_package(
     )
     fix_rows = jsonl_at("evidence/remediation/fix_group_ledger_v1.jsonl", label="packaged fix groups")
     test_rows = jsonl_at("evidence/test/test_receipt_registry_v1.jsonl", label="packaged test receipts")
-    pre_fix = json_at("evidence/test/pre_fix_negative_receipt.json", label="packaged pre-fix receipt")
-    expected_paths = set(expected_package_payload_paths(test_rows, pre_fix))
-    if set(manifest) != expected_paths:
-        missing = sorted(expected_paths - set(manifest))
-        extra = sorted(set(manifest) - expected_paths)
-        raise ContractError(
-            f"package allowlist: missing or extra files (missing={missing}, extra={extra})"
+    pre_fix_relative = (
+        "evidence/test/pre_fix_negative_receipt.json"
+        if pre_fix_mode == LEGACY_MODE
+        else NATIVE_PACKAGE_DESCRIPTOR_PATH
+    )
+    pre_fix_bytes = package_files[pre_fix_relative]
+    pre_fix = load_json_bytes(pre_fix_bytes, label="packaged pre-fix evidence")
+    expected_paths = set(
+        expected_package_payload_paths(
+            test_rows,
+            pre_fix,
+            pre_fix_mode=pre_fix_mode,
         )
+    )
+    _require_exact_package_allowlist(
+        observed=manifest,
+        expected=expected_paths,
+    )
     closure_rows = jsonl_at(
         "evidence/remediation/local_condition_closure.jsonl",
         label="packaged local closures",
@@ -3620,7 +3785,9 @@ def validate_package(
         classification_rows=classification_rows,
         fix_rows=fix_rows,
         test_rows=test_rows,
+        pre_fix_mode=pre_fix_mode,
         pre_fix=pre_fix,
+        pre_fix_bytes=pre_fix_bytes,
         closure_rows=closure_rows,
         documentation=documentation,
         semantic_bytes=semantic_bytes,
@@ -3628,6 +3795,22 @@ def validate_package(
         verdicts=verdicts,
         residuals=residuals,
     )
+    native_pre_fix_replays: NativeReplaySet | None = None
+    if pre_fix_mode == NATIVE_MODE:
+        native_pre_fix_replays = validate_native_packaged_replay_set(
+            descriptor_bytes=pre_fix_bytes,
+            package_files=package_files,
+            registry_rows=pre_fix_definition_rows,
+            registry_bytes=pre_fix_definition_bytes,
+            group_map_rows=group_rows,
+            group_map_bytes=group_bytes,
+            candidate_repo=candidate_repo,
+            final_commit=final_commit,
+            final_tree=final_tree,
+            baseline_commit=baseline_data.candidate_commit,
+            baseline_tree=baseline_data.candidate_tree,
+        )
+        expected_input_hashes.update(native_input_hashes(native_pre_fix_replays))
     equivalence, _, _, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
@@ -3635,6 +3818,7 @@ def validate_package(
         classification_rows=classification_rows,
         fix_group_rows=fix_rows,
         test_receipt_rows=test_rows,
+        pre_fix_mode=pre_fix_mode,
         pre_fix_receipt=pre_fix,
         pre_fix_test_definition_rows=pre_fix_definition_rows,
         pre_fix_test_definition_bytes=pre_fix_definition_bytes,
@@ -3650,6 +3834,7 @@ def validate_package(
         final_commit=final_commit,
         evidence_cutoff=evidence_cutoff,
         semantic_receipt_sha256=semantic_receipt_sha256,
+        native_pre_fix_replays=native_pre_fix_replays,
         artifact_snapshots=package_files,
     )
 

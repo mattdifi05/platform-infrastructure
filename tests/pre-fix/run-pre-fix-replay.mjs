@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -40,6 +40,7 @@ const MAX_SOURCE_MAP_BYTES = 2 * 1024 * 1024;
 const MAX_CASE_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_CASE_TIMEOUT_MS = 120_000;
 const DENIED_USER_SECRET_ROOTS = Object.freeze([".ssh", ".aws", ".docker", ".kube", ".gnupg", ".codex"]);
+const RUN_ID_PATTERN = /^[0-9a-f]{64}$/;
 
 function fail(message) {
   throw new Error(message);
@@ -47,6 +48,21 @@ function fail(message) {
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function issueRunId() {
+  return randomBytes(32).toString("hex");
+}
+
+export function deriveExecutionId({
+  caseId,
+  runId,
+  runnerCommit,
+  baselineCommit,
+  seedTreeSha256,
+} = {}) {
+  if (!RUN_ID_PATTERN.test(runId)) fail("run_id must be 64 lowercase hexadecimal characters");
+  return `${caseId}:${sha256(`${runId}\0${runnerCommit}\0${baselineCommit}\0${seedTreeSha256}`).slice(0, 24)}`;
 }
 
 function isPlainObject(value) {
@@ -895,6 +911,7 @@ async function executeReplayOnBaseline({
 } = {}) {
   if (!baselineRoot) fail("materialized baseline root is required");
   if (!outputDirectory) fail("--output-dir is required");
+  const runId = issueRunId();
   const replayStartedAt = new Date().toISOString();
   const runnerIdentity = await resolveRunnerIdentity(repositoryRoot);
   const baselineIdentity = await resolveBaselineIdentity(baselineRoot);
@@ -981,6 +998,7 @@ async function executeReplayOnBaseline({
     const executionLog = [
       JSON.stringify({
         schema: "platform.pre-fix-negative-replay-log-envelope/v2",
+        run_id: runId,
         case_id: definition.case_id,
         baseline_commit: baselineIdentity.commit,
         baseline_tree: baselineIdentity.tree,
@@ -997,8 +1015,15 @@ async function executeReplayOnBaseline({
     await writeFile(executionLogPath, executionLog, { mode: 0o600 });
     const result = {
       schema: "platform.pre-fix-negative-replay-case-result/v2",
+      run_id: runId,
       execution_index: index + 1,
-      execution_id: `${definition.case_id}:${sha256(`${runnerIdentity.commit}\0${baselineIdentity.commit}\0${definition.seed_tree_sha256}`).slice(0, 24)}`,
+      execution_id: deriveExecutionId({
+        caseId: definition.case_id,
+        runId,
+        runnerCommit: runnerIdentity.commit,
+        baselineCommit: baselineIdentity.commit,
+        seedTreeSha256: definition.seed_tree_sha256,
+      }),
       case_id: definition.case_id,
       slug: definition.slug,
       started_at: startedAt,
@@ -1063,6 +1088,7 @@ async function executeReplayOnBaseline({
   const replayFinishedAt = new Date().toISOString();
   const summary = {
     schema: RECEIPT_SCHEMA,
+    run_id: runId,
     started_at: replayStartedAt,
     finished_at: replayFinishedAt,
     verdict: passed === results.length ? "PASS" : "FAIL",

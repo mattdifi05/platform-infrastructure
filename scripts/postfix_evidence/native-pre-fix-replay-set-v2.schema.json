@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-infrastructure.invalid/schemas/native-pre-fix-replay-set-v2.json",
+  "title": "Native pre-fix replay set v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "replays"],
+  "properties": {
+    "schema": {"const": "platform.pre-fix-negative-replay-set/v2"},
+    "replays": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {"$ref": "#/$defs/replayA"},
+        {"$ref": "#/$defs/replayB"}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?:summary\\.json|results\\.jsonl|FG-(?:00[1-9]|0[1-6][0-9]|07[0-7])/(?:execution|stderr|stdout)\\.log)$"
+        },
+        "size": {"type": "integer", "minimum": 0, "maximum": 16777216},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "replayA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replay_id", "run_id", "artifacts"],
+      "properties": {
+        "replay_id": {"const": "A"},
+        "run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifacts": {
+          "type": "array",
+          "minItems": 233,
+          "maxItems": 233,
+          "items": {"$ref": "#/$defs/artifact"}
+        }
+      }
+    },
+    "replayB": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replay_id", "run_id", "artifacts"],
+      "properties": {
+        "replay_id": {"const": "B"},
+        "run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifacts": {
+          "type": "array",
+          "minItems": 233,
+          "maxItems": 233,
+          "items": {"$ref": "#/$defs/artifact"}
+        }
+      }
+    }
+  }
+}

@@ -1,24 +1,36 @@
 # Integration handoff
 
-## Isolation and scope
+## Historical provenance and original isolation scope
 
-- Worktree: `/Users/matthew/Documents/Codex/2026-07-11/ss/work/postfix-package-builder`
-- Branch: `tooling/postfix-package-builder`
-- Base: `68cd05895b8d479ffb8167344282e7d922958bfc`
-- Authoritative baseline: unchanged
-- Candidate and all cohort worktrees: unchanged by this worktree
-- Push, merge, deploy, Docker, network, provider, secret, and live operations: not performed
+The worktree, branch, base, and branch range below record only the historical
+Package-v1 cohort provenance. They do not enumerate the current native-v2
+adapter/Runner cutover and are not current complete-integration instructions.
+
+- Historical worktree: `/Users/matthew/Documents/Codex/2026-07-11/ss/work/postfix-package-builder`
+- Historical branch: `tooling/postfix-package-builder`
+- Historical base: `68cd05895b8d479ffb8167344282e7d922958bfc`
+- Historical authoritative baseline: unchanged
+- Historical candidate and cohort state: unchanged by that worktree
+- Push, merge, deploy, Docker, network, provider, secret, and live operations:
+  not performed by that historical cohort
 
 The builder only publishes to a previously nonexistent directory external to
 both candidate and baseline.  It removes a newly created output if final
 validation fails.
 
-## Commit order
+## Historical commit order and current atomic cutover
 
-Cherry-pick the complete ordered branch range
-`5791f61^..tooling/postfix-package-builder`. Do not copy only the builder
-without its negative tests, schema, later adversarial hardening, or raw-cohort
-trust-root validation.
+The original Package-v1 instruction was to cherry-pick the complete ordered
+branch range `5791f61^..tooling/postfix-package-builder`. That historical range
+must not be used or represented as a complete integration of the current
+candidate.
+
+The current native-v2 cutover must instead be committed atomically on the
+authoritative candidate. The same candidate commit must contain the adapter,
+native descriptor schema, builder/validator/renderer integration, focused
+tests, README/HANDOFF updates, and the Runner `run_id` implementation and tests.
+No subset of those changes, and no historical branch range alone, constitutes
+the native-v2 integration.
 
 ## Final-assembly obligations
 
@@ -58,8 +70,10 @@ particular:
 - every raw cohort/support SHA, including an incoming cross-cohort dependency
   attributed to its owner FG, must appear exactly once in that FG's final
   support mapping set; invented and omitted mappings fail closed;
-- `integration_mode: cherry-pick` requires distinct cohort/final SHAs plus
-  stable patch-id or exact tree-delta equivalence;
+- `integration_mode: cherry-pick` requires distinct cohort/final SHAs plus the
+  exact same delta by path, mode, old blob content, and new blob content;
+  patch-id-only equivalence is insufficient and a genuinely different delta
+  must use `reconciled`;
 - `integration_mode: direct-final` requires identical cohort/final SHAs and a
   commit reachable from final HEAD (used only for fixes authored directly on
   the final candidate branch);
@@ -72,8 +86,27 @@ particular:
   independent-QA receipts;
 - candidate-wide full-suite, differential-scan, adversarial-QA, and
   documentation-validation receipts are mandatory;
-- the detached-baseline pre-fix receipt must enumerate FG-001 through FG-077
-  exactly once and attest no live, Docker, network, or secret access;
+- the unchanged outer handoff-v1 key `pre_fix_negative_receipt` is dispatched
+  only after all 77 registry rows select one exact mode: legacy-v1 retains its
+  existing evidence receipt/log projection and limits, while native-v2 uses
+  the replay-set descriptor;
+- the native-v2 descriptor must hash exactly 233 ordered regular files from
+  each fixed handoff root `pre-fix-replays/v2/A` and
+  `pre-fix-replays/v2/B`—466 raw files total—and the builder must byte-copy them
+  to the fixed package roots `evidence/test/pre-fix-native-v2/A` and
+  `evidence/test/pre-fix-native-v2/B`;
+- each trusted native Runner invocation must issue one non-overridable random
+  lowercase 64-hex `run_id`, bound by its descriptor row, summary, every result,
+  execution-log header, and execution-ID preimage; A and B must have distinct
+  values, while `run_id` remains outside the stable semantic projection;
+- native raw A/B replay bytes may differ, but each independently recomputed
+  77-result semantic projection and claimed semantic digest must be equal; the
+  distinct-run proof assumes the declared trusted Runner/bootstrap and package
+  assembler root and is not a signature or external CI mint;
+- every native replay must attest the exact scoped write object: target,
+  baseline, and runner worktrees false; ephemeral scratch and external
+  artifacts true; network, Docker, live, provider, and secret capabilities
+  false;
 - the separate 77-row pre-fix test-definition registry must be byte-identical
   to a regular blob at final HEAD and map every group one-to-one to a
   nontrivial Git-bound test definition, closed runner command, and exact

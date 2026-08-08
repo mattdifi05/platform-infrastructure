@@ -32,8 +32,9 @@ evidence boundary: they are neither read nor scanned nor treated as candidate
 inputs. Global excludes and `.git/info/exclude` patterns cannot expand that
 boundary. All non-ignored untracked files still make the candidate dirty.
 `build_postfix_package.py`, `common.py`, `render_postfix_replay.py`,
-`validate_postfix_package.py`, and `handoff-v1.schema.json` must each be a
-regular blob under `scripts/postfix_evidence/` at that exact final HEAD. The
+`validate_postfix_package.py`, `native_pre_fix_replay_v2.py`,
+`handoff-v1.schema.json`, and `native-pre-fix-replay-set-v2.schema.json` must
+each be a regular blob under `scripts/postfix_evidence/` at that exact final HEAD. The
 executing bytes, committed bytes, and packaged validator bytes must match
 exactly. File snapshots, Git blob reads, evidence-log aggregates, manifests,
 package trees, and child-process stdout/stderr all have explicit per-item and
@@ -72,10 +73,12 @@ directions.
 
 Every fix-group row declares `integration_mode`. For `cherry-pick`,
 `cohort_commit` and `final_commit` must be distinct; the final commit must
-resolve, be reachable from final `HEAD`, and be patch-equivalent to the cohort
-commit (stable patch-id or exact Git tree delta).  For `direct-final`, the two
-fields must be the same reachable commit because the fix was authored directly
-on the final candidate branch.
+resolve, be reachable from final `HEAD`, and have the exact same Git delta by
+path, mode, old blob content, and new blob content as the cohort commit. A
+matching patch ID alone is not accepted; a genuinely different integrated
+delta must use `reconciled`. For `direct-final`, the two fields must be the same
+reachable commit because the fix was authored directly on the final candidate
+branch.
 
 `reconciled` is reserved for a real overlapping/conflicting integration whose
 exact tree delta cannot truthfully equal the cohort delta. Each reconciled
@@ -131,22 +134,71 @@ complete, but named-owner acknowledgement and independent operator drill
 receipts remain exact GO-blocking governance residuals. Raw cohort text cannot
 promote either condition to a local PASS.
 
-`pre_fix_negative_receipt` is the execution receipt for negative tests against
-the detached authoritative baseline commit/tree. The separately supplied
-`pre_fix_test_definition_registry` must itself be an exact regular Git blob at
-the final candidate HEAD. It maps FG-001 through FG-077 one-to-one to a
-nontrivial final-HEAD test definition, closed `argv`/`cwd`, and the exact
-regular consumer blobs exercised at the baseline. Each execution log binds
-both identities: the baseline commit/tree and consumer blobs being tested, and
-the final-HEAD registry/test definition used to test them.
+In legacy-v1 mode, `pre_fix_negative_receipt` is the execution receipt for
+negative tests against the detached authoritative baseline commit/tree. The
+separately supplied `pre_fix_test_definition_registry` must itself be an exact
+regular Git blob at the final candidate HEAD. It maps FG-001 through FG-077
+one-to-one to a nontrivial final-HEAD test definition, closed `argv`/`cwd`,
+and the exact regular consumer blobs exercised at the baseline. Each execution
+log binds both identities: the baseline commit/tree and consumer blobs being
+tested, and the final-HEAD registry/test definition used to test them.
 
-The receipt must enumerate all 77 groups exactly once and record that live,
-Docker, network, and secret access were disabled. Every execution binds a
-regular log by SHA-256. Runner-kind counts are intentionally not an
+In that mode, the receipt must enumerate all 77 groups exactly once and record
+that live, Docker, network, and secret access were disabled. Every execution
+binds a regular log by SHA-256. Runner-kind counts are intentionally not an
 authoritative invariant. In particular, an external or generated PoC suite
 that cannot prove an antecedent Git identity is neither a trust root nor a
 package input, and test definitions are never represented as though they had
 existed at the baseline commit.
+
+### Legacy-v1 and native Runner-v2 dispatch
+
+The outer `handoff-v1.schema.json` shape and the
+`files.pre_fix_negative_receipt` key are unchanged. The validator first
+classifies all 77 definition-registry rows. It accepts only an exact all-row
+legacy-v1 registry or an exact all-row native-v2 registry; mixed, hybrid,
+unknown, or type-coerced rows fail before the receipt or descriptor can select
+a mode. Legacy-v1 keeps its existing evidence receipt/log projection, paths,
+and byte limits.
+
+In native-v2 mode, `pre_fix_negative_receipt` contains the replay-set
+descriptor. The only source roots are `pre-fix-replays/v2/A` and
+`pre-fix-replays/v2/B` below the handoff root. Each replay must contain exactly
+233 ordered regular files: `summary.json`, `results.jsonl`, and stdout, stderr,
+and execution logs for FG-001 through FG-077. The descriptor therefore hashes
+all 466 raw A+B files. The package preserves those bytes under
+`evidence/test/pre-fix-native-v2/A` and
+`evidence/test/pre-fix-native-v2/B`; neither descriptor data nor a caller can
+redirect a source or package root.
+
+Each trusted Runner invocation issues one non-overridable random lowercase
+64-hex `run_id`. The descriptor records it, the summary and every result repeat
+it, every execution-log header binds it, and it is the first field in the
+execution-ID preimage. Replay A and replay B must have different `run_id`
+values, so copying one authentic invocation into both roots is rejected.
+
+Raw replay A and replay B are allowed to differ byte-for-byte because paths,
+timestamps, and durations are volatile. Each run is nevertheless validated
+independently as 77/77 PASS and reduced from its parsed results to the Runner's
+stable semantic JSONL projection. The volatile `run_id` is excluded from that
+projection. Both summary digests must be independently reproducible and the
+two projection byte strings must be equal. Raw A/B byte equality and
+artifact-index equality are not substitutes for the distinct-invocation and
+semantic gates.
+
+The distinct `run_id` proof relies on the declared trusted Runner/bootstrap and
+package assembler root; it is not a signature or an external mint. If
+independent CI identity is required, a separately signed CI attestation remains
+an external deployment gate.
+
+Native summaries and every result must preserve the object-shaped write scope:
+target, detached baseline, and runner worktrees are non-writable, while only
+ephemeral scratch and external evidence artifacts are writable. Network,
+Docker, live, provider, and secret capabilities remain false. The exact final
+Git inputs, baseline identity, seed and consumer anchors, command/argv grammar,
+raw log hashes, descriptor, per-run artifact index, semantic projection, and
+all four archived Runner inputs are bound into package validation and build
+input hashes.
 
 Each fix-group ledger row preserves the canonical IDs from the group map and
 records source, control, sink, remediation boundary, integration mode,

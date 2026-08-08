@@ -14,7 +14,7 @@ import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from scripts.postfix_evidence.common import (
     ContractError,
@@ -26,7 +26,16 @@ from scripts.postfix_evidence.common import (
     write_bytes,
     write_json,
     write_jsonl,
-    write_manifest,
+)
+from scripts.postfix_evidence.native_pre_fix_replay_v2 import (
+    LEGACY_MODE,
+    NATIVE_MODE,
+    NATIVE_PACKAGE_DESCRIPTOR_PATH,
+    NATIVE_PACKAGE_ROOTS,
+    NATIVE_SCHEMA_NAME,
+    NATIVE_TRACKED_INPUT_ARCHIVE_PATHS,
+    REPLAY_IDS as NATIVE_REPLAY_IDS,
+    native_input_hashes,
 )
 from scripts.postfix_evidence.validate_postfix_package import (
     BASELINE_MANIFEST_ARCHIVE_PATH,
@@ -34,6 +43,8 @@ from scripts.postfix_evidence.validate_postfix_package import (
     GROUP_MAP_ARCHIVE_PATH,
     HANDOFF_ARCHIVE_PATHS,
     HANDOFF_MANIFEST_ARCHIVE_PATH,
+    PACKAGE_NATIVE_TOTAL_MAX_BYTES,
+    PACKAGE_TOTAL_MAX_BYTES,
     REPLAY_RECEIPT_PATHS,
     TOOL_SOURCE_NAMES,
     TOOL_SOURCE_PACKAGE_PATHS,
@@ -54,6 +65,40 @@ WORKER_OUTPUT_TOTAL_MAX_BYTES = (
 WORKER_STDIN_MAX_BYTES = 1024
 CLEANUP_MAX_ENTRIES = 10_000
 CLEANUP_MAX_DEPTH = 128
+
+
+def _package_total_max_bytes(pre_fix_mode: str) -> int:
+    if pre_fix_mode == LEGACY_MODE:
+        return PACKAGE_TOTAL_MAX_BYTES
+    if pre_fix_mode == NATIVE_MODE:
+        return PACKAGE_NATIVE_TOTAL_MAX_BYTES
+    raise ContractError("package tree: unsupported pre-fix evidence mode")
+
+
+def _package_tree_index(
+    root: Path,
+    pre_fix_mode: str,
+    *,
+    exclude: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
+    return tree_index(
+        root,
+        exclude=exclude,
+        max_total_bytes=_package_total_max_bytes(pre_fix_mode),
+    )
+
+
+def _write_package_manifest(root: Path, pre_fix_mode: str) -> None:
+    index = _package_tree_index(
+        root,
+        pre_fix_mode,
+        exclude={"MANIFEST.sha256"},
+    )
+    payload = "".join(
+        f"{row['sha256']}  {relative}\n"
+        for relative, row in sorted(index.items())
+    )
+    write_bytes(root / "MANIFEST.sha256", payload.encode("utf-8"))
 
 
 def _copy_verified_log(payload: bytes, expected_sha256: str, destination: Path) -> None:
@@ -91,6 +136,40 @@ def _rewrite_pre_fix_receipt(data: ValidatedInputs, destination: Path) -> dict[s
         executions.append(row)
     receipt["executions"] = executions
     return receipt
+
+
+def _write_native_pre_fix_replays(data: ValidatedInputs, destination: Path) -> None:
+    replay_set = data.native_pre_fix_replays
+    if data.pre_fix_mode != NATIVE_MODE or replay_set is None:
+        raise ContractError("native replay render: validated replay set is absent")
+    if replay_set.descriptor_bytes != data.handoff_file_bytes[
+        "pre_fix_negative_receipt"
+    ]:
+        raise ContractError("native replay render: descriptor changed after validation")
+    write_bytes(
+        destination / NATIVE_PACKAGE_DESCRIPTOR_PATH,
+        replay_set.descriptor_bytes,
+    )
+    for key, relative in NATIVE_TRACKED_INPUT_ARCHIVE_PATHS.items():
+        payload = replay_set.tracked_input_bytes[key]
+        scan_secret_bytes(payload, label=f"native replay tracked input {key}")
+        write_bytes(destination / relative, payload)
+    for replay_id in NATIVE_REPLAY_IDS:
+        replay = replay_set.replays[replay_id]
+        prefix = NATIVE_PACKAGE_ROOTS[replay_id]
+        for relative, artifact in sorted(replay.artifacts.items()):
+            if (
+                len(artifact.payload) != artifact.size
+                or sha256_bytes(artifact.payload) != artifact.sha256
+            ):
+                raise ContractError(
+                    f"native replay render: {replay_id}/{relative} changed after validation"
+                )
+            scan_secret_bytes(
+                artifact.payload,
+                label=f"native replay {replay_id}:{relative}",
+            )
+            write_bytes(destination / Path(*prefix.parts) / relative, artifact.payload)
 
 
 def _render_readme(data: ValidatedInputs) -> bytes:
@@ -134,6 +213,11 @@ def _render_core(
         destination / "schemas/handoff-v1.schema.json",
         tool_sources["handoff-v1.schema.json"],
     )
+    if data.pre_fix_mode == NATIVE_MODE:
+        write_bytes(
+            destination / f"schemas/{NATIVE_SCHEMA_NAME}",
+            tool_sources[NATIVE_SCHEMA_NAME],
+        )
     write_bytes(destination / BASELINE_MANIFEST_ARCHIVE_PATH, data.baseline.manifest_bytes)
     write_bytes(destination / GROUP_MAP_ARCHIVE_PATH, data.group_map_bytes)
     write_bytes(destination / HANDOFF_MANIFEST_ARCHIVE_PATH, data.handoff_bytes)
@@ -165,10 +249,17 @@ def _render_core(
         destination / "evidence/remediation/documentation_alignment_receipt.json",
         data.documentation_receipt,
     )
-    write_json(
-        destination / "evidence/test/pre_fix_negative_receipt.json",
-        _rewrite_pre_fix_receipt(data, destination),
-    )
+    if data.pre_fix_mode == LEGACY_MODE:
+        if data.native_pre_fix_replays is not None:
+            raise ContractError("pre-fix render: legacy/native state is ambiguous")
+        write_json(
+            destination / "evidence/test/pre_fix_negative_receipt.json",
+            _rewrite_pre_fix_receipt(data, destination),
+        )
+    elif data.pre_fix_mode == NATIVE_MODE:
+        _write_native_pre_fix_replays(data, destination)
+    else:
+        raise ContractError("pre-fix render: unsupported evidence mode")
 
     semantic_bytes = data.handoff_file_bytes["semantic_completion_receipt"]
     if sha256_bytes(semantic_bytes) != data.handoff_file_sha256["semantic_completion_receipt"]:
@@ -196,7 +287,7 @@ def _render_core(
 
 
 def _validated_input_hashes(data: ValidatedInputs) -> dict[str, str]:
-    return {
+    hashes = {
         "baseline_manifest": data.baseline.manifest_sha256,
         "security_fix_group_map": data.group_map_sha256,
         "handoff_manifest": data.handoff_sha256,
@@ -209,6 +300,11 @@ def _validated_input_hashes(data: ValidatedInputs) -> dict[str, str]:
             for key, value in sorted(data.cohort_handoff_sha256.items())
         },
     }
+    if data.pre_fix_mode == NATIVE_MODE:
+        if data.native_pre_fix_replays is None:
+            raise ContractError("native replay input hashes: replay set is absent")
+        hashes.update(native_input_hashes(data.native_pre_fix_replays))
+    return hashes
 
 
 def _scan_validated_inputs(data: ValidatedInputs) -> None:
@@ -221,6 +317,19 @@ def _scan_validated_inputs(data: ValidatedInputs) -> None:
         scan_secret_bytes(payload, label=f"test log {receipt_id}")
     for group_id, payload in sorted(data.pre_fix_log_bytes.items()):
         scan_secret_bytes(payload, label=f"pre-fix log {group_id}")
+    if data.pre_fix_mode == NATIVE_MODE:
+        replay_set = data.native_pre_fix_replays
+        if replay_set is None:
+            raise ContractError("native replay scan: replay set is absent")
+        scan_secret_bytes(replay_set.descriptor_bytes, label="native replay descriptor")
+        for key, payload in sorted(replay_set.tracked_input_bytes.items()):
+            scan_secret_bytes(payload, label=f"native replay tracked input {key}")
+        for replay_id, replay in sorted(replay_set.replays.items()):
+            for relative, artifact in sorted(replay.artifacts.items()):
+                scan_secret_bytes(
+                    artifact.payload,
+                    label=f"native replay {replay_id}:{relative}",
+                )
 
 
 def _replay_attestation(
@@ -245,6 +354,7 @@ def _replay_attestation(
     )
     return {
         "schema_version": 1,
+        "pre_fix_mode": data.pre_fix_mode,
         "candidate_final_commit": data.candidate_final_commit,
         "candidate_final_tree": data.candidate_final_tree,
         "evidence_cutoff_at": data.evidence_cutoff_at,
@@ -259,6 +369,7 @@ def _replay_attestation(
             expected_package_payload_paths(
                 data.test_receipt_rows,
                 data.pre_fix_receipt,
+                pre_fix_mode=data.pre_fix_mode,
             )
         ),
     }
@@ -715,8 +826,11 @@ def build_package(
             raise ContractError(
                 "replay: fresh-process source/core attestations differ"
             )
-        index_a = tree_index(replay_a)
-        index_b = tree_index(replay_b)
+        pre_fix_mode = attestation_a["pre_fix_mode"]
+        if pre_fix_mode not in {LEGACY_MODE, NATIVE_MODE}:
+            raise ContractError("replay: unsupported pre-fix evidence mode")
+        index_a = _package_tree_index(replay_a, pre_fix_mode)
+        index_b = _package_tree_index(replay_b, pre_fix_mode)
         core_hash = sha256_bytes(canonical_json_bytes(index_a))
         if (
             index_a != index_b
@@ -754,11 +868,11 @@ def build_package(
             for replay_id, relative in REPLAY_RECEIPT_PATHS.items():
                 write_json(replay / relative, replay_receipts[replay_id])
             write_json(replay / "receipts/build_receipt.json", build_receipt)
-            actual_paths = set(tree_index(replay))
+            actual_paths = set(_package_tree_index(replay, pre_fix_mode))
             expected_paths = set(attestation_a["expected_payload_paths"])
             if actual_paths != expected_paths:
                 raise ContractError("package allowlist: builder produced missing or extra files")
-            write_manifest(replay)
+            _write_package_manifest(replay, pre_fix_mode)
         validation_a = _run_package_validator(
             "A",
             replay_a,
@@ -779,7 +893,9 @@ def build_package(
             raise ContractError(
                 "replay: independent package validation results differ"
             )
-        if tree_index(replay_a) != tree_index(replay_b):
+        if _package_tree_index(replay_a, pre_fix_mode) != _package_tree_index(
+            replay_b, pre_fix_mode
+        ):
             raise ContractError("replay: complete package builds are not byte-identical")
         revalidate_candidate_final_state(
             candidate_repo,

@@ -9,11 +9,12 @@ import sys
 from pathlib import Path
 
 from scripts.postfix_evidence.build_postfix_package import (
+    _package_tree_index,
     _render_core,
     _replay_attestation,
     _scan_validated_inputs,
 )
-from scripts.postfix_evidence.common import ContractError, scan_secret_bytes, tree_index
+from scripts.postfix_evidence.common import ContractError, scan_secret_bytes
 from scripts.postfix_evidence.validate_postfix_package import validate_source_inputs
 
 
@@ -45,7 +46,7 @@ def render_replay(
     return _replay_attestation(
         data,
         semantic_receipt_sha256=semantic_receipt_sha256,
-        core_index=tree_index(destination),
+        core_index=_package_tree_index(destination, data.pre_fix_mode),
         tool_sources=tool_sources,
     )
 
