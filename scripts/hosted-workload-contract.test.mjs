@@ -2665,6 +2665,25 @@ function activationGateFixture(root) {
     copyExecutable(name);
   }
   if (process.platform === "linux") {
+    for (const name of [
+      "hosted-workload-activation-gate.sh",
+      "core-stack-activation-gate.sh",
+    ]) {
+      const fixtureGate = path.join(scripts, name);
+      const source = fs.readFileSync(fixtureGate, "utf8");
+      const hostSelection = "SYSTEM_NAME=$(/usr/bin/uname -s)";
+      assert.equal(source.split(hostSelection).length - 1, 1);
+      fs.writeFileSync(fixtureGate, source.replace(hostSelection, "SYSTEM_NAME=Darwin"), { mode: 0o755 });
+    }
+    const fixtureBroker = path.join(scripts, "platform-activation-broker.py");
+    const brokerSource = fs.readFileSync(fixtureBroker, "utf8");
+    const productionCheck = 'def production() -> bool:\n    return sys.platform.startswith("linux")';
+    assert.equal(brokerSource.split(productionCheck).length - 1, 1);
+    fs.writeFileSync(
+      fixtureBroker,
+      brokerSource.replace(productionCheck, "def production() -> bool:\n    return False"),
+      { mode: 0o755 },
+    );
     fs.copyFileSync(
       path.join(import.meta.dirname, "platform-release-context.mjs"),
       path.join(scripts, "platform-release-context-implementation.mjs"),
