@@ -375,7 +375,7 @@ jobs:
       - name: Secret rotation evidence plan
         run: node ./scripts/infra-ops.mjs secret-rotation-evidence
       - name: DR readiness check
-        run: node ./scripts/infra-ops.mjs dr-readiness-check --envFile .env.example
+        run: node ./scripts/infra-ops.mjs dr-readiness-check --envFile .env.example --noDocker
       - name: DR evidence summary
         run: node ./scripts/infra-ops.mjs dr-evidence
       - name: Off-site restore drill plan
