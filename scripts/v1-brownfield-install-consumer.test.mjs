@@ -309,6 +309,15 @@ test("requires a fresh byte-equal off-host PRE-DEPLOY checkpoint before mutation
   assert.match(result.stderr, /stale/);
   assert.equal(fs.existsSync(stale.finalRelease), false);
 
+  const staleCapture = fixture(t);
+  const captureCheckpoint = JSON.parse(fs.readFileSync(staleCapture.checkpoint, "utf8"));
+  captureCheckpoint.backupCapturedUnixSeconds -= 3600;
+  writeFile(staleCapture.checkpoint, `${stableJson(captureCheckpoint)}\n`, 0o600);
+  result = run(staleCapture);
+  assert.equal(result.status, 78);
+  assert.match(result.stderr, /stale/);
+  assert.equal(fs.existsSync(staleCapture.finalRelease), false);
+
   const mismatched = fixture(t);
   const mismatch = JSON.parse(fs.readFileSync(mismatched.checkpoint, "utf8"));
   mismatch.offHostRawArchiveSha256 = "f".repeat(64);
