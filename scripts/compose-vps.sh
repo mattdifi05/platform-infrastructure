@@ -24,6 +24,14 @@ HOST_OS=$(trusted_host_os) || {
   exit 1
 }
 case "$HOST_OS" in Linux|Darwin) ;; *) printf 'Unsupported host OS: %s\n' "$HOST_OS" >&2; exit 1 ;; esac
+if /usr/bin/stat -c '%d' / >/dev/null 2>&1; then
+  STAT_STYLE=gnu
+elif /usr/bin/stat -f '%d' / >/dev/null 2>&1; then
+  STAT_STYLE=bsd
+else
+  printf '%s\n' "The VPS Compose wrapper cannot determine the trusted stat interface." >&2
+  exit 1
+fi
 
 if (( $# == 1 )) && [[ "$1" == runtime-isolation-envelope ]]; then
   REQUEST_MODE=runtime-isolation-envelope
@@ -88,11 +96,10 @@ sha256_stream() {
 
 fd_identity() {
   local target=$1 raw device inode uid mode
-  if stat -Lc '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
-    raw=$(stat -Lc '%d|%i|%u|%a' "$target")
-  else
-    raw=$(stat -f '%d|%i|%u|%Lp' "$target")
-  fi
+  case "$STAT_STYLE" in
+    gnu) raw=$(/usr/bin/stat -Lc '%d|%i|%u|%a' "$target" 2>/dev/null) || return 1 ;;
+    bsd) raw=$(/usr/bin/stat -f '%d|%i|%u|%Lp' "$target" 2>/dev/null) || return 1 ;;
+  esac
   IFS='|' read -r device inode uid mode <<< "$raw"
   printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
 }
@@ -105,11 +112,10 @@ fd_object_identity() {
 }
 
 fd_nlink() {
-  if stat -c '%h' "$1" >/dev/null 2>&1; then
-    stat -c '%h' "$1"
-  else
-    stat -f '%l' "$1"
-  fi
+  case "$STAT_STYLE" in
+    gnu) /usr/bin/stat -Lc '%h' "$1" ;;
+    bsd) /usr/bin/stat -f '%l' "$1" ;;
+  esac
 }
 
 first_handoff_fd=50
@@ -149,7 +155,10 @@ open_read_once_snapshot() {
   local path_device path_inode path_uid path_mode source_device source_inode source_uid source_mode
   local snapshot_file writer_fd hash_fd reader_fd snapshot_identity snapshot_device snapshot_inode snapshot_uid snapshot_mode
   local reader_identity index
-  path_before=$(fd_identity "$source")
+  if ! path_before=$(fd_identity "$source"); then
+    printf 'Locked handoff path could not be opened: %s\n' "$source" >&2
+    return 1
+  fi
   IFS='|' read -r path_device path_inode path_uid path_mode <<< "$path_before"
   source_fd=$next_handoff_fd
   next_handoff_fd=$((next_handoff_fd + 1))
@@ -540,7 +549,10 @@ open_locked_handoff() {
     printf 'Invalid locked handoff path: %s\n' "$source" >&2
     return 1
   }
-  path_before=$(fd_identity "$source")
+  if ! path_before=$(fd_identity "$source"); then
+    printf 'Locked handoff path could not be opened: %s\n' "$source" >&2
+    return 1
+  fi
   [[ "$path_before" = "$expected_device|$expected_inode|$expected_uid|$expected_mode" ]] || {
     printf 'Locked handoff path identity changed: %s\n' "$source" >&2
     return 1
@@ -552,7 +564,10 @@ open_locked_handoff() {
     return 1
   fi
   source_reference=/dev/fd/$source_fd
-  before=$(fd_identity "$source_reference")
+  if ! before=$(fd_identity "$source_reference"); then
+    printf 'Locked handoff object could not be opened: %s\n' "$source" >&2
+    return 1
+  fi
   IFS='|' read -r actual_device actual_inode actual_uid actual_mode <<< "$before"
   [[ "$actual_inode" = "$expected_inode" && "$actual_uid" = "$expected_uid"
       && ( "$HOST_OS" = Darwin || "$actual_device" = "$expected_device" ) ]] || {

@@ -106,7 +106,8 @@ jobs:
           persist-credentials: false
       - name: Prepare Compose fixtures
         run: |
-          mkdir -p .tmp/optional-project-source secrets traefik/certs
+          mkdir -p ../src .tmp/optional-project-source secrets traefik/certs
+          printf 'Infrastructure-only CI placeholder.\n' > ../src/.infra-only
           printf 'Infrastructure-only CI placeholder.\n' > .tmp/optional-project-source/.infra-only
           for name in postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot; do
             printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
@@ -144,7 +145,7 @@ jobs:
         run: |
           install -m 600 .env.vps.example .env
           {
-            printf '%s\n' 'PHP_PROJECTS_DIR=./.tmp/optional-project-source'
+            printf '%s\n' 'PHP_PROJECTS_DIR=../src'
             printf '%s\n' 'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox'
             printf '%s\n' 'DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json'
             printf '%s\n' 'DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active-receipt.json'
