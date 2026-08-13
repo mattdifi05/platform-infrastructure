@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 
 const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protected == true";
+const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "8ccf52306a4150262372c9748f1eca6069e32b87213b3ef00b0c30c14d81246f";
 
 function jobBlock(text, jobName) {
   const jobStart = text.search(new RegExp(`^  ${jobName}:`, "m"));
@@ -100,6 +102,62 @@ export function deploymentPrerequisiteMismatches(workflowText) {
     || !deploy.includes(".dastChainSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_CHAIN_SHA256")
   ) {
     issues.push("deploy-vps must validate the exact receipt v3 release, envelope, authorization and chain identities");
+  }
+  return issues;
+}
+
+export function v1InstallOnlyWorkflowMismatches(workflowText) {
+  const text = String(workflowText);
+  const issues = [];
+  if (crypto.createHash("sha256").update(text, "utf8").digest("hex") !== V1_INSTALL_ONLY_WORKFLOW_SHA256) {
+    issues.push("V1 install-only workflow bytes differ from the frozen candidate-specific controller");
+  }
+  const install = jobBlock(text, "install-v1");
+  if (!install) return ["V1 install-only workflow is missing install-v1"];
+  if (!/^  workflow_dispatch:\s*$/m.test(text) || /^  (?:pull_request|push|schedule|workflow_call):\s*$/m.test(text)) {
+    issues.push("V1 install-only workflow must be manual-only");
+  }
+  if (!/^permissions:\s*\n  contents:\s*read\s*$/m.test(text)
+    || /^\s{2}(?:actions|attestations|checks|deployments|id-token|packages|pull-requests|statuses):/m.test(text)) {
+    issues.push("V1 install-only workflow permissions must be exactly contents read");
+  }
+  if (!install.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
+    issues.push("V1 install-only workflow lacks the exact protected-main manual guard");
+  }
+  if (!/environment:\s*\n\s+name:\s+production/.test(install)) {
+    issues.push("V1 install-only workflow lacks the production environment gate");
+  }
+  if (!/concurrency:\s*\n\s+group:\s+infra-production-deploy\s*\n\s+cancel-in-progress:\s*false/.test(install)) {
+    issues.push("V1 install-only workflow must serialize with full production deployment");
+  }
+  if (!/uses:\s*actions\/checkout@[a-f0-9]{40}[\s\S]*?with:\s*\n\s+ref:\s*\$\{\{ github\.sha \}\}\s*\n\s+persist-credentials:\s*false/.test(install)) {
+    issues.push("V1 install-only workflow must checkout github.sha without persisted credentials");
+  }
+  if (!install.includes('test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    || !install.includes('test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
+    || !install.includes('test "$(git rev-parse --verify HEAD^{commit})" = "$GITHUB_SHA"')
+    || !install.includes('test -z "$(git status --porcelain=v1 --untracked-files=all)"')) {
+    issues.push("V1 install-only workflow does not bind the frozen candidate approval and exact clean controller");
+  }
+  if (/^\s+needs:|continue-on-error:\s*true/m.test(install)) {
+    issues.push("V1 install-only workflow must have no cross-job dependency or continue-on-error path");
+  }
+  const sinks = text.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/gm) ?? [];
+  if (sinks.length !== 1 || !/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/m.test(install)) {
+    issues.push("V1 install-only workflow must contain exactly one fixed install-only sink");
+  }
+  if (!install.includes("node ./scripts/v1-brownfield-install-receipt.mjs verify")
+    || !install.includes("--candidateCommit 832bf2baec47055342af7e7f73425444381b91e0")
+    || !install.includes("--candidateTree 91cee2380809cb0691b9ac47cafa2a673d434caa")
+    || !install.includes("--sourceArchiveSha256 6eabff5f3fdbb4b129519d23a2dd9864f65477c5f0e1ecb58e1b8a9a79af3007")) {
+    issues.push("V1 install-only workflow does not revalidate the exact root receipt");
+  }
+  if (/\bdocker\b|platform-activation-broker|deploy-vps\.sh|release-admission|dast-zap|sigstore|promoter|activation-request/i.test(install)) {
+    issues.push("V1 install-only workflow crosses the activation or Docker boundary");
+  }
+  const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
+  if (productionEnvironments.length !== 1) {
+    issues.push("V1 install-only workflow must expose exactly one production environment job");
   }
   return issues;
 }

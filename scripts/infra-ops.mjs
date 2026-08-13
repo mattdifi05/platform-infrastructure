@@ -2879,6 +2879,10 @@ function infraTestingHygiene() {
     "scripts/vps-evidence-request.test.mjs",
     "scripts/pinned-ssh-host-key.mjs",
     "scripts/pinned-ssh-host-key.test.mjs",
+    "scripts/v1-brownfield-install-receipt.mjs",
+    "scripts/v1-brownfield-install-receipt.test.mjs",
+    "scripts/deploy-v1-install-only.test.mjs",
+    "scripts/platform-activation-transport.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
   ];
@@ -2920,6 +2924,12 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/evidence-bundle-phase.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/pinned-ssh-host-key.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, [
+    "--test",
+    "scripts/v1-brownfield-install-receipt.test.mjs",
+    "scripts/deploy-v1-install-only.test.mjs",
+  ], { cwd: infraRoot });
+  run(process.execPath, ["scripts/platform-activation-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
@@ -3307,6 +3317,7 @@ function infraMaintainabilityHygiene() {
     "core-stack-activation-gate.sh",
     "database-ownership-sandbox-test.sh",
     "deploy-vps-input-test.sh",
+    "deploy-v1-install-only.sh",
     "deploy-vps-remote.sh",
     "helper-image-supply-chain-test.sh",
     "host-reliability-sandbox-test.sh",

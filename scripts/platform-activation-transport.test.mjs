@@ -5,114 +5,116 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "platform-activation-transport-")));
-const fakeSudo = path.join(root, "sudo");
-const fakeBroker = path.join(root, "broker");
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "platform-v1-install-transport-")));
+const fakeSudo = path.join(root, "fixed-sudo");
+const pathShadowSudo = path.join(root, "path-shadow-sudo");
+const pathDirectory = path.join(root, "bin");
 const sudoSentinel = path.join(root, "sudo-invoked");
-const brokerSentinel = path.join(root, "broker-invoked");
+const sudoArguments = path.join(root, "sudo-arguments");
+const pathShadowSentinel = path.join(root, "path-shadow-invoked");
 fs.writeFileSync(fakeSudo, `#!/bin/sh
-: > "$PLATFORM_ACTIVATION_TEST_SUDO_SENTINEL"
+printf '%s\\n' "$@" > "$PLATFORM_V1_INSTALL_TEST_SUDO_ARGUMENTS"
+: > "$PLATFORM_V1_INSTALL_TEST_SUDO_SENTINEL"
 exit 97
 `, { mode: 0o755 });
-fs.writeFileSync(fakeBroker, `#!/bin/sh
-: > "$PLATFORM_ACTIVATION_TEST_BROKER_SENTINEL"
-exit 98
+fs.writeFileSync(pathShadowSudo, `#!/bin/sh
+: > "$PLATFORM_V1_INSTALL_TEST_PATH_SHADOW_SENTINEL"
+exit 96
 `, { mode: 0o755 });
 
-const script = path.join(import.meta.dirname, "deploy-vps-remote.sh");
+const productionScript = path.join(import.meta.dirname, "deploy-vps-remote.sh");
+const productionSource = fs.readFileSync(productionScript, "utf8");
+const systemProbe = "SYSTEM_NAME=$(/usr/bin/uname -s)";
+assert.equal(productionSource.split(systemProbe).length - 1, 1, "remote transport must contain one exact OS test boundary");
+const script = path.join(root, "deploy-vps-remote.sh");
+fs.writeFileSync(script, productionSource.replace(systemProbe, "SYSTEM_NAME=Darwin"), { mode: 0o700 });
 const environment = {
   ...process.env,
-  PATH: root,
-  TMPDIR: path.join(root, "hostile-tmp"),
-  PLATFORM_ACTIVATION_TEST_SUDO: fakeSudo,
-  PLATFORM_ACTIVATION_TEST_BROKER: fakeBroker,
-  PLATFORM_ACTIVATION_TEST_SUDO_SENTINEL: sudoSentinel,
-  PLATFORM_ACTIVATION_TEST_BROKER_SENTINEL: brokerSentinel,
+  PATH: pathDirectory,
+  PLATFORM_V1_INSTALL_TEST_SUDO: fakeSudo,
+  PLATFORM_V1_INSTALL_TEST_SUDO_ARGUMENTS: sudoArguments,
+  PLATFORM_V1_INSTALL_TEST_SUDO_SENTINEL: sudoSentinel,
+  PLATFORM_V1_INSTALL_TEST_PATH_SHADOW_SENTINEL: pathShadowSentinel,
 };
 
-const run = (input, arguments_ = [], extraEnvironment = {}) => spawnSync("/bin/sh", [script, ...arguments_], {
-  encoding: null,
-  input,
-  env: { ...environment, ...extraEnvironment },
-});
+// The PATH shadow uses the conventional name, while the test seam remains an
+// explicit absolute path. Production Linux ignores the seam entirely.
+fs.mkdirSync(pathDirectory);
+fs.symlinkSync(pathShadowSudo, path.join(pathDirectory, "sudo"));
 
-function assertTerminalStop(result, label) {
-  assert.equal(result.status, 78, `${label}: expected terminal STOP 78; stderr=${result.stderr.toString()}`);
-  assert.equal(result.stdout.length, 0, `${label}: STOP emitted unexpected stdout`);
-  assert.match(result.stderr.toString(), /V1 brownfield existing-host path is STOP/);
-  assert.equal(fs.existsSync(sudoSentinel), false, `${label}: STOP reached sudo`);
-  assert.equal(fs.existsSync(brokerSentinel), false, `${label}: STOP reached the activation broker`);
-}
+const reset = () => {
+  for (const file of [sudoSentinel, sudoArguments, pathShadowSentinel]) fs.rmSync(file, { force: true });
+};
+const run = (input, arguments_ = [], extraEnvironment = {}) => {
+  reset();
+  return spawnSync("/bin/sh", [script, ...arguments_], {
+    encoding: null,
+    input,
+    env: { ...environment, ...extraEnvironment },
+  });
+};
 
-async function runWithUnreadableStdin() {
+async function assertOpenStdinCannotReachSudo() {
+  reset();
   const child = spawn("/bin/sh", [script], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const stdout = [];
-  const stderr = [];
-  child.stdout.on("data", (chunk) => stdout.push(chunk));
-  child.stderr.on("data", (chunk) => stderr.push(chunk));
-
-  return await new Promise((resolve, reject) => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.stdin.destroy();
-      child.kill("SIGKILL");
-    }, 1000);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(fs.existsSync(sudoSentinel), false, "open stdin reached sudo before EOF");
+  child.stdin.end();
+  const result = await new Promise((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (status, signal) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error("remote activation shim attempted to read stdin before the terminal V1 STOP"));
-        return;
-      }
-      resolve({
-        status,
-        signal,
-        stdout: Buffer.concat(stdout),
-        stderr: Buffer.concat(stderr),
-      });
-    });
+    child.once("close", (status, signal) => resolve({ status, signal }));
   });
+  assert.equal(result.status, 97, "EOF did not reach the fixed test sudo consumer");
 }
 
 try {
-  // No authoritative V1 consumer binds the verified PRE-DEPLOY backup and all
-  // provider gates to this target-side transport. The shim must therefore stop
-  // without waiting for, consuming, or interpreting stdin.
-  assertTerminalStop(await runWithUnreadableStdin(), "open stdin");
+  await assertOpenStdinCannotReachSudo();
 
-  const request = Buffer.from('{"schema":"platform-activation-request/v3"}\n');
-  assertTerminalStop(run(request), "ordinary request");
+  const empty = run(Buffer.alloc(0));
+  assert.equal(empty.status, 97, `empty stdin did not reach the fixed consumer: ${empty.stderr.toString()}`);
+  assert.equal(fs.existsSync(sudoSentinel), true, "fixed sudo test seam was not invoked");
+  assert.equal(fs.existsSync(pathShadowSentinel), false, "caller PATH selected sudo");
+  assert.deepEqual(fs.readFileSync(sudoArguments, "utf8").trim().split("\n"), [
+    "-n",
+    "--",
+    "/usr/local/libexec/platform-v1-brownfield-install-consumer",
+    "install",
+  ]);
 
-  assertTerminalStop(run(request, ["--force", "attacker-path"]), "caller arguments");
+  const request = run(Buffer.from('{"schema":"platform-activation-request/v3"}\n'));
+  assert.equal(request.status, 64, "request bytes were accepted by the install-only transport");
+  assert.match(request.stderr.toString(), /accepts no stdin/);
+  assert.equal(fs.existsSync(sudoSentinel), false, "request bytes reached sudo");
 
-  assertTerminalStop(run(request, [], {
-    V1_BACKUP_GATE: "SATISFIED",
+  const argumentsResult = run(Buffer.alloc(0), ["--force", "/tmp/attacker"]);
+  assert.equal(argumentsResult.status, 64, "caller arguments were accepted");
+  assert.match(argumentsResult.stderr.toString(), /Usage: deploy-vps-remote\.sh/);
+  assert.equal(fs.existsSync(sudoSentinel), false, "caller arguments reached sudo");
+
+  const environmentResult = run(Buffer.alloc(0), ["attacker"], {
+    PLATFORM_V1_CANDIDATE_COMMIT: "0".repeat(40),
+    PLATFORM_V1_RELEASE_ROOT: "/tmp/attacker",
     V1_PROVIDER_GATES: "SATISFIED",
-    V1_DEPLOYMENT_ADMISSION: "AUTHORIZED",
-    V1_ACTIVATION_PROMOTION: "AUTHORIZED",
-    CONFIRM_MUTATING_VPS: "true",
-  }), "caller environment");
+  });
+  assert.equal(environmentResult.status, 64, "caller state selected a consumer target");
+  assert.equal(fs.existsSync(sudoSentinel), false, "caller state reached sudo");
 
-  const source = fs.readFileSync(script, "utf8");
-  const stop = source.indexOf('echo "V1 brownfield existing-host path is STOP:');
-  const exit = source.indexOf("exit 78", stop);
-  for (const boundary of [
-    "BROKER=/usr/local/libexec/platform-activation-broker",
+  const source = productionSource;
+  for (const required of [
+    "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer",
+    "SUDO=/usr/bin/sudo",
     "SYSTEM_NAME=$(/usr/bin/uname -s)",
-    "request=$(/usr/bin/mktemp",
-    "/bin/dd if=/dev/stdin",
-    'exec "$SUDO" -n "$BROKER" activate',
-  ]) {
-    const boundaryIndex = source.indexOf(boundary);
-    assert.ok(stop >= 0 && exit > stop && boundaryIndex > exit,
-      `terminal V1 STOP must precede ${boundary}`);
+    "/bin/dd if=/dev/stdin bs=1 count=1",
+    '[ "$stdin_bytes" = 0 ]',
+    'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null',
+  ]) assert.ok(source.includes(required), `install-only transport is missing ${required}`);
+  for (const forbidden of ["git ", "docker ", "compose", "platform-activation-broker", "sourceArchive", "releaseRoot"] ) {
+    assert.ok(!source.includes(forbidden), `install-only transport contains forbidden ${forbidden}`);
   }
-  assert.equal(fs.existsSync(environment.TMPDIR), false, "caller TMPDIR influenced the stopped transport");
-  process.stdout.write("platform activation transport tests passed 5/5\n");
+  process.stdout.write("platform V1 install transport tests passed 6/6\n");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
