@@ -41,7 +41,7 @@ jobs:
           test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0
           test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"
           test "$GITHUB_REF" = refs/heads/main
-          test "$(git rev-parse --verify HEAD^{commit})" = "$GITHUB_SHA"
+          test "$(git rev-parse --verify 'HEAD^{commit}')" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Install pinned SSH identity
         env:

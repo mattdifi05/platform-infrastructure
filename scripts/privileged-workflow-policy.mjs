@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 
 const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protected == true";
-const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "8ccf52306a4150262372c9748f1eca6069e32b87213b3ef00b0c30c14d81246f";
+const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "c7fc3315fbf74b2e599ee31ad2d15b2224abb5a366aeb10cc832f45dbd7bc88e";
 
 function jobBlock(text, jobName) {
   const jobStart = text.search(new RegExp(`^  ${jobName}:`, "m"));
@@ -135,7 +135,7 @@ export function v1InstallOnlyWorkflowMismatches(workflowText) {
   }
   if (!install.includes('test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
     || !install.includes('test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
-    || !install.includes('test "$(git rev-parse --verify HEAD^{commit})" = "$GITHUB_SHA"')
+    || !install.includes('test "$(git rev-parse --verify \'HEAD^{commit}\')" = "$GITHUB_SHA"')
     || !install.includes('test -z "$(git status --porcelain=v1 --untracked-files=all)"')) {
     issues.push("V1 install-only workflow does not bind the frozen candidate approval and exact clean controller");
   }
