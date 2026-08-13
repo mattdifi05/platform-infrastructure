@@ -19,8 +19,8 @@ die() {
 
 stat_fields() {
   target=$1
-  if stat -c '%d|%i|%u|%a|%s|%Y|%Z' "$target" >/dev/null 2>&1; then
-    stat -c '%d|%i|%u|%a|%s|%Y|%Z' "$target"
+  if stat -Lc '%d|%i|%u|%a|%s|%Y|%Z' "$target" >/dev/null 2>&1; then
+    stat -Lc '%d|%i|%u|%a|%s|%Y|%Z' "$target"
   else
     stat -f '%d|%i|%u|%Lp|%z|%m|%c' "$target"
   fi

@@ -108,9 +108,11 @@ jobs:
         run: |
           mkdir -p .tmp/optional-project-source secrets traefik/certs
           printf 'Infrastructure-only CI placeholder.\n' > .tmp/optional-project-source/.infra-only
-          for name in postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password; do
+          for name in postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot; do
             printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
           done
+          chmod 600 secrets/*.txt
+          chmod 640 secrets/alertmanager_webhook_token.txt
           printf 'dummy-cert\n' > traefik/certs/local-cert.pem
           printf 'dummy-key\n' > traefik/certs/local-key.pem
           cp .env.example .env
