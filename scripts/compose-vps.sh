@@ -88,8 +88,8 @@ sha256_stream() {
 
 fd_identity() {
   local target=$1 raw device inode uid mode
-  if stat -c '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
-    raw=$(stat -c '%d|%i|%u|%a' "$target")
+  if stat -Lc '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
+    raw=$(stat -Lc '%d|%i|%u|%a' "$target")
   else
     raw=$(stat -f '%d|%i|%u|%Lp' "$target")
   fi

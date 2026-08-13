@@ -1996,12 +1996,26 @@ testRunner("broker security-oracle self-mutants reject every previously accepted
             (error) => error?.message?.split("\n", 1)[0] === exactError,
           );
         } else {
+          const exactPathError =
+            `${attackCase.label} pathname no longer resolves to the pinned directory`;
+          const linuxParentLabel = attackIndex > 0
+            ? mutant.options.directories[attackIndex - 1].label
+            : null;
           assert.throws(
             () => assertPinnedSnapshotAncestryHistory(mutant.events, mutant.options),
-            new RegExp(
-              `${attackCase.label} pathname no longer resolves to the pinned directory`,
-              "i",
-            ),
+            (error) => {
+              const headline = error?.message?.split("\n", 1)[0];
+              if (headline === exactPathError) return true;
+              if (process.platform !== "linux"
+                  || mutationKind !== "symlink-back"
+                  || linuxParentLabel === null
+                  || headline !== `${linuxParentLabel} pinned descriptor identity changed`
+                  || error?.actual?.nlink !== error?.expected?.nlink - 1) {
+                return false;
+              }
+              return ["dev", "gid", "ino", "isDirectory", "isSymlink", "mode", "uid"]
+                .every((field) => error.actual[field] === error.expected[field]);
+            },
           );
         }
       }

@@ -117,10 +117,18 @@ export function evaluateNetworkSegmentation(config) {
     requireDenied(`deny-router-${target}`, "project-router", target);
   }
 
-  const pgAdmin = services.phppgadmin || {};
-  record("phppgadmin-image-pinned", /@sha256:[a-f0-9]{64}$/.test(String(pgAdmin.image || "")), "phpPgAdmin image must use an immutable digest");
-  record("phppgadmin-admin-networks", same([...(serviceNetworks.get("phppgadmin") || [])].sort(), ["platform_db_admin", "platform_routing"]), `networks=${(serviceNetworks.get("phppgadmin") || []).sort().join(",")}`);
-  record("router-lock-contract", String(services["project-router"]?.environment?.PROJECT_ROUTER_WORKLOAD_LOCK_FILE || "").startsWith("/var/www/project-state/"), "project-router uses the verified workload lock");
+  if (Object.hasOwn(services, "phppgadmin")) {
+    const pgAdmin = services.phppgadmin || {};
+    record("phppgadmin-image-pinned", /@sha256:[a-f0-9]{64}$/.test(String(pgAdmin.image || "")), "phpPgAdmin image must use an immutable digest");
+    record("phppgadmin-admin-networks", same([...(serviceNetworks.get("phppgadmin") || [])].sort(), ["platform_db_admin", "platform_routing"]), `networks=${(serviceNetworks.get("phppgadmin") || []).sort().join(",")}`);
+  }
+  const routerEnvironment = services["project-router"]?.environment || {};
+  record(
+    "router-lock-contract",
+    routerEnvironment.PROJECT_ROUTER_WORKLOAD_LOCK_FILE === "/run/platform/hosted-workloads.lock.json"
+      && routerEnvironment.PROJECT_ROUTER_WORKLOAD_LOCK_MODE === "required",
+    "project-router requires the exact read-only runtime workload lock",
+  );
 
   return {
     schemaVersion: 2,

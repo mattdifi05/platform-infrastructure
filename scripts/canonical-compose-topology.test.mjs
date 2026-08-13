@@ -10,6 +10,7 @@ import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workloadLock = "secrets/hosted-workloads.lock.json";
 const workloadLockSha256 = "a".repeat(64);
+const noHostedWorkloadLockSha256 = "61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0";
 
 test("canonical plan invokes the deployment wrapper with a verified workload lock", () => {
   const plan = canonicalVpsTopologyPlan({
@@ -17,6 +18,7 @@ test("canonical plan invokes the deployment wrapper with a verified workload loc
     envFile: ".env.vps.example",
     projectName: "platform_policy_check",
     workloadLock,
+    workloadMode: "hosted",
   });
   assert.equal(plan.command.bin, "bash");
   assert.deepEqual(plan.command.args.slice(1), ["config", "--format", "json"]);
@@ -33,7 +35,7 @@ test("canonical plan invokes the deployment wrapper with a verified workload loc
 });
 
 test("canonical evidence includes hostile overlay services and changes its render identity", () => {
-  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock });
+  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock, workloadMode: "hosted" });
   const base = { services: { traefik: { networks: { platform_edge: null } } }, networks: { platform_edge: { internal: true } } };
   const hostile = structuredClone(base);
   hostile.services["hostile-shell"] = {
@@ -49,7 +51,7 @@ test("canonical evidence includes hostile overlay services and changes its rende
 });
 
 test("hostile services in the canonical render reach both policy evaluators", () => {
-  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock });
+  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock, workloadMode: "hosted" });
   const hostile = {
     services: {
       "project-router": { networks: { platform_postgres: null } },
@@ -82,12 +84,68 @@ test("network and runtime checks consume only the canonical wrapper render", () 
 });
 
 test("invalid or empty canonical renders fail closed", () => {
-  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock });
+  const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadLock, workloadMode: "hosted" });
   assert.throws(() => parseCanonicalVpsTopology("not-json", plan, { workloadLockSha256 }), /not valid JSON/);
   assert.throws(() => parseCanonicalVpsTopology(JSON.stringify({ services: {}, networks: {} }), plan, { workloadLockSha256 }), /empty/);
-  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", projectName: "prod;id", workloadLock }), /project name/);
-  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "" }), /workload lock is required/i);
-  assert.throws(() => parseCanonicalVpsTopology(JSON.stringify({ services: { core: {} }, networks: { core: {} } }), plan), /workload lock SHA256/);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", projectName: "prod;id", workloadLock, workloadMode: "hosted" }), /project name/);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "", workloadMode: "hosted" }), /workload lock is required/i);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock, workloadMode: "no-hosted" }), /forbids a Hosted workload lock/i);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "", workloadMode: "" }), /exact hosted or no-hosted/i);
+  assert.throws(() => parseCanonicalVpsTopology(JSON.stringify({ services: { core: {} }, networks: { core: {} } }), plan), /workload authority lock SHA256/);
+});
+
+test("no-hosted canonical plan binds the exact checked-in authority lock without claiming Hosted activation", () => {
+  const plan = canonicalVpsTopologyPlan({
+    infraRoot: repositoryRoot,
+    envFile: ".env.vps.example",
+    workloadLock: "",
+    workloadMode: "no-hosted",
+  });
+  assert.equal(plan.verification, null);
+  assert.equal(plan.workloadLock, path.join(repositoryRoot, "config", "no-hosted-workloads.lock.json"));
+  assert.equal(plan.expectedWorkloadLockSha256, noHostedWorkloadLockSha256);
+  assert.equal(plan.command.env.HOSTED_WORKLOAD_LOCK, "");
+  assert.equal(plan.command.env.HOSTED_WORKLOAD_MODE, "no-hosted");
+  assert.equal(plan.command.env.HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE, plan.workloadLock);
+  const rendered = JSON.stringify({ services: { core: {} }, networks: { core: {} } });
+  const { evidence } = parseCanonicalVpsTopology(rendered, plan, {
+    workloadLockSha256: noHostedWorkloadLockSha256,
+  });
+  assert.equal(evidence.workloadLock.mode, "no-hosted");
+  assert.equal(evidence.workloadLock.path, "config/no-hosted-workloads.lock.json");
+  assert.throws(
+    () => parseCanonicalVpsTopology(rendered, plan, { workloadLockSha256 }),
+    /no-hosted workload lock SHA256 mismatch/i,
+  );
+});
+
+test("network policy keeps optional database UI checks scoped and requires the exact router lock", () => {
+  const base = {
+    services: {
+      "project-router": {
+        environment: {
+          PROJECT_ROUTER_WORKLOAD_LOCK_FILE: "/run/platform/hosted-workloads.lock.json",
+          PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+        },
+        networks: { platform_routing: null },
+      },
+    },
+    networks: { platform_routing: { internal: true } },
+  };
+  const accepted = evaluateNetworkSegmentation(base);
+  assert.equal(accepted.checks.find(({ id }) => id === "router-lock-contract")?.status, "passed");
+  assert.equal(accepted.checks.some(({ id }) => id.startsWith("phppgadmin-")), false);
+
+  const hostile = structuredClone(base);
+  hostile.services.phppgadmin = {
+    image: "untrusted:latest",
+    networks: { platform_routing: null },
+  };
+  hostile.services["project-router"].environment.PROJECT_ROUTER_WORKLOAD_LOCK_MODE = "optional";
+  const rejected = evaluateNetworkSegmentation(hostile);
+  for (const id of ["phppgadmin-image-pinned", "phppgadmin-admin-networks", "router-lock-contract"]) {
+    assert.equal(rejected.checks.find((check) => check.id === id)?.status, "failed", id);
+  }
 });
 
 test("production activation requires a hosted lock while install examples are explicitly no-hosted", () => {

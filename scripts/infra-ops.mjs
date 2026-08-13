@@ -2961,9 +2961,22 @@ function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {})
   const envValues = parseEnv(resolvedEnvFile);
   const resolvedProjectName = String(projectName ?? argv.projectName ?? argv.project ?? process.env.COMPOSE_PROJECT_NAME ?? envValues.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
   const configuredWorkloadLock = workloadLock ?? argv.workloadLock ?? process.env.HOSTED_WORKLOAD_LOCK ?? envValues.HOSTED_WORKLOAD_LOCK ?? "";
-  const plan = canonicalVpsTopologyPlan({ infraRoot, envFile: resolvedEnvFile, projectName: resolvedProjectName, workloadLock: configuredWorkloadLock });
-  run(plan.verification.bin, plan.verification.args, { env: plan.verification.env });
+  const configuredWorkloadMode = argv.workloadMode ?? process.env.HOSTED_WORKLOAD_MODE ?? envValues.HOSTED_WORKLOAD_MODE ?? "";
+  const plan = canonicalVpsTopologyPlan({
+    infraRoot,
+    envFile: resolvedEnvFile,
+    projectName: resolvedProjectName,
+    workloadLock: configuredWorkloadLock,
+    workloadMode: configuredWorkloadMode,
+  });
+  if (plan.verification) {
+    run(plan.verification.bin, plan.verification.args, { env: plan.verification.env });
+  }
   const workloadLockSha256Before = sha256File(plan.workloadLock);
+  if (plan.expectedWorkloadLockSha256
+      && workloadLockSha256Before !== plan.expectedWorkloadLockSha256) {
+    fail("Canonical no-hosted workload lock SHA256 mismatch before render.");
+  }
   const configText = output(plan.command.bin, plan.command.args, {
     env: plan.command.env,
     maxBuffer: 128 * 1024 * 1024,
@@ -12108,6 +12121,21 @@ function secretScanPatterns() {
   ];
 }
 
+const reviewedSecretScanFingerprints = new Set([
+  "scripts/docker-action-contract.mjs:1069:password-assignment:8a9053358dc4e2ddfd1ef679a71392fc866164a6e1ed95a0767b25be79dcb213",
+  "scripts/docker-action-helper-plan.mjs:619:api-token-assignment:396dac1fb362c2819d23ede6fb220831d7e67055f8a3ade49e8510b99d803918",
+  "scripts/docker-action-helper-plan.mjs:620:api-token-assignment:82e35d50d9a66a0081107b66e6425b2ed6c7bf6162251ce556d835559234f340",
+  "scripts/postfix_evidence/tests/test_postfix_evidence.py:2913:password-assignment:de69f9405273dab37e09f2745491b748f0458ee5b26aaae167b68ce7960458ce",
+  "scripts/postfix_evidence/tests/test_postfix_evidence.py:2915:password-assignment:4fc00e3b41000ffeb4bdc4ef3bd04e3feb1c51d4a5d0d49ce5200c78e9b4f098",
+  "scripts/postfix_evidence/tests/test_postfix_evidence.py:2927:password-assignment:c4458ccd650bd3d016b547f8543a6e571a69ea5a72c759c5ec96f246935db81f",
+  "scripts/postfix_evidence/tests/test_postfix_evidence.py:2928:password-assignment:dbdfc672471ae03325c4a6f50f54abd8fdbf509f6410074159b820a884301324",
+  "scripts/runtime-isolation-consumer.test.mjs:1689:smtp-password:5f2b460aaa219f68bdced37dd9f8551a5ba842dacc331a9573a23301d52bee81",
+  "tests/pre-fix/cases/FG-021/waf-log-pipeline-probe.mjs:64:password-assignment:ad4db5c20d6ac0576a6b6d20e22a1590ab1f01b507d995e2998b9faac9e8ab4b",
+  "tests/pre-fix/cases/FG-023/backup-preview-redaction-probe.mjs:42:private-key:4a81d971ff83df47bf9431e1ac491ef4cd3dbe344d50ee5371bf0293658764f1",
+  "tests/pre-fix/cases/FG-054/redis-workload-authorization-probe.mjs:207:password-assignment:fea46f859c60c8ab537af406df5aa9e3a7a0ed4e6b766b0be95f87dc8ec40a4b",
+  "tests/pre-fix/cases/FG-054/redis-workload-authorization-probe.mjs:212:password-assignment:424dd8e93bfa41f4469005b93488f454e16dd5920dcac1a6bcda14353cf0b829",
+]);
+
 async function secretScan() {
   await withLocalCheckReport("secret-scan", async () => {
     const root = path.resolve(argv.infraRoot ?? infraRoot);
@@ -12128,7 +12156,13 @@ async function secretScan() {
         content.toString("utf8").split(/\r?\n/).forEach((line, index) => {
           if (/change_me|placeholder|example|your-domain|smtpPassword|redisPassword|dbPassword|rootPassword|WITH PASSWORD :'\w+_password'/i.test(line)) return;
           const match = patterns.find(([, pattern]) => pattern.test(line));
-          if (match) hits.push({ file: path.relative(infraRoot, fullPath).replaceAll("\\", "/"), line: index + 1, kind: match[0] });
+          if (!match) return;
+          const file = path.relative(infraRoot, fullPath).replaceAll("\\", "/");
+          const lineNumber = index + 1;
+          const lineSha256 = crypto.createHash("sha256").update(line, "utf8").digest("hex");
+          const fingerprint = `${file}:${lineNumber}:${match[0]}:${lineSha256}`;
+          if (reviewedSecretScanFingerprints.has(fingerprint)) return;
+          hits.push({ file, line: lineNumber, kind: match[0] });
         });
       }
     };

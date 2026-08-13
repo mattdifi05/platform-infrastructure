@@ -114,6 +114,7 @@ jobs:
           printf 'dummy-cert\n' > traefik/certs/local-cert.pem
           printf 'dummy-key\n' > traefik/certs/local-key.pem
           cp .env.example .env
+          chmod 600 .env
           printf '\nPROJECT_SOURCE_DIR=./.tmp/optional-project-source\n' >> .env
           docker network create enterprise_net || true
           docker volume create enterprise_mariadb_data || true
@@ -138,7 +139,9 @@ jobs:
             -f compose.yaml -f compose.secrets.yaml -f compose.backup-scheduler.yaml \
             --profile backup config --quiet
       - name: Network segmentation policy
-        run: node ./scripts/infra-ops.mjs network-segmentation-check --envFile .env.vps.example
+        run: |
+          install -m 600 .env.vps.example .env
+          node ./scripts/infra-ops.mjs network-segmentation-check --envFile .env
       - name: HA configuration check
         run: node ./scripts/infra-ops.mjs ha-config-check
       - name: Managed secrets preflight

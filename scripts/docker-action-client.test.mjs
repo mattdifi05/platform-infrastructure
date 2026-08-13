@@ -3354,7 +3354,7 @@ async function runSocketlessGuardedSafeChild(wrapperMutant = "control") {
     [
       ...preloadArguments,
       "--test",
-      "--test-isolation=none",
+      "--experimental-test-isolation=none",
       `--test-reporter=${reporterUrl}`,
       `--test-name-pattern=${exactNamePattern}`,
       fileURLToPath(import.meta.url),
