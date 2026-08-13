@@ -18,8 +18,10 @@ chmod 0555 "$TMP/bin/sudo"
 grep -Fx 'CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -Fx 'SUDO=/usr/bin/sudo' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -F 'if [ "$SYSTEM_NAME" != Linux ]; then' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -F '/bin/dd if=/dev/stdin bs=1 count=1' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -F '[ "$stdin_bytes" = 0 ]' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'exec 3<&0' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '/usr/bin/od -An -tu1 -N1 <&3' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'exec 3<&-' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '[ -z "$stdin_octet" ]' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -Fx 'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 if grep -Eq 'exec[[:space:]]+sudo|/usr/bin/env[[:space:]]+sudo' "$SCRIPT_DIR/deploy-vps-remote.sh"; then
   echo "FAIL: install-only sink resolves sudo through caller PATH" >&2

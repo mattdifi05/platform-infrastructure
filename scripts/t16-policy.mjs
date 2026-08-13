@@ -152,8 +152,10 @@ const boundedInstallOnlyShim = [
   "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer",
   "SUDO=/usr/bin/sudo",
   'SYSTEM_NAME=$(/usr/bin/uname -s)',
-  "/bin/dd if=/dev/stdin bs=1 count=1",
-  '[ "$stdin_bytes" = 0 ]',
+  "exec 3<&0",
+  "/usr/bin/od -An -tu1 -N1 <&3",
+  "exec 3<&-",
+  '[ -z "$stdin_octet" ]',
   'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null',
 ].every((needle) => includes(deployVpsRemote, needle))
   && /if \[ "\$SYSTEM_NAME" != Linux \]; then[\s\S]*SUDO=\$\{PLATFORM_V1_INSTALL_TEST_SUDO:-\$SUDO\}[\s\S]*fi/.test(deployVpsRemote);

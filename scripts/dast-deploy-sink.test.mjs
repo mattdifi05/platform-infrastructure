@@ -158,8 +158,10 @@ before(localSink, "ssh \"$@\" -- \"$REMOTE\"", "node \"$SCRIPT_ROOT/activation-r
 // The compatibility transport is now an install-only sink. It accepts no
 // request bytes and can invoke only the fixed root-owned V1 consumer.
 has(remoteSink, "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer", "remote install consumer path is not fixed");
-has(remoteSink, "/bin/dd if=/dev/stdin bs=1 count=1", "remote install transport does not prove stdin is empty");
-has(remoteSink, '[ "$stdin_bytes" = 0 ]', "remote install transport does not reject request bytes");
+has(remoteSink, "exec 3<&0", "remote install transport does not preserve the caller stdin descriptor");
+has(remoteSink, "/usr/bin/od -An -tu1 -N1 <&3", "remote install transport does not inspect one bounded input byte");
+has(remoteSink, "exec 3<&-", "remote install transport does not close the preserved stdin descriptor");
+has(remoteSink, '[ -z "$stdin_octet" ]', "remote install transport does not reject request bytes");
 has(remoteSink, 'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null', "remote install transport does not use the fixed root consumer");
 lacks(remoteSink, "platform-activation-broker", "install-only transport must not invoke the activation broker");
 for (const forbidden of [
@@ -202,7 +204,7 @@ for (const binding of [
 assert.equal((workflow.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? []).length, 1,
   "workflow must contain exactly one trusted production mutation sink");
 checks += 1;
-matches(remoteSink, /\/bin\/dd if=\/dev\/stdin bs=1 count=1[\s\S]*\[ "\$stdin_bytes" = 0 \]/,
+matches(remoteSink, /exec 3<&0[\s\S]*\/usr\/bin\/od -An -tu1 -N1 <&3[\s\S]*exec 3<&-[\s\S]*\[ -z "\$stdin_octet" \]/,
   "remote install-only shim must enforce exactly empty stdin");
 const executableClosure = opsDockerfile.slice(
   opsDockerfile.indexOf("&& chmod 0555"),

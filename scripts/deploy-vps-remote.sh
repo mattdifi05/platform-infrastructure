@@ -17,11 +17,19 @@ fi
   exit 64
 }
 
-# Require EOF before crossing the privilege boundary. Reading one bounded byte
-# is fail-closed: a caller that leaves stdin open can only delay its own request
-# and can never reach sudo or the consumer.
-stdin_bytes=$(/bin/dd if=/dev/stdin bs=1 count=1 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d '[:space:]')
-[ "$stdin_bytes" = 0 ] || {
+# Require EOF before crossing the privilege boundary. Preserve the caller's
+# descriptor explicitly: reopening /dev/stdin can fail for a pipe or socket
+# even while fd 0 is still open. od represents every possible input byte,
+# including NUL, without placing that byte in a shell variable.
+exec 3<&0
+if ! stdin_octet=$(/usr/bin/od -An -tu1 -N1 <&3 2>/dev/null); then
+  exec 3<&-
+  echo "The V1 install-only transport could not inspect stdin." >&2
+  exit 74
+fi
+exec 3<&-
+stdin_octet=$(printf '%s' "$stdin_octet" | /usr/bin/tr -d '[:space:]')
+[ -z "$stdin_octet" ] || {
   echo "The V1 install-only transport accepts no stdin." >&2
   exit 64
 }
