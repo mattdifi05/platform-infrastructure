@@ -74,8 +74,9 @@ test("network and runtime checks consume only the canonical wrapper render", () 
   const source = readFileSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), "utf8");
   const networkBody = source.slice(source.indexOf("async function networkSegmentationCheck"), source.indexOf("async function runtimeIsolationCheck"));
   const runtimeBody = source.slice(source.indexOf("async function runtimeIsolationCheck"), source.indexOf("async function faultInjectionTests"));
+  assert.match(networkBody, /canonicalVpsTopologyRender/);
+  assert.match(runtimeBody, /compose-vps\.sh[\s\S]*runtime-isolation-envelope/);
   for (const body of [networkBody, runtimeBody]) {
-    assert.match(body, /canonicalVpsTopologyRender/);
     assert.doesNotMatch(body, /output\("docker"|const composeFiles/);
   }
 });
@@ -89,13 +90,14 @@ test("invalid or empty canonical renders fail closed", () => {
   assert.throws(() => parseCanonicalVpsTopology(JSON.stringify({ services: { core: {} }, networks: { core: {} } }), plan), /workload lock SHA256/);
 });
 
-test("production preflight and tracked env examples require a hosted workload lock", () => {
+test("production activation requires a hosted lock while install examples are explicitly no-hosted", () => {
   const source = readFileSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), "utf8");
   const preflight = source.slice(source.indexOf("async function productionPreflight"), source.indexOf("async function haConfigCheck"));
   assert.match(preflight, /requireKey\("HOSTED_WORKLOAD_LOCK"\)/);
   assert.match(preflight, /hosted-workload-lock\.sh/);
   for (const file of [".env.example", ".env.vps.example", ".env.staging.example"]) {
     const content = readFileSync(path.join(repositoryRoot, file), "utf8");
-    assert.match(content, /^HOSTED_WORKLOAD_LOCK=\S+$/m, `${file} must name a nonempty lock path`);
+    assert.match(content, /^HOSTED_WORKLOAD_LOCK=$/m, `${file} must not claim an unavailable Hosted lock`);
+    assert.match(content, /^HOSTED_WORKLOAD_MODE=no-hosted$/m, `${file} must explicitly keep Hosted activation disabled`);
   }
 });

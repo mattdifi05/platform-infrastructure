@@ -41,10 +41,12 @@ jobs:
       - name: Prepare GHCR image names
         run: |
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          echo "CONTROL_CENTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-control-center" >> "$GITHUB_ENV"
-          echo "PROJECT_ROUTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-project-router" >> "$GITHUB_ENV"
-          echo "PLATFORM_ALERT_DISPATCHER_IMAGE=ghcr.io/${owner}/platform-infrastructure-alert-dispatcher" >> "$GITHUB_ENV"
-          echo "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=ghcr.io/${owner}/platform-infrastructure-backup-scheduler" >> "$GITHUB_ENV"
+          {
+            echo "CONTROL_CENTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-control-center"
+            echo "PROJECT_ROUTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-project-router"
+            echo "PLATFORM_ALERT_DISPATCHER_IMAGE=ghcr.io/${owner}/platform-infrastructure-alert-dispatcher"
+            echo "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=ghcr.io/${owner}/platform-infrastructure-backup-scheduler"
+          } >> "$GITHUB_ENV"
 
       - name: Login to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4

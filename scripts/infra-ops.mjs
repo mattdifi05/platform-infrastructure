@@ -3271,7 +3271,7 @@ function infraMaintainabilityHygiene() {
   const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
   const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
   assertMatch(opsWrapper, /ops-image-trust\.sh/, "infra-ops wrapper must obtain its runner from the trusted deployment admission chain.");
-  assertMatch(opsWrapper, /docker run --rm --pull=never[\s\S]*"\$OPS_IMAGE_ID"/, "infra-ops wrapper must execute only the admitted local image ID without pulling.");
+  assertMatch(opsWrapper, /run_ops_container\(\) \{[\s\S]*set -- "\$OPS_IMAGE_ID" "\$@"[\s\S]*docker run --rm --pull=never[\s\S]*"\$@"[\s\S]*\}/, "infra-ops wrapper must execute only the admitted local image ID without pulling.");
   assertNoMatch(opsWrapper, /docker build|platform\/ops:local|PLATFORM_OPS_USE_HOST_NODE|OPS_FINGERPRINT_LABEL/, "infra-ops wrapper must not build, self-attest, or expose a host-Node bypass.");
   assertNoMatch(`${compose}\n${controlCenterServer}\n${projectRouterServer}`, /stexor|fireport|matthewdifilippo/i, "Core infrastructure must stay project-generic.");
   assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(/, "Project router must stay proxy-only.");
@@ -3284,18 +3284,22 @@ function infraMaintainabilityHygiene() {
     "build-context-sandbox-test.sh",
     "build-daemon-isolation-sandbox-test.sh",
     "cloudflare-origin-lock-ufw.sh",
+    "cloudflare-trusted-proxy-check.sh",
     "collect-host-reliability.sh",
     "compose-runtime-check.sh",
     "compose-vps.sh",
     "configure-host-wait-online.sh",
     "container-metrics-sandbox-test.sh",
     "core-image-supply-chain-test.sh",
+    "core-stack-activation-gate.sh",
     "database-ownership-sandbox-test.sh",
     "deploy-vps-input-test.sh",
     "deploy-vps-remote.sh",
     "helper-image-supply-chain-test.sh",
     "host-reliability-sandbox-test.sh",
+    "hosted-workload-activation-gate.sh",
     "hosted-workload-lock.sh",
+    "hosted-workload-network-ownership.sh",
     "install-host-reliability-collector.sh",
     "keycloak-backchannel-configure.sh",
     "keycloak-passkey-readiness.sh",
@@ -3318,7 +3322,9 @@ function infraMaintainabilityHygiene() {
     "install-container-metrics-collector.sh",
     "install-offsite-backup-cron.sh",
     "node-project-runtime.sh",
+    "ops-image-entrypoint.sh",
     "ops-image-trust.sh",
+    "v1-brownfield-bootstrap.sh",
     "vps-bootstrap-ubuntu.sh",
     "vps-go-live.sh",
     "vps-hardening-ubuntu.sh",

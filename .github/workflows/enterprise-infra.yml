@@ -38,6 +38,9 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PLATFORM_TEST_DOCKER_COMPOSE_BIN: /tmp/platform-ci-docker-compose-v5.3.1
+      PLATFORM_TEST_DOCKER_COMPOSE_SHA256: f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -55,6 +58,18 @@ jobs:
           done
       - name: Maintainability policy
         run: node ./scripts/infra-ops.mjs maintainability-hygiene
+      - name: Install locked Control Center test dependencies
+        working-directory: control-center
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare SHA-pinned standalone Compose test renderer
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" \
+            https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-linux-x86_64
+          printf '%s  %s\n' "$PLATFORM_TEST_DOCKER_COMPOSE_SHA256" "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" | sha256sum -c -
+          chmod 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN"
+          compose_version=$("$PLATFORM_TEST_DOCKER_COMPOSE_BIN" version --short)
+          test "$compose_version" = 5.3.1
       - name: Infrastructure behavior tests
         run: node ./scripts/infra-ops.mjs testing-hygiene
       - name: Upload quality evidence reports
@@ -73,6 +88,16 @@ jobs:
       PLATFORM_OPS_IMAGE: ghcr.io/example.invalid/platform-ops@sha256:0000000000000000000000000000000000000000000000000000000000000000
       PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: ghcr.io/example.invalid/platform-backup-scheduler
       PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: "1111111111111111111111111111111111111111111111111111111111111111"
+      DOCKER_ACTION_ACTIVATION_INBOX: /tmp/platform-candidate-ci/provider-activation-inbox
+      DOCKER_ACTION_ACTIVE_RECEIPT_FILE: /tmp/platform-candidate-ci/active-receipt.json
+      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "2222222222222222222222222222222222222222222222222222222222222222"
+      DOCKER_ACTION_COMBINED_RENDER_SHA256: "3333333333333333333333333333333333333333333333333333333333333333"
+      DOCKER_ACTION_RUNTIME_INTENT_FILE: /tmp/platform-candidate-ci/runtime-intent.json
+      DOCKER_ACTION_RUNTIME_INTENT_ID: intent.candidate-ci-compose-render-only
+      PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY: ghcr.io/example.invalid/platform-docker-action-broker
+      PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: "4444444444444444444444444444444444444444444444444444444444444444"
+      PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: ghcr.io/example.invalid/platform-provider-activation-sidecar
+      PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: "5555555555555555555555555555555555555555555555555555555555555555"
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -354,7 +379,8 @@ jobs:
           set -e
           printf '%s\n' "$output"
           test "$status" -ne 0
-          report=$(ls -t reports/evidence-bundle-verify/evidence-bundle-verify-*.json | head -n 1)
+          report=$(find reports/evidence-bundle-verify -type f -name 'evidence-bundle-verify-*.json' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')
+          test -n "$report"
           node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (p.status !== "external-pending" || p.issues.length !== 0 || p.externalPending.length === 0) process.exit(1)' "$report"
       - name: Upload CI evidence reports
         if: always()
@@ -475,10 +501,12 @@ jobs:
             --consumerJob "$CONSUMER_JOB" \
             --challengeNonce "$CHALLENGE_NONCE" \
             --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"
-          printf 'target=%s\n' "$CANONICAL_TARGET" >> "$GITHUB_OUTPUT"
-          printf 'identity_path=%s\n' "$IDENTITY_PATH" >> "$GITHUB_OUTPUT"
-          printf 'pre_probe=%s\n' "$PRE_PROBE" >> "$GITHUB_OUTPUT"
-          printf 'pre_observed_at=%s\n' "$PRE_OBSERVED_AT" >> "$GITHUB_OUTPUT"
+          {
+            printf 'target=%s\n' "$CANONICAL_TARGET"
+            printf 'identity_path=%s\n' "$IDENTITY_PATH"
+            printf 'pre_probe=%s\n' "$PRE_PROBE"
+            printf 'pre_observed_at=%s\n' "$PRE_OBSERVED_AT"
+          } >> "$GITHUB_OUTPUT"
       - name: Run ZAP baseline against staging
         id: scan
         env:
@@ -582,9 +610,11 @@ jobs:
           install -m 600 security/dast/zap-baseline.json "$REQUEST_DIR/zap-baseline.json"
           install -m 600 security/dast/zap-baseline.html "$REQUEST_DIR/zap-baseline.html"
           install -m 600 security/dast/zap-baseline.xml "$REQUEST_DIR/zap-baseline.xml"
-          printf 'dast_scan_request_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.scanRequestSha256')" >> "$GITHUB_OUTPUT"
-          printf 'artifact_name=%s\n' "$REPORT_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
-          printf 'request_path=%s\n' "$DAST_SCAN_REQUEST" >> "$GITHUB_OUTPUT"
+          {
+            printf 'dast_scan_request_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.scanRequestSha256')"
+            printf 'artifact_name=%s\n' "$REPORT_ARTIFACT_NAME"
+            printf 'request_path=%s\n' "$DAST_SCAN_REQUEST"
+          } >> "$GITHUB_OUTPUT"
       - name: Upload exact run-bound DAST request and raw reports
         id: upload-request
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -637,7 +667,7 @@ jobs:
           TRUSTED_RUN_ID=
           TRUSTED_RUN_ATTEMPT=
           TRUSTED_RUN_METADATA="${RUNNER_TEMP}/dast-provider-run.json"
-          for poll in $(seq 1 90); do
+          for _poll in $(seq 1 90); do
             ARTIFACTS="$(/usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/artifacts?name=${PROVIDER_ARTIFACT_NAME}&per_page=100")"
             mapfile -t RUN_IDS < <(printf '%s' "$ARTIFACTS" | jq -r --arg name "$PROVIDER_ARTIFACT_NAME" \
               '.artifacts | map(select(.name == $name and .expired == false) | .workflow_run.id) | unique[]')
@@ -659,12 +689,14 @@ jobs:
             --metadata "$TRUSTED_RUN_METADATA" \
             --runId "$TRUSTED_RUN_ID" \
             --runAttempt "$TRUSTED_RUN_ATTEMPT")"
-          printf 'repository=%s\n' "$TRUSTED_REPOSITORY" >> "$GITHUB_OUTPUT"
-          printf 'run_id=%s\n' "$TRUSTED_RUN_ID" >> "$GITHUB_OUTPUT"
-          printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA" >> "$GITHUB_OUTPUT"
-          printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')" >> "$GITHUB_OUTPUT"
-          printf 'artifact_name=%s\n' "$PROVIDER_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          {
+            printf 'repository=%s\n' "$TRUSTED_REPOSITORY"
+            printf 'run_id=%s\n' "$TRUSTED_RUN_ID"
+            printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT"
+            printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA"
+            printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')"
+            printf 'artifact_name=%s\n' "$PROVIDER_ARTIFACT_NAME"
+          } >> "$GITHUB_OUTPUT"
       - name: Download independent provider DAST receipt and Sigstore bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -756,9 +788,11 @@ jobs:
           install -m 600 "$DAST_PROVIDER_METADATA" "$FINAL_DIR/dast-provider-run.json"
           install -m 600 "$DAST_BUNDLE" "$FINAL_DIR/dast-provider-attestation.bundle.jsonl"
           install -m 600 "${RUNNER_TEMP}/gh_2.93.0_linux_amd64.tar.gz" "$FINAL_DIR/gh_2.93.0_linux_amd64.tar.gz"
-          printf 'dast_receipt_sha256=%s\n' "$DAST_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'dast_provider_metadata_sha256=%s\n' "$DAST_PROVIDER_METADATA_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'dast_attestation_bundle_sha256=%s\n' "$DAST_BUNDLE_SHA256" >> "$GITHUB_OUTPUT"
+          {
+            printf 'dast_receipt_sha256=%s\n' "$DAST_RECEIPT_SHA256"
+            printf 'dast_provider_metadata_sha256=%s\n' "$DAST_PROVIDER_METADATA_SHA256"
+            printf 'dast_attestation_bundle_sha256=%s\n' "$DAST_BUNDLE_SHA256"
+          } >> "$GITHUB_OUTPUT"
       - name: Upload cryptographically verified run-bound DAST handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -898,7 +932,7 @@ jobs:
           TRUSTED_RUN_ID=
           TRUSTED_RUN_ATTEMPT=
           TRUSTED_RUN_METADATA="${RUNNER_TEMP}/trusted-provider-run.json"
-          for poll in $(seq 1 90); do
+          for _poll in $(seq 1 90); do
             ARTIFACTS="$(/usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100")"
             mapfile -t RUN_IDS < <(printf '%s' "$ARTIFACTS" | jq -r --arg name "$ARTIFACT_NAME" \
               '.artifacts | map(select(.name == $name and .expired == false) | .workflow_run.id) | unique[]')
@@ -920,12 +954,14 @@ jobs:
             --metadata "$TRUSTED_RUN_METADATA" \
             --runId "$TRUSTED_RUN_ID" \
             --runAttempt "$TRUSTED_RUN_ATTEMPT")"
-          printf 'repository=%s\n' "$TRUSTED_REPOSITORY" >> "$GITHUB_OUTPUT"
-          printf 'run_id=%s\n' "$TRUSTED_RUN_ID" >> "$GITHUB_OUTPUT"
-          printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA" >> "$GITHUB_OUTPUT"
-          printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')" >> "$GITHUB_OUTPUT"
-          printf 'artifact_name=%s\n' "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          {
+            printf 'repository=%s\n' "$TRUSTED_REPOSITORY"
+            printf 'run_id=%s\n' "$TRUSTED_RUN_ID"
+            printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT"
+            printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA"
+            printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')"
+            printf 'artifact_name=%s\n' "$ARTIFACT_NAME"
+          } >> "$GITHUB_OUTPUT"
       - name: Download exact release-attestation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -985,18 +1021,20 @@ jobs:
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
           test "$(jq -r '.workflowRunId' "${manifests[0]}")" = "$EXPECTED_RELEASE_RUN_ID"
           test "$(jq -r '.workflowRunUrl' "${manifests[0]}")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${EXPECTED_RELEASE_RUN_ID}"
-          printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
-          printf 'source_archive=%s\n' "${source_archives[0]}" >> "$GITHUB_OUTPUT"
-          printf 'source_archive_sha256=%s\n' "$SOURCE_ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
-          printf 'subject_evidence_bundle=%s\n' "${subject_evidence_bundles[0]}" >> "$GITHUB_OUTPUT"
-          printf 'artifact_receipt=%s\n' "${artifact_receipts[0]}" >> "$GITHUB_OUTPUT"
-          printf 'deployment_receipt=%s\n' "${deployment_receipts[0]}" >> "$GITHUB_OUTPUT"
-          printf 'staging_receipt=%s\n' "${staging_receipts[0]}" >> "$GITHUB_OUTPUT"
-          printf 'artifact_receipt_sha256=%s\n' "$EXPECTED_ARTIFACT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'deployment_receipt_sha256=%s\n' "$DEPLOYMENT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'staging_receipt_sha256=%s\n' "$STAGING_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'runtime_intent_sha256=%s\n' "$RUNTIME_INTENT_SHA256" >> "$GITHUB_OUTPUT"
+          {
+            printf 'manifest=%s\n' "${manifests[0]}"
+            printf 'source_archive=%s\n' "${source_archives[0]}"
+            printf 'source_archive_sha256=%s\n' "$SOURCE_ARCHIVE_SHA256"
+            printf 'sbom=%s\n' "${sboms[0]}"
+            printf 'subject_evidence_bundle=%s\n' "${subject_evidence_bundles[0]}"
+            printf 'artifact_receipt=%s\n' "${artifact_receipts[0]}"
+            printf 'deployment_receipt=%s\n' "${deployment_receipts[0]}"
+            printf 'staging_receipt=%s\n' "${staging_receipts[0]}"
+            printf 'artifact_receipt_sha256=%s\n' "$EXPECTED_ARTIFACT_RECEIPT_SHA256"
+            printf 'deployment_receipt_sha256=%s\n' "$DEPLOYMENT_RECEIPT_SHA256"
+            printf 'staging_receipt_sha256=%s\n' "$STAGING_RECEIPT_SHA256"
+            printf 'runtime_intent_sha256=%s\n' "$RUNTIME_INTENT_SHA256"
+          } >> "$GITHUB_OUTPUT"
       - name: Verify release subjects and trusted-provider deployment admission
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1159,9 +1197,11 @@ jobs:
           test -n "$GH_TOKEN"
           PROMOTER_METADATA="${RUNNER_TEMP}/activation-promoter-run.json"
           /usr/local/bin/gh api "repos/${PROMOTER_REPOSITORY}/actions/runs/${PROMOTER_RUN_ID}" > "$PROMOTER_METADATA"
-          printf 'run_id=%s\n' "$PROMOTER_RUN_ID" >> "$GITHUB_OUTPUT"
-          printf 'run_attempt=%s\n' "$PROMOTER_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          printf 'metadata=%s\n' "$PROMOTER_METADATA" >> "$GITHUB_OUTPUT"
+          {
+            printf 'run_id=%s\n' "$PROMOTER_RUN_ID"
+            printf 'run_attempt=%s\n' "$PROMOTER_RUN_ATTEMPT"
+            printf 'metadata=%s\n' "$PROMOTER_METADATA"
+          } >> "$GITHUB_OUTPUT"
       - name: Download provider-promoted activation artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1372,21 +1412,28 @@ jobs:
         run: |
           ACTIVATION_RECEIPT="${RUNNER_TEMP}/activation-receipt.json"
           umask 077
-          export DEPLOY_ENVIRONMENT_SHA256="$(jq -er '.runtimeIntent.environmentSha256' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
-          export DEPLOY_DAST_PROVIDER_RECEIPT_SHA256="$(jq -er '.dastProviderReceiptSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256="$(jq -er '.dastAuthorizationSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DAST_CHAIN_SHA256="$(jq -er '.dastChainSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DAST_PROVIDER_METADATA_SHA256="$(jq -er '.chain.providerMetadataSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
-          export DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256="$(jq -er '.chain.sigstoreBundleSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
-          export DEPLOY_DAST_SIGSTORE_SUBJECT="$(jq -er '.chain.sigstoreSubject' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
-          export DEPLOY_RELEASE_BUNDLE_SHA256="$(jq -er '.releaseBundle.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_RELEASE_BUNDLE_SIZE_BYTES="$(jq -er '.releaseBundle.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256="$(jq -er '.releaseBundle.manifestSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256="$(jq -er '.dockerActivationEnvelope.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES="$(jq -er '.dockerActivationEnvelope.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE="$(jq -er '.dockerActivationEnvelope.payloadType' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID="$(jq -er '.dockerActivationEnvelope.runtimeIntentId' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
-          export DEPLOY_DOCKER_ACTIVATION_GENERATION="$(jq -er '.dockerActivationEnvelope.generation' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_ENVIRONMENT_SHA256="$(jq -er '.runtimeIntent.environmentSha256' "$DEPLOY_ADMISSION_RECEIPT_PATH")"
+          DEPLOY_DAST_PROVIDER_RECEIPT_SHA256="$(jq -er '.dastProviderReceiptSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256="$(jq -er '.dastAuthorizationSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DAST_CHAIN_SHA256="$(jq -er '.dastChainSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DAST_PROVIDER_METADATA_SHA256="$(jq -er '.chain.providerMetadataSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256="$(jq -er '.chain.sigstoreBundleSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          DEPLOY_DAST_SIGSTORE_SUBJECT="$(jq -er '.chain.sigstoreSubject' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"
+          DEPLOY_RELEASE_BUNDLE_SHA256="$(jq -er '.releaseBundle.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_RELEASE_BUNDLE_SIZE_BYTES="$(jq -er '.releaseBundle.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256="$(jq -er '.releaseBundle.manifestSha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256="$(jq -er '.dockerActivationEnvelope.sha256' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES="$(jq -er '.dockerActivationEnvelope.sizeBytes' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE="$(jq -er '.dockerActivationEnvelope.payloadType' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID="$(jq -er '.dockerActivationEnvelope.runtimeIntentId' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          DEPLOY_DOCKER_ACTIVATION_GENERATION="$(jq -er '.dockerActivationEnvelope.generation' "$DEPLOY_ACTIVATION_PROMOTION_RESULT")"
+          export DEPLOY_ENVIRONMENT_SHA256 DEPLOY_DAST_PROVIDER_RECEIPT_SHA256
+          export DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256 DEPLOY_DAST_CHAIN_SHA256
+          export DEPLOY_DAST_PROVIDER_METADATA_SHA256 DEPLOY_DAST_SIGSTORE_BUNDLE_SHA256 DEPLOY_DAST_SIGSTORE_SUBJECT
+          export DEPLOY_RELEASE_BUNDLE_SHA256 DEPLOY_RELEASE_BUNDLE_SIZE_BYTES DEPLOY_RELEASE_BUNDLE_MANIFEST_SHA256
+          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SHA256 DEPLOY_DOCKER_ACTIVATION_ENVELOPE_SIZE_BYTES
+          export DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID
+          export DEPLOY_DOCKER_ACTIVATION_GENERATION
           test "$DEPLOY_DAST_PROVIDER_RECEIPT_SHA256" = "${{ needs.dast-zap.outputs.dast_receipt_sha256 }}"
           test "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_SHA256" = "$(sha256sum "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH" | awk '{print $1}')"
           test "$DEPLOY_DAST_CHAIN_SHA256" = "$(jq -er '.chainSha256' "$DEPLOY_DAST_ACTIVATION_AUTHORIZATION_PATH")"

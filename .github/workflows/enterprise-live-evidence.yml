@@ -152,7 +152,8 @@ jobs:
           set -e
           printf '%s\n' "$output"
           test "$status" -ne 0
-          report=$(ls -t reports/evidence-bundle-verify/evidence-bundle-verify-*.json | head -n 1)
+          report=$(find reports/evidence-bundle-verify -type f -name 'evidence-bundle-verify-*.json' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')
+          test -n "$report"
           node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (p.status !== "external-pending" || p.issues.length !== 0 || p.externalPending.length === 0) process.exit(1)' "$report"
 
       - name: Upload live evidence reports
