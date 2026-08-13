@@ -1,0 +1,1336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.invalid/schemas/v1-brownfield-runtime-identity.schema.json",
+  "title": "Verify-only V1 brownfield runtime identity bridge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "documentId",
+    "scope",
+    "evidenceClass",
+    "synthetic",
+    "verifyOnly",
+    "status",
+    "stagingBoundary",
+    "schedulerBoundary",
+    "productionBoundary",
+    "currentContracts",
+    "safety"
+  ],
+  "properties": {
+    "schema": { "const": "platform.v1-brownfield-runtime-identity/v1" },
+    "documentId": { "$ref": "#/$defs/sha256" },
+    "scope": { "const": "platform-infrastructure" },
+    "evidenceClass": {
+      "enum": ["EXTERNAL-PENDING-TEMPLATE", "SYNTHETIC-TEST"]
+    },
+    "synthetic": { "type": "boolean" },
+    "verifyOnly": { "const": true },
+    "status": {
+      "enum": ["EXTERNAL-PENDING", "SYNTHETIC-COMPLETE-NOT-AUTHORIZED"]
+    },
+    "stagingBoundary": { "$ref": "#/$defs/stagingBoundary" },
+    "schedulerBoundary": { "$ref": "#/$defs/schedulerBoundary" },
+    "productionBoundary": { "$ref": "#/$defs/productionBoundary" },
+    "currentContracts": { "$ref": "#/$defs/currentContracts" },
+    "safety": { "$ref": "#/$defs/safety" }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/pendingDocumentState" },
+    { "$ref": "#/$defs/syntheticDocumentState" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sha256OrNull": {
+      "anyOf": [
+        { "$ref": "#/$defs/sha256" },
+        { "type": "null" }
+      ]
+    },
+    "stringOrNull": {
+      "type": ["string", "null"]
+    },
+    "imageReferenceOrNull": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:/-]+@sha256:[a-f0-9]{64}$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "imageIdOrNull": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "timestampOrNull": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "legacyApplicationDataPathOrNull": {
+      "enum": [
+        "/home/platform_infrastructure/platform-infrastructure/projects-portal/state",
+        null
+      ]
+    },
+    "emptyObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "emptyObjectOrNull": {
+      "anyOf": [
+        { "$ref": "#/$defs/emptyObject" },
+        { "type": "null" }
+      ]
+    },
+    "volumeLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "com.docker.compose.project",
+        "com.docker.compose.version",
+        "com.docker.compose.volume"
+      ],
+      "properties": {
+        "com.docker.compose.project": { "const": "platform_infra_vps" },
+        "com.docker.compose.version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+        },
+        "com.docker.compose.volume": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "volumeLabelsOrNull": {
+      "anyOf": [
+        { "$ref": "#/$defs/volumeLabels" },
+        { "type": "null" }
+      ]
+    },
+    "backupJobsVolumeLabelsOrNull": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["com.docker.compose.project", "com.docker.compose.version", "com.docker.compose.volume"],
+          "properties": {
+            "com.docker.compose.project": { "const": "platform_infra_vps" },
+            "com.docker.compose.version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
+            "com.docker.compose.volume": { "const": "backup_scheduler_jobs" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "backupLogsVolumeLabelsOrNull": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["com.docker.compose.project", "com.docker.compose.version", "com.docker.compose.volume"],
+          "properties": {
+            "com.docker.compose.project": { "const": "platform_infra_vps" },
+            "com.docker.compose.version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
+            "com.docker.compose.volume": { "const": "backup_scheduler_logs" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "activationCasVolumeLabelsOrNull": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["com.docker.compose.project", "com.docker.compose.version", "com.docker.compose.volume"],
+          "properties": {
+            "com.docker.compose.project": { "const": "platform_infra_vps" },
+            "com.docker.compose.version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
+            "com.docker.compose.volume": { "const": "docker_action_activation_cas" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "brokerSocketVolumeLabelsOrNull": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["com.docker.compose.project", "com.docker.compose.version", "com.docker.compose.volume"],
+          "properties": {
+            "com.docker.compose.project": { "const": "platform_infra_vps" },
+            "com.docker.compose.version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
+            "com.docker.compose.volume": { "const": "docker_action_broker_socket" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "brokerStateVolumeLabelsOrNull": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["com.docker.compose.project", "com.docker.compose.version", "com.docker.compose.volume"],
+          "properties": {
+            "com.docker.compose.project": { "const": "platform_infra_vps" },
+            "com.docker.compose.version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
+            "com.docker.compose.volume": { "const": "docker_action_broker_state" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "composeFileOrder": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "prefixItems": [
+        { "const": "compose.yaml" },
+        { "const": "compose.secrets.yaml" },
+        { "const": "compose.waf.yaml" },
+        { "const": "compose.vps.yaml" },
+        { "const": "compose.vps-waf.yaml" },
+        { "const": "compose.backup-scheduler.yaml" },
+        { "const": "compose.runtime.yaml" },
+        { "const": "compose.networks.yaml" },
+        { "const": "compose.runtime-isolation.yaml" },
+        { "const": "compose.runtime-identity.yaml" }
+      ],
+      "items": false
+    },
+    "productionServices": {
+      "type": "array",
+      "minItems": 20,
+      "maxItems": 20,
+      "prefixItems": [
+        { "const": "alertmanager" },
+        { "const": "backup-scheduler" },
+        { "const": "broker-auth-bootstrap" },
+        { "const": "control-center" },
+        { "const": "docker-action-activation-sidecar" },
+        { "const": "docker-action-broker" },
+        { "const": "grafana" },
+        { "const": "keycloak" },
+        { "const": "loki" },
+        { "const": "mariadb" },
+        { "const": "minio" },
+        { "const": "nats" },
+        { "const": "platform-alert-dispatcher" },
+        { "const": "postgres" },
+        { "const": "project-router" },
+        { "const": "prometheus" },
+        { "const": "promtail" },
+        { "const": "redis" },
+        { "const": "traefik" },
+        { "const": "waf" }
+      ],
+      "items": false
+    },
+    "productionNetworks": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "prefixItems": [
+        { "const": "platform_bus" },
+        { "const": "platform_cache" },
+        { "const": "platform_db_admin" },
+        { "const": "platform_edge" },
+        { "const": "platform_egress" },
+        { "const": "platform_observability" },
+        { "const": "platform_postgres" },
+        { "const": "platform_routing" },
+        { "const": "platform_storage" }
+      ],
+      "items": false
+    },
+    "protectedResourceMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configs", "networks", "secrets", "services", "volumes"],
+      "properties": {
+        "configs": {
+          "type": "array",
+          "prefixItems": [{ "const": "enterprise_traefik_routes" }],
+          "minItems": 1,
+          "maxItems": 1,
+          "items": false
+        },
+        "networks": { "$ref": "#/$defs/productionNetworks" },
+        "secrets": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "alertmanager_webhook_token" },
+            { "const": "control_center_database_url" },
+            { "const": "control_center_vault_keys" },
+            { "const": "docker_action_backup_catalog" },
+            { "const": "docker_action_backup_job_execute" },
+            { "const": "docker_action_backup_offsite_sync" },
+            { "const": "docker_action_backup_prune_apply" },
+            { "const": "docker_action_backup_prune_plan" },
+            { "const": "docker_action_evidence_runtime_snapshot" },
+            { "const": "docker_action_restore_drill_full" },
+            { "const": "docker_action_runtime_intent_trust_key" },
+            { "const": "grafana_admin_password" },
+            { "const": "keycloak_admin_password" },
+            { "const": "keycloak_db_password" },
+            { "const": "mariadb_root_password" },
+            { "const": "minio_root_password" },
+            { "const": "nats_password" },
+            { "const": "postgres_superuser_password" },
+            { "const": "projects_gateway_signing_keys" },
+            { "const": "redis_password" },
+            { "const": "smtp_password" }
+          ],
+          "minItems": 21,
+          "maxItems": 21,
+          "items": false
+        },
+        "services": { "$ref": "#/$defs/productionServices" },
+        "volumes": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "backup_scheduler_jobs" },
+            { "const": "backup_scheduler_logs" },
+            { "const": "docker_action_activation_cas" },
+            { "const": "docker_action_broker_socket" },
+            { "const": "docker_action_broker_state" },
+            { "const": "enterprise_alertmanager_data" },
+            { "const": "enterprise_grafana_data" },
+            { "const": "enterprise_keycloak_data" },
+            { "const": "enterprise_loki_data" },
+            { "const": "enterprise_mariadb_data" },
+            { "const": "enterprise_minio_data" },
+            { "const": "enterprise_nats_data" },
+            { "const": "enterprise_postgres_data" },
+            { "const": "enterprise_prometheus_data" },
+            { "const": "enterprise_redis_data" },
+            { "const": "nats_auth_config" },
+            { "const": "redis_auth_config" }
+          ],
+          "minItems": 17,
+          "maxItems": 17,
+          "items": false
+        }
+      }
+    },
+    "stagingBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectName",
+        "disposition",
+        "executionAuthorized",
+        "sourceFiles",
+        "sourceSetSha256",
+        "serviceNames",
+        "volumeNames"
+      ],
+      "properties": {
+        "projectName": { "const": "platform_infra_v1_control" },
+        "disposition": { "const": "NON_EXECUTABLE" },
+        "executionAuthorized": { "const": false },
+        "sourceFiles": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "compose.v1-control-plane.yaml" },
+            { "const": "governance/v1-brownfield-control-plane.json" },
+            { "const": "scripts/v1-brownfield-control-plane-gate.mjs" }
+          ],
+          "minItems": 3,
+          "maxItems": 3,
+          "items": false
+        },
+        "sourceSetSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "serviceNames": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "docker-action-activation-sidecar" },
+            { "const": "docker-action-broker" }
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": false
+        },
+        "volumeNames": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "backup_scheduler_jobs" },
+            { "const": "docker_action_activation_cas" },
+            { "const": "docker_action_broker_socket" },
+            { "const": "docker_action_broker_state" }
+          ],
+          "minItems": 4,
+          "maxItems": 4,
+          "items": false
+        }
+      }
+    },
+    "schedulerBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractSchema",
+        "projectName",
+        "disposition",
+        "executionAuthorized",
+        "dataRollbackAuthorized",
+        "contractArtifactSha256",
+        "identitySetSha256",
+        "queueMigrationSha256",
+        "applicationDataParentBindingSha256"
+      ],
+      "properties": {
+        "contractSchema": { "const": "platform.v1-brownfield-scheduler-cutover-plan/v1" },
+        "projectName": { "const": "platform_infra_vps" },
+        "disposition": { "const": "VERIFY_ONLY_STOP" },
+        "executionAuthorized": { "const": false },
+        "dataRollbackAuthorized": { "const": false },
+        "contractArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "identitySetSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "queueMigrationSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "applicationDataParentBindingSha256": { "$ref": "#/$defs/sha256OrNull" }
+      }
+    },
+    "composeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawFullRenderBytesSha256",
+        "fileOrder",
+        "fileOrderSha256",
+        "profiles",
+        "profilesSha256",
+        "environmentSha256",
+        "projectName",
+        "projectNameSha256",
+        "serviceNames",
+        "serviceSetSha256",
+        "configSha256",
+        "networkNames",
+        "networksSha256",
+        "attachmentsSha256",
+        "resourceMap",
+        "resourceMapSha256",
+        "noHostedPolicyBytesSha256"
+      ],
+      "properties": {
+        "rawFullRenderBytesSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "fileOrder": { "$ref": "#/$defs/composeFileOrder" },
+        "fileOrderSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "profiles": {
+          "type": "array",
+          "prefixItems": [{ "const": "backup" }],
+          "minItems": 1,
+          "maxItems": 1,
+          "items": false
+        },
+        "profilesSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "environmentSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "projectName": { "const": "platform_infra_vps" },
+        "projectNameSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "serviceNames": { "$ref": "#/$defs/productionServices" },
+        "serviceSetSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "configSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "networkNames": { "$ref": "#/$defs/productionNetworks" },
+        "networksSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "attachmentsSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "resourceMap": { "$ref": "#/$defs/protectedResourceMap" },
+        "resourceMapSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "noHostedPolicyBytesSha256": { "$ref": "#/$defs/sha256OrNull" }
+      }
+    },
+    "runtimeContainers": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "containerName", "projectName", "networkMode", "networkNames", "containerId", "imageReference", "imageId", "configHash", "mountsSha256", "networkAttachmentsSha256", "inspectionArtifactSha256", "containerCasSha256"],
+          "properties": {
+            "service": { "const": "docker-action-activation-sidecar" },
+            "containerName": { "const": "enterprise-docker-action-activation-sidecar" },
+            "projectName": { "const": "platform_infra_vps" },
+            "networkMode": { "const": "none" },
+            "networkNames": { "type": "array", "maxItems": 0 },
+            "containerId": { "$ref": "#/$defs/sha256OrNull" },
+            "imageReference": { "$ref": "#/$defs/imageReferenceOrNull" },
+            "imageId": { "$ref": "#/$defs/imageIdOrNull" },
+            "configHash": { "$ref": "#/$defs/sha256OrNull" },
+            "mountsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "networkAttachmentsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "containerCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "containerName", "projectName", "networkMode", "networkNames", "containerId", "imageReference", "imageId", "configHash", "mountsSha256", "networkAttachmentsSha256", "inspectionArtifactSha256", "containerCasSha256"],
+          "properties": {
+            "service": { "const": "docker-action-broker" },
+            "containerName": { "const": "enterprise-docker-action-broker" },
+            "projectName": { "const": "platform_infra_vps" },
+            "networkMode": { "const": "none" },
+            "networkNames": { "type": "array", "maxItems": 0 },
+            "containerId": { "$ref": "#/$defs/sha256OrNull" },
+            "imageReference": { "$ref": "#/$defs/imageReferenceOrNull" },
+            "imageId": { "$ref": "#/$defs/imageIdOrNull" },
+            "configHash": { "$ref": "#/$defs/sha256OrNull" },
+            "mountsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "networkAttachmentsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "containerCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "containerName", "projectName", "networkMode", "networkNames", "containerId", "imageReference", "imageId", "configHash", "mountsSha256", "networkAttachmentsSha256", "inspectionArtifactSha256", "containerCasSha256"],
+          "properties": {
+            "service": { "const": "backup-scheduler" },
+            "containerName": { "const": "enterprise-backup-scheduler" },
+            "projectName": { "const": "platform_infra_vps" },
+            "networkMode": { "const": "none" },
+            "networkNames": { "type": "array", "maxItems": 0 },
+            "containerId": { "$ref": "#/$defs/sha256OrNull" },
+            "imageReference": { "$ref": "#/$defs/imageReferenceOrNull" },
+            "imageId": { "$ref": "#/$defs/imageIdOrNull" },
+            "configHash": { "$ref": "#/$defs/sha256OrNull" },
+            "mountsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "networkAttachmentsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "containerCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "containerName", "projectName", "networkMode", "networkNames", "containerId", "imageReference", "imageId", "configHash", "mountsSha256", "networkAttachmentsSha256", "inspectionArtifactSha256", "containerCasSha256"],
+          "properties": {
+            "service": { "const": "control-center" },
+            "containerName": { "const": "enterprise-control-center" },
+            "projectName": { "const": "platform_infra_vps" },
+            "networkMode": { "const": "COMPOSE-NETWORKS" },
+            "networkNames": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "platform_routing" },
+                { "const": "platform_db_admin" },
+                { "const": "platform_observability" },
+                { "const": "platform_egress" }
+              ],
+              "minItems": 4,
+              "maxItems": 4,
+              "items": false
+            },
+            "containerId": { "$ref": "#/$defs/sha256OrNull" },
+            "imageReference": { "$ref": "#/$defs/imageReferenceOrNull" },
+            "imageId": { "$ref": "#/$defs/imageIdOrNull" },
+            "configHash": { "$ref": "#/$defs/sha256OrNull" },
+            "mountsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "networkAttachmentsSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "containerCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        }
+      ],
+      "items": false
+    },
+    "runtimeVolumes": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalName", "physicalName", "driver", "scope", "options", "labels", "createdAt", "mountpoint", "inspectionArtifactSha256", "volumeCasSha256"],
+          "properties": {
+            "logicalName": { "const": "backup_scheduler_jobs" },
+            "physicalName": { "const": "platform_infra_vps_backup_scheduler_jobs" },
+            "driver": { "enum": ["local", null] },
+            "scope": { "enum": ["local", null] },
+            "options": { "$ref": "#/$defs/emptyObjectOrNull" },
+            "labels": { "$ref": "#/$defs/backupJobsVolumeLabelsOrNull" },
+            "createdAt": { "$ref": "#/$defs/timestampOrNull" },
+            "mountpoint": {
+              "anyOf": [
+                { "type": "string", "pattern": "^/(?:(?!\\.{1,2}/)[^/\\u0000]+/)*volumes/platform_infra_vps_backup_scheduler_jobs/_data$" },
+                { "type": "null" }
+              ]
+            },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "volumeCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalName", "physicalName", "driver", "scope", "options", "labels", "createdAt", "mountpoint", "inspectionArtifactSha256", "volumeCasSha256"],
+          "properties": {
+            "logicalName": { "const": "backup_scheduler_logs" },
+            "physicalName": { "const": "platform_infra_vps_backup_scheduler_logs" },
+            "driver": { "enum": ["local", null] },
+            "scope": { "enum": ["local", null] },
+            "options": { "$ref": "#/$defs/emptyObjectOrNull" },
+            "labels": { "$ref": "#/$defs/backupLogsVolumeLabelsOrNull" },
+            "createdAt": { "$ref": "#/$defs/timestampOrNull" },
+            "mountpoint": {
+              "anyOf": [
+                { "type": "string", "pattern": "^/(?:(?!\\.{1,2}/)[^/\\u0000]+/)*volumes/platform_infra_vps_backup_scheduler_logs/_data$" },
+                { "type": "null" }
+              ]
+            },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "volumeCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalName", "physicalName", "driver", "scope", "options", "labels", "createdAt", "mountpoint", "inspectionArtifactSha256", "volumeCasSha256"],
+          "properties": {
+            "logicalName": { "const": "docker_action_activation_cas" },
+            "physicalName": { "const": "platform_infra_vps_docker_action_activation_cas" },
+            "driver": { "enum": ["local", null] },
+            "scope": { "enum": ["local", null] },
+            "options": { "$ref": "#/$defs/emptyObjectOrNull" },
+            "labels": { "$ref": "#/$defs/activationCasVolumeLabelsOrNull" },
+            "createdAt": { "$ref": "#/$defs/timestampOrNull" },
+            "mountpoint": {
+              "anyOf": [
+                { "type": "string", "pattern": "^/(?:(?!\\.{1,2}/)[^/\\u0000]+/)*volumes/platform_infra_vps_docker_action_activation_cas/_data$" },
+                { "type": "null" }
+              ]
+            },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "volumeCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalName", "physicalName", "driver", "scope", "options", "labels", "createdAt", "mountpoint", "inspectionArtifactSha256", "volumeCasSha256"],
+          "properties": {
+            "logicalName": { "const": "docker_action_broker_socket" },
+            "physicalName": { "const": "platform_infra_vps_docker_action_broker_socket" },
+            "driver": { "enum": ["local", null] },
+            "scope": { "enum": ["local", null] },
+            "options": { "$ref": "#/$defs/emptyObjectOrNull" },
+            "labels": { "$ref": "#/$defs/brokerSocketVolumeLabelsOrNull" },
+            "createdAt": { "$ref": "#/$defs/timestampOrNull" },
+            "mountpoint": {
+              "anyOf": [
+                { "type": "string", "pattern": "^/(?:(?!\\.{1,2}/)[^/\\u0000]+/)*volumes/platform_infra_vps_docker_action_broker_socket/_data$" },
+                { "type": "null" }
+              ]
+            },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "volumeCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalName", "physicalName", "driver", "scope", "options", "labels", "createdAt", "mountpoint", "inspectionArtifactSha256", "volumeCasSha256"],
+          "properties": {
+            "logicalName": { "const": "docker_action_broker_state" },
+            "physicalName": { "const": "platform_infra_vps_docker_action_broker_state" },
+            "driver": { "enum": ["local", null] },
+            "scope": { "enum": ["local", null] },
+            "options": { "$ref": "#/$defs/emptyObjectOrNull" },
+            "labels": { "$ref": "#/$defs/brokerStateVolumeLabelsOrNull" },
+            "createdAt": { "$ref": "#/$defs/timestampOrNull" },
+            "mountpoint": {
+              "anyOf": [
+                { "type": "string", "pattern": "^/(?:(?!\\.{1,2}/)[^/\\u0000]+/)*volumes/platform_infra_vps_docker_action_broker_state/_data$" },
+                { "type": "null" }
+              ]
+            },
+            "inspectionArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+            "volumeCasSha256": { "$ref": "#/$defs/sha256OrNull" }
+          }
+        }
+      ],
+      "items": false
+    },
+    "queueOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "containerName", "access", "source", "target"],
+      "properties": {
+        "service": { "type": "string" },
+        "containerName": { "type": "string" },
+        "access": { "enum": ["RW", "RO"] },
+        "source": { "const": "backup_scheduler_jobs" },
+        "target": { "type": "string" }
+      }
+    },
+    "queueOwnership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logicalVolumeName", "parentAndChildScope", "owners", "extraParentOrChildReadWriteWriters", "completeParentAndChildWriterEnumeration", "observationArtifactSha256", "writerEnumerationSha256"],
+      "properties": {
+        "logicalVolumeName": { "const": "backup_scheduler_jobs" },
+        "parentAndChildScope": { "const": "EXACT-PARENT-AND-CHILD" },
+        "owners": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "containerName", "access", "source", "target"],
+              "properties": {
+                "service": { "const": "control-center" },
+                "containerName": { "const": "enterprise-control-center" },
+                "access": { "const": "RW" },
+                "source": { "const": "backup_scheduler_jobs" },
+                "target": { "const": "/var/www/project-state/backup-jobs" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "containerName", "access", "source", "target"],
+              "properties": {
+                "service": { "const": "backup-scheduler" },
+                "containerName": { "const": "enterprise-backup-scheduler" },
+                "access": { "const": "RW" },
+                "source": { "const": "backup_scheduler_jobs" },
+                "target": { "const": "/var/www/project-state/backup-jobs" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "containerName", "access", "source", "target"],
+              "properties": {
+                "service": { "const": "docker-action-broker" },
+                "containerName": { "const": "enterprise-docker-action-broker" },
+                "access": { "const": "RO" },
+                "source": { "const": "backup_scheduler_jobs" },
+                "target": { "const": "/run/platform/backup-jobs" }
+              }
+            }
+          ],
+          "items": false
+        },
+        "extraParentOrChildReadWriteWriters": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "completeParentAndChildWriterEnumeration": {
+          "enum": [true, null]
+        },
+        "observationArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "writerEnumerationSha256": { "$ref": "#/$defs/sha256OrNull" }
+      }
+    },
+    "applicationAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "containerName", "sourcePath", "target", "readOnly"],
+      "properties": {
+        "service": { "type": "string" },
+        "containerName": { "type": "string" },
+        "sourcePath": { "$ref": "#/$defs/legacyApplicationDataPathOrNull" },
+        "target": { "const": "/var/www/project-state" },
+        "readOnly": { "type": "boolean" }
+      }
+    },
+    "applicationDataParent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "sourcePath", "canonicalPath", "sourceIdentitySha256", "baselineBindingSha256", "consumerSetSha256", "observationArtifactSha256", "preservedForFirstCutover", "relocationAllowed", "finalAttachments"],
+      "properties": {
+        "classification": { "const": "APPLICATION-DATA" },
+        "sourcePath": { "$ref": "#/$defs/legacyApplicationDataPathOrNull" },
+        "canonicalPath": { "$ref": "#/$defs/legacyApplicationDataPathOrNull" },
+        "sourceIdentitySha256": { "$ref": "#/$defs/sha256OrNull" },
+        "baselineBindingSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "consumerSetSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "observationArtifactSha256": { "$ref": "#/$defs/sha256OrNull" },
+        "preservedForFirstCutover": { "const": true },
+        "relocationAllowed": { "const": false },
+        "finalAttachments": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "containerName", "sourcePath", "target", "readOnly"],
+              "properties": {
+                "service": { "const": "control-center" },
+                "containerName": { "const": "enterprise-control-center" },
+                "sourcePath": { "$ref": "#/$defs/legacyApplicationDataPathOrNull" },
+                "target": { "const": "/var/www/project-state" },
+                "readOnly": { "const": false }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "containerName", "sourcePath", "target", "readOnly"],
+              "properties": {
+                "service": { "const": "project-router" },
+                "containerName": { "const": "enterprise-project-router" },
+                "sourcePath": { "$ref": "#/$defs/legacyApplicationDataPathOrNull" },
+                "target": { "const": "/var/www/project-state" },
+                "readOnly": { "const": true }
+              }
+            }
+          ],
+          "items": false
+        }
+      }
+    },
+    "productionBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectName", "compose", "containers", "volumes", "queueOwnership", "applicationDataParent"],
+      "properties": {
+        "projectName": { "const": "platform_infra_vps" },
+        "compose": { "$ref": "#/$defs/composeIdentity" },
+        "containers": { "$ref": "#/$defs/runtimeContainers" },
+        "volumes": { "$ref": "#/$defs/runtimeVolumes" },
+        "queueOwnership": { "$ref": "#/$defs/queueOwnership" },
+        "applicationDataParent": { "$ref": "#/$defs/applicationDataParent" }
+      }
+    },
+    "currentContracts": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "sourceFiles", "status", "mismatches"],
+          "properties": {
+            "id": { "const": "v1-control-plane-staging" },
+            "sourceFiles": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "compose.v1-control-plane.yaml" },
+                { "const": "governance/v1-brownfield-control-plane.json" },
+                { "const": "scripts/v1-brownfield-control-plane-gate.mjs" }
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "items": false
+            },
+            "status": { "const": "MISMATCH-STOP" },
+            "mismatches": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "STAGING-NAMESPACE-NON-EXECUTABLE" },
+                { "const": "STAGING-HAS-FOUR-NOT-FIVE-FINAL-VOLUMES" },
+                { "const": "STAGING-OMITS-FINAL-SCHEDULER-AND-CONTROL-CENTER" }
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "items": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "sourceFiles", "status", "mismatches"],
+          "properties": {
+            "id": { "const": "scheduler-cutover" },
+            "sourceFiles": {
+              "type": "array",
+              "prefixItems": [{ "const": "scripts/v1-brownfield-scheduler-cutover.mjs" }],
+              "minItems": 1,
+              "maxItems": 1,
+              "items": false
+            },
+            "status": { "const": "MISMATCH-STOP" },
+            "mismatches": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "VERIFY-ONLY-DESCRIPTION-NOT-RUNTIME-OBSERVATION" },
+                { "const": "FINAL-CONTAINER-VOLUME-AND-RENDER-CAS-EXTERNAL-PENDING" }
+              ],
+              "minItems": 2,
+              "maxItems": 2,
+              "items": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "sourceFiles", "status", "mismatches"],
+          "properties": {
+            "id": { "const": "production-runtime-no-hosted" },
+            "sourceFiles": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "scripts/compose-vps.sh" },
+                { "const": "compose.backup-scheduler.yaml" },
+                { "const": "compose.runtime-isolation.yaml" },
+                { "const": "config/no-hosted-workloads.lock.json" }
+              ],
+              "minItems": 4,
+              "maxItems": 4,
+              "items": false
+            },
+            "status": { "const": "MISMATCH-STOP" },
+            "mismatches": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "CONTROL-CENTER-MISSING-CANONICAL-QUEUE-VOLUME-MOUNT" },
+                { "const": "RAW-FULL-RENDER-AND-RUNTIME-CAS-EXTERNAL-PENDING" },
+                { "const": "APPLICATION-DATA-PARENT-FIRST-CUTOVER-BINDING-EXTERNAL-PENDING" }
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "items": false
+            }
+          }
+        }
+      ],
+      "items": false
+    },
+    "pendingStagingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectName": {},
+        "disposition": {},
+        "executionAuthorized": {},
+        "sourceFiles": {},
+        "sourceSetSha256": { "const": null },
+        "serviceNames": {},
+        "volumeNames": {}
+      }
+    },
+    "syntheticStagingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectName": {},
+        "disposition": {},
+        "executionAuthorized": {},
+        "sourceFiles": {},
+        "sourceSetSha256": { "$ref": "#/$defs/sha256" },
+        "serviceNames": {},
+        "volumeNames": {}
+      }
+    },
+    "pendingSchedulerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contractSchema": {},
+        "projectName": {},
+        "disposition": {},
+        "executionAuthorized": {},
+        "dataRollbackAuthorized": {},
+        "contractArtifactSha256": { "const": null },
+        "identitySetSha256": { "const": null },
+        "queueMigrationSha256": { "const": null },
+        "applicationDataParentBindingSha256": { "const": null }
+      }
+    },
+    "syntheticSchedulerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contractSchema": {},
+        "projectName": {},
+        "disposition": {},
+        "executionAuthorized": {},
+        "dataRollbackAuthorized": {},
+        "contractArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "identitySetSha256": { "$ref": "#/$defs/sha256" },
+        "queueMigrationSha256": { "$ref": "#/$defs/sha256" },
+        "applicationDataParentBindingSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "pendingComposeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rawFullRenderBytesSha256": { "const": null },
+        "fileOrder": {},
+        "fileOrderSha256": { "const": null },
+        "profiles": {},
+        "profilesSha256": { "const": null },
+        "environmentSha256": { "const": null },
+        "projectName": {},
+        "projectNameSha256": { "const": null },
+        "serviceNames": {},
+        "serviceSetSha256": { "const": null },
+        "configSha256": { "const": null },
+        "networkNames": {},
+        "networksSha256": { "const": null },
+        "attachmentsSha256": { "const": null },
+        "resourceMap": {},
+        "resourceMapSha256": { "const": null },
+        "noHostedPolicyBytesSha256": { "const": null }
+      }
+    },
+    "syntheticComposeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rawFullRenderBytesSha256": { "$ref": "#/$defs/sha256" },
+        "fileOrder": {},
+        "fileOrderSha256": { "$ref": "#/$defs/sha256" },
+        "profiles": {},
+        "profilesSha256": { "$ref": "#/$defs/sha256" },
+        "environmentSha256": { "$ref": "#/$defs/sha256" },
+        "projectName": {},
+        "projectNameSha256": { "$ref": "#/$defs/sha256" },
+        "serviceNames": {},
+        "serviceSetSha256": { "$ref": "#/$defs/sha256" },
+        "configSha256": { "$ref": "#/$defs/sha256" },
+        "networkNames": {},
+        "networksSha256": { "$ref": "#/$defs/sha256" },
+        "attachmentsSha256": { "$ref": "#/$defs/sha256" },
+        "resourceMap": {},
+        "resourceMapSha256": { "$ref": "#/$defs/sha256" },
+        "noHostedPolicyBytesSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "pendingContainerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service": {},
+        "containerName": {},
+        "projectName": {},
+        "networkMode": {},
+        "networkNames": {},
+        "containerId": { "const": null },
+        "imageReference": { "const": null },
+        "imageId": { "const": null },
+        "configHash": { "const": null },
+        "mountsSha256": { "const": null },
+        "networkAttachmentsSha256": { "const": null },
+        "inspectionArtifactSha256": { "const": null },
+        "containerCasSha256": { "const": null }
+      }
+    },
+    "syntheticContainerState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service": {},
+        "containerName": {},
+        "projectName": {},
+        "networkMode": {},
+        "networkNames": {},
+        "containerId": { "$ref": "#/$defs/sha256" },
+        "imageReference": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:/-]+@sha256:[a-f0-9]{64}$"
+        },
+        "imageId": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "configHash": { "$ref": "#/$defs/sha256" },
+        "mountsSha256": { "$ref": "#/$defs/sha256" },
+        "networkAttachmentsSha256": { "$ref": "#/$defs/sha256" },
+        "inspectionArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "containerCasSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "pendingVolumeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logicalName": {},
+        "physicalName": {},
+        "driver": { "const": null },
+        "scope": { "const": null },
+        "options": { "const": null },
+        "labels": { "const": null },
+        "createdAt": { "const": null },
+        "mountpoint": { "const": null },
+        "inspectionArtifactSha256": { "const": null },
+        "volumeCasSha256": { "const": null }
+      }
+    },
+    "syntheticVolumeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logicalName": {},
+        "physicalName": {},
+        "driver": { "const": "local" },
+        "scope": { "const": "local" },
+        "options": { "$ref": "#/$defs/emptyObject" },
+        "labels": { "$ref": "#/$defs/volumeLabels" },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "mountpoint": { "type": "string", "pattern": "^/" },
+        "inspectionArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "volumeCasSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "pendingQueueState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logicalVolumeName": {},
+        "parentAndChildScope": {},
+        "owners": {},
+        "extraParentOrChildReadWriteWriters": {},
+        "completeParentAndChildWriterEnumeration": { "const": null },
+        "observationArtifactSha256": { "const": null },
+        "writerEnumerationSha256": { "const": null }
+      }
+    },
+    "syntheticQueueState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logicalVolumeName": {},
+        "parentAndChildScope": {},
+        "owners": {},
+        "extraParentOrChildReadWriteWriters": {},
+        "completeParentAndChildWriterEnumeration": { "const": true },
+        "observationArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "writerEnumerationSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "pendingApplicationAttachmentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service": {},
+        "containerName": {},
+        "sourcePath": { "const": null },
+        "target": {},
+        "readOnly": {}
+      }
+    },
+    "syntheticApplicationAttachmentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service": {},
+        "containerName": {},
+        "sourcePath": {
+          "const": "/home/platform_infrastructure/platform-infrastructure/projects-portal/state"
+        },
+        "target": {},
+        "readOnly": {}
+      }
+    },
+    "pendingApplicationDataState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "classification": {},
+        "sourcePath": { "const": null },
+        "canonicalPath": { "const": null },
+        "sourceIdentitySha256": { "const": null },
+        "baselineBindingSha256": { "const": null },
+        "consumerSetSha256": { "const": null },
+        "observationArtifactSha256": { "const": null },
+        "preservedForFirstCutover": {},
+        "relocationAllowed": {},
+        "finalAttachments": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/pendingApplicationAttachmentState" },
+            { "$ref": "#/$defs/pendingApplicationAttachmentState" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "syntheticApplicationDataState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "classification": {},
+        "sourcePath": {
+          "const": "/home/platform_infrastructure/platform-infrastructure/projects-portal/state"
+        },
+        "canonicalPath": {
+          "const": "/home/platform_infrastructure/platform-infrastructure/projects-portal/state"
+        },
+        "sourceIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "baselineBindingSha256": { "$ref": "#/$defs/sha256" },
+        "consumerSetSha256": { "$ref": "#/$defs/sha256" },
+        "observationArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "preservedForFirstCutover": {},
+        "relocationAllowed": {},
+        "finalAttachments": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/syntheticApplicationAttachmentState" },
+            { "$ref": "#/$defs/syntheticApplicationAttachmentState" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "pendingProductionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectName": {},
+        "compose": { "$ref": "#/$defs/pendingComposeState" },
+        "containers": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "$ref": "#/$defs/pendingContainerState" },
+            { "$ref": "#/$defs/pendingContainerState" },
+            { "$ref": "#/$defs/pendingContainerState" },
+            { "$ref": "#/$defs/pendingContainerState" }
+          ],
+          "items": false
+        },
+        "volumes": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            { "$ref": "#/$defs/pendingVolumeState" },
+            { "$ref": "#/$defs/pendingVolumeState" },
+            { "$ref": "#/$defs/pendingVolumeState" },
+            { "$ref": "#/$defs/pendingVolumeState" },
+            { "$ref": "#/$defs/pendingVolumeState" }
+          ],
+          "items": false
+        },
+        "queueOwnership": { "$ref": "#/$defs/pendingQueueState" },
+        "applicationDataParent": { "$ref": "#/$defs/pendingApplicationDataState" }
+      }
+    },
+    "syntheticProductionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectName": {},
+        "compose": { "$ref": "#/$defs/syntheticComposeState" },
+        "containers": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "$ref": "#/$defs/syntheticContainerState" },
+            { "$ref": "#/$defs/syntheticContainerState" },
+            { "$ref": "#/$defs/syntheticContainerState" },
+            { "$ref": "#/$defs/syntheticContainerState" }
+          ],
+          "items": false
+        },
+        "volumes": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "prefixItems": [
+            { "$ref": "#/$defs/syntheticVolumeState" },
+            { "$ref": "#/$defs/syntheticVolumeState" },
+            { "$ref": "#/$defs/syntheticVolumeState" },
+            { "$ref": "#/$defs/syntheticVolumeState" },
+            { "$ref": "#/$defs/syntheticVolumeState" }
+          ],
+          "items": false
+        },
+        "queueOwnership": { "$ref": "#/$defs/syntheticQueueState" },
+        "applicationDataParent": { "$ref": "#/$defs/syntheticApplicationDataState" }
+      }
+    },
+    "pendingDocumentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {},
+        "documentId": {},
+        "scope": {},
+        "evidenceClass": { "const": "EXTERNAL-PENDING-TEMPLATE" },
+        "synthetic": { "const": false },
+        "verifyOnly": {},
+        "status": { "const": "EXTERNAL-PENDING" },
+        "stagingBoundary": { "$ref": "#/$defs/pendingStagingState" },
+        "schedulerBoundary": { "$ref": "#/$defs/pendingSchedulerState" },
+        "productionBoundary": { "$ref": "#/$defs/pendingProductionState" },
+        "currentContracts": {},
+        "safety": {}
+      }
+    },
+    "syntheticDocumentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {},
+        "documentId": {},
+        "scope": {},
+        "evidenceClass": { "const": "SYNTHETIC-TEST" },
+        "synthetic": { "const": true },
+        "verifyOnly": {},
+        "status": { "const": "SYNTHETIC-COMPLETE-NOT-AUTHORIZED" },
+        "stagingBoundary": { "$ref": "#/$defs/syntheticStagingState" },
+        "schedulerBoundary": { "$ref": "#/$defs/syntheticSchedulerState" },
+        "productionBoundary": { "$ref": "#/$defs/syntheticProductionState" },
+        "currentContracts": {},
+        "safety": {}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unknownResources", "preserveApplications", "preserveDatabases", "preservePersistentStorage", "deploymentAuthority", "executionAuthorized", "mutationAuthority", "executorAvailable", "dockerExecutor", "networkAuthority", "signingAuthority", "dataRollbackAuthorized", "actions"],
+      "properties": {
+        "unknownResources": { "const": "PRESERVE+STOP" },
+        "preserveApplications": { "const": true },
+        "preserveDatabases": { "const": true },
+        "preservePersistentStorage": { "const": true },
+        "deploymentAuthority": { "const": false },
+        "executionAuthorized": { "const": false },
+        "mutationAuthority": { "const": false },
+        "executorAvailable": { "const": false },
+        "dockerExecutor": { "const": false },
+        "networkAuthority": { "const": false },
+        "signingAuthority": { "const": false },
+        "dataRollbackAuthorized": { "const": false },
+        "actions": { "type": "array", "maxItems": 0 }
+      }
+    }
+  }
+}

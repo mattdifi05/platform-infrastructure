@@ -1,0 +1,661 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.example.invalid/schemas/v1-phase-b-preinstall-authorization.schema.json",
+  "title": "V1 Phase-B dual-signed PREINSTALL authorization payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "activationAuthority",
+    "authoritativeBackup",
+    "authorizationId",
+    "consumerChallenge",
+    "dataRollbackAuthority",
+    "decision",
+    "deploymentAuthority",
+    "expiresAt",
+    "installPlanSha256",
+    "installationAuthority",
+    "installerBootstrapSha256",
+    "issuedAt",
+    "materializationPreconditions",
+    "materializationTargetPlanSha256",
+    "notBefore",
+    "operationScope",
+    "packageInputObservation",
+    "policySha256",
+    "preMutationAncestryVerification",
+    "preinstallTuple",
+    "preinstallTupleSha256",
+    "principalAccountObservation",
+    "producers",
+    "replayClaimPrecondition",
+    "replayRequirements",
+    "resourceObservation",
+    "schema",
+    "transactionId",
+    "version"
+  ],
+  "properties": {
+    "schema": {
+      "const": "platform.v1-phase-b-preinstall-authorization/v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "authorizationId": {
+      "$ref": "#/$defs/identifier"
+    },
+    "transactionId": {
+      "$ref": "#/$defs/sha256"
+    },
+    "issuedAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "notBefore": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "policySha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "preinstallTuple": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/preinstallTuple"
+    },
+    "preinstallTupleSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "installPlanSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "installerBootstrapSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "authoritativeBackup": {
+      "$ref": "#/$defs/backupReference"
+    },
+    "consumerChallenge": {
+      "$ref": "#/$defs/challenge"
+    },
+    "operationScope": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/phaseBOperationScope"
+    },
+    "materializationPreconditions": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/materializationPreconditions"
+    },
+    "materializationTargetPlanSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "packageInputObservation": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/packageInputObservation"
+    },
+    "preMutationAncestryVerification": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/ancestryVerification"
+    },
+    "principalAccountObservation": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/principalAccountObservation"
+    },
+    "replayClaimPrecondition": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/replayClaimPrecondition"
+    },
+    "resourceObservation": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/resourceObservation"
+    },
+    "replayRequirements": {
+      "$ref": "#/$defs/replayRequirements"
+    },
+    "producers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationTargetRoot",
+        "phaseBInstaller"
+      ],
+      "properties": {
+        "activationTargetRoot": {
+          "allOf": [
+            {
+              "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/targetRootProducer"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "const": "activationTargetRoot"
+                },
+                "rootState": {
+                  "const": "ABSENT_PROVEN"
+                }
+              }
+            }
+          ]
+        },
+        "phaseBInstaller": {
+          "allOf": [
+            {
+              "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/externalProducer"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "const": "phaseBInstaller"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "decision": {
+      "const": "AUTHORIZE_EXACT_PREINSTALL_ONLY"
+    },
+    "installationAuthority": {
+      "const": true
+    },
+    "deploymentAuthority": {
+      "const": false
+    },
+    "activationAuthority": {
+      "const": false
+    },
+    "dataRollbackAuthority": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+    },
+    "identifier": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/opaqueIdentifier"
+    },
+    "positiveDecimal": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/positiveDecimal"
+    },
+    "timestamp": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+    },
+    "nonce": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/nonce"
+    },
+    "backupReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestationId",
+        "backupAuthorityKeyId",
+        "backupSetId",
+        "backupTrustPolicySha256",
+        "envelopeSha256",
+        "expiresAt",
+        "issuedAt",
+        "payloadSha256",
+        "payloadType",
+        "sourceTargetCustodianKeyId"
+      ],
+      "properties": {
+        "attestationId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backupAuthorityKeyId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backupSetId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backupTrustPolicySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "envelopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "issuedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "payloadSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payloadType": {
+          "const": "application/vnd.platform.v1-authoritative-backup-attestation.v1+json"
+        },
+        "sourceTargetCustodianKeyId": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "challengeId",
+        "consumerJob",
+        "consumerJobWorkflowSha",
+        "consumerRepository",
+        "consumerRunAttempt",
+        "consumerRunId",
+        "consumerWorkflowPath",
+        "expiresAt",
+        "issuedAt",
+        "maxAgeSeconds",
+        "nonce",
+        "replayDomain"
+      ],
+      "properties": {
+        "challengeId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "consumerJob": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/externalProducer/properties/jobName"
+        },
+        "consumerJobWorkflowSha": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/gitSha"
+        },
+        "consumerRepository": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/candidateRepository"
+        },
+        "consumerRunAttempt": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/safePositiveInteger"
+        },
+        "consumerRunId": {
+          "$ref": "#/$defs/positiveDecimal"
+        },
+        "consumerWorkflowPath": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/externalProducer/properties/workflowPath"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "issuedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "maxAgeSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900
+        },
+        "nonce": {
+          "$ref": "#/$defs/nonce"
+        },
+        "replayDomain": {
+          "const": "phase-b-exact-preinstall/platform-infrastructure/v1"
+        }
+      }
+    },
+    "replayRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "atomicCreateExclusiveRequired",
+        "claimAncestrySha256",
+        "claimFileFsyncRequired",
+        "claimNegativeLookupReceiptSha256",
+        "claimObjectPath",
+        "claimParentFsyncRequired",
+        "claimParentIdentitySha256",
+        "claimParentPath",
+        "consumeBeforeFirstNonClaimMutation",
+        "failureStateTerminal",
+        "journalCreatedExclusiveRequired",
+        "journalRecordPath",
+        "journalStorePath",
+        "ledgerId",
+        "priorState",
+        "receiptCreatedExclusiveRequired",
+        "receiptObjectKeySha256",
+        "receiptObjectPath",
+        "receiptStorePath",
+        "replayKeySha256",
+        "schema",
+        "status"
+      ],
+      "properties": {
+        "schema": {
+          "const": "platform.v1-phase-b-replay-requirements/v1"
+        },
+        "ledgerId": {
+          "const": "platform-v1-phase-b-installer-ledger"
+        },
+        "claimParentPath": {
+          "const": "/var/lib"
+        },
+        "claimParentIdentitySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claimAncestrySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "replayKeySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claimObjectPath": {
+          "type": "string",
+          "pattern": "^/var/lib/\\.platform-v1-phase-b-claim-[a-f0-9]{64}$"
+        },
+        "claimNegativeLookupReceiptSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "journalStorePath": {
+          "const": "/var/lib/platform-infrastructure/v1-phase-b-ledger"
+        },
+        "journalRecordPath": {
+          "type": "string",
+          "pattern": "^/var/lib/platform-infrastructure/v1-phase-b-ledger/[a-f0-9]{64}\\.json$"
+        },
+        "receiptStorePath": {
+          "const": "/var/lib/platform-infrastructure/v1-install-receipts/sha256"
+        },
+        "receiptObjectKeySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "receiptObjectPath": {
+          "type": "string",
+          "pattern": "^/var/lib/platform-infrastructure/v1-install-receipts/sha256/[a-f0-9]{64}\\.json$"
+        },
+        "priorState": {
+          "const": "ABSENT_PROVEN"
+        },
+        "consumeBeforeFirstNonClaimMutation": {
+          "const": true
+        },
+        "atomicCreateExclusiveRequired": {
+          "const": true
+        },
+        "claimFileFsyncRequired": {
+          "const": true
+        },
+        "claimParentFsyncRequired": {
+          "const": true
+        },
+        "journalCreatedExclusiveRequired": {
+          "const": true
+        },
+        "receiptCreatedExclusiveRequired": {
+          "const": true
+        },
+        "failureStateTerminal": {
+          "const": true
+        },
+        "status": {
+          "const": "EXTERNAL_PENDING"
+        }
+      }
+    },
+    "verificationOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "authoritativeEvidence",
+        "callerSuppliedTrustAnchors",
+        "localMutationAuthority",
+        "installationAuthorized",
+        "deploymentAuthorized",
+        "activationAuthorized",
+        "dataRollbackAuthorized",
+        "replayLedgerStatus",
+        "replayVerified",
+        "phaseAHistoricalReplayReceiptAuthenticationStatus",
+        "phaseAHistoricalReplayReceiptAuthenticated",
+        "packageMaterializationStatus",
+        "packageMaterializationVerified",
+        "rawBaselineVerificationStatus",
+        "rawBackupReceiptVerificationStatus",
+        "sourceSetRecomputationStatus",
+        "offHostSourceDeviceExclusionVerificationStatus",
+        "restoredCoverageRecomputationStatus",
+        "databaseCoverageRecomputationStatus",
+        "protectedPathOverlapVerificationStatus",
+        "packageArchiveFormatVerificationStatus",
+        "packageManifestMemberExtractionVerificationStatus",
+        "replayArtifactByteSchemaVerificationStatus",
+        "consumerChallengeAuthorityStatus",
+        "expectedBindingsAuthorityStatus",
+        "rawBaselineReopened",
+        "rawStructuralBackupReceiptReopened",
+        "sourceDeviceSetRecomputed",
+        "offHostSourceDeviceExclusionRecomputed",
+        "restoredCoverageRecomputed",
+        "databaseCoverageRecomputed",
+        "protectedPathSetRecomputed",
+        "allInstallWritesDisjointFromProtectedPaths",
+        "packageArchiveFormatVerified",
+        "packageManifestMembersRecomputed",
+        "replayClaimBytesSchemaVerified",
+        "replayJournalBytesSchemaVerified",
+        "installExecutionReceiptBytesSchemaVerified",
+        "consumerChallengeAuthorityVerified",
+        "expectedBindingsAuthorityVerified",
+        "trustedNativeLauncherRequired",
+        "stdoutAuthority",
+        "liveAuthorization",
+        "mutationAuthority",
+        "sourceDeviceSetSha256",
+        "sourceDeviceCount",
+        "sourceDeviceIdentitiesComplete",
+        "preMutationFilesystemObservationStatus",
+        "preMutationFilesystemObservationReceiptSha256",
+        "preMutationFilesystemRuntimeRecheckStatus",
+        "preMutationFilesystemRuntimeRecheckVerified",
+        "runtimeBootstrapTrustStatus",
+        "runtimeBootstrapTrustVerified",
+        "effect",
+        "policySha256",
+        "preinstallTupleSha256",
+        "phaseAPackageEnvelopeSha256",
+        "phaseAAuthorizationEnvelopeSha256",
+        "backupAttestationEnvelopeSha256",
+        "phaseBPreinstallEnvelopeSha256",
+        "transactionId",
+        "authorizationId",
+        "permittedOperations",
+        "forbiddenOperations"
+      ],
+      "properties": {
+        "schema": {
+          "const": "platform.v1-phase-b-preinstall-verification/v1"
+        },
+        "status": {
+          "const": "SIGNATURE_VERIFIED_NON_AUTHORITATIVE"
+        },
+        "authoritativeEvidence": {
+          "const": false
+        },
+        "callerSuppliedTrustAnchors": {
+          "const": true
+        },
+        "localMutationAuthority": {
+          "const": false
+        },
+        "installationAuthorized": {
+          "const": false
+        },
+        "deploymentAuthorized": {
+          "const": false
+        },
+        "activationAuthorized": {
+          "const": false
+        },
+        "dataRollbackAuthorized": {
+          "const": false
+        },
+        "replayLedgerStatus": {
+          "const": "EXTERNAL_PENDING"
+        },
+        "replayVerified": {
+          "const": false
+        },
+        "phaseAHistoricalReplayReceiptAuthenticationStatus": {
+          "const": "EXTERNAL_PENDING"
+        },
+        "phaseAHistoricalReplayReceiptAuthenticated": {
+          "const": false
+        },
+        "packageMaterializationStatus": {
+          "const": "EXTERNAL_PENDING"
+        },
+        "packageMaterializationVerified": {
+          "const": false
+        },
+        "rawBaselineVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "rawBackupReceiptVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "sourceSetRecomputationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "offHostSourceDeviceExclusionVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "restoredCoverageRecomputationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "databaseCoverageRecomputationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "protectedPathOverlapVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "packageArchiveFormatVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "packageManifestMemberExtractionVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "replayArtifactByteSchemaVerificationStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "consumerChallengeAuthorityStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "expectedBindingsAuthorityStatus": {
+          "const": "EXTERNAL_ROOT_CONSUMER_REQUIRED"
+        },
+        "rawBaselineReopened": {
+          "const": false
+        },
+        "rawStructuralBackupReceiptReopened": {
+          "const": false
+        },
+        "sourceDeviceSetRecomputed": {
+          "const": false
+        },
+        "offHostSourceDeviceExclusionRecomputed": {
+          "const": false
+        },
+        "restoredCoverageRecomputed": {
+          "const": false
+        },
+        "databaseCoverageRecomputed": {
+          "const": false
+        },
+        "protectedPathSetRecomputed": {
+          "const": false
+        },
+        "allInstallWritesDisjointFromProtectedPaths": {
+          "const": false
+        },
+        "packageArchiveFormatVerified": {
+          "const": false
+        },
+        "packageManifestMembersRecomputed": {
+          "const": false
+        },
+        "replayClaimBytesSchemaVerified": {
+          "const": false
+        },
+        "replayJournalBytesSchemaVerified": {
+          "const": false
+        },
+        "installExecutionReceiptBytesSchemaVerified": {
+          "const": false
+        },
+        "consumerChallengeAuthorityVerified": {
+          "const": false
+        },
+        "expectedBindingsAuthorityVerified": {
+          "const": false
+        },
+        "trustedNativeLauncherRequired": {
+          "const": true
+        },
+        "stdoutAuthority": {
+          "const": false
+        },
+        "liveAuthorization": {
+          "const": false
+        },
+        "mutationAuthority": {
+          "const": false
+        },
+        "sourceDeviceSetSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceDeviceCount": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/safePositiveInteger"
+        },
+        "sourceDeviceIdentitiesComplete": {
+          "const": true
+        },
+        "preMutationFilesystemObservationStatus": {
+          "const": "SIGNATURE_BOUND_NON_AUTHORITATIVE"
+        },
+        "preMutationFilesystemObservationReceiptSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "preMutationFilesystemRuntimeRecheckStatus": {
+          "const": "EXTERNAL_PENDING"
+        },
+        "preMutationFilesystemRuntimeRecheckVerified": {
+          "const": false
+        },
+        "runtimeBootstrapTrustStatus": {
+          "const": "EXTERNAL_PENDING"
+        },
+        "runtimeBootstrapTrustVerified": {
+          "const": false
+        },
+        "effect": {
+          "const": "STOP"
+        },
+        "policySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "preinstallTupleSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "phaseAPackageEnvelopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "phaseAAuthorizationEnvelopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backupAttestationEnvelopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "phaseBPreinstallEnvelopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "transactionId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authorizationId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "permittedOperations": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/phaseBOperationScope/properties/permitted"
+        },
+        "forbiddenOperations": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/phaseBOperationScope/properties/forbidden"
+        }
+      }
+    }
+  }
+}

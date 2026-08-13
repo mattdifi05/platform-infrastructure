@@ -1,8 +1,26 @@
 # Platform VPS Pre-Deploy Checklist
 
-Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
+This document has two disjoint host modes. Never apply the fresh-host commands
+to an existing/brownfield host merely because a local flag or report says that
+the operation is confirmed.
 
-## Host Bootstrap
+## Existing/brownfield V1: terminal STOP
+
+- [ ] Treat `vps-go-live.sh --confirmLive` and the `enterprise-vps-evidence`
+      workflow/remote collector as terminal STOP with exit 78.
+- [ ] Do not run bootstrap, hardening, Docker daemon replacement/restart, Git
+      fetch, evidence collection or any other live mutation through those paths.
+- [ ] A caller flag, environment value, local `NONAUTHORITATIVE` report or
+      self-asserted `SATISFIED`/`AUTHORIZED` state cannot lift this stop.
+- [ ] Resume only through the controlled V1 sequence after a canonical complete
+      live baseline, a separate verified and restorable PRE-DEPLOY backup for
+      every application/database/storage mapping, and all three authenticated
+      provider gates. Until then those gates remain `EXTERNAL-PENDING`.
+
+## Fresh-host bootstrap only
+
+The commands in this section are only for a proven empty/new Ubuntu LTS host.
+They are not recovery or admission instructions for the existing V1 server.
 
 - [ ] Ubuntu LTS installed and updated.
 - [ ] `sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user <deploy-user>` executed, installing Git, jq, Docker Engine, Buildx and Docker Compose plugin from Docker's official Ubuntu apt repository.
@@ -13,7 +31,9 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] Password SSH login disabled.
 - [ ] `sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd` executed after key access and the target SSH port were verified, including Docker daemon hardening, and the JSON/Markdown report under `reports/vps-hardening/` was archived outside Git. If an existing `/etc/docker/daemon.json` blocks the run, review the generated template and rerun with `--replace-docker-daemon-config`.
 - [ ] `sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce` passed and the JSON/Markdown report under `reports/vps-host/`, including the expected SSH port, UFW allow rule and remediation guidance for every check, was archived outside Git.
-- [ ] GitHub Actions workflow `enterprise-vps-evidence` passed in the `production` environment; its verified receipt/provenance binds the archive to the exact workflow commit and Git tree, and the artifact was archived outside Git.
+- [ ] Do not use `enterprise-vps-evidence` for V1: it is deliberately hard-stopped
+      before SSH. Run the reviewed standalone fresh-host scripts directly only
+      when the host is independently proven empty/new.
 - [ ] `sudo ufw status verbose` reviewed.
 - [ ] fail2ban active.
 - [ ] `sh ./scripts/container-metrics-sandbox-test.sh` passed without touching the live Docker runtime.
@@ -50,7 +70,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] The gated deploy used one canonical verified hosted-workload lock and exact project name for the ordered sequence: bounded Compose `create`; unprivileged `hosted-workload-network-ownership.sh --lock <absolute-lock> --project-name <project>`; noninteractive root `workload-egress-firewall.sh --apply --confirm APPLY-WORKLOAD-EGRESS-FIREWALL` and `--verify`, both with the same lock/project; fresh ownership/firewall verification; bounded Compose `start`. The deployment identity has the narrow reviewed `sudo -n` prerequisite for that firewall gate. No prefix discovery, caller subnet, or direct wrapper mutation was used.
 - [ ] `sh ./scripts/linux-portability-check.sh` passed and the JSON/Markdown report under `reports/linux-portability/` was archived outside Git.
 - [ ] No mutable `:latest` image exists in the rendered VPS+WAF stack.
-- [ ] `sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated a reviewed JSON/Markdown plan under `reports/vps-go-live/`; if an existing Docker daemon config must be replaced, the reviewed plan includes `--replace-docker-daemon-config`.
+- [ ] `sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated only a reviewed `NONAUTHORITATIVE` JSON/Markdown plan under `reports/vps-go-live/`. Never turn that plan into existing-host authority with `--confirmLive`; it remains terminal STOP.
 - [ ] `sh ./scripts/vps-postdeploy.sh .env` passed after the first VPS compose start, including WAF smoke and `infra-health` against public URLs from `.env`.
 - [ ] Remote deploy variables reviewed: `DEPLOY_RUN_PRE_GO_LIVE`, `DEPLOY_RUN_GO_NO_GO`, `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL`, `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN` and `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE` are enabled only for the final evidence window.
 

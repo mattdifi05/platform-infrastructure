@@ -1,0 +1,106 @@
+{
+  "schema": "platform.v1-phase-a-authorization-policy/v1",
+  "version": 1,
+  "status": "EXTERNAL-PENDING",
+  "reason": "No independent provider READY policy, role-separated verification keys, protected workflow approvals, package attestation, or read-only authorization has been supplied through a trusted channel.",
+  "selfAssertedEvidenceAccepted": false,
+  "localTemplate": true,
+  "authoritativeEvidence": false,
+  "trustAnchorProvenance": "NOT_CONFIGURED",
+  "replayLedgerStatus": "EXTERNAL_PENDING",
+  "candidate": {
+    "repository": null,
+    "repositoryId": null,
+    "repositoryOwnerId": null,
+    "commitSha": null,
+    "treeSha": null,
+    "clean": null,
+    "sourceArchiveSha256": null,
+    "packageSha256": null,
+    "packageManifestSha256": null
+  },
+  "twoPhaseOrderContract": {
+    "id": null,
+    "sha256": null
+  },
+  "packageAttestor": {
+    "role": "packageAttestor",
+    "algorithm": "Ed25519",
+    "keyId": null,
+    "publicKeySpkiPem": null,
+    "producer": {
+      "repository": null,
+      "repositoryId": null,
+      "repositoryOwnerId": null,
+      "workflowPath": null,
+      "jobWorkflowSha": null,
+      "headSha": null,
+      "ref": null,
+      "eventName": null,
+      "runId": null,
+      "runAttempt": null,
+      "jobName": null,
+      "protectedEnvironment": null,
+      "approvalDecision": null,
+      "approvalApproverIdentity": null,
+      "approvalEvidenceIdentity": null,
+      "approvalEvidenceSha256": null,
+      "approvalEvidenceIssuedAt": null
+    }
+  },
+  "phaseAAuthorizationProvider": {
+    "role": "phaseAAuthorizationProvider",
+    "algorithm": "Ed25519",
+    "keyId": null,
+    "publicKeySpkiPem": null,
+    "producer": {
+      "repository": null,
+      "repositoryId": null,
+      "repositoryOwnerId": null,
+      "workflowPath": null,
+      "jobWorkflowSha": null,
+      "headSha": null,
+      "ref": null,
+      "eventName": null,
+      "runId": null,
+      "runAttempt": null,
+      "jobName": null,
+      "protectedEnvironment": null,
+      "approvalDecision": null,
+      "approvalApproverIdentity": null,
+      "approvalEvidenceIdentity": null,
+      "approvalEvidenceSha256": null,
+      "approvalEvidenceIssuedAt": null
+    }
+  },
+  "futureRoleKeyIds": {
+    "backupAuthority": null,
+    "sourceTargetCustodian": null,
+    "phaseBInstaller": null,
+    "hostedGate": null,
+    "deploymentGate": null,
+    "activationGate": null,
+    "admissionController": null,
+    "activationTargetRoot": null
+  },
+  "packageAttestation": {
+    "payloadType": "application/vnd.platform.v1.phase-a.package-attestation.v1+json",
+    "maxLifetimeSeconds": 600
+  },
+  "authorization": {
+    "payloadType": "application/vnd.platform.v1.phase-a.read-only-authorization.v1+json",
+    "maxLifetimeSeconds": 300,
+    "permittedOperations": [
+      "READ_ONLY_LIVE_PREFLIGHT"
+    ],
+    "forbiddenOperations": [
+      "CREATE_BACKUP",
+      "QUIESCE",
+      "INSTALL",
+      "DOCKER",
+      "FIREWALL",
+      "ACTIVATE",
+      "RESTORE"
+    ]
+  }
+}

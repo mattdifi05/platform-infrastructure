@@ -247,6 +247,25 @@ jobs:
           sh scripts/deploy-vps-input-test.sh
           sh scripts/deploy-vps-order-test.sh
           sh scripts/vps-activation-sink-test.sh
+      - name: V1 brownfield offline preservation tests
+        timeout-minutes: 10
+        run: |
+          node --test --test-concurrency=1 \
+            scripts/live-preservation-baseline.test.mjs \
+            scripts/v1-predeploy-backup-receipt.test.mjs \
+            scripts/v1-provider-gates.test.mjs \
+            scripts/v1-phase-a-authorization.test.mjs \
+            scripts/v1-brownfield-bootstrap.test.mjs \
+            scripts/v1-brownfield-admission.test.mjs \
+            scripts/v1-install-package.test.mjs \
+            scripts/v1-phase-b-preinstall-authorization.test.mjs \
+            scripts/v1-phase-b-replay-artifacts.test.mjs \
+            scripts/v1-brownfield-runtime-identity.test.mjs \
+            scripts/v1-brownfield-application-data-cutover.test.mjs \
+            scripts/v1-brownfield-scheduler-cutover.test.mjs \
+            scripts/v1-brownfield-control-plane-policy.test.mjs \
+            scripts/v1-brownfield-control-plane-gate.test.mjs \
+            scripts/hosted-workload-preservation-guard.test.mjs
       - name: Upload supply-chain evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1103,6 +1122,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Block production until authoritative V1 brownfield admission exists
+        run: |
+          echo "::error::STOP: authoritative V1 brownfield admission is not implemented; canonical COMPLETE baseline, immutable/CAS PRE-DEPLOY backup, exact candidate commit/tree and target root, and provider+target authorization are required."
+          echo "::error::Local REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE with mutationAuthority=false is deny-only."
+          node ./scripts/v1-brownfield-control-plane-gate.mjs apply
+          exit 78
       - name: Download exact admitted deployment receipts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

@@ -69,6 +69,18 @@ RUNTIME_SOURCE_RENDER_SHA256=
 RUNTIME_WORKLOAD_LOCK_SHA256=
 STATE_DIR=${PLATFORM_ACTIVATION_STATE_DIR:-${XDG_STATE_HOME:-${HOME:?HOME is required}/.local/state}/platform-infrastructure/activation}
 TRANSACTION_ID=
+TRANSACTION_LABEL=com.platform.activation.transaction-id
+TRANSACTION_MODEL_LABEL=com.platform.activation.source-model-sha256
+TRANSACTION_SOURCE_MODEL_SHA256=
+TRANSACTION_RUNTIME_MODEL=
+TRANSACTION_CONTAINER_CAS='[]'
+TRANSACTION_VOLUME_CAS='[]'
+TRANSACTION_NETWORK_CAS='[]'
+TRANSACTION_RESOURCE_PROJECTION='{"volumes":[],"networks":[]}'
+TRANSACTION_RESOURCE_MODE=none
+TRANSACTION_CONTAINERS_REMOVABLE=0
+RESUME_CREATING=0
+PENDING_JOURNAL=
 JOURNAL=
 ACTIVE_RECEIPT=
 BROKER_FD=${PLATFORM_ACTIVATION_BROKER_FD:-}
@@ -85,6 +97,7 @@ declare -a CURRENT_EXTENSIONS=()
 declare -a PREVIOUS_EXTENSIONS=()
 declare -a CURRENT_ALL_SERVICES=()
 declare -a PREVIOUS_ALL_SERVICES=()
+declare -a TRANSACTION_CREATED_CONTAINER_IDS=()
 
 usage() {
   cat >&2 <<'EOF'
@@ -213,6 +226,872 @@ assert_daemon_identity() {
   }
 }
 
+canonical_host_path() {
+  /usr/bin/python3 -I - "$1" <<'PY'
+import os
+import sys
+
+value = sys.argv[1]
+if (not value.startswith("/") or "//" in value or "\x00" in value
+    or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    or (len(value) > 1 and value.endswith("/"))):
+    raise SystemExit(1)
+normalized = os.path.normpath(value)
+if normalized != value:
+    raise SystemExit(1)
+resolved = os.path.realpath(value)
+if not resolved.startswith("/") or os.path.normpath(resolved) != resolved:
+    raise SystemExit(1)
+print(resolved)
+PY
+}
+
+host_path_has_docker_authority() {
+  local candidate=$1 docker_root=$2
+  case "$candidate" in
+    /|/run|/var/run|/run/docker.sock|/var/run/docker.sock) return 0 ;;
+  esac
+  [[ "$candidate" == "$docker_root" \
+      || "$docker_root" == "$candidate/"* ]]
+}
+
+assert_candidate_broker_socket_contract() {
+  local model=$1 service=$2 source=$3 target=$4 read_only=$5 create_host_path=$6
+  [[ "$service" == docker-action-broker \
+      && "$source" == /var/run/docker.sock \
+      && "$target" == /var/run/docker.sock \
+      && "$read_only" == true \
+      && "$create_host_path" == false \
+      && -n "${RELEASE_CONTEXT_JSON:-}" ]] || return 1
+  printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e --slurpfile model "$model" '
+    . as $release
+    | $model[0] as $candidate
+    | ($candidate.services["docker-action-broker"] // null) as $broker
+    | ($broker.volumes // []) as $mounts
+    | ($broker.environment // {}) as $environment
+    | ($release.subjects // []
+        | map(select(.serviceName == "docker-action-broker"))) as $subjects
+    | ($broker | type) == "object"
+    and ($candidate.name == "platform_infra_vps")
+    and ($broker.image | type == "string"
+      and test("^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[a-f0-9]{64}$"))
+    and (($broker | has("build")) | not)
+    and ($broker.init == true)
+    and ($broker.user == "0:0")
+    and ($broker.read_only == true)
+    and ($broker.pids_limit == 256)
+    and ($broker.restart == "unless-stopped")
+    and ($broker.network_mode == "none")
+    and (($broker.networks // {}) | length) == 0
+    and (($broker.ports // []) | length) == 0
+    and (($broker.expose // []) | length) == 0
+    and (($broker.cap_drop // []) == ["ALL"])
+    and (($broker.cap_add // []) | length) == 0
+    and (($broker.group_add // []) | length) == 0
+    and (($broker.security_opt // []) == ["no-new-privileges:true"])
+    and (($broker.entrypoint // []) == [
+      "node",
+      "/opt/platform-docker-broker/docker-action-broker.mjs"
+    ])
+    and ($environment.DOCKER_ACTION_BROKER_SOCKET
+      == "/run/platform/docker-action-broker/broker.sock")
+    and (($environment | has("DOCKER_HOST")) | not)
+    and (($environment | has("DOCKER_API_VERSION")) | not)
+    and (($broker.healthcheck.test // []) == [
+      "CMD",
+      "node",
+      "/opt/platform-docker-broker/docker-action-readiness.mjs",
+      "--require-trusted-activation"
+    ])
+    and ([$mounts[]
+      | select(.type == "bind"
+        and (.source == "/var/run/docker.sock" or .target == "/var/run/docker.sock"))]
+      == [{
+        type: "bind",
+        source: "/var/run/docker.sock",
+        target: "/var/run/docker.sock",
+        read_only: true,
+        bind: {create_host_path: false}
+      }])
+    and ([$candidate.services
+      | to_entries[]
+      | select(any((.value.volumes // [])[];
+          .type == "bind"
+          and (.source == "/var/run/docker.sock"
+            or .source == "/run/docker.sock"
+            or .target == "/var/run/docker.sock"
+            or .target == "/run/docker.sock")))
+      | .key] == ["docker-action-broker"])
+    and ($subjects | length) == 1
+    and ($subjects[0].imageReference == $broker.image)
+    and ($subjects[0].imageId | type == "string"
+      and test("^sha256:[a-f0-9]{64}$"))
+  ' >/dev/null
+}
+
+assert_global_docker_authority_boundary() {
+  local transaction_model=${1:-}
+  local docker_root_raw docker_root inventory_before inventory_after inspections mount_records
+  local id duplicate candidate record source target rw read_only service canonical_source authority_id= authority_source=
+  local registered authorized
+  local before_json after_json
+  local -a before_ids=() after_ids=()
+  docker_root_raw=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    info --format '{{.DockerRootDir}}') || {
+      printf '%s\n' "Docker root identity could not be obtained safely." >&2
+      return 70
+    }
+  [[ "$docker_root_raw" == /* && "$docker_root_raw" != *$'\n'* && "$docker_root_raw" != *$'\r'* ]] || {
+    printf '%s\n' "Docker root identity is ambiguous." >&2
+    return 70
+  }
+  docker_root=$(canonical_host_path "$docker_root_raw") || {
+    printf '%s\n' "Docker root identity is not a canonical absolute path." >&2
+    return 70
+  }
+  inventory_before=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    ps -aq --no-trunc) || {
+      printf '%s\n' "Global container inventory could not be enumerated safely." >&2
+      return 70
+    }
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || {
+      printf '%s\n' "Global container inventory returned an invalid identity." >&2
+      return 70
+    }
+    duplicate=0
+    for candidate in "${before_ids[@]:-}"; do [[ "$candidate" != "$id" ]] || duplicate=1; done
+    (( duplicate == 0 )) || {
+      printf '%s\n' "Global container inventory returned duplicate identities." >&2
+      return 70
+    }
+    before_ids+=("$id")
+  done <<< "$inventory_before"
+  before_json=$(printf '%s\n' "${before_ids[@]:-}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 70
+  if ((${#before_ids[@]} != 0)); then
+    inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+      "${before_ids[@]}") || {
+        printf '%s\n' "Global container inventory could not be inspected safely." >&2
+        return 70
+      }
+    printf '%s' "$inspections" | jq -e --argjson expected "$before_json" '
+      type == "array"
+      and length == ($expected | length)
+      and ([.[].Id] | sort) == $expected
+      and ([.[].Id] | unique | length) == ($expected | length)
+      and all(.[];
+        (type == "object")
+        and (.Id | type == "string")
+        and (.Mounts | type == "array")
+        and all(.Mounts[];
+          (type == "object")
+          and (.Type | type == "string")
+          and (if .Type == "bind" then
+            (.Source | type == "string"
+              and startswith("/")
+              and (contains("\u0009") | not)
+              and (contains("\u000a") | not)
+              and (contains("\u000d") | not))
+            and (.Destination | type == "string" and startswith("/"))
+            and (.RW | type == "boolean")
+          else true end))
+      )
+    ' >/dev/null || {
+      printf '%s\n' "Global container inspection is malformed or differs from inventory." >&2
+      return 70
+    }
+    mount_records=$(printf '%s' "$inspections" | jq -c '
+      .[] | .Id as $id | .Mounts[]
+      | select(.Type == "bind")
+      | {id: $id, source: .Source, target: .Destination, rw: .RW}
+    ') || return 70
+    while IFS= read -r record; do
+      [[ -z "$record" ]] && continue
+      id=$(printf '%s' "$record" | jq -er '.id') || return 70
+      source=$(printf '%s' "$record" | jq -er '.source') || return 70
+      target=$(printf '%s' "$record" | jq -er '.target') || return 70
+      rw=$(printf '%s' "$record" | jq -r '.rw') || return 70
+      [[ "$rw" == true || "$rw" == false ]] || return 70
+      canonical_source=$(canonical_host_path "$source") || {
+        printf 'Container %s has a non-canonical bind source; preserving it and refusing activation.\n' "$id" >&2
+        return 70
+      }
+      if host_path_has_docker_authority "$source" "$docker_root_raw" \
+          || host_path_has_docker_authority "$canonical_source" "$docker_root"; then
+        authorized=0
+        registered=0
+        for candidate in "${TRANSACTION_CREATED_CONTAINER_IDS[@]:-}"; do
+          [[ "$candidate" != "$id" ]] || registered=1
+        done
+        if (( registered == 1 )) && [[ -n "$transaction_model" \
+            && "$source" == /var/run/docker.sock \
+            && ( "$canonical_source" == /var/run/docker.sock || "$canonical_source" == /run/docker.sock ) \
+            && ! -L "$source" && -S "$source" ]]; then
+          service=$(printf '%s' "$inspections" | jq -er --arg id "$id" '
+            [.[] | select(.Id == $id) | .Config.Labels["com.docker.compose.service"]]
+            | if length == 1 then .[0] else error("ambiguous service") end
+          ') || return 70
+          if [[ "$rw" == false ]]; then read_only=true; else read_only=false; fi
+          if [[ "$service" == docker-action-broker ]] \
+              && assert_candidate_broker_socket_contract \
+                "$transaction_model" "$service" "$source" "$target" "$read_only" false; then
+            authorized=1
+          fi
+        fi
+        if (( authorized == 0 )); then
+          authority_id=$id
+          authority_source=$source
+        fi
+      fi
+    done <<< "$mount_records"
+  fi
+  inventory_after=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    ps -aq --no-trunc) || {
+      printf '%s\n' "Global container inventory could not be revalidated safely." >&2
+      return 70
+    }
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || return 70
+    duplicate=0
+    for candidate in "${after_ids[@]:-}"; do [[ "$candidate" != "$id" ]] || duplicate=1; done
+    (( duplicate == 0 )) || return 70
+    after_ids+=("$id")
+  done <<< "$inventory_after"
+  after_json=$(printf '%s\n' "${after_ids[@]:-}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 70
+  [[ "$after_json" == "$before_json" ]] || {
+    printf '%s\n' "Global container inventory changed during authority inspection; refusing activation." >&2
+    return 70
+  }
+  [[ -z "$authority_id" ]] || {
+    printf 'Pre-existing container %s has Docker socket or host-parent authority through %s; preserving it and refusing activation.\n' \
+      "$authority_id" "$authority_source" >&2
+    return 70
+  }
+}
+
+assert_project_preservation_boundary() {
+  local inventory id expected found count=0 inspections
+  local -a live_ids=()
+  inventory=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq --no-trunc \
+    --filter "label=com.docker.compose.project=$PROJECT_NAME") || {
+      printf '%s\n' "Project container inventory could not be enumerated safely." >&2
+      return 70
+    }
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || {
+      printf '%s\n' "Project container inventory returned an invalid identity." >&2
+      return 70
+    }
+    live_ids+=("$id")
+  done <<< "$inventory"
+  if ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} == 0)); then
+    if ((${#live_ids[@]} != 0)); then
+      printf 'Pre-existing project containers are not transaction-owned; preserving %s container(s) and refusing activation.\n' \
+        "${#live_ids[@]}" >&2
+      return 70
+    fi
+    return 0
+  fi
+  for expected in "${TRANSACTION_CREATED_CONTAINER_IDS[@]}"; do
+    [[ "$expected" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || {
+      printf '%s\n' "A registered transaction container identity is invalid; refusing cleanup." >&2
+      return 70
+    }
+  done
+  ((${#live_ids[@]} == ${#TRANSACTION_CREATED_CONTAINER_IDS[@]})) || {
+    printf '%s\n' "Project container inventory differs from the transaction-owned set; preserving unknown containers." >&2
+    return 70
+  }
+  for id in "${live_ids[@]}"; do
+    found=0
+    for expected in "${TRANSACTION_CREATED_CONTAINER_IDS[@]}"; do
+      if [[ "$id" == "$expected" ]]; then
+        found=1
+        break
+      fi
+    done
+    (( found == 1 )) || {
+      printf '%s\n' "Project inventory contains a container not registered by this transaction; preserving it." >&2
+      return 70
+    }
+    count=$((count + 1))
+  done
+  (( count == ${#TRANSACTION_CREATED_CONTAINER_IDS[@]} )) || {
+    printf '%s\n' "Transaction-owned project container inventory is incomplete; refusing mutation." >&2
+    return 70
+  }
+  [[ "$TRANSACTION_SOURCE_MODEL_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
+    printf '%s\n' "Transaction source-model CAS is unavailable; refusing mutation." >&2
+    return 70
+  }
+  printf '%s' "$TRANSACTION_CONTAINER_CAS" | jq -e \
+    --argjson expectedCount "${#TRANSACTION_CREATED_CONTAINER_IDS[@]}" '
+      type == "array"
+      and length == $expectedCount
+      and ([.[].id] | unique | length) == $expectedCount
+      and all(.[];
+        (keys | sort) == ["configHash", "id", "mounts", "networks"]
+        and (.id | type == "string" and length >= 3)
+        and (.configHash | type == "string" and test("^[a-f0-9]{64}$"))
+        and (.mounts | type == "array")
+        and (.networks | type == "array"))
+    ' >/dev/null || {
+      printf '%s\n' "Transaction container CAS set is invalid; refusing mutation." >&2
+      return 70
+    }
+  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}") || {
+      printf '%s\n' "Transaction container CAS identities cannot be inspected." >&2
+      return 70
+    }
+  printf '%s' "$inspections" | jq -e \
+    --arg project "$PROJECT_NAME" \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+    --argjson expectedCas "$TRANSACTION_CONTAINER_CAS" '
+      def normalized_mounts:
+        [(.Mounts // [])[]
+          | if .Type == "volume" then
+              {type: "volume", source: (.Name // ""), target: .Destination,
+               rw: (.RW == true), propagation: ""}
+            elif .Type == "bind" then
+              {type: "bind", source: .Source, target: .Destination,
+               rw: (.RW == true), propagation: (.Propagation // "rprivate")}
+            elif .Type == "tmpfs" then
+              {type: "tmpfs", source: "", target: .Destination,
+               rw: (.RW == true), propagation: ""}
+            else error("unsupported Engine mount type") end]
+        | sort_by(.type, .target, .source);
+      ([.[] | {
+        id: .Id,
+        configHash: .Config.Labels["com.docker.compose.config-hash"],
+        mounts: normalized_mounts,
+        networks: ((.NetworkSettings.Networks // {}) | keys | unique | sort)
+      }] | sort_by(.id)) == ($expectedCas | sort_by(.id))
+      and all(.[];
+        .Config.Labels["com.docker.compose.project"] == $project
+        and .Config.Labels[$transactionLabel] == $transactionId
+        and .Config.Labels[$sourceModelLabel] == $sourceModelSha256)
+    ' >/dev/null || {
+      printf '%s\n' "Transaction container identity/config CAS changed; refusing mutation." >&2
+      return 70
+    }
+}
+
+normalize_transaction_volume_inspection() {
+  jq -c '
+    if type != "array" or length != 1 then error("volume inspection is not singular") else .[0] end
+    | {
+        name: .Name,
+        driver: .Driver,
+        scope: .Scope,
+        labels: (.Labels // {}),
+        options: (.Options // {}),
+        mountpoint: .Mountpoint,
+        createdAt: .CreatedAt
+      }
+  '
+}
+
+normalize_transaction_network_inspection() {
+  jq -c '
+    if type != "array" or length != 1 then error("network inspection is not singular") else .[0] end
+    | {
+        id: .Id,
+        name: .Name,
+        driver: .Driver,
+        scope: .Scope,
+        internal: .Internal,
+        attachable: .Attachable,
+        ingress: .Ingress,
+        configOnly: (.ConfigOnly // false),
+        enableIPv4: (.EnableIPv4 // true),
+        enableIPv6: (.EnableIPv6 // false),
+        labels: (.Labels // {}),
+        options: (.Options // {}),
+        ipam: (.IPAM // {})
+      }
+  '
+}
+
+transaction_resource_projection() {
+  local model=$1 selected_services
+  shift
+  (( $# > 0 )) || return 1
+  selected_services=$(printf '%s\n' "$@" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort') || return 1
+  jq -c --arg project "$PROJECT_NAME" --argjson selected "$selected_services" '
+    . as $model
+    | ($selected | map(
+        . as $service
+        | if ($model.services[$service] | type) == "object" then $service
+          else error("selected service missing from transaction model") end
+      )) as $services
+    | ([$services[] as $service
+        | ($model.services[$service].volumes // [])[]
+        | if type == "object" then . else error("non-object service mount") end
+        | select(.type == "volume")
+        | (.source // "") as $logical
+        | if ($logical | type == "string" and length > 0) then $logical
+          else error("anonymous named volume is not transaction-projectable") end
+      ] | unique | sort) as $volume_logical_names
+    | ([$services[] as $service
+        | ($model.services[$service].networks // {})
+        | if type == "object" then keys[]
+          elif type == "array" then .[]
+          else error("service networks are not projectable") end
+      ] | unique | sort) as $network_logical_names
+    | {
+        volumes: [$volume_logical_names[] as $logical
+          | ($model.volumes[$logical] // null) as $definition
+          | if ($definition | type) != "object" then error("used volume missing from model")
+            elif ($definition.external // false) == true then empty
+            else {
+              logicalName: $logical,
+              physicalName: ($definition.name // ($project + "_" + $logical)),
+              definition: $definition
+            } end],
+        networks: [$network_logical_names[] as $logical
+          | ($model.networks[$logical] // null) as $definition
+          | if ($definition | type) != "object" then error("used network missing from model")
+            elif ($definition.external // false) == true then empty
+            else {
+              logicalName: $logical,
+              physicalName: ($definition.name // ($project + "_" + $logical)),
+              definition: $definition
+            } end]
+      }
+    | if (([.volumes[].physicalName] | unique | length) == (.volumes | length)
+        and ([.networks[].physicalName] | unique | length) == (.networks | length))
+      then . else error("transaction resource projection has an alias collision") end
+  ' "$model"
+}
+
+assert_transaction_resource_projection() {
+  local model=$1 mode=$2
+  shift 2
+  local projection expected actual kind
+  [[ "$mode" == exact || "$mode" == subset ]] || return 1
+  projection=$(transaction_resource_projection "$model" "$@") || return 1
+  for kind in volume network; do
+    if [[ "$kind" == volume ]]; then
+      expected=$(printf '%s' "$projection" | jq -c '[.volumes[] | {logicalName, physicalName}] | sort_by(.physicalName)') || return 1
+      actual=$(printf '%s' "$TRANSACTION_VOLUME_CAS" | jq -c '[.[] | {logicalName, physicalName}] | sort_by(.physicalName)') || return 1
+    else
+      expected=$(printf '%s' "$projection" | jq -c '[.networks[] | {logicalName, physicalName}] | sort_by(.physicalName)') || return 1
+      actual=$(printf '%s' "$TRANSACTION_NETWORK_CAS" | jq -c '[.[] | {logicalName, physicalName}] | sort_by(.physicalName)') || return 1
+    fi
+    if [[ "$mode" == exact ]]; then
+      [[ "$actual" == "$expected" ]] || {
+        printf 'Transaction %s CAS is missing an exact used model resource.\n' "$kind" >&2
+        return 1
+      }
+    else
+      jq -en --argjson expected "$expected" --argjson actual "$actual" '
+        all($actual[]; . as $record | ($expected | index($record)) != null)
+      ' >/dev/null || {
+        printf 'Transaction %s CAS is outside the authorized resource projection.\n' "$kind" >&2
+        return 1
+      }
+    fi
+  done
+}
+
+assert_registered_transaction_resources() {
+  local kind cas record name expected inspection actual
+  local resource_mode=${TRANSACTION_RESOURCE_MODE:-none}
+  local resource_projection=${TRANSACTION_RESOURCE_PROJECTION:-'{"volumes":[],"networks":[]}'}
+  jq -en --arg mode "$resource_mode" \
+    --argjson projection "$resource_projection" \
+    --argjson volumes "$TRANSACTION_VOLUME_CAS" \
+    --argjson networks "$TRANSACTION_NETWORK_CAS" '
+      def identities($records):
+        [$records[] | {logicalName, physicalName}] | sort_by(.physicalName);
+      ($mode == "none" or $mode == "subset" or $mode == "exact")
+      and (($projection | keys | sort) == ["networks", "volumes"])
+      and (($projection.volumes | type) == "array")
+      and (($projection.networks | type) == "array")
+      and (if $mode == "none" then
+        $volumes == [] and $networks == []
+        and $projection == {volumes: [], networks: []}
+      elif $mode == "exact" then
+        identities($volumes) == identities($projection.volumes)
+        and identities($networks) == identities($projection.networks)
+      else
+        all(identities($volumes)[]; . as $record | identities($projection.volumes) | index($record) != null)
+        and all(identities($networks)[]; . as $record | identities($projection.networks) | index($record) != null)
+      end)
+    ' >/dev/null || return 1
+  for kind in volume network; do
+    if [[ "$kind" == volume ]]; then cas=$TRANSACTION_VOLUME_CAS; else cas=$TRANSACTION_NETWORK_CAS; fi
+    printf '%s' "$cas" | jq -e '
+      type == "array"
+      and ([.[].physicalName] | unique | length) == length
+      and all(.[];
+        (keys | sort) == ["inspection", "logicalName", "physicalName"]
+        and (.logicalName | type == "string" and length > 0)
+        and (.physicalName | type == "string" and length > 0)
+        and (.inspection | type == "object"))
+    ' >/dev/null || return 1
+    while IFS= read -r record; do
+      [[ -z "$record" ]] && continue
+      name=$(printf '%s' "$record" | jq -er '.physicalName') || return 1
+      expected=$(printf '%s' "$record" | jq -c '.inspection') || return 1
+      inspection=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+        "$kind" inspect "$name") || return 1
+      if [[ "$kind" == volume ]]; then
+        actual=$(printf '%s' "$inspection" | normalize_transaction_volume_inspection) || return 1
+      else
+        actual=$(printf '%s' "$inspection" | normalize_transaction_network_inspection) || return 1
+      fi
+      [[ "$actual" == "$expected" ]] || {
+        printf 'Registered transaction %s CAS changed for %s; preserving it and refusing mutation.\n' \
+          "$kind" "$name" >&2
+        return 1
+      }
+    done < <(printf '%s' "$cas" | jq -c '.[]')
+  done
+}
+
+register_transaction_resources() {
+  local model=$1 mode=$2
+  shift 2
+  local live_volume_names live_network_names record definition logical name inspection normalized cas_record
+  local projection existing existing_count live found old_volumes old_networks old_projection old_mode
+  local transaction_volumes=$TRANSACTION_VOLUME_CAS transaction_networks=$TRANSACTION_NETWORK_CAS
+  [[ "$model" == /* && -f "$model" && ! -L "$model" \
+      && "$TRANSACTION_ID" =~ ^[a-f0-9]{64}$ \
+      && "$TRANSACTION_SOURCE_MODEL_SHA256" =~ ^[a-f0-9]{64}$ ]] || return 1
+  [[ "$mode" == exact || "$mode" == subset ]] || return 1
+  (( $# > 0 )) || return 1
+  assert_registered_transaction_resources || return 1
+  assert_transaction_resource_projection "$model" subset "$@" || return 1
+  projection=$(transaction_resource_projection "$model" "$@") || return 1
+  old_projection=${TRANSACTION_RESOURCE_PROJECTION:-'{"volumes":[],"networks":[]}'}
+  old_mode=${TRANSACTION_RESOURCE_MODE:-none}
+  if [[ "$old_mode" != none && "$projection" != "$old_projection" ]]; then
+    printf '%s\n' "Transaction resource projection changed; refusing CAS refresh." >&2
+    return 1
+  fi
+  [[ "$old_mode" != exact || "$mode" == exact ]] || {
+    printf '%s\n' "Exact transaction resource CAS cannot regress to subset." >&2
+    return 1
+  }
+  live_volume_names=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    volume ls --format '{{.Name}}') || return 1
+  live_network_names=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    network ls --format '{{.Name}}') || return 1
+  while IFS= read -r record; do
+    [[ -z "$record" ]] && continue
+    logical=$(printf '%s' "$record" | jq -er '.logicalName') || return 1
+    name=$(printf '%s' "$record" | jq -er '.physicalName') || return 1
+    definition=$(printf '%s' "$record" | jq -c '.definition') || return 1
+    found=0
+    while IFS= read -r live; do [[ "$live" != "$name" ]] || found=1; done <<< "$live_volume_names"
+    if (( found == 0 )); then
+      [[ "$mode" == subset ]] && continue
+      printf 'Transaction volume %s is missing from Engine state after successful create.\n' "$name" >&2
+      return 1
+    fi
+    inspection=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+      volume inspect "$name") || return 1
+    printf '%s' "$inspection" | jq -e \
+      --arg project "$PROJECT_NAME" \
+      --arg logical "$logical" \
+      --arg name "$name" \
+      --arg transactionId "$TRANSACTION_ID" \
+      --arg transactionLabel "$TRANSACTION_LABEL" \
+      --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+      --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+      --argjson definition "$definition" '
+        type == "array" and length == 1
+        and (.[0] as $resource
+          | ($definition | type == "object")
+          and (($definition | keys - ["driver", "driver_opts", "labels", "name"]) | length == 0)
+          and ($resource.Name == $name)
+          and ($resource.Driver == ($definition.driver // "local"))
+          and (($resource.Options // {}) == ($definition.driver_opts // {}))
+          and ($resource.Scope | type == "string" and length > 0)
+          and ($resource.Mountpoint | type == "string" and startswith("/"))
+          and ($resource.CreatedAt | type == "string" and length > 0)
+          and (($resource.Labels // {})["com.docker.compose.project"] == $project)
+          and (($resource.Labels // {})["com.docker.compose.volume"] == $logical)
+          and (($resource.Labels // {})[$transactionLabel] == $transactionId)
+          and (($resource.Labels // {})[$sourceModelLabel] == $sourceModelSha256)
+          and all(($definition.labels // {}) | to_entries[];
+            . as $label | ($resource.Labels // {})[$label.key] == $label.value)
+          and ((($resource.Labels // {}) | with_entries(select(.key != "com.docker.compose.version")))
+            == (($definition.labels // {}) + {
+              "com.docker.compose.project": $project,
+              "com.docker.compose.volume": $logical
+            }))
+          and (($resource.Labels // {})["com.docker.compose.version"] | type == "string" and length > 0)
+        )
+      ' >/dev/null || {
+        printf 'Candidate volume %s is not exact transaction-owned state; preserving it.\n' "$name" >&2
+        return 1
+      }
+    normalized=$(printf '%s' "$inspection" | normalize_transaction_volume_inspection) || return 1
+    cas_record=$(jq -cn --arg logicalName "$logical" --arg physicalName "$name" \
+      --argjson inspection "$normalized" \
+      '{logicalName: $logicalName, physicalName: $physicalName, inspection: $inspection}') || return 1
+    existing=$(printf '%s' "$transaction_volumes" | jq -c --arg name "$name" \
+      '[.[] | select(.physicalName == $name)]') || return 1
+    existing_count=$(printf '%s' "$existing" | jq -r 'length') || return 1
+    if (( existing_count == 1 )); then
+      [[ "$(printf '%s' "$existing" | jq -c '.[0]')" == "$cas_record" ]] || {
+        printf 'Registered transaction volume CAS cannot be refreshed for %s.\n' "$name" >&2
+        return 1
+      }
+    elif (( existing_count == 0 )); then
+      transaction_volumes=$(jq -cn --argjson current "$transaction_volumes" --argjson record "$cas_record" \
+        '$current + [$record] | sort_by(.physicalName)') || return 1
+    else
+      return 1
+    fi
+  done < <(printf '%s' "$projection" | jq -c '.volumes[]')
+  while IFS= read -r record; do
+    [[ -z "$record" ]] && continue
+    logical=$(printf '%s' "$record" | jq -er '.logicalName') || return 1
+    name=$(printf '%s' "$record" | jq -er '.physicalName') || return 1
+    definition=$(printf '%s' "$record" | jq -c '.definition') || return 1
+    found=0
+    while IFS= read -r live; do [[ "$live" != "$name" ]] || found=1; done <<< "$live_network_names"
+    if (( found == 0 )); then
+      [[ "$mode" == subset ]] && continue
+      printf 'Transaction network %s is missing from Engine state after successful create.\n' "$name" >&2
+      return 1
+    fi
+    inspection=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+      network inspect "$name") || return 1
+    printf '%s' "$inspection" | jq -e \
+      --arg project "$PROJECT_NAME" \
+      --arg logical "$logical" \
+      --arg name "$name" \
+      --arg transactionId "$TRANSACTION_ID" \
+      --arg transactionLabel "$TRANSACTION_LABEL" \
+      --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+      --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+      --argjson definition "$definition" '
+        type == "array" and length == 1
+        and (.[0] as $resource
+          | ($definition | type == "object")
+          and (($definition | keys - ["attachable", "driver", "driver_opts", "enable_ipv4", "enable_ipv6", "internal", "labels", "name"]) | length == 0)
+          and ($resource.Id | type == "string" and length > 0)
+          and ($resource.Name == $name)
+          and ($resource.Driver == ($definition.driver // "bridge"))
+          and (($resource.Options // {}) == ($definition.driver_opts // {}))
+          and ($resource.Internal == ($definition.internal // false))
+          and ($resource.Attachable == ($definition.attachable // false))
+          and (if $definition.enable_ipv4 == null then true else ($resource.EnableIPv4 // true) == $definition.enable_ipv4 end)
+          and (if $definition.enable_ipv6 == null then true else ($resource.EnableIPv6 // false) == $definition.enable_ipv6 end)
+          and ($resource.Ingress == false)
+          and (($resource.ConfigOnly // false) == false)
+          and (($resource.Labels // {})["com.docker.compose.project"] == $project)
+          and (($resource.Labels // {})["com.docker.compose.network"] == $logical)
+          and (($resource.Labels // {})[$transactionLabel] == $transactionId)
+          and (($resource.Labels // {})[$sourceModelLabel] == $sourceModelSha256)
+          and all(($definition.labels // {}) | to_entries[];
+            . as $label | ($resource.Labels // {})[$label.key] == $label.value)
+          and ((($resource.Labels // {}) | with_entries(select(.key != "com.docker.compose.version")))
+            == (($definition.labels // {}) + {
+              "com.docker.compose.project": $project,
+              "com.docker.compose.network": $logical
+            }))
+          and (($resource.Labels // {})["com.docker.compose.version"] | type == "string" and length > 0)
+        )
+      ' >/dev/null || {
+        printf 'Candidate network %s is not exact transaction-owned state; preserving it.\n' "$name" >&2
+        return 1
+      }
+    normalized=$(printf '%s' "$inspection" | normalize_transaction_network_inspection) || return 1
+    cas_record=$(jq -cn --arg logicalName "$logical" --arg physicalName "$name" \
+      --argjson inspection "$normalized" \
+      '{logicalName: $logicalName, physicalName: $physicalName, inspection: $inspection}') || return 1
+    existing=$(printf '%s' "$transaction_networks" | jq -c --arg name "$name" \
+      '[.[] | select(.physicalName == $name)]') || return 1
+    existing_count=$(printf '%s' "$existing" | jq -r 'length') || return 1
+    if (( existing_count == 1 )); then
+      [[ "$(printf '%s' "$existing" | jq -c '.[0]')" == "$cas_record" ]] || {
+        printf 'Registered transaction network CAS cannot be refreshed for %s.\n' "$name" >&2
+        return 1
+      }
+    elif (( existing_count == 0 )); then
+      transaction_networks=$(jq -cn --argjson current "$transaction_networks" --argjson record "$cas_record" \
+        '$current + [$record] | sort_by(.physicalName)') || return 1
+    else
+      return 1
+    fi
+  done < <(printf '%s' "$projection" | jq -c '.networks[]')
+  old_volumes=$TRANSACTION_VOLUME_CAS
+  old_networks=$TRANSACTION_NETWORK_CAS
+  TRANSACTION_VOLUME_CAS=$transaction_volumes
+  TRANSACTION_NETWORK_CAS=$transaction_networks
+  TRANSACTION_RESOURCE_PROJECTION=$projection
+  TRANSACTION_RESOURCE_MODE=$mode
+  if ! assert_registered_transaction_resources \
+      || ! assert_transaction_resource_projection "$model" "$mode" "$@"; then
+    TRANSACTION_VOLUME_CAS=$old_volumes
+    TRANSACTION_NETWORK_CAS=$old_networks
+    TRANSACTION_RESOURCE_PROJECTION=$old_projection
+    TRANSACTION_RESOURCE_MODE=$old_mode
+    return 1
+  fi
+}
+
+transaction_resource_collision_is_registered() {
+  local kind=$1 name=$2 cas matches inspection actual expected
+  if [[ "$kind" == volume ]]; then cas=$TRANSACTION_VOLUME_CAS; else cas=$TRANSACTION_NETWORK_CAS; fi
+  matches=$(printf '%s' "$cas" | jq -c --arg name "$name" '[.[] | select(.physicalName == $name)]') || return 1
+  [[ "$(printf '%s' "$matches" | jq -r 'length')" == 1 ]] || return 1
+  expected=$(printf '%s' "$matches" | jq -c '.[0].inspection') || return 1
+  inspection=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    "$kind" inspect "$name") || return 1
+  if [[ "$kind" == volume ]]; then
+    actual=$(printf '%s' "$inspection" | normalize_transaction_volume_inspection) || return 1
+  else
+    actual=$(printf '%s' "$inspection" | normalize_transaction_network_inspection) || return 1
+  fi
+  [[ "$actual" == "$expected" ]]
+}
+
+assert_candidate_resource_boundary() {
+  local model=$1 names name live candidate collision_type=
+  local external_volumes bind_records service source target read_only create_host_path
+  local docker_root_raw= docker_root= canonical_source protected
+  local -a candidate_volumes=() candidate_networks=() live_volumes=() live_networks=()
+  [[ "$model" == /* && -f "$model" && ! -L "$model" ]] || return 70
+  assert_registered_transaction_resources || return 70
+  external_volumes=$(jq -r --arg project "$PROJECT_NAME" '
+    (.volumes // {})
+    | to_entries[]
+    | select((.value.external // false) == true)
+    | (.value.name // ($project + "_" + .key))
+  ' "$model") || return 70
+  if [[ -n "$external_volumes" ]]; then
+    printf '%s\n' "Candidate external persistent volume has no authoritative rebuild-backup receipt; refusing activation." >&2
+    return 70
+  fi
+  bind_records=$(jq -r '
+    .services
+    | to_entries[] as $service
+    | ($service.value.volumes // [])[]
+    | if type != "object" then error("non-object mount") else . end
+    | select(.type == "bind")
+    | [
+        $service.key,
+        (.source // ""),
+        (.target // ""),
+        ((.read_only // false) | tostring),
+        ((if (.bind.create_host_path | type) == "boolean"
+          then .bind.create_host_path else true end) | tostring)
+      ]
+    | @tsv
+  ' "$model") || return 70
+  if [[ -n "$bind_records" ]]; then
+    docker_root_raw=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+      info --format '{{.DockerRootDir}}') || return 70
+    [[ "$docker_root_raw" == /* && "$docker_root_raw" != *$'\n'* && "$docker_root_raw" != *$'\r'* ]] || return 70
+    docker_root=$(canonical_host_path "$docker_root_raw") || return 70
+  fi
+  while IFS=$'\t' read -r service source target read_only create_host_path; do
+    [[ -z "$service$source$target$read_only$create_host_path" ]] && continue
+    [[ -n "$service" && "$source" == /* && "$target" == /* \
+        && "$source" != *$'\n'* && "$source" != *$'\r'* \
+        && "$target" != *$'\n'* && "$target" != *$'\r'* ]] || return 70
+    [[ "$read_only" == true || "$read_only" == false ]] || return 70
+    [[ "$create_host_path" == true || "$create_host_path" == false ]] || return 70
+    if [[ "$read_only" != true ]]; then
+      printf 'Candidate writable bind has no authoritative rebuild-backup receipt for service %s; refusing activation.\n' \
+        "$service" >&2
+      return 70
+    fi
+    canonical_source=$(canonical_host_path "$source") || {
+      printf 'Candidate bind source is not canonical for service %s; refusing activation.\n' "$service" >&2
+      return 70
+    }
+    protected=0
+    if host_path_has_docker_authority "$source" "$docker_root_raw" \
+        || host_path_has_docker_authority "$canonical_source" "$docker_root"; then
+      protected=1
+    fi
+    if (( protected == 1 )); then
+      if ! assert_candidate_broker_socket_contract \
+          "$model" "$service" "$source" "$target" "$read_only" "$create_host_path" \
+          || [[ ! -S "$source" || -L "$source" ]]; then
+        printf 'Candidate Docker socket or host-parent bind is not the release-bound exact broker contract and socket identity for service %s; refusing activation.\n' \
+          "$service" >&2
+        return 70
+      fi
+    else
+      [[ -e "$source" && ! -L "$source" && "$source" == "$canonical_source" \
+          && ( -f "$source" || -d "$source" ) ]] || {
+        printf 'Candidate read-only bind source is absent, aliased, or has an unsupported identity for service %s; refusing activation.\n' \
+          "$service" >&2
+        return 70
+      }
+    fi
+  done <<< "$bind_records"
+  names=$(jq -r --arg project "$PROJECT_NAME" '
+    (.volumes // {})
+    | to_entries[]
+    | select((.value.external // false) != true)
+    | (.value.name // ($project + "_" + .key))
+  ' "$model") || return 70
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ ${#name} -le 255 && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 70
+    candidate_volumes+=("$name")
+  done <<< "$names"
+  names=$(jq -r --arg project "$PROJECT_NAME" '
+    (.networks // {})
+    | to_entries[]
+    | select((.value.external // false) != true)
+    | (.value.name // ($project + "_" + .key))
+  ' "$model") || return 70
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ ${#name} -le 255 && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 70
+    candidate_networks+=("$name")
+  done <<< "$names"
+  names=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    volume ls --format '{{.Name}}') || return 70
+  while IFS= read -r name; do [[ -z "$name" ]] || live_volumes+=("$name"); done <<< "$names"
+  names=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" \
+    network ls --format '{{.Name}}') || return 70
+  while IFS= read -r name; do [[ -z "$name" ]] || live_networks+=("$name"); done <<< "$names"
+  for candidate in "${candidate_volumes[@]:-}"; do
+    [[ -n "$candidate" ]] || continue
+    for live in "${live_volumes[@]:-}"; do
+      if [[ "$candidate" == "$live" ]] \
+          && ! transaction_resource_collision_is_registered volume "$candidate"; then
+        collision_type=volume
+      fi
+    done
+  done
+  for candidate in "${candidate_networks[@]:-}"; do
+    [[ -n "$candidate" ]] || continue
+    for live in "${live_networks[@]:-}"; do
+      if [[ "$candidate" == "$live" ]] \
+          && ! transaction_resource_collision_is_registered network "$candidate"; then
+        collision_type=network
+      fi
+    done
+  done
+  [[ -z "$collision_type" ]] || {
+    printf 'Candidate-owned %s already exists without transaction ownership; preserving it and refusing activation.\n' \
+      "$collision_type" >&2
+    return 70
+  }
+}
+
 canonical_file() {
   local candidate=$1 parent base canonical_parent
   [[ "$candidate" == /* && "$candidate" != *[!A-Za-z0-9_./-]* && "$candidate" != *//* && "$candidate" != */../* && "$candidate" != */.. ]] || return 1
@@ -296,6 +1175,7 @@ verify_privileged_helpers() {
 
 journal_phase() {
   local phase=$1 detail=${2:-}
+  assert_project_preservation_boundary || return 70
   if [[ "$phase" == intent ]]; then
     local expected_previous_sha=
     [[ -z "$ACTIVE_RECEIPT" ]] || expected_previous_sha=$(printf '%s' "$ACTIVE_RECEIPT" | jq -r '.releaseContextSha256')
@@ -313,6 +1193,7 @@ journal_phase() {
 commit_active_receipt() {
   local target_state=$1 model=$2 detail=$3 lock_path= model_sha= result services_json
   shift 3
+  assert_project_preservation_boundary || return 70
   services_json=$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort') || return 1
   if [[ "$target_state" == hosted ]]; then
     lock_path=$LOCK
@@ -659,6 +1540,100 @@ runtime_model() {
   ' "$output" >/dev/null
 }
 
+bind_transaction_runtime_model() {
+  local source_model=$1 output=$2 source_model_sha
+  [[ "$TRANSACTION_ID" =~ ^[a-f0-9]{64}$ ]] || {
+    printf '%s\n' "Activation transaction identity is invalid." >&2
+    return 1
+  }
+  [[ "$source_model" == /* && "$output" == /* && "$source_model" != "$output" ]] || return 1
+  source_model_sha=$(sha256_file "$source_model") || return 1
+  [[ "$source_model_sha" =~ ^[a-f0-9]{64}$ ]] || return 1
+  jq --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$source_model_sha" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" '
+    def bind_labels:
+      if (((.labels // {}) | has($transactionLabel))
+          or ((.labels // {}) | has($sourceModelLabel))) then
+        error("activation CAS label is already present")
+      else
+        .labels = ((.labels // {}) + {
+          ($transactionLabel): $transactionId,
+          ($sourceModelLabel): $sourceModelSha256
+        })
+      end;
+    .services |= with_entries(
+      if (((.value.labels // {}) | has($transactionLabel))
+          or ((.value.labels // {}) | has($sourceModelLabel))) then
+        error("activation CAS label is already present")
+      else
+        .value.labels = ((.value.labels // {}) + {
+          ($transactionLabel): $transactionId,
+          ($sourceModelLabel): $sourceModelSha256
+        })
+      end
+    )
+    | .volumes = ((.volumes // {}) | with_entries(
+        if (.value.external // false) == true then .
+        else .value = ((.value // {}) | bind_labels)
+        end
+      ))
+    | .networks = ((.networks // {}) | with_entries(
+        if (.value.external // false) == true then .
+        else .value = ((.value // {}) | bind_labels)
+        end
+      ))
+  ' "$source_model" > "$output" || return 1
+  chmod 600 "$output"
+  jq -e --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$source_model_sha" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+    --slurpfile source "$source_model" '
+      . as $runtime
+      | $source[0] as $original
+      | (($runtime | del(.services, .volumes, .networks)) == ($original | del(.services, .volumes, .networks)))
+      and (($runtime.services | keys | sort) == ($original.services | keys | sort))
+      and all($runtime.services | to_entries[];
+        .key as $service
+        | (.value.labels[$transactionLabel] == $transactionId)
+        and (.value.labels[$sourceModelLabel] == $sourceModelSha256)
+        and ((
+          .value
+          | .labels |= del(.[$transactionLabel])
+          | .labels |= del(.[$sourceModelLabel])
+          | if ($original.services[$service] | has("labels")) then . else del(.labels) end
+        ) == $original.services[$service])
+      )
+      and (["volumes", "networks"] | all(.[];
+        . as $kind
+        | (($runtime[$kind] // {}) | to_entries | all(.[];
+          .key as $resource
+          | ($original[$kind][$resource] // {}) as $originalDefinition
+          | if ($originalDefinition.external // false) == true then
+              .value == $originalDefinition
+            else
+              (.value.labels[$transactionLabel] == $transactionId)
+              and (.value.labels[$sourceModelLabel] == $sourceModelSha256)
+              and ((
+                .value
+                | .labels |= del(.[$transactionLabel])
+                | .labels |= del(.[$sourceModelLabel])
+                | if ($originalDefinition | has("labels")) then . else del(.labels) end
+              ) == $originalDefinition)
+            end
+        ))
+      ))
+      and (($runtime.volumes // {} | keys | sort) == ($original.volumes // {} | keys | sort))
+      and (($runtime.networks // {} | keys | sort) == ($original.networks // {} | keys | sort))
+    ' "$output" >/dev/null || {
+      printf '%s\n' "Transaction-labelled runtime model is not an exact derived model." >&2
+      return 1
+    }
+  TRANSACTION_SOURCE_MODEL_SHA256=$source_model_sha
+}
+
 verify_release_context_unchanged() {
   local current
   current=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || return 1
@@ -743,15 +1718,220 @@ verify_inputs() {
   }
 }
 
+register_transaction_created_containers() {
+  local model=$1 mode=$2
+  shift 2
+  local ids id candidate duplicate inspections expected_ids expected_services expected_subjects candidate_cas
+  local project_inventory project_json
+  local -a candidate_ids=() project_ids=()
+  ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} == 0)) || {
+    printf '%s\n' "Transaction container identities may be registered only once." >&2
+    return 1
+  }
+  [[ "$mode" == exact || "$mode" == subset ]] || return 1
+  ids=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq --no-trunc \
+    --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+    --filter "label=$TRANSACTION_LABEL=$TRANSACTION_ID") || return 1
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || {
+      printf '%s\n' "Compose returned an invalid created container identity." >&2
+      return 1
+    }
+    duplicate=0
+    for candidate in "${candidate_ids[@]:-}"; do
+      [[ "$candidate" != "$id" ]] || duplicate=1
+    done
+    (( duplicate == 0 )) || {
+      printf '%s\n' "Compose returned duplicate created container identities." >&2
+      return 1
+    }
+    candidate_ids+=("$id")
+  done <<< "$ids"
+  if [[ "$mode" == exact ]]; then
+    ((${#candidate_ids[@]} == $#)) || {
+      printf '%s\n' "Created service container identities are not exact; refusing unowned cleanup." >&2
+      return 1
+    }
+  else
+    ((${#candidate_ids[@]} <= $#)) || {
+      printf '%s\n' "Partial create returned more transaction containers than authorized services." >&2
+      return 1
+    }
+  fi
+  if ((${#candidate_ids[@]} == 0)); then
+    [[ "$mode" == subset ]] || {
+      printf '%s\n' "Created service container identities are not exact; refusing unowned cleanup." >&2
+      return 1
+    }
+    assert_project_preservation_boundary
+    return
+  fi
+  expected_ids=$(printf '%s\n' "${candidate_ids[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 1
+  expected_services=$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 1
+  expected_subjects=$(printf '%s' "$RELEASE_CONTEXT_JSON" | jq -c '.subjects') || return 1
+  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+    "${candidate_ids[@]}") || return 1
+  printf '%s' "$inspections" | jq -e \
+    --arg project "$PROJECT_NAME" \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --argjson expectedIds "$expected_ids" \
+    --argjson expectedServices "$expected_services" \
+    --argjson subjects "$expected_subjects" \
+    --arg mode "$mode" \
+    --slurpfile model "$model" '
+      def actual_mounts:
+        [(.Mounts // [])[]
+          | if .Type == "volume" then
+              {type: "volume", source: (.Name // ""), target: .Destination,
+               rw: (.RW == true), propagation: ""}
+            elif .Type == "bind" then
+              {type: "bind", source: .Source, target: .Destination,
+               rw: (.RW == true), propagation: (.Propagation // "rprivate")}
+            elif .Type == "tmpfs" then
+              {type: "tmpfs", source: "", target: .Destination,
+               rw: (.RW == true), propagation: ""}
+            else error("unsupported Engine mount type") end]
+        | sort_by(.type, .target, .source);
+      def expected_mounts($definition; $model; $project):
+        [($definition.volumes // [])[]
+          | if type != "object" then error("non-object model mount")
+            elif .type == "volume" then
+              (.source // "") as $logical
+              | if ($logical | type == "string" and length > 0)
+                  and (($model.volumes[$logical] | type) == "object")
+                then {type: "volume",
+                      source: ($model.volumes[$logical].name // ($project + "_" + $logical)),
+                      target: .target, rw: ((.read_only // false) != true), propagation: ""}
+                else error("anonymous or missing model volume") end
+            elif .type == "bind" then
+              {type: "bind", source: .source, target: .target,
+               rw: ((.read_only // false) != true), propagation: (.bind.propagation // "rprivate")}
+            elif .type == "tmpfs" then
+              {type: "tmpfs", source: "", target: .target,
+               rw: ((.read_only // false) != true), propagation: ""}
+            else error("unsupported model mount type") end]
+        | sort_by(.type, .target, .source);
+      def expected_networks($definition; $model; $project):
+        [($definition.networks // {})
+          | if type == "object" then keys[]
+            elif type == "array" then .[]
+            else error("invalid model networks") end
+          | . as $logical
+          | if ($model.networks[$logical] | type) == "object"
+            then ($model.networks[$logical].name // ($project + "_" + $logical))
+            else error("missing model network") end]
+        | unique | sort;
+      type == "array"
+      and length == ($expectedIds | length)
+      and ([.[].Id] | sort) == $expectedIds
+      and ([.[].Config.Labels["com.docker.compose.service"]] | unique | length) == length
+      and all(.[];
+        .Config.Labels["com.docker.compose.service"] as $service
+        | $expectedServices | index($service) != null)
+      and all(.[];
+        . as $container
+        | ($container.Config.Labels["com.docker.compose.service"] // "") as $service
+        | ($model[0].services[$service] // null) as $definition
+        | ([$subjects[] | select(.serviceName == $service)]) as $matchingSubjects
+        | (($definition.labels // {}) | to_entries) as $expectedLabels
+        | (expected_mounts($definition; $model[0]; $project)) as $expectedMounts
+        | (expected_networks($definition; $model[0]; $project)) as $expectedNetworks
+        | ((($definition | type) == "object")
+        and (($matchingSubjects | length) == 1)
+        and ($container.Config.Labels["com.docker.compose.project"] == $project)
+        and ($container.Config.Labels[$transactionLabel] == $transactionId)
+        and ($container.Config.Labels["com.docker.compose.config-hash"] | type == "string" and test("^[a-f0-9]{64}$"))
+        and ($container.Config.Image == $definition.image)
+        and ($container.Image == $matchingSubjects[0].imageId)
+        and ($matchingSubjects[0].imageReference == $definition.image)
+        and all($expectedLabels[];
+            . as $expectedLabel
+            | $container.Config.Labels[$expectedLabel.key] == $expectedLabel.value)
+        and ($container.State.Running == false)
+        and ($container.State.Paused == false)
+        and ($container.State.Restarting == false)
+        and (($container | actual_mounts) == $expectedMounts)
+        and (((($container.NetworkSettings.Networks // {}) | keys | unique | sort)) == $expectedNetworks)
+        and (if $mode == "subset" then
+          $container.State.Status == "created"
+          and $container.State.StartedAt == "0001-01-01T00:00:00Z"
+          and $container.State.FinishedAt == "0001-01-01T00:00:00Z"
+        else true end))
+      )
+    ' >/dev/null || {
+      printf '%s\n' "Created container identities and transaction ownership are not exact; refusing cleanup." >&2
+      return 1
+    }
+  candidate_cas=$(printf '%s' "$inspections" | jq -c '
+    def normalized_mounts:
+      [(.Mounts // [])[]
+        | if .Type == "volume" then
+            {type: "volume", source: (.Name // ""), target: .Destination,
+             rw: (.RW == true), propagation: ""}
+          elif .Type == "bind" then
+            {type: "bind", source: .Source, target: .Destination,
+             rw: (.RW == true), propagation: (.Propagation // "rprivate")}
+          elif .Type == "tmpfs" then
+            {type: "tmpfs", source: "", target: .Destination,
+             rw: (.RW == true), propagation: ""}
+          else error("unsupported Engine mount type") end]
+      | sort_by(.type, .target, .source);
+    [.[] | {
+      id: .Id,
+      configHash: .Config.Labels["com.docker.compose.config-hash"],
+      mounts: normalized_mounts,
+      networks: ((.NetworkSettings.Networks // {}) | keys | unique | sort)
+    }] | sort_by(.id)
+  ') || return 1
+  project_inventory=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq --no-trunc \
+    --filter "label=com.docker.compose.project=$PROJECT_NAME") || return 1
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$ ]] || return 1
+    for candidate in "${project_ids[@]:-}"; do
+      [[ "$candidate" != "$id" ]] || {
+        printf '%s\n' "Project inventory contains duplicate identities; refusing transaction registration." >&2
+        return 1
+      }
+    done
+    project_ids+=("$id")
+  done <<< "$project_inventory"
+  project_json=$(printf '%s\n' "${project_ids[@]:-}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 1
+  [[ "$project_json" == "$expected_ids" ]] || {
+    printf '%s\n' "Project inventory contains an unknown container; transaction subset was not registered." >&2
+    return 1
+  }
+  TRANSACTION_CREATED_CONTAINER_IDS=("${candidate_ids[@]}")
+  TRANSACTION_CONTAINER_CAS=$candidate_cas
+  assert_project_preservation_boundary || return 1
+  if [[ "$mode" == subset ]]; then TRANSACTION_CONTAINERS_REMOVABLE=1; fi
+}
+
 create_services() {
   local model=$1
   shift
+  local create_status=0 registration_mode=exact
   (("$#" > 0)) || return 1
   assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 70
+  assert_candidate_resource_boundary "$model" || return 70
+  assert_daemon_identity || return 1
+  assert_global_docker_authority_boundary || return 70
+  assert_daemon_identity || return 1
   timeout "$ACTIVATION_TIMEOUT" \
-    bash -c 'endpoint=$1; model=$2; root=$3; project=$4; shift 4; exec docker --host "$endpoint" compose --project-directory "$root" --profile backup -p "$project" -f "$model" create --no-build --pull never --no-deps "$@"' \
+    bash -c 'endpoint=$1; model=$2; root=$3; project=$4; shift 4; unset COMPOSE_REMOVE_ORPHANS; exec docker --host "$endpoint" compose --project-directory "$root" --profile backup -p "$project" -f "$model" create --no-build --pull never --no-deps --no-recreate "$@"' \
     hosted-create "$CANONICAL_DOCKER_HOST" "$model" "$INFRA_ROOT" "$PROJECT_NAME" "$@" \
-    || return 1
+    || create_status=$?
+  if (( create_status != 0 )); then registration_mode=subset; fi
+  register_transaction_resources "$model" "$registration_mode" "$@" || return 1
+  register_transaction_created_containers "$model" "$registration_mode" "$@" || return 1
+  (( create_status == 0 )) || return "$create_status"
+  assert_daemon_identity || return 1
+  assert_global_docker_authority_boundary "$model" || return 70
+  assert_registered_transaction_resources || return 1
   assert_daemon_identity
 }
 
@@ -761,6 +1941,7 @@ start_services() {
   local ids count
   (("$#" > 0)) || return 1
   assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 70
   ids=$(timeout "$VERIFY_TIMEOUT" \
     bash -c 'endpoint=$1; model=$2; root=$3; project=$4; shift 4; exec docker --host "$endpoint" compose --project-directory "$root" --profile backup -p "$project" -f "$model" ps -aq "$@"' \
     hosted-ids "$CANONICAL_DOCKER_HOST" "$model" "$INFRA_ROOT" "$PROJECT_NAME" "$@") || return 1
@@ -769,8 +1950,17 @@ start_services() {
     printf '%s\n' "Created service container IDs are not exact." >&2
     return 1
   }
+  assert_project_preservation_boundary || return 70
+  assert_registered_transaction_resources || return 70
+  assert_daemon_identity || return 1
+  assert_global_docker_authority_boundary "$model" || return 70
+  assert_daemon_identity || return 1
   # Word splitting is intentional after the strict one-ID-per-line count above.
   timeout "$ACTIVATION_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" start $ids >/dev/null || return 1
+  assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 70
+  assert_registered_transaction_resources || return 70
+  assert_global_docker_authority_boundary "$model" || return 70
   assert_daemon_identity
 }
 
@@ -780,10 +1970,13 @@ stop_and_prove() {
   local ids inspections
   (("$#" > 0)) || return 1
   assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 70
+  assert_registered_transaction_resources || return 70
   timeout "$STOP_TIMEOUT" \
     bash -c 'endpoint=$1; model=$2; root=$3; project=$4; shift 4; exec docker --host "$endpoint" compose --project-directory "$root" --profile backup -p "$project" -f "$model" stop --timeout 30 "$@"' \
     hosted-stop "$CANONICAL_DOCKER_HOST" "$model" "$INFRA_ROOT" "$PROJECT_NAME" "$@" || return 1
   assert_daemon_identity || return 1
+  assert_registered_transaction_resources || return 70
   ids=$(
     timeout "$VERIFY_TIMEOUT" \
       bash -c 'endpoint=$1; model=$2; root=$3; project=$4; shift 4; exec docker --host "$endpoint" compose --project-directory "$root" --profile backup -p "$project" -f "$model" ps -aq "$@"' \
@@ -800,6 +1993,7 @@ stop_and_prove() {
       printf '%s\n' "Hosted/core stop could not be proven for running, paused and restarting states." >&2
       return 1
     }
+  assert_registered_transaction_resources
 }
 
 verify_running_services() {
@@ -899,6 +2093,10 @@ start_services_ordered() {
     (("${#layer_services[@]}" > 0)) || return 1
     start_services "$model" "${layer_services[@]}" || return 1
     verify_running_services "$model" "$expected_lock_sha" "${layer_services[@]}" || return 1
+    assert_project_preservation_boundary || return 70
+    assert_registered_transaction_resources || return 70
+    assert_global_docker_authority_boundary "$model" || return 70
+    assert_daemon_identity || return 1
   done < <(awk -F'\t' '!seen[$1]++ { print $1 }' "$order_file")
 }
 
@@ -935,6 +2133,7 @@ verify_ownership() {
 
 firewall() {
   local mode=$1 lock_path=${2:-}
+  assert_project_preservation_boundary || return 70
   case "$mode" in
     preflight)
       [[ -n "$lock_path" ]] || return 1
@@ -969,46 +2168,9 @@ firewall() {
   esac
 }
 
-stop_entire_project_for_recovery() {
-  local ids running
-  assert_daemon_identity || return 1
-  ids=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq \
-    --filter "label=com.docker.compose.project=$PROJECT_NAME") || return 1
-  if [[ -n "$ids" ]]; then
-    # Word splitting is intentional for Docker IDs returned one per line.
-    timeout "$STOP_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" stop --time 30 $ids >/dev/null || return 1
-  fi
-  assert_daemon_identity || return 1
-  running=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -q \
-    --filter "label=com.docker.compose.project=$PROJECT_NAME") || return 1
-  [[ -z "$running" ]] || {
-    printf '%s\n' "Pending activation recovery could not prove the project stopped." >&2
-    return 1
-  }
-}
-
-remove_stale_project_containers() {
-  local ids inspections stale expected_json
-  expected_json=$(printf '%s\n' "${CURRENT_ALL_SERVICES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')
-  ids=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq \
-    --filter "label=com.docker.compose.project=$PROJECT_NAME") || return 1
-  [[ -n "$ids" ]] || return 0
-  # Word splitting is intentional for Docker IDs returned one per line.
-  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect $ids) || return 1
-  stale=$(printf '%s' "$inspections" | jq -r --argjson expected "$expected_json" '
-    .[]
-    | select((.Config.Labels["com.docker.compose.service"] // "") as $service
-      | ($expected | index($service)) == null)
-    | .Id
-  ') || return 1
-  if [[ -n "$stale" ]]; then
-    # Word splitting is intentional for validated Docker IDs.
-    timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" rm $stale >/dev/null || return 1
-  fi
-}
-
 recover_pending_transaction() {
-  local previous_journal=$1 previous_state_id retained_context_path retained_context retained_context_sha
+  local previous_journal=$1 source_model=$2 transaction_model=$3
+  local previous_state_id retained_context_path retained_context retained_context_sha
   local pending_transaction pending_phase recovery
   [[ "$RECOVER_PENDING" == 1 ]] || {
     printf '%s\n' "A durable pending activation exists; rerun with --recover-pending for fail-closed reconciliation." >&2
@@ -1046,47 +2208,190 @@ recover_pending_transaction() {
       printf '%s\n' "Pending activation journal does not match its retained trusted release context." >&2
       return 1
     }
-  stop_entire_project_for_recovery || return 1
   pending_transaction=$(printf '%s' "$previous_journal" | jq -r '.transactionId') || return 1
   pending_phase=$(printf '%s' "$previous_journal" | jq -r '.phase') || return 1
+  [[ "$RELEASE_CONTEXT" == "$retained_context_path" \
+      && "$RELEASE_CONTEXT_SHA256" == "$retained_context_sha" \
+      && "$RELEASE_CONTEXT_JSON" == "$retained_context" ]] || {
+    printf '%s\n' "Pending activation belongs to a different trusted release context; adoption is forbidden." >&2
+    return 1
+  }
+  if [[ "$pending_phase" == creating ]]; then
+    [[ "$ACTION" == activate ]] || {
+      printf '%s\n' "A pending create transaction can only be resumed by the activation action." >&2
+      return 1
+    }
+    [[ "$source_model" == /* && "$transaction_model" == /* \
+        && -f "$source_model" && ! -L "$source_model" ]] || return 1
+    TRANSACTION_ID=$pending_transaction
+    bind_transaction_runtime_model "$source_model" "$transaction_model" || return 1
+    register_transaction_created_containers \
+      "$transaction_model" subset "${CURRENT_ALL_SERVICES[@]}" || {
+        printf '%s\n' "Pending partial-create containers are not the exact never-started transaction subset; preserving them." >&2
+        return 1
+      }
+    register_transaction_resources "$transaction_model" subset "${CURRENT_ALL_SERVICES[@]}" || {
+      printf '%s\n' "Pending partial-create resources are not exact transaction-owned identities; preserving them." >&2
+      return 1
+    }
+    assert_candidate_resource_boundary "$transaction_model" || return 1
+    assert_global_docker_authority_boundary "$transaction_model" || return 1
+    assert_daemon_identity || return 1
+    if ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} > 0)); then
+      MUTATION_STARTED=1
+      stop_transaction_created_and_prove || return 1
+      remove_transaction_created_and_prove || return 1
+      MUTATION_STARTED=0
+    fi
+    assert_project_preservation_boundary || return 1
+    assert_registered_transaction_resources || return 1
+    JOURNAL=$previous_journal
+    JOURNAL_PHASE=creating
+    RESUME_CREATING=1
+    return 0
+  fi
+  assert_project_preservation_boundary || {
+    printf '%s\n' "Pending recovery has no authenticated transaction-owned container ID set; preserving the project." >&2
+    return 1
+  }
+  assert_global_docker_authority_boundary || return 1
   recovery=$(broker_client recover-stop \
     "$pending_transaction" "$pending_phase" "$retained_context_path" "$EXPECTED_DAEMON_ID" \
-    "pending transaction was fail-closed by proving the entire Compose project stopped") || return 1
+    "pending transaction was fail-closed after proving the project inventory empty") || return 1
   JOURNAL=$(printf '%s' "$recovery" | jq -c '.journal') || return 1
   ACTIVE_RECEIPT=$(printf '%s' "$recovery" | jq -c '.active') || return 1
   JOURNAL_PHASE=complete
 }
 
-rollback_no_hosted() {
-  local no_hosted_sha service
-  local -a fallback_services=()
-  [[ -n "$FALLBACK_RUNTIME_MODEL" ]] || return 1
-  no_hosted_sha=$(sha256_file "$NO_HOSTED_LOCK") || return 1
-  stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}" || return 1
-  while IFS= read -r service; do
-    [[ -n "$service" ]] && fallback_services+=("$service")
-  done < <(jq -r '.services | keys[]' "$FALLBACK_RUNTIME_MODEL")
-  verify_release_context_unchanged || return 1
-  verify_release_subjects "$FALLBACK_MODEL" 0 || return 1
-  create_services "$FALLBACK_RUNTIME_MODEL" "${fallback_services[@]}" || return 1
-  firewall deactivate || return 1
-  start_services_ordered "$FALLBACK_RUNTIME_MODEL" "$no_hosted_sha" "${fallback_services[@]}" || return 1
-  verify_running_services "$FALLBACK_RUNTIME_MODEL" "$no_hosted_sha" "${fallback_services[@]}" || return 1
+stop_transaction_created_and_prove() {
+  local inspections expected_ids
+  ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} > 0)) || return 0
+  assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 1
+  assert_registered_transaction_resources || return 1
+  expected_ids=$(printf '%s\n' "${TRANSACTION_CREATED_CONTAINER_IDS[@]}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 1
+  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}") || return 1
+  printf '%s' "$inspections" | jq -e \
+    --arg project "$PROJECT_NAME" \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+    --argjson expectedCas "$TRANSACTION_CONTAINER_CAS" \
+    --argjson expectedIds "$expected_ids" \
+    --argjson expectedCount "${#TRANSACTION_CREATED_CONTAINER_IDS[@]}" '
+      length == $expectedCount
+      and ([.[].Id] | sort) == $expectedIds
+      and ([.[] | {
+        id: .Id,
+        configHash: .Config.Labels["com.docker.compose.config-hash"]
+      }] | sort_by(.id)) == ($expectedCas | map({id, configHash}) | sort_by(.id))
+      and all(.[];
+        .Config.Labels["com.docker.compose.project"] == $project
+        and .Config.Labels[$transactionLabel] == $transactionId
+        and .Config.Labels[$sourceModelLabel] == $sourceModelSha256)
+    ' >/dev/null || {
+    printf '%s\n' "Registered container ownership could not be revalidated; refusing cleanup." >&2
+    return 1
+  }
+  assert_registered_transaction_resources || return 1
+  timeout "$STOP_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" stop --time 30 \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}" >/dev/null || return 1
+  assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 1
+  assert_registered_transaction_resources || return 1
+  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}") || return 1
+  printf '%s' "$inspections" | jq -e \
+    --arg project "$PROJECT_NAME" \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+    --argjson expectedCas "$TRANSACTION_CONTAINER_CAS" \
+    --argjson expectedIds "$expected_ids" '
+    ([.[].Id] | sort) == $expectedIds
+    and ([.[] | {
+      id: .Id,
+      configHash: .Config.Labels["com.docker.compose.config-hash"]
+    }] | sort_by(.id)) == ($expectedCas | map({id, configHash}) | sort_by(.id))
+    and all(.[];
+      .Config.Labels["com.docker.compose.project"] == $project
+      and .Config.Labels[$transactionLabel] == $transactionId
+      and .Config.Labels[$sourceModelLabel] == $sourceModelSha256
+      and .State.Running == false
+      and .State.Paused == false
+      and .State.Restarting == false)
+  ' >/dev/null || return 1
+  assert_registered_transaction_resources
 }
 
-stop_all_known_and_prove() {
-  local current_ok=1 previous_ok=1
-  stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}" || current_ok=0
-  if [[ -n "$PREVIOUS_LOCK" ]]; then
-    stop_and_prove "$PREVIOUS_RUNTIME_MODEL" "${PREVIOUS_ALL_SERVICES[@]}" || previous_ok=0
+remove_transaction_created_and_prove() {
+  local inspections expected_ids remaining post_inspect
+  ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} > 0)) || return 0
+  (( TRANSACTION_CONTAINERS_REMOVABLE == 1 )) || {
+    printf '%s\n' "Transaction containers were not proven never-started; refusing writable-layer removal." >&2
+    return 1
+  }
+  assert_daemon_identity || return 1
+  assert_project_preservation_boundary || return 1
+  assert_registered_transaction_resources || return 1
+  expected_ids=$(printf '%s\n' "${TRANSACTION_CREATED_CONTAINER_IDS[@]}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort') || return 1
+  inspections=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}") || return 1
+  printf '%s' "$inspections" | jq -e \
+    --arg project "$PROJECT_NAME" \
+    --arg transactionId "$TRANSACTION_ID" \
+    --arg transactionLabel "$TRANSACTION_LABEL" \
+    --arg sourceModelSha256 "$TRANSACTION_SOURCE_MODEL_SHA256" \
+    --arg sourceModelLabel "$TRANSACTION_MODEL_LABEL" \
+    --argjson expectedCas "$TRANSACTION_CONTAINER_CAS" \
+    --argjson expectedIds "$expected_ids" '
+      ([.[].Id] | sort) == $expectedIds
+      and ([.[] | {
+        id: .Id,
+        configHash: .Config.Labels["com.docker.compose.config-hash"]
+      }] | sort_by(.id)) == ($expectedCas | map({id, configHash}) | sort_by(.id))
+      and all(.[];
+        .Config.Labels["com.docker.compose.project"] == $project
+        and .Config.Labels[$transactionLabel] == $transactionId
+        and .Config.Labels[$sourceModelLabel] == $sourceModelSha256
+        and .State.Running == false
+        and .State.Paused == false
+        and .State.Restarting == false
+        and .State.Status == "created"
+        and .State.StartedAt == "0001-01-01T00:00:00Z"
+        and .State.FinishedAt == "0001-01-01T00:00:00Z")
+    ' >/dev/null || {
+    printf '%s\n' "Never-started transaction container CAS could not be revalidated; refusing removal." >&2
+    return 1
+  }
+  assert_registered_transaction_resources || return 1
+  timeout "$STOP_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" rm \
+    "${TRANSACTION_CREATED_CONTAINER_IDS[@]}" >/dev/null || return 1
+  assert_daemon_identity || return 1
+  assert_registered_transaction_resources || return 1
+  remaining=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" ps -aq --no-trunc \
+    --filter "label=com.docker.compose.project=$PROJECT_NAME") || return 1
+  [[ -z "$remaining" ]] || {
+    printf '%s\n' "Project inventory is not empty after exact transaction removal; preserving remaining containers." >&2
+    return 1
+  }
+  if post_inspect=$(timeout "$VERIFY_TIMEOUT" docker --host "$CANONICAL_DOCKER_HOST" inspect \
+      "${TRANSACTION_CREATED_CONTAINER_IDS[@]}" 2>/dev/null); then
+    printf '%s' "$post_inspect" | jq -e 'type == "array" and length == 0' >/dev/null || return 1
   fi
-  (( current_ok == 1 && previous_ok == 1 ))
+  TRANSACTION_CREATED_CONTAINER_IDS=()
+  TRANSACTION_CONTAINER_CAS='[]'
+  TRANSACTION_CONTAINERS_REMOVABLE=0
+  assert_registered_transaction_resources
 }
 
 cleanup() {
   local status=$?
-  local service
-  local -a committed_services=()
   trap - EXIT HUP INT TERM
   set +e
   if (( status != 0 && COMMIT_ATTEMPTED == 1 && GATE_COMPLETE == 0 )); then
@@ -1102,32 +2407,25 @@ cleanup() {
     printf '%s\n' "Activation commit outcome is ambiguous; runtime rollback is forbidden until broker state is reconciled." >&2
   elif (( status != 0 && MUTATION_STARTED == 1 && GATE_COMPLETE == 0 && ROLLBACK_RUNNING == 0 )) && [[ "$ACTION" == activate ]]; then
     ROLLBACK_RUNNING=1
-    if rollback_no_hosted; then
-      while IFS= read -r service; do
-        [[ -n "$service" ]] && committed_services+=("$service")
-      done < <(jq -r '.services | keys[]' "$FALLBACK_RUNTIME_MODEL")
-      if commit_active_receipt no-hosted "$FALLBACK_RUNTIME_MODEL" \
-        "activation failed; canonical no-hosted rollback was proven" "${committed_services[@]}"; then
-        GATE_COMPLETE=1
-        status=71
-        printf '%s\n' "Activation failed; the previous verified or canonical no-hosted state was restored." >&2
+    if ((${#TRANSACTION_CREATED_CONTAINER_IDS[@]} == 0)); then
+      status=73
+      printf '%s\n' "Activation failed without an authenticated transaction-owned container ID set; runtime cleanup was refused." >&2
+    elif stop_transaction_created_and_prove; then
+      if (( TRANSACTION_CONTAINERS_REMOVABLE == 1 )); then
+        if remove_transaction_created_and_prove; then
+          status=72
+          printf '%s\n' "Activation create failed; only exact never-started transaction containers were stopped and removed without volumes." >&2
+        else
+          status=73
+          printf '%s\n' "Activation create failed and exact never-started removal could not be proven; preserved state remains pending." >&2
+        fi
       else
-        status=73
-        printf '%s\n' "Activation rollback ran, but its durable broker receipt could not be committed." >&2
-      fi
-    elif stop_all_known_and_prove; then
-      if commit_active_receipt stopped "$CURRENT_RUNTIME_MODEL" \
-        "activation and rollback failed; every known service was proven stopped"; then
-        GATE_COMPLETE=1
         status=72
-        printf '%s\n' "Activation and verified rollback failed; every known hosted service is proven stopped and firewall enforcement was retained." >&2
-      else
-        status=73
-        printf '%s\n' "Known services were stopped, but the durable stopped receipt could not be committed." >&2
+        printf '%s\n' "Activation failed; only containers registered as created by this transaction were stopped and firewall enforcement was retained." >&2
       fi
     else
       status=73
-      printf '%s\n' "Activation failed and a complete hosted stop is not proven; existing firewall enforcement remains active." >&2
+      printf '%s\n' "Activation failed and transaction-owned cleanup could not be proven; unknown containers and firewall state were preserved." >&2
     fi
   elif (( status != 0 && MUTATION_STARTED == 1 )); then
     status=73
@@ -1158,6 +2456,11 @@ EXPECTED_DAEMON_ID=$(daemon_id) || {
   printf '%s\n' "Canonical local Docker daemon returned an invalid identity." >&2
   exit 70
 }
+assert_daemon_identity || exit 70
+if (( RECOVER_PENDING == 0 )); then
+  assert_project_preservation_boundary || exit 70
+  assert_global_docker_authority_boundary || exit 70
+fi
 assert_daemon_identity || exit 70
 
 RELEASE_CONTEXT_JSON=$(node "$SCRIPT_DIR/platform-release-context.mjs" read "$RELEASE_CONTEXT") || exit 70
@@ -1222,7 +2525,14 @@ fi
 assert_mutex_identity || exit 75
 previous_journal=$(state_read_optional journal.json) || exit 70
 if [[ -n "$previous_journal" ]] && printf '%s' "$previous_journal" | jq -e '.state == "pending"' >/dev/null; then
-  recover_pending_transaction "$previous_journal" || exit 75
+  [[ "$RECOVER_PENDING" == 1 ]] || {
+    printf '%s\n' "A durable pending activation exists; rerun with --recover-pending for fail-closed reconciliation." >&2
+    exit 75
+  }
+  PENDING_JOURNAL=$previous_journal
+elif (( RECOVER_PENDING == 1 )); then
+  printf '%s\n' "--recover-pending requires an authenticated pending activation journal." >&2
+  exit 75
 fi
 ACTIVE_RECEIPT=$(state_read_optional active.json) || exit 70
 
@@ -1376,19 +2686,30 @@ printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e \
   }
 verify_release_context_unchanged || exit 70
 verify_release_subjects "$CURRENT_MODEL" 1 || exit 70
+if [[ -n "$PENDING_JOURNAL" ]]; then
+  TRANSACTION_RUNTIME_MODEL=$TEMP_DIRECTORY/pending-transaction-compose.json
+  recover_pending_transaction \
+    "$PENDING_JOURNAL" "$CURRENT_RUNTIME_MODEL" "$TRANSACTION_RUNTIME_MODEL" || exit 75
+  if (( RESUME_CREATING == 1 )); then
+    CURRENT_RUNTIME_MODEL=$TRANSACTION_RUNTIME_MODEL
+    node "$SCRIPT_DIR/platform-activation-state.mjs" assert-unmounted \
+      "$STATE_DIR" "$CURRENT_RUNTIME_MODEL" || exit 70
+  fi
+fi
 model_paths=("$CURRENT_CORE_MODEL" "$CURRENT_MODEL" "$CURRENT_RUNTIME_MODEL" "$FALLBACK_MODEL" "$FALLBACK_RUNTIME_MODEL")
 [[ -z "$PREVIOUS_CORE_MODEL" ]] || model_paths+=("$PREVIOUS_CORE_MODEL")
 [[ -z "$PREVIOUS_MODEL" ]] || model_paths+=("$PREVIOUS_MODEL")
 [[ -z "$PREVIOUS_RUNTIME_MODEL" ]] || model_paths+=("$PREVIOUS_RUNTIME_MODEL")
 node "$SCRIPT_DIR/platform-activation-state.mjs" assert-unmounted "$STATE_DIR" "${model_paths[@]}" || exit 70
 assert_mutex_identity || exit 75
+assert_candidate_resource_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 
 if [[ "$ACTION" == stop ]]; then
+  assert_project_preservation_boundary || exit 70
   TRANSACTION_ID=$(node "$SCRIPT_DIR/platform-activation-state.mjs" nonce)
-  journal_phase intent "stop exact current service set"
+  journal_phase intent "record exact empty project state"
   MUTATION_STARTED=1
-  stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
-  commit_active_receipt stopped "$CURRENT_RUNTIME_MODEL" "exact current service set proven stopped"
+  commit_active_receipt stopped "$CURRENT_RUNTIME_MODEL" "project inventory proven empty without container mutation"
   GATE_COMPLETE=1
   MUTATION_STARTED=0
   printf 'Proven stopped hosted/extension service set: %s\n' "${CURRENT_ALL_SERVICES[*]}"
@@ -1397,58 +2718,88 @@ fi
 
 if (( NO_HOSTED == 0 )); then
   verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
+  assert_project_preservation_boundary || exit 70
   firewall preflight "$LOCK"
 fi
-TRANSACTION_ID=$(node "$SCRIPT_DIR/platform-activation-state.mjs" nonce)
-journal_phase intent "core, platform extension and hosted union transition"
+assert_project_preservation_boundary || exit 70
+if (( RESUME_CREATING == 0 )); then
+  TRANSACTION_ID=$(node "$SCRIPT_DIR/platform-activation-state.mjs" nonce)
+  TRANSACTION_RUNTIME_MODEL=$TEMP_DIRECTORY/current-transaction-compose.json
+  bind_transaction_runtime_model "$CURRENT_RUNTIME_MODEL" "$TRANSACTION_RUNTIME_MODEL" || exit 70
+  CURRENT_RUNTIME_MODEL=$TRANSACTION_RUNTIME_MODEL
+  node "$SCRIPT_DIR/platform-activation-state.mjs" assert-unmounted "$STATE_DIR" "$CURRENT_RUNTIME_MODEL" || exit 70
+  assert_project_preservation_boundary || exit 70
+  journal_phase intent "core, platform extension and hosted union transition"
+else
+  [[ "$JOURNAL_PHASE" == creating && "$TRANSACTION_ID" =~ ^[a-f0-9]{64}$ ]] || exit 75
+  assert_registered_transaction_resources || exit 75
+fi
 MUTATION_STARTED=1
 assert_mutex_identity
 
-core_arguments=(
-  --action validate
-  --project-name "$PROJECT_NAME"
-  --env-file "$ENV_FILE"
-  --release-context "$RELEASE_CONTEXT"
-  --confirm ACTIVATE-CORE-STACK
-)
-if (( NO_HOSTED == 1 )); then
-  core_arguments+=(--no-hosted-workloads)
+if (( RESUME_CREATING == 0 )); then
+  core_arguments=(
+    --action validate
+    --project-name "$PROJECT_NAME"
+    --env-file "$ENV_FILE"
+    --release-context "$RELEASE_CONTEXT"
+    --confirm ACTIVATE-CORE-STACK
+  )
+  if (( NO_HOSTED == 1 )); then
+    core_arguments+=(--no-hosted-workloads)
+  else
+    core_arguments+=(--lock "$LOCK")
+  fi
+  PLATFORM_ACTIVATION_TRANSACTION_ID="$TRANSACTION_ID" \
+  PLATFORM_ACTIVATION_EXPECTED_DAEMON_ID="$EXPECTED_DAEMON_ID" \
+  PLATFORM_ACTIVATION_STATE_DIR="$STATE_DIR" \
+    bash "$SCRIPT_DIR/core-stack-activation-gate.sh" "${core_arguments[@]}"
+  assert_daemon_identity
+  journal_phase core-validated "signed core render validated inside the global transaction"
+  assert_project_preservation_boundary || exit 70
+  assert_mutex_identity
+  journal_phase quiesced "greenfield project inventory proven empty; unknown and orphan containers are preservation-blocking"
+  journal_phase creating "exact current hosted/extension container creation authorized"
 else
-  core_arguments+=(--lock "$LOCK")
+  assert_project_preservation_boundary || exit 70
+  assert_registered_transaction_resources || exit 75
 fi
-PLATFORM_ACTIVATION_TRANSACTION_ID="$TRANSACTION_ID" \
-PLATFORM_ACTIVATION_EXPECTED_DAEMON_ID="$EXPECTED_DAEMON_ID" \
-PLATFORM_ACTIVATION_STATE_DIR="$STATE_DIR" \
-  bash "$SCRIPT_DIR/core-stack-activation-gate.sh" "${core_arguments[@]}"
-assert_daemon_identity
-journal_phase core-validated "signed core render validated inside the global transaction"
-
-if [[ -n "$PREVIOUS_RUNTIME_MODEL" ]]; then
-  stop_and_prove "$PREVIOUS_RUNTIME_MODEL" "${PREVIOUS_ALL_SERVICES[@]}"
-fi
-stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
-stop_entire_project_for_recovery
-remove_stale_project_containers
-assert_mutex_identity
-journal_phase quiesced "entire project plus current/previous union proven stopped; stale services removed"
-
-journal_phase creating "exact current hosted/extension container creation authorized"
 create_services "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
+assert_project_preservation_boundary || exit 70
+assert_registered_transaction_resources || exit 75
+assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 assert_mutex_identity
 journal_phase created "exact current hosted/extension containers created stopped"
 if (( NO_HOSTED == 0 )); then
+  assert_project_preservation_boundary || exit 70
+  assert_registered_transaction_resources || exit 75
+  assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
   verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
   verify_ownership "$LOCK" "$CURRENT_RUNTIME_MODEL"
+  assert_registered_transaction_resources || exit 75
+  assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
   firewall apply "$LOCK"
   firewall verify "$LOCK"
   journal_phase firewall-active "current egress inventory enforced before start"
+  assert_registered_transaction_resources || exit 75
+  assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 else
+  assert_registered_transaction_resources || exit 75
+  assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
   firewall deactivate
   journal_phase firewall-inactive "hosted egress chain removed while the full project was quiesced"
 fi
+assert_project_preservation_boundary || exit 70
+assert_registered_transaction_resources || exit 75
+assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 start_services_ordered "$CURRENT_RUNTIME_MODEL" "$CURRENT_LOCK_SHA256" "${CURRENT_ALL_SERVICES[@]}"
+assert_project_preservation_boundary || exit 70
+assert_registered_transaction_resources || exit 75
+assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 verify_running_services "$CURRENT_RUNTIME_MODEL" "$CURRENT_LOCK_SHA256" "${CURRENT_ALL_SERVICES[@]}"
 verify_exact_workload_inventory
+assert_registered_transaction_resources || exit 75
+assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 if (( NO_HOSTED == 0 )); then
   verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
   verify_ownership "$LOCK" "$CURRENT_RUNTIME_MODEL"
@@ -1459,6 +2810,9 @@ if (( RUN_POSTDEPLOY == 1 )); then
   sh "$SCRIPT_DIR/vps-postdeploy.sh" "$ENV_FILE"
   journal_phase postdeploy-verified "fixed repository postdeploy verification completed under the activation mutex"
 fi
+assert_project_preservation_boundary || exit 70
+assert_registered_transaction_resources || exit 75
+assert_global_docker_authority_boundary "$CURRENT_RUNTIME_MODEL" || exit 70
 commit_active_receipt \
   "$([[ "$NO_HOSTED" == 1 ]] && printf no-hosted || printf hosted)" \
   "$CURRENT_RUNTIME_MODEL" "active receipt committed" "${CURRENT_ALL_SERVICES[@]}"

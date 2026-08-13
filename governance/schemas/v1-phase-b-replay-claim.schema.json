@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.example.invalid/schemas/v1-phase-b-replay-claim.schema.json",
+  "title": "V1 Phase-B first-write replay claim bytes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binding", "createdAt", "ledgerAncestrySha256", "ledgerParentIdentitySha256",
+    "ledgerParentPath", "schema", "sequence", "state", "writeContract"
+  ],
+  "properties": {
+    "schema": { "const": "platform.v1-phase-b-replay-claim/v1" },
+    "binding": { "$ref": "#/$defs/binding" },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "ledgerAncestrySha256": { "$ref": "#/$defs/sha256" },
+    "ledgerParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+    "ledgerParentPath": { "const": "/var/lib" },
+    "sequence": { "const": 0 },
+    "state": { "const": "CLAIMED" },
+    "writeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "atomicCreateExclusiveRequired", "claimNegativeLookupReceiptSha256",
+        "descriptorNoFollowRequired", "fileFsyncRequired", "firstWriteRequired", "openFlags",
+        "openat2ResolveBeneathNoSymlinks", "openat2ResolveNoXdev", "parentFsyncRequired",
+        "rollbackAllowed", "resumeAllowed"
+      ],
+      "properties": {
+        "atomicCreateExclusiveRequired": { "const": true },
+        "claimNegativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "descriptorNoFollowRequired": { "const": true },
+        "fileFsyncRequired": { "const": true },
+        "firstWriteRequired": { "const": true },
+        "openFlags": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "O_CREAT" }, { "const": "O_EXCL" },
+            { "const": "O_NOFOLLOW" }, { "const": "O_WRONLY" }
+          ],
+          "items": false,
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "openat2ResolveBeneathNoSymlinks": { "const": true },
+        "openat2ResolveNoXdev": { "const": true },
+        "parentFsyncRequired": { "const": true },
+        "rollbackAllowed": { "const": false },
+        "resumeAllowed": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256" },
+    "nonce": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/nonce" },
+    "identifier": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/identifier" },
+    "opaqueIdentifier": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/opaqueIdentifier" },
+    "absolutePath": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/absolutePath" },
+    "timestamp": { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp" },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorizationEnvelopeSha256", "authorizationExpiresAt", "authorizationId", "authorizationIssuedAt",
+        "claimId", "claimObjectPath", "journalParentIdentitySha256", "journalRecordPath", "journalStorePath",
+        "ledgerEntryKeySha256", "ledgerId", "ledgerParentPath", "nonce", "packageBytesSha256",
+        "packageInputObservationSha256", "packageManifestSha256", "policySha256",
+        "preinstallTupleSha256", "receiptId", "receiptObjectKeySha256", "receiptObjectPath", "receiptStorePath",
+        "transactionId"
+      ],
+      "properties": {
+        "authorizationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "authorizationExpiresAt": { "$ref": "#/$defs/timestamp" },
+        "authorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "authorizationIssuedAt": { "$ref": "#/$defs/timestamp" },
+        "claimId": { "$ref": "#/$defs/identifier" },
+        "claimObjectPath": { "type": "string", "pattern": "^/var/lib/\\.platform-v1-phase-b-claim-[a-f0-9]{64}$" },
+        "journalParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "journalRecordPath": { "type": "string", "pattern": "^/var/lib/platform-infrastructure/v1-phase-b-ledger/[a-f0-9]{64}\\.json$" },
+        "journalStorePath": { "const": "/var/lib/platform-infrastructure/v1-phase-b-ledger" },
+        "ledgerEntryKeySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerId": { "const": "platform-v1-phase-b-installer-ledger" },
+        "ledgerParentPath": { "const": "/var/lib" },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "packageBytesSha256": { "$ref": "#/$defs/sha256" },
+        "packageInputObservationSha256": { "$ref": "#/$defs/sha256" },
+        "packageManifestSha256": { "$ref": "#/$defs/sha256" },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "preinstallTupleSha256": { "$ref": "#/$defs/sha256" },
+        "receiptId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "receiptObjectKeySha256": { "$ref": "#/$defs/sha256" },
+        "receiptObjectPath": { "type": "string", "pattern": "^/var/lib/platform-infrastructure/v1-install-receipts/sha256/[a-f0-9]{64}\\.json$" },
+        "receiptStorePath": { "const": "/var/lib/platform-infrastructure/v1-install-receipts/sha256" },
+        "transactionId": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

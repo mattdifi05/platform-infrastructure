@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+echo "V1 brownfield existing-host path is STOP: no authoritative V1 consumer binds the verified PRE-DEPLOY backup and authenticated provider gates to target activation." >&2
+exit 78
+
 # This is deliberately a minimal transport shim. The candidate checkout never
 # selects release paths, installs privileged helpers, renders Compose, or
 # mutates Docker. The fixed provider-installed broker authenticates the bounded

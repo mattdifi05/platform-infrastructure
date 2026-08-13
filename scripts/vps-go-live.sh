@@ -26,12 +26,12 @@ usage() {
   cat <<'EOF'
 Usage: vps-go-live.sh [options]
 
-Safe-by-default VPS go-live orchestrator. Without --confirmLive it
-only writes a plan report. With --confirmLive it runs the selected live steps in
-order and writes JSON/Markdown reports under reports/vps-go-live/.
+Safe-by-default V1 planning orchestrator. Without --confirmLive it only writes
+a NONAUTHORITATIVE plan report. --confirmLive is terminally disabled for the
+existing/brownfield V1 path and exits 78 before any live action.
 
 Options:
-  --confirmLive                         Execute live checks/actions.
+  --confirmLive                         STOP (exit 78) on V1 existing hosts.
   --planOnly                            Write the plan only. This is default.
   --env-file PATH                       Production env file. Default: .env.
   --project-name NAME                   Compose project name.
@@ -147,6 +147,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$PLAN_ONLY" -eq 0 ]; then
+  echo "V1 brownfield existing-host path is STOP: a caller confirmation, environment value or local report cannot replace the verified PRE-DEPLOY backup and authenticated provider gates." >&2
+  exit 78
+fi
 
 [ "$PROJECT_NAME" = platform_infra_vps ] || {
   echo "Go-live requires canonical project platform_infra_vps." >&2
@@ -271,7 +276,7 @@ run_step() {
   command_line="$2"
   function_name="$3"
   if [ "$PLAN_ONLY" -eq 1 ]; then
-    add_step "$name" "planned" "$command_line" "not executed; pass --confirmLive on the VPS"
+    add_step "$name" "planned" "$command_line" "NONAUTHORITATIVE plan only; V1 existing-host live execution remains STOP"
     return
   fi
   if "$function_name"; then
@@ -436,5 +441,5 @@ fi
 write_reports
 
 if [ "$PLAN_ONLY" -eq 1 ]; then
-  echo "Plan only. Re-run with --confirmLive on the VPS when ready."
+  echo "Plan only. V1 existing-host live execution remains STOP. Use the standalone fresh-host scripts only on a proven empty host."
 fi

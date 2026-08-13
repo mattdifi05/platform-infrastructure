@@ -144,6 +144,110 @@ for (const command of [
   );
 }
 
+const expectedBrownfieldOfflineStep = [
+  "      - name: V1 brownfield offline preservation tests",
+  "        timeout-minutes: 10",
+  "        run: |",
+  "          node --test --test-concurrency=1 \\",
+  "            scripts/live-preservation-baseline.test.mjs \\",
+  "            scripts/v1-predeploy-backup-receipt.test.mjs \\",
+  "            scripts/v1-provider-gates.test.mjs \\",
+  "            scripts/v1-phase-a-authorization.test.mjs \\",
+  "            scripts/v1-brownfield-bootstrap.test.mjs \\",
+  "            scripts/v1-brownfield-admission.test.mjs \\",
+  "            scripts/v1-install-package.test.mjs \\",
+  "            scripts/v1-phase-b-preinstall-authorization.test.mjs \\",
+  "            scripts/v1-phase-b-replay-artifacts.test.mjs \\",
+  "            scripts/v1-brownfield-runtime-identity.test.mjs \\",
+  "            scripts/v1-brownfield-application-data-cutover.test.mjs \\",
+  "            scripts/v1-brownfield-scheduler-cutover.test.mjs \\",
+  "            scripts/v1-brownfield-control-plane-policy.test.mjs \\",
+  "            scripts/v1-brownfield-control-plane-gate.test.mjs \\",
+  "            scripts/hosted-workload-preservation-guard.test.mjs",
+].join("\n");
+const brownfieldOfflineStep = deployment.match(
+  /      - name: V1 brownfield offline preservation tests\n[\s\S]*?(?=\n      - name:)/,
+)?.[0] ?? "";
+assert.equal(
+  brownfieldOfflineStep,
+  expectedBrownfieldOfflineStep,
+  "the V1 brownfield preservation suite must use the exact serial offline invocation",
+);
+assert.equal(
+  deployment.split("node --test --test-concurrency=1").length - 1,
+  1,
+  "the exact V1 brownfield serial invocation must appear once",
+);
+for (const command of [
+  "scripts/v1-brownfield-application-data-cutover.test.mjs",
+]) {
+  assert.equal(
+    deployment.split(command).length - 1,
+    1,
+    `${command} must appear exactly once in the offline V1 brownfield step`,
+  );
+}
+const supplyChainJobIndex = deployment.indexOf("\n  supply-chain:");
+const releasePolicyIndex = deployment.indexOf(
+  "      - name: Release artifact and admission policy tests",
+  supplyChainJobIndex,
+);
+const brownfieldOfflineIndex = deployment.indexOf(expectedBrownfieldOfflineStep, supplyChainJobIndex);
+const uploadSupplyChainIndex = deployment.indexOf(
+  "      - name: Upload supply-chain evidence reports",
+  supplyChainJobIndex,
+);
+const enterpriseReadinessIndex = deployment.indexOf("\n  enterprise-readiness:", supplyChainJobIndex);
+assert.ok(
+  supplyChainJobIndex >= 0
+    && supplyChainJobIndex < releasePolicyIndex
+    && releasePolicyIndex < brownfieldOfflineIndex
+    && brownfieldOfflineIndex < uploadSupplyChainIndex
+    && uploadSupplyChainIndex < enterpriseReadinessIndex,
+  "the exact V1 brownfield serial suite must stay inside supply-chain after release policy and before evidence upload",
+);
+
+const expectedBrownfieldDeploymentStop = [
+  "      - name: Block production until authoritative V1 brownfield admission exists",
+  "        run: |",
+  "          echo \"::error::STOP: authoritative V1 brownfield admission is not implemented; canonical COMPLETE baseline, immutable/CAS PRE-DEPLOY backup, exact candidate commit/tree and target root, and provider+target authorization are required.\"",
+  "          echo \"::error::Local REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE with mutationAuthority=false is deny-only.\"",
+  "          node ./scripts/v1-brownfield-control-plane-gate.mjs apply",
+  "          exit 78",
+].join("\n");
+const brownfieldDeploymentStop = deployment.match(
+  /      - name: Block production until authoritative V1 brownfield admission exists\n[\s\S]*?(?=\n      - name:)/,
+)?.[0] ?? "";
+assert.equal(
+  brownfieldDeploymentStop,
+  expectedBrownfieldDeploymentStop,
+  "production must contain the exact terminal V1 brownfield stop",
+);
+assert.equal(
+  deployment.split("node ./scripts/v1-brownfield-control-plane-gate.mjs apply").length - 1,
+  1,
+  "the deny-only V1 brownfield apply reference must be invoked exactly once",
+);
+const checkoutIndex = deployment.indexOf("      - uses: actions/checkout@", deployment.indexOf("  deploy-vps:"));
+const brownfieldStopIndex = deployment.indexOf(expectedBrownfieldDeploymentStop);
+const firstHandoffIndex = deployment.indexOf(
+  "      - name: Download exact admitted deployment receipts",
+  deployment.indexOf("  deploy-vps:"),
+);
+const installSshIndex = deployment.indexOf("      - name: Install SSH key", deployment.indexOf("  deploy-vps:"));
+const opsImageIndex = deployment.indexOf('          docker pull "$OPS_IMAGE"', deployment.indexOf("  deploy-vps:"));
+assert.ok(
+  checkoutIndex >= 0
+    && checkoutIndex < brownfieldStopIndex
+    && brownfieldStopIndex < firstHandoffIndex
+    && firstHandoffIndex < installSshIndex,
+  "the V1 brownfield stop must precede deployment handoffs and SSH material",
+);
+assert.ok(
+  brownfieldStopIndex < opsImageIndex,
+  "the V1 brownfield stop must precede every ops-image deployment sink",
+);
+
 const brokerInvocation = infraOps.match(
   /const dockerActionBrokerTestFiles = \[([\s\S]*?)\];[\s\S]*?run\(process\.execPath, \[\n\s+"--test",\n\s+"--test-concurrency=1",\n\s+\.\.\.dockerActionBrokerTestFiles,\n\s+\], \{ cwd: infraRoot \}\);/,
 );
@@ -167,5 +271,5 @@ assert.match(
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
 
-const total = fixtures.length * 3 + 1 + 29;
+const total = fixtures.length * 3 + 1 + 38;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);

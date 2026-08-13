@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "V1 brownfield existing-host path is STOP: remote caller values cannot replace the verified PRE-DEPLOY backup and authenticated provider gates." >&2
+exit 78
+
 decode_field() {
   printf '%s' "$1" | base64 -d
 }

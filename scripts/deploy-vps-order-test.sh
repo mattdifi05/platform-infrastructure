@@ -26,16 +26,45 @@ if grep -Eq 'exec[[:space:]]+sudo|/usr/bin/env[[:space:]]+sudo' "$SCRIPT_DIR/dep
   echo "FAIL: activation sink resolves sudo through caller PATH" >&2
   exit 1
 fi
-printf 'PASS\texact-absolute-root-broker-sink\n'
+printf 'PASS\tlegacy-transport-remains-fixed-broker-only\n'
+
+remote_stop_line=$(grep -nF 'echo "V1 brownfield existing-host path is STOP:' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
+remote_exit_line=$(grep -n '^exit 78$' "$SCRIPT_DIR/deploy-vps-remote.sh" | head -n 1 | cut -d: -f1)
+remote_uname_line=$(grep -nF 'SYSTEM_NAME=$(/usr/bin/uname -s)' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
+remote_mktemp_line=$(grep -nF 'request=$(/usr/bin/mktemp ' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
+remote_stdin_line=$(grep -nF '/bin/dd if=/dev/stdin' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
+remote_sudo_line=$(grep -nF 'exec "$SUDO" -n "$BROKER" activate' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
+[ "$remote_stop_line" -lt "$remote_exit_line" ] \
+  && [ "$remote_exit_line" -lt "$remote_uname_line" ] \
+  && [ "$remote_exit_line" -lt "$remote_mktemp_line" ] \
+  && [ "$remote_exit_line" -lt "$remote_stdin_line" ] \
+  && [ "$remote_exit_line" -lt "$remote_sudo_line" ] || {
+  echo "FAIL: remote V1 STOP 78 is not terminal before stdin, sudo and mutation" >&2
+  exit 1
+}
+printf 'PASS\tremote-v1-stop-before-stdin-sudo-and-mutation\n'
 
 rm -f "$TMP/path-shadow-invoked"
-if env PATH="$TMP/bin:$PATH" PATH_SHADOW_INVOKED="$TMP/path-shadow-invoked" \
-  sh "$SCRIPT_DIR/deploy-vps-remote.sh" attacker >/dev/null 2>&1; then
-  echo "FAIL: activation sink accepted a caller-selected argument" >&2
+set +e
+printf '%s\n' '{"schema":"platform-activation-request/v3"}' | env \
+  PATH="$TMP/bin:$PATH" \
+  PATH_SHADOW_INVOKED="$TMP/path-shadow-invoked" \
+  PLATFORM_ACTIVATION_TEST_SUDO="$TMP/bin/sudo" \
+  V1_BACKUP_GATE=SATISFIED \
+  V1_PROVIDER_GATES=SATISFIED \
+  V1_DEPLOYMENT_ADMISSION=AUTHORIZED \
+  V1_ACTIVATION_PROMOTION=AUTHORIZED \
+  CONFIRM_MUTATING_VPS=true \
+  sh "$SCRIPT_DIR/deploy-vps-remote.sh" --force attacker >"$TMP/out" 2>"$TMP/err"
+status=$?
+set -e
+[ "$status" -eq 78 ] || {
+  echo "FAIL: caller arguments or environment bypassed remote V1 STOP (got $status)" >&2
   exit 1
-fi
+}
 [ ! -e "$TMP/path-shadow-invoked" ]
-printf 'PASS\tcaller-selected-arguments-rejected-before-any-sudo\n'
+grep -F 'V1 brownfield existing-host path is STOP' "$TMP/err" >/dev/null
+printf 'PASS\tcaller-state-cannot-bypass-remote-v1-stop\n'
 
 grep -F "ssh \"\$@\" -- \"\$REMOTE\" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate'" \
   "$SCRIPT_DIR/deploy-vps.sh" >/dev/null
@@ -48,9 +77,17 @@ if grep -Eq 'git (fetch|pull|checkout)|docker |compose-vps|prepare-vps-runtime|c
 fi
 printf 'PASS\tlegacy-remote-mutator-is-absent\n'
 
+v1_stop_line=$(grep -n '^enforce_v1_brownfield_admission_stop$' "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
+endpoint_line=$(grep -n 'sh "$SCRIPT_ROOT/ssh-known-host-endpoint.sh"' "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
 request_line=$(grep -n 'node "$SCRIPT_ROOT/activation-request.mjs"' "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
 ssh_line=$(grep -n "ssh \"\$@\" -- \"\$REMOTE\" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate'" "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
 receipt_line=$(grep -n 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"' "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
+[ "$v1_stop_line" -lt "$endpoint_line" ] && [ "$endpoint_line" -lt "$request_line" ] || {
+  echo "FAIL: authoritative V1 brownfield stop is not before the first remote endpoint operation" >&2
+  exit 1
+}
+printf 'PASS\tv1-brownfield-stop-before-remote-endpoint\n'
+
 [ "$request_line" -lt "$ssh_line" ] && [ "$ssh_line" -lt "$receipt_line" ] || {
   echo "FAIL: request, broker activation and receipt validation are not ordered" >&2
   exit 1
@@ -114,4 +151,4 @@ if grep -Eq 'DEPLOY_REMOTE_DIR|DEPLOY_SOURCE_ARCHIVE_PATH|DEPLOY_RUN_|PRE_GO_LIV
 fi
 printf 'PASS\tlegacy-ordering-inputs-are-not-consumed\n'
 
-printf 'deploy VPS broker order tests passed 11/11\n'
+printf 'deploy VPS broker order tests passed 13/13\n'

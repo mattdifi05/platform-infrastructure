@@ -72,7 +72,7 @@ test("SSH workflows require pinned trust and contain no trust-on-first-use path"
   assert.match(deployScript, /pinned-ssh-host-key\.mjs"\s+verify/);
 });
 
-test("a fake endpoint cannot emit an archive or receipt before pinned trust exists", () => {
+test("a fake endpoint cannot emit an archive or receipt through any pre-trust gate", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fake-ssh-endpoint-"));
   const fakeSsh = path.join(directory, "ssh");
   const invoked = path.join(directory, "invoked");
@@ -93,7 +93,10 @@ test("a fake endpoint cannot emit an archive or receipt before pinned trust exis
     });
     assert.notEqual(result.status, 0);
     assert.equal(fs.existsSync(invoked), false);
-    assert.match(result.stderr, /pinned SSH host trust/i);
+    assert.match(
+      result.stderr,
+      /provider-attested ops image entrypoint|authoritative V1 brownfield admission|pinned SSH host trust/i,
+    );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

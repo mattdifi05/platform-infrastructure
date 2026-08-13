@@ -1,0 +1,1607 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1",
+  "title": "V1 brownfield immutable preinstall and final transaction tuples",
+  "description": "Closed structural contract for the non-circular PREINSTALL to FINAL admission DAG. Schema validation grants no mutation authority and does not replace runtime equality, causality, signature, freshness, or caller-pin checks.",
+  "$ref": "#/$defs/commonTuple",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,255}$"
+    },
+    "opaqueIdentifier": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{7,255}$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,14}|[1-8][0-9]{15}|900[0-6][0-9]{12}|90070[0-9]{11}|90071[0-8][0-9]{10}|900719[0-8][0-9]{9}|9007199[0-1][0-9]{8}|90071992[0-4][0-9]{7}|900719925[0-3][0-9]{6}|9007199254[0-6][0-9]{5}|90071992547[0-3][0-9]{4}|9007199254740[0-8][0-9]{2}|90071992547409[0-8][0-9]|900719925474099[0-1])$"
+    },
+    "positiveDecimal": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]{0,14}|[1-8][0-9]{15}|900[0-6][0-9]{12}|90070[0-9]{11}|90071[0-8][0-9]{10}|900719[0-8][0-9]{9}|9007199[0-1][0-9]{8}|90071992[0-4][0-9]{7}|900719925[0-3][0-9]{6}|9007199254[0-6][0-9]{5}|90071992547[0-3][0-9]{4}|9007199254740[0-8][0-9]{2}|90071992547409[0-8][0-9]|900719925474099[0-1])$"
+    },
+    "safeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "safePositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:[0-9]{4}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/(?:((?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+)(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+)*)?$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "candidateRepository": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[a-z0-9_.-]+/[a-z0-9_.-]+$"
+    },
+    "hostname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    "sshEndpoint": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 320,
+      "pattern": "^ssh://[a-z_][a-z0-9_-]{0,31}@(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^0[0-7]{3}$"
+    },
+    "filesystemIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceIdentity", "filesystemUuid", "gid", "inode", "mode", "mountId", "nlink", "uid"],
+      "properties": {
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "gid": { "$ref": "#/$defs/safeInteger" },
+        "inode": { "$ref": "#/$defs/positiveDecimal" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "mountId": { "$ref": "#/$defs/positiveDecimal" },
+        "nlink": { "$ref": "#/$defs/safePositiveInteger" },
+        "uid": { "$ref": "#/$defs/safeInteger" }
+      }
+    },
+    "rootOwnedDirectoryIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/filesystemIdentity" },
+        { "type": "object", "properties": {
+          "gid": { "const": 0 },
+          "mode": { "const": "0755" },
+          "uid": { "const": 0 }
+        } }
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deploymentGid", "deploymentUid", "dockerDaemonId", "endpoint", "environment", "host", "machineId",
+        "root", "rootAbsenceReceiptSha256", "rootFilesystemIdentitySha256", "rootIdentity", "rootParentIdentity",
+        "rootParentPath", "rootState", "sshHostKeySha256", "targetId"
+      ],
+      "properties": {
+        "deploymentGid": { "$ref": "#/$defs/safePositiveInteger" },
+        "deploymentUid": { "$ref": "#/$defs/safePositiveInteger" },
+        "dockerDaemonId": { "$ref": "#/$defs/identifier" },
+        "endpoint": { "$ref": "#/$defs/sshEndpoint" },
+        "environment": { "const": "production" },
+        "host": { "$ref": "#/$defs/hostname" },
+        "machineId": { "$ref": "#/$defs/sha256" },
+        "root": { "$ref": "#/$defs/absolutePath" },
+        "rootAbsenceReceiptSha256": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "rootFilesystemIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "rootIdentity": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/filesystemIdentity" }]
+        },
+        "rootParentIdentity": { "$ref": "#/$defs/filesystemIdentity" },
+        "rootParentPath": { "$ref": "#/$defs/absolutePath" },
+        "rootState": { "enum": ["ABSENT_PROVEN", "EXISTING_EXACT"] },
+        "sshHostKeySha256": { "$ref": "#/$defs/sha256" },
+        "targetId": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "rootState": { "const": "ABSENT_PROVEN" } }, "required": ["rootState"] },
+          "then": {
+            "type": "object",
+            "properties": {
+              "rootAbsenceReceiptSha256": { "$ref": "#/$defs/sha256" },
+              "rootIdentity": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "type": "object", "properties": { "rootState": { "const": "EXISTING_EXACT" } }, "required": ["rootState"] },
+          "then": {
+            "type": "object",
+            "properties": {
+              "rootAbsenceReceiptSha256": { "type": "null" },
+              "rootIdentity": { "$ref": "#/$defs/filesystemIdentity" }
+            }
+          }
+        }
+      ]
+    },
+    "sourceTarget": {
+      "allOf": [
+        { "$ref": "#/$defs/target" },
+        { "type": "object", "properties": {
+          "rootAbsenceReceiptSha256": { "type": "null" },
+          "rootIdentity": { "$ref": "#/$defs/filesystemIdentity" },
+          "rootState": { "const": "EXISTING_EXACT" }
+        } }
+      ]
+    },
+    "activationTargetPreinstall": {
+      "allOf": [
+        { "$ref": "#/$defs/target" },
+        { "type": "object", "properties": {
+          "root": { "const": "/srv/platform-infrastructure" },
+          "rootAbsenceReceiptSha256": { "$ref": "#/$defs/sha256" },
+          "rootIdentity": { "type": "null" },
+          "rootParentIdentity": { "$ref": "#/$defs/rootOwnedDirectoryIdentity" },
+          "rootParentPath": { "const": "/srv" },
+          "rootState": { "const": "ABSENT_PROVEN" }
+        } }
+      ]
+    },
+    "activationTargetPostinstall": {
+      "allOf": [
+        { "$ref": "#/$defs/target" },
+        { "type": "object", "properties": {
+          "root": { "const": "/srv/platform-infrastructure" },
+          "rootAbsenceReceiptSha256": { "type": "null" },
+          "rootIdentity": { "$ref": "#/$defs/rootOwnedDirectoryIdentity" },
+          "rootParentIdentity": { "$ref": "#/$defs/rootOwnedDirectoryIdentity" },
+          "rootParentPath": { "const": "/srv" },
+          "rootState": { "const": "EXISTING_EXACT" }
+        } }
+      ]
+    },
+    "authorizedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clean", "commitSha", "packageManifestSha256", "packageSha256", "repository", "repositoryId",
+        "repositoryOwnerId", "sourceArchiveSha256", "treeSha"
+      ],
+      "properties": {
+        "clean": { "const": true },
+        "commitSha": { "$ref": "#/$defs/gitSha" },
+        "packageManifestSha256": { "$ref": "#/$defs/sha256" },
+        "packageSha256": { "$ref": "#/$defs/sha256" },
+        "repository": { "$ref": "#/$defs/candidateRepository" },
+        "repositoryId": { "$ref": "#/$defs/positiveDecimal" },
+        "repositoryOwnerId": { "$ref": "#/$defs/positiveDecimal" },
+        "sourceArchiveSha256": { "$ref": "#/$defs/sha256" },
+        "treeSha": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "authorizedTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deploymentGid", "deploymentUid", "dockerDaemonId", "endpoint", "hostname", "machineIdentitySha256",
+        "rootFilesystemIdentitySha256", "sshHostKeySha256", "targetRoot"
+      ],
+      "properties": {
+        "deploymentGid": { "$ref": "#/$defs/safePositiveInteger" },
+        "deploymentUid": { "$ref": "#/$defs/safePositiveInteger" },
+        "dockerDaemonId": { "$ref": "#/$defs/identifier" },
+        "endpoint": { "$ref": "#/$defs/sshEndpoint" },
+        "hostname": { "$ref": "#/$defs/hostname" },
+        "machineIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "rootFilesystemIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "sshHostKeySha256": { "$ref": "#/$defs/sha256" },
+        "targetRoot": { "const": "/srv/platform-infrastructure" }
+      }
+    },
+    "futureRoleKeyIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationGate", "activationTargetRoot", "admissionController", "backupAuthority", "deploymentGate",
+        "hostedGate", "phaseBInstaller", "sourceTargetCustodian"
+      ],
+      "properties": {
+        "activationGate": { "$ref": "#/$defs/sha256" },
+        "activationTargetRoot": { "$ref": "#/$defs/sha256" },
+        "admissionController": { "$ref": "#/$defs/sha256" },
+        "backupAuthority": { "$ref": "#/$defs/sha256" },
+        "deploymentGate": { "$ref": "#/$defs/sha256" },
+        "hostedGate": { "$ref": "#/$defs/sha256" },
+        "phaseBInstaller": { "$ref": "#/$defs/sha256" },
+        "sourceTargetCustodian": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "phaseA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorizationEnvelopeSha256", "authorizationId", "authorizationPayloadType", "authorizationProviderKeyId",
+        "authorizedCandidate", "authorizedCandidateSha256", "authorizedTarget", "authorizedTargetSha256", "candidateClean",
+        "consumerChallengeSha256", "expiresAt", "futureRoleKeyIds", "issuedAt", "nonce", "orderContractId",
+        "orderContractSha256", "packageAttestationEnvelopeSha256", "packageAttestationId", "packageAttestorKeyId",
+        "packageManifestSha256", "packagePayloadType", "packageSha256", "policySha256", "replayLedgerStatus", "scope",
+        "verificationReceiptSha256", "verifiedAt"
+      ],
+      "properties": {
+        "authorizationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "authorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "authorizationPayloadType": { "const": "application/vnd.platform.v1.phase-a.read-only-authorization.v1+json" },
+        "authorizationProviderKeyId": { "$ref": "#/$defs/sha256" },
+        "authorizedCandidate": { "$ref": "#/$defs/authorizedCandidate" },
+        "authorizedCandidateSha256": { "$ref": "#/$defs/sha256" },
+        "authorizedTarget": { "$ref": "#/$defs/authorizedTarget" },
+        "authorizedTargetSha256": { "$ref": "#/$defs/sha256" },
+        "candidateClean": { "const": true },
+        "consumerChallengeSha256": { "$ref": "#/$defs/sha256" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "futureRoleKeyIds": { "$ref": "#/$defs/futureRoleKeyIds" },
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "orderContractId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "orderContractSha256": { "$ref": "#/$defs/sha256" },
+        "packageAttestationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "packageAttestationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "packageAttestorKeyId": { "$ref": "#/$defs/sha256" },
+        "packageManifestSha256": { "$ref": "#/$defs/sha256" },
+        "packagePayloadType": { "const": "application/vnd.platform.v1.phase-a.package-attestation.v1+json" },
+        "packageSha256": { "$ref": "#/$defs/sha256" },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "replayLedgerStatus": { "const": "EXTERNAL_PENDING" },
+        "scope": { "const": "READ_ONLY_LIVE_PREFLIGHT" },
+        "verificationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commitSha", "repository", "repositoryId", "repositoryOwnerId", "sourceArchiveSha256", "treeSha"],
+      "properties": {
+        "commitSha": { "$ref": "#/$defs/gitSha" },
+        "repository": { "$ref": "#/$defs/candidateRepository" },
+        "repositoryId": { "$ref": "#/$defs/positiveDecimal" },
+        "repositoryOwnerId": { "$ref": "#/$defs/positiveDecimal" },
+        "sourceArchiveSha256": { "$ref": "#/$defs/sha256" },
+        "treeSha": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactSha256", "baselineId", "captureCompletedAt", "captureStartedAt", "classification", "complete",
+        "databaseCount", "databaseSetSha256", "deficiencies", "protectedArtifactCount", "protectedArtifactSetSha256",
+        "schema", "sourceDeviceCount", "sourceDeviceIdentitiesComplete", "sourceDeviceSetSha256", "verifiedAt", "version"
+      ],
+      "properties": {
+        "artifactSha256": { "$ref": "#/$defs/sha256" },
+        "baselineId": { "$ref": "#/$defs/sha256" },
+        "captureCompletedAt": { "$ref": "#/$defs/timestamp" },
+        "captureStartedAt": { "$ref": "#/$defs/timestamp" },
+        "classification": { "const": "COMPLETE-PRESERVATION-BASELINE" },
+        "complete": { "const": true },
+        "databaseCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "databaseSetSha256": { "$ref": "#/$defs/sha256" },
+        "deficiencies": { "type": "array", "maxItems": 0 },
+        "protectedArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "protectedArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "schema": { "const": "platform.live-preservation-baseline/v1" },
+        "sourceDeviceCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "sourceDeviceIdentitiesComplete": { "const": true },
+        "sourceDeviceSetSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" },
+        "version": { "const": 1 }
+      }
+    },
+    "structuralBackupReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactSha256", "authoritative", "backupArtifactSetSha256", "backupManifestSha256", "backupSetId",
+        "databaseCount", "databaseSetSha256", "protectedArtifactCount", "protectedArtifactSetSha256",
+        "receiptId", "schema", "status", "verifiedAt"
+      ],
+      "properties": {
+        "artifactSha256": { "$ref": "#/$defs/sha256" },
+        "authoritative": { "const": false },
+        "backupArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "backupManifestSha256": { "$ref": "#/$defs/sha256" },
+        "backupSetId": { "$ref": "#/$defs/sha256" },
+        "databaseCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "databaseSetSha256": { "$ref": "#/$defs/sha256" },
+        "protectedArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "protectedArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "receiptId": { "$ref": "#/$defs/sha256" },
+        "schema": { "const": "platform.v1-predeploy-backup-receipt/v1" },
+        "status": { "const": "REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "offHostRetrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backupArtifactSetSha256", "backupManifestSha256", "backupSetId", "lastVerifiedAt", "providerIdentity",
+        "protectedArtifactCount", "protectedArtifactSetSha256", "retrievalCompletedAt",
+        "retrievalReceiptArtifactSha256", "retrievalStartedAt", "retrievedBytesSha256", "verified"
+      ],
+      "properties": {
+        "backupArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "backupManifestSha256": { "$ref": "#/$defs/sha256" },
+        "backupSetId": { "$ref": "#/$defs/sha256" },
+        "lastVerifiedAt": { "$ref": "#/$defs/timestamp" },
+        "providerIdentity": { "$ref": "#/$defs/identifier" },
+        "protectedArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "protectedArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "retrievalCompletedAt": { "$ref": "#/$defs/timestamp" },
+        "retrievalReceiptArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "retrievalStartedAt": { "$ref": "#/$defs/timestamp" },
+        "retrievedBytesSha256": { "$ref": "#/$defs/sha256" },
+        "verified": { "const": true }
+      }
+    },
+    "restoreDrill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backupArtifactSetSha256", "backupManifestSha256", "backupSetId", "expectedArtifactCount", "isolated",
+        "manifestParity", "restoredArtifactCount", "restoredArtifactSetSha256", "restoredBytesSha256",
+        "restoreDrillArtifactSha256", "retrievalReceiptArtifactSha256", "startedAt", "verified", "verifiedAt"
+      ],
+      "properties": {
+        "backupArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "backupManifestSha256": { "$ref": "#/$defs/sha256" },
+        "backupSetId": { "$ref": "#/$defs/sha256" },
+        "expectedArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "isolated": { "const": true },
+        "manifestParity": { "const": true },
+        "restoredArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "restoredArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "restoredBytesSha256": { "$ref": "#/$defs/sha256" },
+        "restoreDrillArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "retrievalReceiptArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "verified": { "const": true },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "databaseConsistency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backupArtifactSetSha256", "backupManifestSha256", "backupSetId", "databaseCatalogSha256",
+        "databaseSetSha256", "databasesConsistent", "expectedDatabaseCount", "restoredBytesSha256",
+        "restoreDrillArtifactSha256", "retrievalReceiptArtifactSha256", "verificationArtifactSha256", "verifiedAt",
+        "verifiedDatabaseCount"
+      ],
+      "properties": {
+        "backupArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "backupManifestSha256": { "$ref": "#/$defs/sha256" },
+        "backupSetId": { "$ref": "#/$defs/sha256" },
+        "databaseCatalogSha256": { "$ref": "#/$defs/sha256" },
+        "databaseSetSha256": { "$ref": "#/$defs/sha256" },
+        "databasesConsistent": { "const": true },
+        "expectedDatabaseCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "restoredBytesSha256": { "$ref": "#/$defs/sha256" },
+        "restoreDrillArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "retrievalReceiptArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "verificationArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" },
+        "verifiedDatabaseCount": { "$ref": "#/$defs/safePositiveInteger" }
+      }
+    },
+    "writeConsistency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicationDataMutationAuthority", "capturedAt", "continuedLiveWritesPreserved", "mode",
+        "snapshotReceiptArtifactSha256", "sourceWriteWatermarkSha256", "verifiedAt"
+      ],
+      "properties": {
+        "applicationDataMutationAuthority": { "const": false },
+        "capturedAt": { "$ref": "#/$defs/timestamp" },
+        "continuedLiveWritesPreserved": { "const": true },
+        "mode": { "const": "POINT_IN_TIME_SNAPSHOT" },
+        "snapshotReceiptArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "sourceWriteWatermarkSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "authoritativeBackupBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestationExpiresAt", "attestationId", "attestationIssuedAt", "backupArtifactSetSha256",
+        "backupDeviceIdentity", "backupManifestSha256", "backupRootPath", "backupSetId", "backupTrustPolicySha256",
+        "captureCompletedAt", "captureStartedAt", "databaseConsistency", "databaseCount", "databaseSetSha256",
+        "evidenceArtifactSha256", "offHost", "offHostRetrieval", "protectedArtifactCount",
+        "protectedArtifactSetSha256", "restoreDrill", "sourceDeviceSetExcluded", "verifiedAt", "writeConsistency"
+      ],
+      "properties": {
+        "attestationExpiresAt": { "$ref": "#/$defs/timestamp" },
+        "attestationId": { "$ref": "#/$defs/sha256" },
+        "attestationIssuedAt": { "$ref": "#/$defs/timestamp" },
+        "backupArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "backupDeviceIdentity": { "$ref": "#/$defs/identifier" },
+        "backupManifestSha256": { "$ref": "#/$defs/sha256" },
+        "backupRootPath": { "$ref": "#/$defs/absolutePath" },
+        "backupSetId": { "$ref": "#/$defs/sha256" },
+        "backupTrustPolicySha256": { "$ref": "#/$defs/sha256" },
+        "captureCompletedAt": { "$ref": "#/$defs/timestamp" },
+        "captureStartedAt": { "$ref": "#/$defs/timestamp" },
+        "databaseConsistency": { "$ref": "#/$defs/databaseConsistency" },
+        "databaseCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "databaseSetSha256": { "$ref": "#/$defs/sha256" },
+        "evidenceArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "offHost": { "const": true },
+        "offHostRetrieval": { "$ref": "#/$defs/offHostRetrieval" },
+        "protectedArtifactCount": { "$ref": "#/$defs/safePositiveInteger" },
+        "protectedArtifactSetSha256": { "$ref": "#/$defs/sha256" },
+        "restoreDrill": { "$ref": "#/$defs/restoreDrill" },
+        "sourceDeviceSetExcluded": { "const": true },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" },
+        "writeConsistency": { "$ref": "#/$defs/writeConsistency" }
+      }
+    },
+    "binaryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "gid", "mode", "name", "nlink", "packageMember", "path", "sha256", "sizeBytes", "uid", "version"],
+      "properties": {
+        "disposition": { "const": "CREATE_IF_ABSENT_OR_REQUIRE_EXACT" },
+        "gid": { "const": 0 },
+        "mode": { "const": "0555" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9._-]+$" },
+        "nlink": { "const": 1 },
+        "packageMember": { "type": "string", "minLength": 5, "maxLength": 259, "pattern": "^bin/[A-Za-z0-9._-]+$" },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "uid": { "const": 0 },
+        "version": { "$ref": "#/$defs/safePositiveInteger" }
+      }
+    },
+    "brokerIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/binaryIdentity" },
+        { "type": "object", "properties": {
+          "name": { "const": "platform-activation-broker" },
+          "packageMember": { "const": "bin/platform-activation-broker" },
+          "path": { "const": "/usr/local/libexec/platform-activation-broker" }
+        } }
+      ]
+    },
+    "verifierIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/binaryIdentity" },
+        { "type": "object", "properties": {
+          "name": { "const": "platform-v1-brownfield-admission" },
+          "packageMember": { "const": "bin/platform-v1-brownfield-admission" },
+          "path": { "const": "/usr/local/libexec/platform-v1-brownfield-admission" }
+        } }
+      ]
+    },
+    "helperList": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "allOf": [
+          { "$ref": "#/$defs/binaryIdentity" },
+          { "type": "object", "properties": {
+            "name": { "const": "platform-hosted-preparation-broker" },
+            "packageMember": { "const": "bin/platform-hosted-preparation-broker" },
+            "path": { "const": "/usr/local/libexec/platform-hosted-preparation-broker" }
+          } }
+        ] },
+        { "allOf": [
+          { "$ref": "#/$defs/binaryIdentity" },
+          { "type": "object", "properties": {
+            "name": { "const": "platform-origin-firewall" },
+            "packageMember": { "const": "bin/platform-origin-firewall" },
+            "path": { "const": "/usr/local/libexec/platform-origin-firewall" }
+          } }
+        ] },
+        { "allOf": [
+          { "$ref": "#/$defs/binaryIdentity" },
+          { "type": "object", "properties": {
+            "name": { "const": "platform-workload-egress-firewall" },
+            "packageMember": { "const": "bin/platform-workload-egress-firewall" },
+            "path": { "const": "/usr/local/libexec/platform-workload-egress-firewall" }
+          } }
+        ] }
+      ],
+      "items": false
+    },
+    "directoryPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "gid", "mode", "path", "uid"],
+      "properties": {
+        "disposition": { "const": "CREATE_IF_ABSENT_OR_REQUIRE_EXACT" },
+        "gid": { "const": 0 },
+        "mode": { "const": "0755" },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "uid": { "const": 0 }
+      }
+    },
+    "directoryList": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/directoryPlan" }, { "type": "object", "properties": { "path": { "const": "/srv/platform-infrastructure" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/directoryPlan" }, { "type": "object", "properties": { "path": { "const": "/srv/platform-infrastructure/releases" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/directoryPlan" }, { "type": "object", "properties": { "path": { "const": "/srv/platform-infrastructure/release-states" } } }] }
+      ],
+      "items": false
+    },
+    "privilegePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedSupplementaryGroups", "argumentPolicy", "content", "contentEncoding", "contentProfile", "disposition",
+        "dockerGroupMembershipAllowed", "dockerSocketAccessAllowed", "effectiveSudoPolicyProfile", "gid", "mode", "nlink",
+        "parentGid", "parentMode", "parentPath", "parentUid", "parentWritableByNonRoot", "packageMember", "path",
+        "permittedInvocation", "principalAccountIdentityReceiptSha256", "principalGid", "principalName",
+        "principalPreexistingRequired", "principalUid", "providerPrevalidated", "providerValidationReceiptSha256",
+        "rootEquivalentCapabilitiesAllowed", "setenvAllowed", "sha256", "shellAllowed", "sizeBytes", "uid",
+        "unrestrictedSudoAllowed", "validatorPath", "validatorSha256"
+      ],
+      "properties": {
+        "allowedSupplementaryGroups": { "type": "array", "maxItems": 0 },
+        "argumentPolicy": { "const": "EXACT-NO-WILDCARDS" },
+        "content": {
+          "type": "string",
+          "minLength": 70,
+          "maxLength": 512,
+          "pattern": "^[a-z_][a-z0-9_-]{0,31} ALL=\\(root\\) NOPASSWD: /usr/local/libexec/platform-activation-broker activate\\n$"
+        },
+        "contentEncoding": { "const": "UTF-8" },
+        "contentProfile": { "const": "ACTIVATION-BROKER-ACTIVATE-ONLY/V1" },
+        "disposition": { "const": "CREATE_IF_ABSENT_OR_REQUIRE_EXACT" },
+        "dockerGroupMembershipAllowed": { "const": false },
+        "dockerSocketAccessAllowed": { "const": false },
+        "effectiveSudoPolicyProfile": { "const": "ACTIVATION-BROKER-ACTIVATE-ONLY/V1" },
+        "gid": { "const": 0 },
+        "mode": { "const": "0440" },
+        "nlink": { "const": 1 },
+        "parentGid": { "const": 0 },
+        "parentMode": { "const": "0755" },
+        "parentPath": { "const": "/etc/sudoers.d" },
+        "parentUid": { "const": 0 },
+        "parentWritableByNonRoot": { "const": false },
+        "packageMember": { "const": "etc/sudoers.d/platform-activation-broker" },
+        "path": { "const": "/etc/sudoers.d/platform-activation-broker" },
+        "permittedInvocation": { "const": "/usr/local/libexec/platform-activation-broker activate" },
+        "principalAccountIdentityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "principalGid": { "$ref": "#/$defs/safePositiveInteger" },
+        "principalName": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z_][a-z0-9_-]{0,31}$" },
+        "principalPreexistingRequired": { "const": true },
+        "principalUid": { "$ref": "#/$defs/safePositiveInteger" },
+        "providerPrevalidated": { "const": true },
+        "providerValidationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "rootEquivalentCapabilitiesAllowed": { "const": false },
+        "setenvAllowed": { "const": false },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "shellAllowed": { "const": false },
+        "sizeBytes": { "$ref": "#/$defs/safePositiveInteger" },
+        "uid": { "const": 0 },
+        "unrestrictedSudoAllowed": { "const": false },
+        "validatorPath": { "const": "/usr/sbin/visudo" },
+        "validatorSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "installerBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationTargetRootFingerprintSha256", "executionIdentitySha256", "gid", "independentlyPinned", "mode",
+        "nlink", "path", "phaseBInstallerFingerprintSha256", "sha256", "trustPolicySha256", "uid", "version"
+      ],
+      "properties": {
+        "activationTargetRootFingerprintSha256": { "$ref": "#/$defs/sha256" },
+        "executionIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "gid": { "const": 0 },
+        "independentlyPinned": { "const": true },
+        "mode": { "const": "0555" },
+        "nlink": { "const": 1 },
+        "path": { "const": "/usr/local/libexec/platform-v1-bootstrap-installer" },
+        "phaseBInstallerFingerprintSha256": { "$ref": "#/$defs/sha256" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "trustPolicySha256": { "$ref": "#/$defs/sha256" },
+        "uid": { "const": 0 },
+        "version": { "const": 2 }
+      }
+    },
+    "parentRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["descriptorRelativeRequired", "gid", "mode", "noSymlinkRequired", "nonWritableByNonRootRequired", "path", "uid"],
+      "properties": {
+        "descriptorRelativeRequired": { "const": true },
+        "gid": { "const": 0 },
+        "mode": { "const": "0755" },
+        "noSymlinkRequired": { "const": true },
+        "nonWritableByNonRootRequired": { "const": true },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "uid": { "const": 0 }
+      }
+    },
+    "sourceParentRequirements": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/var" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/var/lib" } } }] }
+      ],
+      "items": false
+    },
+    "destinationParentRequirements": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/usr" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/usr/local" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/usr/local/libexec" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/etc" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/etc/sudoers.d" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/parentRequirement" }, { "type": "object", "properties": { "path": { "const": "/srv" } } }] }
+      ],
+      "items": false
+    },
+    "materializationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "casRoot", "descriptorRelativeMembersOnly", "destinationParents", "manifestMemberParityRequired",
+        "openatNoFollowRequired", "regularRootOwnedNlinkOneLeafRequired", "rootOwnedNonWritableAncestryRequired",
+        "schema", "sourceParents"
+      ],
+      "properties": {
+        "casRoot": { "type": "string", "pattern": "^/var/lib/platform-infrastructure/v1-package-cas/sha256/[a-f0-9]{64}$" },
+        "descriptorRelativeMembersOnly": { "const": true },
+        "destinationParents": { "$ref": "#/$defs/destinationParentRequirements" },
+        "manifestMemberParityRequired": { "const": true },
+        "openatNoFollowRequired": { "const": true },
+        "regularRootOwnedNlinkOneLeafRequired": { "const": true },
+        "rootOwnedNonWritableAncestryRequired": { "const": true },
+        "schema": { "const": "platform.v1-package-materialization-plan/v1" },
+        "sourceParents": { "$ref": "#/$defs/sourceParentRequirements" }
+      }
+    },
+    "materializationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "gid", "kind", "mode", "nlink", "path", "sha256", "sizeBytes", "uid"],
+      "properties": {
+        "disposition": { "const": "CREATE_IF_ABSENT_OR_REQUIRE_EXACT" },
+        "gid": { "const": 0 },
+        "kind": { "enum": ["DIRECTORY", "EXECUTABLE", "REGULAR_FILE", "SUDOERS_POLICY"] },
+        "mode": { "$ref": "#/$defs/mode" },
+        "nlink": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safePositiveInteger" }] },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "sizeBytes": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safePositiveInteger" }] },
+        "uid": { "const": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "DIRECTORY" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0755" }, "nlink": { "type": "null" }, "sha256": { "type": "null" }, "sizeBytes": { "type": "null" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "EXECUTABLE" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0555" }, "nlink": { "const": 1 }, "sha256": { "$ref": "#/$defs/sha256" }, "sizeBytes": { "$ref": "#/$defs/safePositiveInteger" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "REGULAR_FILE" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0444" }, "nlink": { "const": 1 }, "sha256": { "$ref": "#/$defs/sha256" }, "sizeBytes": { "$ref": "#/$defs/safePositiveInteger" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "SUDOERS_POLICY" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0440" }, "nlink": { "const": 1 }, "sha256": { "$ref": "#/$defs/sha256" }, "sizeBytes": { "$ref": "#/$defs/safePositiveInteger" } } }
+        }
+      ]
+    },
+    "materializationTargets": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": { "$ref": "#/$defs/materializationTarget" }
+    },
+    "resourceBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hardTotalWriteCeilingBytes", "maxCasBytes", "maxCreatedInodes", "maxDestinationBytes", "maxJournalBytes",
+        "maxTotalWriteBytes", "packageMemberBytesTotal", "packageMemberCount", "requiredFreeBytesAfter",
+        "requiredFreeInodesAfter", "schema"
+      ],
+      "properties": {
+        "hardTotalWriteCeilingBytes": { "const": 67108864 },
+        "maxCasBytes": { "$ref": "#/$defs/safePositiveInteger" },
+        "maxCreatedInodes": { "$ref": "#/$defs/safePositiveInteger" },
+        "maxDestinationBytes": { "$ref": "#/$defs/safePositiveInteger" },
+        "maxJournalBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "maxTotalWriteBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "packageMemberBytesTotal": { "$ref": "#/$defs/safePositiveInteger" },
+        "packageMemberCount": { "const": 6 },
+        "requiredFreeBytesAfter": { "const": 1073741824 },
+        "requiredFreeInodesAfter": { "const": 10000 },
+        "schema": { "const": "platform.v1-install-resource-budget/v1" }
+      }
+    },
+    "installPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "broker", "directories", "helpers", "installerBootstrap", "materializationPolicy", "materializationTargets",
+        "packageAttestationEnvelopeSha256", "packageBytesSha256", "packageBytesSizeBytes", "packageManifestSha256",
+        "packageManifestSizeBytes", "plannedReceiptId", "privilegePolicy", "resourceBudget", "verifier"
+      ],
+      "properties": {
+        "broker": { "$ref": "#/$defs/brokerIdentity" },
+        "directories": { "$ref": "#/$defs/directoryList" },
+        "helpers": { "$ref": "#/$defs/helperList" },
+        "installerBootstrap": { "$ref": "#/$defs/installerBootstrap" },
+        "materializationPolicy": { "$ref": "#/$defs/materializationPolicy" },
+        "materializationTargets": { "$ref": "#/$defs/materializationTargets" },
+        "packageAttestationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "packageBytesSha256": { "$ref": "#/$defs/sha256" },
+        "packageBytesSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "packageManifestSha256": { "$ref": "#/$defs/sha256" },
+        "packageManifestSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "plannedReceiptId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "privilegePolicy": { "$ref": "#/$defs/privilegePolicy" },
+        "resourceBudget": { "$ref": "#/$defs/resourceBudget" },
+        "verifier": { "$ref": "#/$defs/verifierIdentity" }
+      }
+    },
+    "rollbackPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactSha256", "codeRollbackAllowed", "dataRollbackAuthority", "policyId", "preserveNewWrites", "requiresPostDeployPreservation"],
+      "properties": {
+        "artifactSha256": { "$ref": "#/$defs/sha256" },
+        "codeRollbackAllowed": { "const": true },
+        "dataRollbackAuthority": { "const": false },
+        "policyId": { "$ref": "#/$defs/sha256" },
+        "preserveNewWrites": { "const": true },
+        "requiresPostDeployPreservation": { "const": true }
+      }
+    },
+    "preinstallTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationTarget", "authoritativeBackupAttestation", "baseline", "candidate", "identityTransition",
+        "installPlan", "phaseA", "rollbackPolicy", "schema", "sourceTarget", "strategy", "structuralBackupReceipt",
+        "transactionId"
+      ],
+      "properties": {
+        "activationTarget": { "$ref": "#/$defs/activationTargetPreinstall" },
+        "authoritativeBackupAttestation": { "$ref": "#/$defs/authoritativeBackupBinding" },
+        "baseline": { "$ref": "#/$defs/baseline" },
+        "candidate": { "$ref": "#/$defs/candidate" },
+        "identityTransition": { "type": "null" },
+        "installPlan": { "$ref": "#/$defs/installPlan" },
+        "phaseA": { "$ref": "#/$defs/phaseA" },
+        "rollbackPolicy": { "$ref": "#/$defs/rollbackPolicy" },
+        "schema": { "const": "platform.v1-brownfield-preinstall-tuple/v1" },
+        "sourceTarget": { "$ref": "#/$defs/sourceTarget" },
+        "strategy": { "const": "ADDITIVE" },
+        "structuralBackupReceipt": { "$ref": "#/$defs/structuralBackupReceipt" },
+        "transactionId": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "externalProducer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approvalApproverIdentity", "approvalDecision", "approvalEvidenceIdentity", "approvalEvidenceIssuedAt",
+        "approvalEvidenceSha256", "eventName", "headSha", "jobName", "jobWorkflowSha", "protectedEnvironment",
+        "ref", "repository", "repositoryId", "repositoryOwnerId", "role", "runAttempt", "runId", "type", "workflowPath"
+      ],
+      "properties": {
+        "approvalApproverIdentity": { "$ref": "#/$defs/identifier" },
+        "approvalDecision": { "const": "APPROVED" },
+        "approvalEvidenceIdentity": { "$ref": "#/$defs/identifier" },
+        "approvalEvidenceIssuedAt": { "$ref": "#/$defs/timestamp" },
+        "approvalEvidenceSha256": { "$ref": "#/$defs/sha256" },
+        "eventName": { "const": "workflow_dispatch" },
+        "headSha": { "$ref": "#/$defs/gitSha" },
+        "jobName": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$" },
+        "jobWorkflowSha": { "$ref": "#/$defs/gitSha" },
+        "protectedEnvironment": { "$ref": "#/$defs/identifier" },
+        "ref": { "const": "refs/heads/main" },
+        "repository": { "$ref": "#/$defs/candidateRepository" },
+        "repositoryId": { "$ref": "#/$defs/positiveDecimal" },
+        "repositoryOwnerId": { "$ref": "#/$defs/positiveDecimal" },
+        "role": { "enum": ["activationGate", "admissionController", "backupAuthority", "deploymentGate", "hostedGate", "phaseBInstaller"] },
+        "runAttempt": { "$ref": "#/$defs/safePositiveInteger" },
+        "runId": { "$ref": "#/$defs/positiveDecimal" },
+        "type": { "const": "EXTERNAL-CI" },
+        "workflowPath": { "type": "string", "minLength": 22, "maxLength": 256, "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$" }
+      }
+    },
+    "targetRootProducer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestationArtifactSha256", "attestationIdentity", "attestedAt", "endpoint", "machineId", "role", "root",
+        "rootAbsenceReceiptSha256", "rootFilesystemIdentitySha256", "rootIdentitySha256", "rootParentIdentitySha256",
+        "rootState", "targetId", "type"
+      ],
+      "properties": {
+        "attestationArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "attestationIdentity": { "$ref": "#/$defs/identifier" },
+        "attestedAt": { "$ref": "#/$defs/timestamp" },
+        "endpoint": { "$ref": "#/$defs/sshEndpoint" },
+        "machineId": { "$ref": "#/$defs/sha256" },
+        "role": { "enum": ["activationTargetRoot", "sourceTargetCustodian"] },
+        "root": { "$ref": "#/$defs/absolutePath" },
+        "rootAbsenceReceiptSha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "rootFilesystemIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "rootIdentitySha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "rootParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "rootState": { "enum": ["ABSENT_PROVEN", "EXISTING_EXACT"] },
+        "targetId": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "TARGET-ROOT" }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "rootState": { "const": "ABSENT_PROVEN" } }, "required": ["rootState"] },
+          "then": { "type": "object", "properties": { "rootAbsenceReceiptSha256": { "$ref": "#/$defs/sha256" }, "rootIdentitySha256": { "type": "null" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "rootState": { "const": "EXISTING_EXACT" } }, "required": ["rootState"] },
+          "then": { "type": "object", "properties": { "rootAbsenceReceiptSha256": { "type": "null" }, "rootIdentitySha256": { "$ref": "#/$defs/sha256" } } }
+        }
+      ]
+    },
+    "observedParent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceIdentity", "filesystemUuid", "gid", "inode", "mode", "mountId", "nlink", "path", "symlink", "uid", "writableByNonRoot"],
+      "properties": {
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "gid": { "const": 0 },
+        "inode": { "$ref": "#/$defs/positiveDecimal" },
+        "mode": { "const": "0755" },
+        "mountId": { "$ref": "#/$defs/positiveDecimal" },
+        "nlink": { "$ref": "#/$defs/safePositiveInteger" },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "symlink": { "const": false },
+        "uid": { "const": 0 },
+        "writableByNonRoot": { "const": false }
+      }
+    },
+    "observedSourceParents": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/var" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/var/lib" } } }] }
+      ],
+      "items": false
+    },
+    "observedDestinationParents": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/usr" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/usr/local" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/usr/local/libexec" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/etc" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/etc/sudoers.d" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/srv" } } }] }
+      ],
+      "items": false
+    },
+    "ancestryVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destinationParents", "materializationPolicySha256", "sourceParents", "verificationReceiptSha256", "verifiedAt"],
+      "properties": {
+        "destinationParents": { "$ref": "#/$defs/observedDestinationParents" },
+        "materializationPolicySha256": { "$ref": "#/$defs/sha256" },
+        "sourceParents": { "$ref": "#/$defs/observedSourceParents" },
+        "verificationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "materializedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "descriptorNoFollow", "deviceIdentity", "fileType", "filesystemUuid", "gid", "identityReceiptSha256", "inode",
+        "kind", "mode", "mountId", "nlink", "path", "sha256", "sizeBytes", "symlink", "uid"
+      ],
+      "properties": {
+        "descriptorNoFollow": { "const": true },
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "fileType": { "enum": ["DIRECTORY", "REGULAR_FILE"] },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "gid": { "const": 0 },
+        "identityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "inode": { "$ref": "#/$defs/positiveDecimal" },
+        "kind": { "enum": ["DIRECTORY", "EXECUTABLE", "INSTALL_RECEIPT", "LEDGER_RECORD", "REGULAR_FILE", "REPLAY_CLAIM", "SUDOERS_POLICY"] },
+        "mode": { "$ref": "#/$defs/mode" },
+        "mountId": { "$ref": "#/$defs/positiveDecimal" },
+        "nlink": { "$ref": "#/$defs/safePositiveInteger" },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "sizeBytes": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safePositiveInteger" }] },
+        "symlink": { "const": false },
+        "uid": { "const": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "DIRECTORY" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": {
+            "fileType": { "const": "DIRECTORY" }, "mode": { "const": "0755" },
+            "nlink": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 },
+            "sha256": { "type": "null" }, "sizeBytes": { "type": "null" }
+          } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "enum": ["EXECUTABLE", "INSTALL_RECEIPT", "LEDGER_RECORD", "REGULAR_FILE", "REPLAY_CLAIM", "SUDOERS_POLICY"] } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": {
+            "fileType": { "const": "REGULAR_FILE" }, "nlink": { "const": 1 },
+            "sha256": { "$ref": "#/$defs/sha256" }, "sizeBytes": { "$ref": "#/$defs/safePositiveInteger" }
+          } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "EXECUTABLE" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0555" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "REGULAR_FILE" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0444" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "SUDOERS_POLICY" } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0440" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "enum": ["INSTALL_RECEIPT", "LEDGER_RECORD", "REPLAY_CLAIM"] } }, "required": ["kind"] },
+          "then": { "type": "object", "properties": { "mode": { "const": "0400" } } }
+        }
+      ]
+    },
+    "absentMaterializationPrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchorIdentitySha256", "anchorPath", "negativeLookupReceiptSha256", "openat2ResolveBeneathNoSymlinks",
+        "openat2ResolveNoXdev", "path", "relativePath", "state", "verifiedAt"
+      ],
+      "properties": {
+        "anchorIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "anchorPath": { "enum": ["/var/lib", "/srv", "/usr/local/libexec", "/etc/sudoers.d"] },
+        "negativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "openat2ResolveBeneathNoSymlinks": { "const": true },
+        "openat2ResolveNoXdev": { "const": true },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "relativePath": { "$ref": "#/$defs/relativePath" },
+        "state": { "const": "ABSENT_PROVEN" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "existingMaterializationPrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchorIdentitySha256", "anchorPath", "identity", "openat2ResolveBeneathNoSymlinks",
+        "openat2ResolveNoXdev", "path", "relativePath", "state", "verifiedAt"
+      ],
+      "properties": {
+        "anchorIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "anchorPath": { "enum": ["/var/lib", "/srv", "/usr/local/libexec", "/etc/sudoers.d"] },
+        "identity": { "$ref": "#/$defs/materializedIdentity" },
+        "openat2ResolveBeneathNoSymlinks": { "const": true },
+        "openat2ResolveNoXdev": { "const": true },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "relativePath": { "$ref": "#/$defs/relativePath" },
+        "state": { "const": "EXISTING_EXACT" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "materializationPrecondition": {
+      "oneOf": [
+        { "$ref": "#/$defs/absentMaterializationPrecondition" },
+        { "$ref": "#/$defs/existingMaterializationPrecondition" }
+      ]
+    },
+    "materializationPreconditions": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": { "$ref": "#/$defs/materializationPrecondition" }
+    },
+    "materializationOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "noReplacement", "path", "preconditionSha256", "state", "transactionId", "verifiedAt"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/materializedIdentity" },
+        "noReplacement": { "const": true },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "preconditionSha256": { "$ref": "#/$defs/sha256" },
+        "state": { "enum": ["CREATED_BY_TRANSACTION", "PREEXISTING_EXACT_UNCHANGED"] },
+        "transactionId": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "materializationOutcomes": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": { "$ref": "#/$defs/materializationOutcome" }
+    },
+    "packageInputObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "descriptorIdentityReceiptSha256", "manifestSha256", "manifestSizeBytes", "packageBytesSha256",
+        "packageBytesSizeBytes", "pathAccepted", "readOnly", "schema", "sealedAgainstMutation", "transport", "verifiedAt"
+      ],
+      "properties": {
+        "descriptorIdentityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "manifestSha256": { "$ref": "#/$defs/sha256" },
+        "manifestSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "packageBytesSha256": { "$ref": "#/$defs/sha256" },
+        "packageBytesSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "pathAccepted": { "const": false },
+        "readOnly": { "const": true },
+        "schema": { "const": "platform.v1-authenticated-package-input-observation/v1" },
+        "sealedAgainstMutation": { "const": true },
+        "transport": { "const": "AUTHENTICATED_READ_ONLY_FD" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "dockerSocketIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accessibleEndpointCount", "aclArtifactSha256", "ancestryVerificationReceiptSha256", "daemonId",
+        "daemonProbeReceiptSha256", "descriptorIdentityReceiptSha256", "descriptorNoFollow", "deviceIdentity",
+        "discoveredEndpoints", "dockerHostEnvironmentAccepted", "endpointEnumerationReceiptSha256", "fileType",
+        "filesystemUuid", "gid", "inode", "mode", "mountId", "nlink", "parentAncestry", "path",
+        "principalAccessibleEndpoints", "principalEffectiveAccess", "symlink", "tcpEndpointsAccessible", "uid"
+      ],
+      "properties": {
+        "accessibleEndpointCount": { "const": 0 },
+        "aclArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "ancestryVerificationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "daemonId": { "$ref": "#/$defs/identifier" },
+        "daemonProbeReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "descriptorIdentityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "descriptorNoFollow": { "const": true },
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "discoveredEndpoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [{ "const": "unix:///run/docker.sock" }],
+          "items": false
+        },
+        "dockerHostEnvironmentAccepted": { "const": false },
+        "endpointEnumerationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "fileType": { "const": "SOCKET" },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "gid": { "$ref": "#/$defs/safeInteger" },
+        "inode": { "$ref": "#/$defs/positiveDecimal" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "mountId": { "$ref": "#/$defs/positiveDecimal" },
+        "nlink": { "const": 1 },
+        "parentAncestry": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/" } } }] },
+            { "allOf": [{ "$ref": "#/$defs/observedParent" }, { "type": "object", "properties": { "path": { "const": "/run" } } }] }
+          ],
+          "items": false
+        },
+        "path": { "const": "/run/docker.sock" },
+        "principalAccessibleEndpoints": { "type": "array", "maxItems": 0 },
+        "principalEffectiveAccess": { "const": false },
+        "symlink": { "const": false },
+        "tcpEndpointsAccessible": { "const": false },
+        "uid": { "const": 0 }
+      }
+    },
+    "principalAccountObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accountLookupReceiptSha256", "capabilityReceiptSha256", "dockerGroupMembership", "dockerSocketAccess",
+        "dockerSocketAclReceiptSha256", "dockerSocketIdentity", "effectiveSudoCommands", "effectiveSudoReceiptSha256",
+        "groupMembershipReceiptSha256", "groupaddForbidden", "passwdEntryReceiptSha256", "preexisting", "principalGid",
+        "principalName", "principalUid", "rootEquivalentCapabilities", "supplementaryGroups", "unrestrictedSudo",
+        "useraddForbidden", "verifiedAt"
+      ],
+      "properties": {
+        "accountLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "capabilityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "dockerGroupMembership": { "const": false },
+        "dockerSocketAccess": { "const": false },
+        "dockerSocketAclReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "dockerSocketIdentity": { "$ref": "#/$defs/dockerSocketIdentity" },
+        "effectiveSudoCommands": {
+          "type": "array",
+          "maxItems": 1,
+          "items": { "const": "/usr/local/libexec/platform-activation-broker activate" }
+        },
+        "effectiveSudoReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "groupMembershipReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "groupaddForbidden": { "const": true },
+        "passwdEntryReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "preexisting": { "const": true },
+        "principalGid": { "$ref": "#/$defs/safePositiveInteger" },
+        "principalName": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z_][a-z0-9_-]{0,31}$" },
+        "principalUid": { "$ref": "#/$defs/safePositiveInteger" },
+        "rootEquivalentCapabilities": { "const": false },
+        "supplementaryGroups": { "type": "array", "maxItems": 0 },
+        "unrestrictedSudo": { "const": false },
+        "useraddForbidden": { "const": true },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "postinstallPrincipalAccountObservation": {
+      "allOf": [
+        { "$ref": "#/$defs/principalAccountObservation" },
+        { "type": "object", "properties": {
+          "effectiveSudoCommands": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "prefixItems": [{ "const": "/usr/local/libexec/platform-activation-broker activate" }],
+            "items": false
+          }
+        } }
+      ]
+    },
+    "resourceObservationDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviceIdentity", "filesystemUuid", "freeBytes", "freeInodes", "mountIds", "plannedCreatedInodes", "plannedWriteBytes",
+        "requiredFreeBytesAfter", "requiredFreeInodesAfter"
+      ],
+      "properties": {
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "freeBytes": { "$ref": "#/$defs/safeInteger" },
+        "freeInodes": { "$ref": "#/$defs/safeInteger" },
+        "mountIds": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/positiveDecimal" }
+        },
+        "plannedCreatedInodes": { "$ref": "#/$defs/safePositiveInteger" },
+        "plannedWriteBytes": { "$ref": "#/$defs/safePositiveInteger" },
+        "requiredFreeBytesAfter": { "const": 1073741824 },
+        "requiredFreeInodesAfter": { "const": 10000 }
+      }
+    },
+    "resourceObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["devices", "observedAt", "receiptSha256", "schema"],
+      "properties": {
+        "devices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/resourceObservationDevice" }
+        },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "receiptSha256": { "$ref": "#/$defs/sha256" },
+        "schema": { "const": "platform.v1-pre-mutation-resource-observation/v1" }
+      }
+    },
+    "resourceOutcomeDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actualCreatedInodes", "actualWrittenBytes", "deviceIdentity", "filesystemUuid", "freeBytes", "freeInodes", "mountIds",
+        "installerAccountingReceiptSha256", "plannedCreatedInodes", "plannedWriteBytes", "requiredFreeBytesAfter",
+        "requiredFreeInodesAfter"
+      ],
+      "properties": {
+        "actualCreatedInodes": { "$ref": "#/$defs/safeInteger" },
+        "actualWrittenBytes": { "$ref": "#/$defs/safeInteger" },
+        "deviceIdentity": { "$ref": "#/$defs/identifier" },
+        "filesystemUuid": { "$ref": "#/$defs/sha256" },
+        "freeBytes": { "$ref": "#/$defs/safeInteger" },
+        "freeInodes": { "$ref": "#/$defs/safeInteger" },
+        "mountIds": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/positiveDecimal" }
+        },
+        "installerAccountingReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "plannedCreatedInodes": { "$ref": "#/$defs/safePositiveInteger" },
+        "plannedWriteBytes": { "$ref": "#/$defs/safePositiveInteger" },
+        "requiredFreeBytesAfter": { "const": 1073741824 },
+        "requiredFreeInodesAfter": { "const": 10000 }
+      }
+    },
+    "resourceOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["devices", "preMutationObservationReceiptSha256", "receiptSha256", "verifiedAt"],
+      "properties": {
+        "devices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/resourceOutcomeDevice" }
+        },
+        "preMutationObservationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "receiptSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "phaseBOperationScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forbidden", "permitted"],
+      "properties": {
+        "forbidden": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "prefixItems": [
+            { "const": "APP_DATA_MUTATION" }, { "const": "APP_OR_DB_QUIESCE" }, { "const": "CHOWN_EXISTING" },
+            { "const": "DATABASE_OPERATION" }, { "const": "DOCKER_OPERATION" }, { "const": "FIREWALL_OPERATION" },
+            { "const": "REMOVE_EXISTING" }, { "const": "REPLACE_EXISTING" }, { "const": "RESTORE_OPERATION" },
+            { "const": "SYSTEMD_OPERATION" }
+          ],
+          "items": false
+        },
+        "permitted": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            { "const": "MATERIALIZE_PINNED_PACKAGE_TO_CAS" },
+            { "const": "INSTALL_PINNED_V1_CONTROL_PLANE" },
+            { "const": "VERIFY_INSTALLED_V1_CONTROL_PLANE" }
+          ],
+          "items": false
+        }
+      }
+    },
+    "replayClaimPrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "atomicCreateExclusiveRequired", "authorizationId", "claimFileFsyncRequired",
+        "claimNegativeLookupReceiptSha256", "claimObjectPath", "claimParentFsyncRequired",
+        "ledgerAncestrySha256", "ledgerEntryKeySha256", "ledgerParentIdentitySha256", "ledgerParentPath",
+        "nonce", "openat2ResolveBeneathNoSymlinks", "openat2ResolveNoXdev", "policySha256",
+        "preinstallTupleSha256", "schema", "verifiedAt"
+      ],
+      "properties": {
+        "atomicCreateExclusiveRequired": { "const": true },
+        "authorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "claimFileFsyncRequired": { "const": true },
+        "claimNegativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "claimObjectPath": { "type": "string", "pattern": "^/var/lib/\\.platform-v1-phase-b-claim-[a-f0-9]{64}$" },
+        "claimParentFsyncRequired": { "const": true },
+        "ledgerAncestrySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerEntryKeySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerParentPath": { "const": "/var/lib" },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "openat2ResolveBeneathNoSymlinks": { "const": true },
+        "openat2ResolveNoXdev": { "const": true },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "preinstallTupleSha256": { "$ref": "#/$defs/sha256" },
+        "schema": { "const": "platform.v1-phase-b-replay-claim-precondition/v1" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "phaseBPreInstallAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationTargetRootFingerprintSha256", "activationTargetRootProducer", "authorizationEnvelopeSha256",
+        "authorizationId", "backupAttestationEnvelopeSha256", "expiresAt", "installPlanSha256", "issuedAt",
+        "installerBootstrapSha256", "materializationPreconditions", "materializationTargetPlanSha256", "nonce",
+        "operationScope", "packageInputObservation", "payloadType", "phaseBInstallerFingerprintSha256",
+        "phaseBInstallerProducer", "policySha256", "preMutationAncestryVerification", "preinstallTupleSha256",
+        "principalAccountObservation", "replayClaimPrecondition", "replayLedgerStatus", "resourceObservation", "scope",
+        "verificationReceiptSha256", "verifiedAt"
+      ],
+      "properties": {
+        "activationTargetRootFingerprintSha256": { "$ref": "#/$defs/sha256" },
+        "activationTargetRootProducer": {
+          "allOf": [
+            { "$ref": "#/$defs/targetRootProducer" },
+            { "type": "object", "properties": {
+              "role": { "const": "activationTargetRoot" },
+              "rootState": { "const": "ABSENT_PROVEN" }
+            } }
+          ]
+        },
+        "authorizationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "authorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "backupAttestationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "installPlanSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "installerBootstrapSha256": { "$ref": "#/$defs/sha256" },
+        "materializationPreconditions": { "$ref": "#/$defs/materializationPreconditions" },
+        "materializationTargetPlanSha256": { "$ref": "#/$defs/sha256" },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "operationScope": { "$ref": "#/$defs/phaseBOperationScope" },
+        "packageInputObservation": { "$ref": "#/$defs/packageInputObservation" },
+        "payloadType": { "const": "application/vnd.platform.v1.phase-b.preinstall-authorization.v1+json" },
+        "phaseBInstallerFingerprintSha256": { "$ref": "#/$defs/sha256" },
+        "phaseBInstallerProducer": {
+          "allOf": [
+            { "$ref": "#/$defs/externalProducer" },
+            { "type": "object", "properties": { "role": { "const": "phaseBInstaller" } } }
+          ]
+        },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "preMutationAncestryVerification": { "$ref": "#/$defs/ancestryVerification" },
+        "preinstallTupleSha256": { "$ref": "#/$defs/sha256" },
+        "principalAccountObservation": { "$ref": "#/$defs/principalAccountObservation" },
+        "replayClaimPrecondition": { "$ref": "#/$defs/replayClaimPrecondition" },
+        "replayLedgerStatus": { "const": "EXTERNAL_PENDING" },
+        "resourceObservation": { "$ref": "#/$defs/resourceObservation" },
+        "scope": { "const": "INSTALL_PINNED_V1_CONTROL_PLANE_ONLY" },
+        "verificationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "phaseBLedgerConsumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "atomicCreateExclusive", "authorizationEnvelopeSha256", "authorizationId", "claimArtifactSha256",
+        "claimCreatedAt", "claimDurablyCommitted", "claimFileFsyncCompleted", "claimId",
+        "claimNegativeLookupReceiptSha256", "claimObjectIdentity", "claimObjectPath", "claimParentFsyncCompleted",
+        "claimSizeBytes", "consumedAt", "failureTerminal", "firstNonClaimMutationAt", "firstWritePath",
+        "journalArtifactSha256", "journalNegativeLookupReceiptSha256", "journalObjectIdentity",
+        "journalParentIdentitySha256", "journalRecordCreatedExclusive", "journalRecordFsyncCompleted",
+        "journalRecordPath", "journalRecordSizeBytes", "journalRecordWrittenAt", "ledgerAncestrySha256",
+        "ledgerEntryKeySha256", "ledgerId", "ledgerParentIdentitySha256", "ledgerParentPath", "nonce",
+        "receiptArtifactSha256", "receiptCreatedExclusive", "receiptFsyncCompleted", "receiptNegativeLookupReceiptSha256",
+        "receiptObjectIdentity", "receiptObjectKeySha256", "receiptObjectPath", "receiptParentIdentitySha256",
+        "receiptSizeBytes", "receiptStorePath", "receiptWrittenAt", "replayRejected", "schema", "state"
+      ],
+      "properties": {
+        "atomicCreateExclusive": { "const": true },
+        "authorizationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "authorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "claimArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "claimCreatedAt": { "$ref": "#/$defs/timestamp" },
+        "claimDurablyCommitted": { "const": true },
+        "claimFileFsyncCompleted": { "const": true },
+        "claimId": { "$ref": "#/$defs/identifier" },
+        "claimNegativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "claimObjectIdentity": { "$ref": "#/$defs/materializedIdentity" },
+        "claimObjectPath": { "type": "string", "pattern": "^/var/lib/\\.platform-v1-phase-b-claim-[a-f0-9]{64}$" },
+        "claimParentFsyncCompleted": { "const": true },
+        "claimSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "consumedAt": { "$ref": "#/$defs/timestamp" },
+        "failureTerminal": { "const": true },
+        "firstNonClaimMutationAt": { "$ref": "#/$defs/timestamp" },
+        "firstWritePath": { "type": "string", "pattern": "^/var/lib/\\.platform-v1-phase-b-claim-[a-f0-9]{64}$" },
+        "journalArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "journalNegativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "journalObjectIdentity": { "$ref": "#/$defs/materializedIdentity" },
+        "journalParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "journalRecordCreatedExclusive": { "const": true },
+        "journalRecordFsyncCompleted": { "const": true },
+        "journalRecordPath": { "type": "string", "pattern": "^/var/lib/platform-infrastructure/v1-phase-b-ledger/[a-f0-9]{64}\\.json$" },
+        "journalRecordSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "journalRecordWrittenAt": { "$ref": "#/$defs/timestamp" },
+        "ledgerAncestrySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerEntryKeySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerId": { "const": "platform-v1-phase-b-installer-ledger" },
+        "ledgerParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "ledgerParentPath": { "const": "/var/lib" },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "receiptArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "receiptCreatedExclusive": { "const": true },
+        "receiptFsyncCompleted": { "const": true },
+        "receiptNegativeLookupReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "receiptObjectIdentity": { "$ref": "#/$defs/materializedIdentity" },
+        "receiptObjectKeySha256": { "$ref": "#/$defs/sha256" },
+        "receiptObjectPath": { "type": "string", "pattern": "^/var/lib/platform-infrastructure/v1-install-receipts/sha256/[a-f0-9]{64}\\.json$" },
+        "receiptParentIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "receiptSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "receiptStorePath": { "const": "/var/lib/platform-infrastructure/v1-install-receipts/sha256" },
+        "receiptWrittenAt": { "$ref": "#/$defs/timestamp" },
+        "replayRejected": { "const": true },
+        "schema": { "const": "platform.v1-phase-b-replay-ledger-consumption/v1" },
+        "state": { "const": "CONSUMED_BEFORE_FIRST_NON_CLAIM_MUTATION" }
+      }
+    },
+    "privilegePolicyTargetVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effectiveBytesSha256", "phaseBPrincipalAccountObservationSha256", "policySha256",
+        "postinstallPrincipalAuthorityObservation", "principalAccountIdentityReceiptSha256", "principalGid",
+        "principalName", "principalUid", "stagedBytesSha256", "validatorPath", "validatorSha256",
+        "verificationReceiptSha256", "verified", "verifiedAt"
+      ],
+      "properties": {
+        "effectiveBytesSha256": { "$ref": "#/$defs/sha256" },
+        "phaseBPrincipalAccountObservationSha256": { "$ref": "#/$defs/sha256" },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "postinstallPrincipalAuthorityObservation": { "$ref": "#/$defs/postinstallPrincipalAccountObservation" },
+        "principalAccountIdentityReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "principalGid": { "$ref": "#/$defs/safePositiveInteger" },
+        "principalName": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z_][a-z0-9_-]{0,31}$" },
+        "principalUid": { "$ref": "#/$defs/safePositiveInteger" },
+        "stagedBytesSha256": { "$ref": "#/$defs/sha256" },
+        "validatorPath": { "const": "/usr/sbin/visudo" },
+        "validatorSha256": { "$ref": "#/$defs/sha256" },
+        "verificationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "verified": { "const": true },
+        "verifiedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "installReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationTargetPostinstall", "artifactHashScope", "artifactSha256", "broker", "directories", "helpers",
+        "installPlanSha256", "installedAt", "installerBootstrap", "installerBootstrapExecutionReceiptSha256",
+        "materializationPolicy", "materializationReceiptSha256", "materializationTargetOutcomes", "materializationTargets",
+        "packageAttestationEnvelopeSha256", "packageBytesSha256", "packageBytesSizeBytes", "packageManifestSha256",
+        "packageManifestSizeBytes", "phaseBAuthorizationEnvelopeSha256", "phaseBAuthorizationId", "phaseBLedgerConsumption",
+        "postInstallAncestryVerification", "preMutationAncestryVerificationSha256", "privilegePolicy",
+        "privilegePolicyTargetVerification", "receiptId", "resourceOutcome", "selfHash", "verifier"
+      ],
+      "properties": {
+        "activationTargetPostinstall": { "$ref": "#/$defs/activationTargetPostinstall" },
+        "artifactHashScope": { "const": "EXTERNAL-INSTALL-JOURNAL-BYTES" },
+        "artifactSha256": { "$ref": "#/$defs/sha256" },
+        "broker": { "$ref": "#/$defs/brokerIdentity" },
+        "directories": { "$ref": "#/$defs/directoryList" },
+        "helpers": { "$ref": "#/$defs/helperList" },
+        "installPlanSha256": { "$ref": "#/$defs/sha256" },
+        "installedAt": { "$ref": "#/$defs/timestamp" },
+        "installerBootstrap": { "$ref": "#/$defs/installerBootstrap" },
+        "installerBootstrapExecutionReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "materializationPolicy": { "$ref": "#/$defs/materializationPolicy" },
+        "materializationReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "materializationTargetOutcomes": { "$ref": "#/$defs/materializationOutcomes" },
+        "materializationTargets": { "$ref": "#/$defs/materializationTargets" },
+        "packageAttestationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "packageBytesSha256": { "$ref": "#/$defs/sha256" },
+        "packageBytesSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "packageManifestSha256": { "$ref": "#/$defs/sha256" },
+        "packageManifestSizeBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "phaseBAuthorizationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "phaseBAuthorizationId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "phaseBLedgerConsumption": { "$ref": "#/$defs/phaseBLedgerConsumption" },
+        "postInstallAncestryVerification": { "$ref": "#/$defs/ancestryVerification" },
+        "preMutationAncestryVerificationSha256": { "$ref": "#/$defs/sha256" },
+        "privilegePolicy": { "$ref": "#/$defs/privilegePolicy" },
+        "privilegePolicyTargetVerification": { "$ref": "#/$defs/privilegePolicyTargetVerification" },
+        "receiptId": { "$ref": "#/$defs/opaqueIdentifier" },
+        "resourceOutcome": { "$ref": "#/$defs/resourceOutcome" },
+        "selfHash": { "const": false },
+        "verifier": { "$ref": "#/$defs/verifierIdentity" }
+      }
+    },
+    "ciChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "challengeId", "eventName", "expiresAt", "issuedAt", "job", "maxAgeSeconds", "nonce",
+        "protectedEnvironment", "ref", "repository", "repositoryId", "repositoryOwnerId", "runAttempt", "runId",
+        "workflowPath", "workflowSha"
+      ],
+      "properties": {
+        "challengeId": { "$ref": "#/$defs/sha256" },
+        "eventName": { "const": "workflow_dispatch" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "job": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$" },
+        "maxAgeSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "protectedEnvironment": { "$ref": "#/$defs/identifier" },
+        "ref": { "const": "refs/heads/main" },
+        "repository": { "$ref": "#/$defs/candidateRepository" },
+        "repositoryId": { "$ref": "#/$defs/positiveDecimal" },
+        "repositoryOwnerId": { "$ref": "#/$defs/positiveDecimal" },
+        "runAttempt": { "$ref": "#/$defs/safePositiveInteger" },
+        "runId": { "$ref": "#/$defs/positiveDecimal" },
+        "workflowPath": { "type": "string", "minLength": 22, "maxLength": 256, "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$" },
+        "workflowSha": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "commonTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backupAttestationEnvelopeSha256", "ciChallenge", "installReceipt", "phaseBPreInstallAuthorization",
+        "preinstallTuple", "preinstallTupleSha256", "schema", "transactionId"
+      ],
+      "properties": {
+        "backupAttestationEnvelopeSha256": { "$ref": "#/$defs/sha256" },
+        "ciChallenge": { "$ref": "#/$defs/ciChallenge" },
+        "installReceipt": { "$ref": "#/$defs/installReceipt" },
+        "phaseBPreInstallAuthorization": { "$ref": "#/$defs/phaseBPreInstallAuthorization" },
+        "preinstallTuple": { "$ref": "#/$defs/preinstallTuple" },
+        "preinstallTupleSha256": { "$ref": "#/$defs/sha256" },
+        "schema": { "const": "platform.v1-brownfield-common-tuple/v1" },
+        "transactionId": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

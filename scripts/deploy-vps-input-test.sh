@@ -523,6 +523,33 @@ expect_reject() {
   printf 'PASS\t%s\n' "$label"
 }
 
+expect_v1_admission_stop() {
+  label=$1
+  shift
+  rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
+  set +e
+  "$@" >"$TMP/$label.stdout" 2>"$TMP/$label.stderr"
+  status=$?
+  set -e
+  [ "$status" -eq 78 ] || {
+    echo "FAIL: $label did not stop with EXTERNAL-PENDING status 78 (status $status)" >&2
+    exit 1
+  }
+  grep -F 'Authoritative V1 brownfield admission is unavailable.' "$TMP/$label.stderr" >/dev/null || {
+    echo "FAIL: $label did not report the authoritative V1 brownfield stop" >&2
+    exit 1
+  }
+  grep -F 'REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE' "$TMP/$label.stderr" >/dev/null || {
+    echo "FAIL: $label did not classify the local backup result as deny-only" >&2
+    exit 1
+  }
+  [ ! -e "$FAKE_SSH_ARGS" ] || {
+    echo "FAIL: $label reached SSH" >&2
+    exit 1
+  }
+  printf 'PASS\t%s\n' "$label"
+}
+
 expect_reject untrusted-caller run_client env PLATFORM_TRUSTED_OPS_RUNNER=0 sh "$TEST_ROOT/scripts/deploy-vps.sh"
 expect_reject remote-option run_client env DEPLOY_REMOTE=-oProxyCommand=id sh "$TEST_ROOT/scripts/deploy-vps.sh"
 expect_reject option-like-user-f run_client env DEPLOY_REMOTE=-Ftmp@example.internal sh "$TEST_ROOT/scripts/deploy-vps.sh"
@@ -542,55 +569,41 @@ expect_reject legacy-dast-receipt-only run_client env -u DEPLOY_DAST_PROVIDER_RE
 ln -s "$TMP/ssh-key" "$TMP/ssh-key-link"
 expect_reject symlink-ssh-key run_client env DEPLOY_SSH_KEY_PATH="$TMP/ssh-key-link" sh "$TEST_ROOT/scripts/deploy-vps.sh"
 
-rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
-run_client sh "$TEST_ROOT/scripts/deploy-vps.sh" > "$TMP/receipt"
-grep -Fx 'deploy@example.internal' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx -- '--' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx 'StrictHostKeyChecking=yes' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx 'GlobalKnownHostsFile=/dev/null' "$FAKE_SSH_ARGS" >/dev/null
-node -e '
-const fs=require("fs");
-const request=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-if (request.schema!=="platform-activation-request/v3") process.exit(1);
-if (!/^activation:[a-f0-9]{64}:[a-f0-9]{64}$/.test(request.requestId)) process.exit(1);
-if (request.releaseBundle.sha256!=="e".repeat(64)) process.exit(1);
-if (request.dockerActivationEnvelope.sha256!=="f".repeat(64)) process.exit(1);
-if (request.dockerActivationEnvelope.payloadType!=="application/vnd.platform.docker-runtime-activation.v2+json") process.exit(1);
-if (request.releaseContext.receipts.dastProviderSha256===request.releaseContext.receipts.dastAuthorizationSha256) process.exit(1);
-if (request.releaseContext.dastChainSha256!==request.dockerActivationEnvelope.dastChainSha256) process.exit(1);
-if (Object.hasOwn(request,"activationAdmission") || Object.hasOwn(request,"bundle")) process.exit(1);
-if (Object.hasOwn(request,"artifacts")) process.exit(1);
-' "$FAKE_SSH_STDIN"
-[ "$(wc -c < "$FAKE_SSH_STDIN" | tr -d ' ')" -lt 1048576 ]
-if grep -Eq 'base64|exact-source-archive\.tar|dast-countersign|https://staging\.example\.com|remote_dir|git (fetch|pull|checkout)|sh -s' \
-  "$FAKE_SSH_STDIN"; then
-  echo "FAIL: small broker request contains raw DAST/provider evidence or a legacy transport" >&2
-  exit 1
-fi
-printf 'PASS\tfixed-broker-small-json-request\n'
-
-jq '.dockerActivationEnvelopeSha256 = ("0" * 64)' "$TMP/broker-receipt.json" > "$TMP/tampered-broker-receipt.json"
-rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
-if FAKE_SSH_RECEIPT_OVERRIDE="$TMP/tampered-broker-receipt.json" run_client sh "$TEST_ROOT/scripts/deploy-vps.sh" >/dev/null 2>&1; then
-  echo "FAIL: mismatched broker receipt was accepted" >&2
-  exit 1
-fi
-[ -s "$FAKE_SSH_STDIN" ] || {
-  echo "FAIL: receipt-negative path did not reach the broker boundary" >&2
-  exit 1
-}
-printf 'PASS\tmismatched-broker-receipt-fails-closed\n'
-
-set +e
-run_client env BROKER_EXIT=78 sh "$TEST_ROOT/scripts/deploy-vps.sh" >/dev/null 2>&1
-status=$?
-set -e
-[ "$status" -eq 78 ] || {
-  echo "FAIL: missing external broker did not remain EXTERNAL-PENDING (status $status)" >&2
-  exit 1
-}
-printf 'PASS\tbroker-external-pending-has-no-fallback\n'
+expect_v1_admission_stop omitted-v1-admission \
+  run_client sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop self-asserted-ready-is-denied \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
+    DEPLOY_V1_BROWNFIELD_MUTATION_AUTHORITY=true \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop local-non-authoritative-backup-is-denied \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE \
+    DEPLOY_V1_BROWNFIELD_MUTATION_AUTHORITY=false \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop caller-baseline-hash-cannot-bypass \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
+    DEPLOY_V1_BROWNFIELD_BASELINE_SHA256="$(printf '0%.0s' $(seq 1 64))" \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop caller-backup-hash-cannot-bypass \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
+    DEPLOY_V1_BROWNFIELD_BACKUP_RECEIPT_SHA256="$(printf '0%.0s' $(seq 1 64))" \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop caller-candidate-binding-cannot-bypass \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
+    DEPLOY_V1_BROWNFIELD_CANDIDATE_COMMIT="$(printf '0%.0s' $(seq 1 40))" \
+    DEPLOY_V1_BROWNFIELD_CANDIDATE_TREE="$(printf '1%.0s' $(seq 1 40))" \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
+expect_v1_admission_stop caller-target-binding-cannot-bypass \
+  run_client env \
+    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
+    DEPLOY_V1_BROWNFIELD_TARGET_ROOT=/srv/caller-selected \
+    DEPLOY_V1_BROWNFIELD_PROVIDER_AUTHORIZATION=self-asserted \
+    DEPLOY_V1_BROWNFIELD_TARGET_AUTHORIZATION=self-asserted \
+    sh "$TEST_ROOT/scripts/deploy-vps.sh"
 
 for forbidden in 'sh -s' 'git ' 'docker ' 'scp ' 'sftp ' 'cloudflare-origin-lock-ufw.sh' 'prepare-vps-runtime.sh'; do
   if grep -F "$forbidden" "$TEST_ROOT/scripts/deploy-vps.sh" >/dev/null; then
@@ -600,4 +613,4 @@ for forbidden in 'sh -s' 'git ' 'docker ' 'scp ' 'sftp ' 'cloudflare-origin-lock
 done
 printf 'PASS\tno-remote-checkout-staging-or-candidate-privilege\n'
 
-printf 'deploy VPS input tests passed 21/21\n'
+printf 'deploy VPS input tests passed 25/25\n'

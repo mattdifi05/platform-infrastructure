@@ -65,9 +65,13 @@ test("invalid SSH port is rejected", () => {
 test("mutation requires explicit confirmation", () => {
   assert.throws(() => validateVpsEvidenceRequest({ ...valid, RUN_HARDENING: "true" }), /CONFIRM_MUTATING_VPS/);
 });
-test("confirmed mutation remains valid", () => {
+test("confirmed caller mutation flags remain non-authoritative", () => {
   const request = validateVpsEvidenceRequest({ ...valid, RUN_HARDENING: "true", CONFIRM_MUTATING_VPS: "true" });
   assert.equal(request.runHardening, "true");
+  const remote = fs.readFileSync(path.join(import.meta.dirname, "vps-evidence-remote.sh"), "utf8");
+  const rendered = renderVpsEvidenceRemoteScript(request, remote);
+  assert.match(rendered, /V1 brownfield existing-host path is STOP/);
+  assert.ok(rendered.indexOf("exit 78") < rendered.indexOf('git -C "$remote_dir" fetch'));
 });
 test("workflow commit and tree must be exact object IDs", () => {
   assert.throws(() => validateVpsEvidenceRequest({ ...valid, WORKFLOW_SHA: "main" }), /WORKFLOW_SHA/);
@@ -158,6 +162,63 @@ test("workflow and remote script use exact detached provenance instead of mutabl
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /verify-receipt/);
   assert.match(workflow, /--expectedTree/);
+});
+
+test("workflow stops unconditionally before SSH and caller inputs cannot bypass it", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "enterprise-vps-evidence.yml"), "utf8");
+  const stop = workflow.indexOf("      - name: V1 brownfield existing-host admission stop");
+  const installKey = workflow.indexOf("      - name: Install SSH key");
+  const ssh = workflow.indexOf('ssh -F /dev/null -i "$ssh_key_snapshot"');
+  assert.notEqual(stop, -1);
+  assert.ok(stop < installKey);
+  assert.ok(stop < ssh);
+  const stopStep = workflow.slice(stop, installKey);
+  assert.match(stopStep, /run: \|\n\s+echo .*V1 brownfield existing-host path is STOP.*\n\s+exit 78\s*$/);
+  assert.doesNotMatch(stopStep, /\bif:|continue-on-error|\$\{\{/);
+});
+
+test("remote hard-stop precedes git, bootstrap, hardening, and evidence minting", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vps-evidence-v1-stop-"));
+  const fakeBin = path.join(directory, "bin");
+  const invoked = path.join(directory, "forbidden-command-invoked");
+  const remote = path.join(import.meta.dirname, "vps-evidence-remote.sh");
+  fs.mkdirSync(fakeBin);
+  for (const command of ["git", "sudo", "tar"]) {
+    fs.writeFileSync(
+      path.join(fakeBin, command),
+      `#!/bin/sh\nprintf invoked > ${JSON.stringify(invoked)}\nexit 97\n`,
+      { mode: 0o700 },
+    );
+  }
+  const encoded = (value) => Buffer.from(value, "utf8").toString("base64");
+  try {
+    const result = spawnSync("/bin/bash", [remote], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        PLATFORM_REMOTE_DIR_B64: encoded(directory),
+        PLATFORM_HARDENED_SSH_PORT_B64: encoded("2222"),
+        PLATFORM_RUN_BOOTSTRAP_B64: encoded("true"),
+        PLATFORM_RUN_HARDENING_B64: encoded("true"),
+        PLATFORM_RELOAD_SSHD_B64: encoded("true"),
+        PLATFORM_REPLACE_DOCKER_DAEMON_CONFIG_B64: encoded("true"),
+        PLATFORM_DEPLOY_USER_B64: encoded("platform_deploy"),
+        PLATFORM_WORKFLOW_SHA_B64: encoded("1".repeat(40)),
+        PLATFORM_WORKFLOW_TREE_B64: encoded("2".repeat(40)),
+        CONFIRM_MUTATING_VPS: "true",
+        V1_BACKUP_GATE: "SATISFIED",
+        V1_PROVIDER_GATES: "SATISFIED",
+        V1_DEPLOYMENT_ADMISSION: "AUTHORIZED",
+      },
+    });
+    assert.equal(result.status, 78, result.stderr);
+    assert.match(result.stderr, /V1 brownfield existing-host path is STOP/);
+    assert.equal(fs.existsSync(invoked), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 process.stdout.write(`VPS evidence request tests passed ${passed}/${passed}\n`);

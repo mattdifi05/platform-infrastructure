@@ -154,12 +154,18 @@ lacks(localSink, "docker compose", "immutable client must not mutate Docker dire
 before(localSink, "node \"$SCRIPT_ROOT/activation-request.mjs\"", "ssh \"$@\" -- \"$REMOTE\"", "request v3 must be validated and emitted before SSH");
 before(localSink, "ssh \"$@\" -- \"$REMOTE\"", "node \"$SCRIPT_ROOT/activation-receipt-policy.mjs\"", "receipt v3 must be validated after the broker response");
 
-// The compatibility shim is a bounded stdin transport to one provider-owned
-// root binary. It contains no candidate checkout, Docker, or evidence replay.
+// The legacy compatibility transport remains present but is terminally
+// unreachable until an authoritative V1 consumer binds the verified backup
+// and provider gates. STOP must precede stdin, sudo, and every mutation.
+has(remoteSink, 'echo "V1 brownfield existing-host path is STOP:', "remote shim must expose the terminal V1 STOP");
+has(remoteSink, "exit 78", "remote shim must use the fail-closed V1 exit status");
+before(remoteSink, 'echo "V1 brownfield existing-host path is STOP:', "exit 78", "remote shim must announce STOP before exiting");
+before(remoteSink, "exit 78", "/bin/dd if=/dev/stdin", "remote shim must STOP before reading stdin");
+before(remoteSink, "exit 78", 'exec "$SUDO" -n "$BROKER" activate', "remote shim must STOP before sudo/broker activation");
 has(remoteSink, "BROKER=/usr/local/libexec/platform-activation-broker", "remote shim broker path is not fixed");
 has(remoteSink, "MAX_REQUEST_BYTES=1048576", "remote shim request size is not bounded");
-has(remoteSink, "/bin/dd if=/dev/stdin", "remote shim must consume stdin only");
-has(remoteSink, 'exec "$SUDO" -n "$BROKER" activate < "$request"', "remote shim must exec only the fixed root broker");
+has(remoteSink, "/bin/dd if=/dev/stdin", "unreachable legacy transport must consume stdin only");
+has(remoteSink, 'exec "$SUDO" -n "$BROKER" activate < "$request"', "unreachable legacy transport must retain the fixed root broker");
 for (const forbidden of [
   "git fetch",
   "git checkout",

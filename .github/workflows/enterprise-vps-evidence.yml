@@ -65,6 +65,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: V1 brownfield existing-host admission stop
+        run: |
+          echo "V1 brownfield existing-host path is STOP: workflow inputs and local state cannot replace the verified PRE-DEPLOY backup and authenticated provider gates." >&2
+          exit 78
+
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

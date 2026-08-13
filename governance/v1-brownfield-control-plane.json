@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "platform.v1-brownfield-control-plane/v1",
+  "status": "LOCAL-NOT-PREPARED",
+  "projectName": "platform_infra_v1_control",
+  "mutationServices": [
+    "docker-action-activation-sidecar",
+    "docker-action-broker"
+  ],
+  "replaceableServices": [],
+  "preservedProjectNames": [
+    "platform_infra_vps"
+  ],
+  "unknownResources": "PRESERVE",
+  "deploymentAuthority": false,
+  "rawBrokerEligibility": false,
+  "forbiddenOperations": [
+    "down",
+    "--remove-orphans",
+    "prune",
+    "project-wide stop/rm"
+  ],
+  "preservation": {
+    "preserveAllExistingContainers": true,
+    "preserveAllExistingDatabases": true,
+    "preserveAllExistingVolumes": true,
+    "preserveAllExistingNamedVolumes": true,
+    "preserveAllExistingAnonymousVolumes": true,
+    "preserveAllExistingBindMounts": true,
+    "preserveAllExistingNetworks": true,
+    "minimumObservedVolumes": {
+      "total": 139,
+      "named": 12,
+      "anonymous": 127
+    }
+  },
+  "localBlockers": [
+    "canonical complete live baseline",
+    "zero existing raw Docker socket owners",
+    "zero existing host-parent authorities",
+    "zero candidate bind source or target collisions",
+    "real rendered Compose with root-owned bind and secret identities",
+    "authenticated root executor",
+    "all provider gates authenticated"
+  ],
+  "providerGates": [
+    {
+      "name": "Hosted preparation/provider conformance",
+      "status": "EXTERNAL-PENDING"
+    },
+    {
+      "name": "Deployment admission",
+      "status": "EXTERNAL-PENDING"
+    },
+    {
+      "name": "Activation promotion/Sigstore",
+      "status": "EXTERNAL-PENDING"
+    }
+  ],
+  "compose": {
+    "file": "compose.v1-control-plane.yaml",
+    "projectScopedVolumes": [
+      "backup_scheduler_jobs",
+      "docker_action_activation_cas",
+      "docker_action_broker_socket",
+      "docker_action_broker_state"
+    ],
+    "networks": []
+  }
+}

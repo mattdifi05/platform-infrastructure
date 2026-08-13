@@ -1,0 +1,161 @@
+name: platform_infra_v1_control
+
+services:
+  docker-action-activation-sidecar:
+    image: ${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY:?set provider/admin activation sidecar repository}@sha256:${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256:?set provider/admin activation sidecar sha256}
+    init: true
+    user: "0:0"
+    read_only: true
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+    network_mode: none
+    entrypoint:
+      - /opt/provider-activation/materialize-dsse-cas
+    environment:
+      ACTIVATION_INBOX: /run/platform/provider-activation/inbox
+      ACTIVATION_CAS: /run/platform/docker-action-activation/by-bundle-sha256
+    volumes:
+      - type: bind
+        source: ${DOCKER_ACTION_ACTIVATION_INBOX:?set provider/admin-owned activation inbox}
+        target: /run/platform/provider-activation/inbox
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: docker_action_activation_cas
+        target: /run/platform/docker-action-activation/by-bundle-sha256
+
+  docker-action-broker:
+    image: ${PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY:?set digest-pinned broker repository}@sha256:${PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256:?set broker image sha256}
+    init: true
+    user: "0:0"
+    read_only: true
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    network_mode: none
+    entrypoint:
+      - node
+      - /opt/platform-docker-broker/docker-action-broker.mjs
+    environment:
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_RUNTIME_INTENT_FILE: /run/platform/docker-action-trust/runtime-intent.json
+      DOCKER_ACTION_ACTIVE_RECEIPT_FILE: /run/platform/docker-action-trust/active-receipt.json
+      DOCKER_ACTION_RUNTIME_INTENT_TRUST_KEY_FILE: /run/secrets/docker_action_runtime_intent_trust_key
+    secrets:
+      - source: docker_action_runtime_intent_trust_key
+        target: docker_action_runtime_intent_trust_key
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_catalog
+        target: docker_action_backup_catalog
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_job_execute
+        target: docker_action_backup_job_execute
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_prune_plan
+        target: docker_action_backup_prune_plan
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_prune_apply
+        target: docker_action_backup_prune_apply
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_restore_drill_full
+        target: docker_action_restore_drill_full
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_backup_offsite_sync
+        target: docker_action_backup_offsite_sync
+        uid: "0"
+        gid: "0"
+        mode: 256
+      - source: docker_action_evidence_runtime_snapshot
+        target: docker_action_evidence_runtime_snapshot
+        uid: "0"
+        gid: "0"
+        mode: 256
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: docker_action_broker_socket
+        target: /run/platform/docker-action-broker
+      - type: volume
+        source: docker_action_broker_state
+        target: /var/lib/platform/docker-action-broker
+      - type: volume
+        source: backup_scheduler_jobs
+        target: /run/platform/backup-jobs
+        read_only: true
+      - type: volume
+        source: docker_action_activation_cas
+        target: /run/platform/docker-action-activation/by-bundle-sha256
+        read_only: true
+      - type: bind
+        source: ${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}
+        target: /run/platform/docker-action-trust/runtime-intent.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}
+        target: /run/platform/docker-action-trust/active-receipt.json
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - /opt/platform-docker-broker/docker-action-readiness.mjs
+        - --require-trusted-activation
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      docker-action-activation-sidecar:
+        condition: service_completed_successfully
+
+volumes:
+  backup_scheduler_jobs: {}
+  docker_action_activation_cas: {}
+  docker_action_broker_socket: {}
+  docker_action_broker_state: {}
+
+secrets:
+  docker_action_runtime_intent_trust_key:
+    file: ${DOCKER_ACTION_RUNTIME_INTENT_TRUST_KEY_FILE:?set root-owned runtime-intent trust key file}
+  docker_action_backup_catalog:
+    file: ${DOCKER_ACTION_BACKUP_CATALOG_FILE:?set root-owned backup catalog capability file}
+  docker_action_backup_job_execute:
+    file: ${DOCKER_ACTION_BACKUP_JOB_EXECUTE_FILE:?set root-owned backup execution capability file}
+  docker_action_backup_prune_plan:
+    file: ${DOCKER_ACTION_BACKUP_PRUNE_PLAN_FILE:?set root-owned backup prune-plan capability file}
+  docker_action_backup_prune_apply:
+    file: ${DOCKER_ACTION_BACKUP_PRUNE_APPLY_FILE:?set root-owned backup prune-apply capability file}
+  docker_action_restore_drill_full:
+    file: ${DOCKER_ACTION_RESTORE_DRILL_FULL_FILE:?set root-owned restore-drill capability file}
+  docker_action_backup_offsite_sync:
+    file: ${DOCKER_ACTION_BACKUP_OFFSITE_SYNC_FILE:?set root-owned offsite-sync capability file}
+  docker_action_evidence_runtime_snapshot:
+    file: ${DOCKER_ACTION_EVIDENCE_RUNTIME_SNAPSHOT_FILE:?set root-owned evidence capability file}

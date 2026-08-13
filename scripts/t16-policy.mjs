@@ -109,6 +109,35 @@ record("vps-request-generator", includes(vpsWorkflow, "vps-evidence-request.mjs 
 record("vps-fixed-remote-command", includes(vpsWorkflow, "'$DEPLOY_REMOTE' 'bash -s'") || includes(vpsWorkflow, '"$DEPLOY_REMOTE" \'bash -s\''), "remote shell command is fixed");
 record("vps-no-remote-argv", !includes(vpsWorkflow, "bash -s --"), "workflow inputs are absent from SSH remote argv");
 record("vps-array-arguments", includes(vpsRemote, 'bootstrap_args+=(--deploy-user "$deploy_user")') && includes(vpsRemote, '"${hardening_args[@]}"'), "remote mutating scripts use arrays");
+const vpsWorkflowStop = vpsWorkflow.indexOf("      - name: V1 brownfield existing-host admission stop");
+const vpsWorkflowNextStep = vpsWorkflow.indexOf("      - name: Install SSH key");
+const vpsWorkflowSsh = vpsWorkflow.indexOf('ssh -F /dev/null -i "$ssh_key_snapshot"');
+const vpsWorkflowStopStep = vpsWorkflow.slice(vpsWorkflowStop, vpsWorkflowNextStep);
+record(
+  "vps-v1-stop-before-ssh",
+  vpsWorkflowStop >= 0
+    && vpsWorkflowNextStep > vpsWorkflowStop
+    && /run: \|\n\s+echo .*V1 brownfield existing-host path is STOP.*\n\s+exit 78\s*$/.test(vpsWorkflowStopStep)
+    && !/\bif:|continue-on-error|\$\{\{/.test(vpsWorkflowStopStep)
+    && vpsWorkflowSsh > vpsWorkflowStop,
+  "V1 brownfield workflow stops unconditionally with exit 78 before SSH",
+);
+const vpsRemoteStop = vpsRemote.indexOf("V1 brownfield existing-host path is STOP");
+const vpsRemoteExit = vpsRemote.indexOf("exit 78", vpsRemoteStop);
+const vpsRemotePrelude = vpsRemote.slice(0, vpsRemote.indexOf("decode_field()"));
+const vpsRemoteFirstMutation = Math.min(
+  vpsRemote.indexOf('git -C "$remote_dir" fetch'),
+  vpsRemote.indexOf("sudo sh ./scripts/vps-bootstrap-ubuntu.sh"),
+  vpsRemote.indexOf("sudo sh ./scripts/vps-hardening-ubuntu.sh"),
+);
+record(
+  "vps-v1-remote-stop-before-mutation",
+  vpsRemoteStop >= 0
+    && vpsRemoteExit > vpsRemoteStop
+    && vpsRemoteExit < vpsRemoteFirstMutation
+    && /^#!\/usr\/bin\/env bash\nset -euo pipefail\n\necho "V1 brownfield existing-host path is STOP:[^\n]+" >&2\nexit 78\n\n$/.test(vpsRemotePrelude),
+  "V1 remote collector stops with exit 78 before git, bootstrap, hardening or evidence output",
+);
 record("deploy-vps-fixed-command", includes(deployVps, 'ssh "$@" -- "$REMOTE" \'/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate\''), "production deploy uses the absolute root-owned activation broker command");
 record(
   "deploy-vps-canonical-request",
@@ -128,12 +157,22 @@ const boundedActivationShim = [
   'exec "$SUDO" -n "$BROKER" activate < "$request"',
 ].every((needle) => includes(deployVpsRemote, needle))
   && /if \[ "\$SYSTEM_NAME" != Linux \]; then[\s\S]*BROKER=\$\{PLATFORM_ACTIVATION_TEST_BROKER:-\$BROKER\}[\s\S]*SUDO=\$\{PLATFORM_ACTIVATION_TEST_SUDO:-\$SUDO\}[\s\S]*fi/.test(deployVpsRemote);
+const remoteV1Stop = deployVpsRemote.indexOf('echo "V1 brownfield existing-host path is STOP:');
+const remoteV1Exit = deployVpsRemote.indexOf("exit 78", remoteV1Stop);
+const remoteFirstStdinRead = deployVpsRemote.indexOf("/bin/dd if=/dev/stdin");
+const remoteBrokerExecution = deployVpsRemote.indexOf('exec "$SUDO" -n "$BROKER" activate');
+const terminalRemoteV1Stop = /^#!\/usr\/bin\/env sh\nset -eu\n\necho "V1 brownfield existing-host path is STOP:[^\n]+" >&2\nexit 78\n\n/.test(deployVpsRemote)
+  && remoteV1Stop >= 0
+  && remoteV1Exit > remoteV1Stop
+  && remoteFirstStdinRead > remoteV1Exit
+  && remoteBrokerExecution > remoteV1Exit;
 record(
   "deploy-vps-remote-revalidation",
-  boundedActivationShim
+  terminalRemoteV1Stop
+    && boundedActivationShim
     && includes(deployVps, 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"')
     && !/decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
-  "remote sink delegates only to the root-owned broker and the client validates its exact receipt",
+  "remote sink stops before stdin/sudo; unreachable legacy transport remains fixed to the root broker",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");

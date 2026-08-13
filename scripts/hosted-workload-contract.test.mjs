@@ -2787,7 +2787,7 @@ try {
   fs.writeFileSync(currentModel, modelText(currentModelValue));
   fs.writeFileSync(previousModel, modelText(previousModelValue));
   fs.writeFileSync(otherModel, modelText(otherModelValue));
-  fs.writeFileSync(dockerState, `${JSON.stringify({ containers: {} })}\n`, { mode: 0o600 });
+  fs.writeFileSync(dockerState, `${JSON.stringify({ containers: {}, volumes: {}, networks: {} })}\n`, { mode: 0o600 });
 
   const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
   const releaseContext = (modelValue, {
@@ -2990,18 +2990,19 @@ const pauseAt = (point) => {
 if (args[0] === "info") {
   if (process.env.PLATFORM_ACTIVATION_TRANSACTION_ID) pauseAt("intent");
   if (fs.existsSync(process.env.HOSTED_TEST_FIREWALL_MARKER || "")) pauseAt("firewall-active");
-  process.stdout.write("daemon-fixture\\n");
+  process.stdout.write(args.includes("{{.DockerRootDir}}") ? "/var/lib/docker\\n" : "daemon-fixture\\n");
   process.exit(0);
 }
 if (args[0] === "image" && args[1] === "inspect") {
   process.stdout.write("sha256:" + "d".repeat(64) + "\\n");
   process.exit(0);
 }
-
 const readState = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
 const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state) + "\\n", { mode: 0o600 });
 const state = readState();
 const containers = state.containers;
+const volumes = state.volumes || (state.volumes = {});
+const networks = state.networks || (state.networks = {});
 const selectedIds = (values) => values.filter((value) => Object.hasOwn(containers, value));
 const containerForService = (project, service) => Object.values(containers)
   .find((container) => container.project === project && container.service === service);
@@ -3012,7 +3013,7 @@ function inspection(container) {
   const labels = {
     "com.docker.compose.project": container.project,
     "com.docker.compose.service": container.service,
-    "com.docker.compose.config-hash": "fixture-config-hash",
+    "com.docker.compose.config-hash": "c".repeat(64),
     ...(definition.labels || {}),
   };
   const environment = Array.isArray(definition.environment)
@@ -3040,12 +3041,36 @@ function inspection(container) {
       Running: container.running,
       Paused: false,
       Restarting: false,
-      Status: container.running ? "running" : "exited",
+      Status: container.running ? "running" : (container.everStarted ? "exited" : "created"),
+      StartedAt: container.everStarted ? "2026-08-09T00:00:00Z" : "0001-01-01T00:00:00Z",
+      FinishedAt: container.everStarted ? "2026-08-09T00:00:01Z" : "0001-01-01T00:00:00Z",
     },
+    Mounts: [],
     NetworkSettings: {
       Networks: Object.fromEntries(networkNames.map((name) => [name, {}])),
     },
   };
+}
+
+if (args[0] === "volume" && args[1] === "ls") {
+  for (const name of Object.keys(volumes).sort()) process.stdout.write(name + "\\n");
+  process.exit(0);
+}
+if (args[0] === "network" && args[1] === "ls") {
+  for (const name of Object.keys(networks).sort()) process.stdout.write(name + "\\n");
+  process.exit(0);
+}
+if (args[0] === "volume" && args[1] === "inspect") {
+  const selected = args.slice(2).filter((name) => Object.hasOwn(volumes, name));
+  if (selected.length !== args.length - 2) process.exit(1);
+  process.stdout.write(JSON.stringify(selected.map((name) => volumes[name])) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "network" && args[1] === "inspect") {
+  const selected = args.slice(2).filter((name) => Object.hasOwn(networks, name));
+  if (selected.length !== args.length - 2) process.exit(1);
+  process.stdout.write(JSON.stringify(selected.map((name) => networks[name])) + "\\n");
+  process.exit(0);
 }
 
 if (args[0] === "compose") {
@@ -3060,7 +3085,53 @@ if (args[0] === "compose") {
   const services = requested.length > 0 ? requested : Object.keys(model.services);
   if (command === "create") {
     pauseAt("quiesced");
-    for (const service of services) {
+    for (const [logical, definitionValue] of Object.entries(model.volumes || {})) {
+      if (definitionValue && definitionValue.external === true) continue;
+      const definition = definitionValue || {};
+      const name = definition.name || project + "_" + logical;
+      if (!volumes[name]) volumes[name] = {
+        Name: name,
+        Driver: definition.driver || "local",
+        Scope: "local",
+        Labels: {
+          "com.docker.compose.project": project,
+          "com.docker.compose.version": "2.29.0",
+          "com.docker.compose.volume": logical,
+          ...(definition.labels || {}),
+        },
+        Options: definition.driver_opts || null,
+        Mountpoint: "/var/lib/docker/volumes/" + name + "/_data",
+        CreatedAt: "2026-08-09T00:00:00Z",
+      };
+    }
+    for (const [logical, definitionValue] of Object.entries(model.networks || {})) {
+      if (definitionValue && definitionValue.external === true) continue;
+      const definition = definitionValue || {};
+      const name = definition.name || project + "_" + logical;
+      if (!networks[name]) networks[name] = {
+        Id: "network-" + logical,
+        Name: name,
+        Driver: definition.driver || "bridge",
+        Scope: "local",
+        Internal: definition.internal === true,
+        Attachable: definition.attachable === true,
+        Ingress: false,
+        ConfigOnly: false,
+        EnableIPv4: definition.enable_ipv4 !== false,
+        EnableIPv6: definition.enable_ipv6 === true,
+        Labels: {
+          "com.docker.compose.project": project,
+          "com.docker.compose.version": "2.29.0",
+          "com.docker.compose.network": logical,
+          ...(definition.labels || {}),
+        },
+        Options: definition.driver_opts || null,
+        IPAM: { Driver: "default", Options: null, Config: [] },
+      };
+    }
+    const partialCount = Number.parseInt(process.env.HOSTED_TEST_PARTIAL_CREATE_COUNT || "0", 10);
+    const selectedServices = partialCount > 0 ? services.slice(0, partialCount) : services;
+    for (const service of selectedServices) {
       const existing = containerForService(project, service);
       const id = existing ? existing.id : "cid-" + service;
       containers[id] = {
@@ -3068,11 +3139,13 @@ if (args[0] === "compose") {
         project,
         service,
         running: false,
+        everStarted: false,
         definition: model.services[service],
         model,
       };
     }
     writeState(state);
+    if (partialCount > 0) process.exit(88);
     process.exit(0);
   }
   if (command === "stop") {
@@ -3098,6 +3171,7 @@ if (args[0] === "start") {
   const failingService = process.env.HOSTED_TEST_FAIL_SERVICE || "";
   if (ids.some((id) => containers[id].service === failingService)) process.exit(82);
   for (const id of ids) containers[id].running = true;
+  for (const id of ids) containers[id].everStarted = true;
   writeState(state);
   process.stdout.write(ids.join("\\n") + (ids.length > 0 ? "\\n" : ""));
   process.exit(0);
@@ -3228,7 +3302,7 @@ const exitResult = new Promise((resolve) => {
   child.once("exit", (code, endedSignal) => resolve({ code, signal: endedSignal }));
 });
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const deadline = Date.now() + 8_000;
+const deadline = Date.now() + 20_000;
 while (!fs.existsSync(process.env.HOSTED_TEST_PAUSE_READY)
     && child.exitCode === null && child.signalCode === null
     && Date.now() < deadline) await pause(20);
@@ -3245,7 +3319,7 @@ const ended = await exitResult;
 process.stdout.write(JSON.stringify({ ...ended, stdout, stderr }));
 `], {
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: 30_000,
     env: {
       ...fixture.environment,
       HOSTED_TEST_ACTIVATION_ARGS: JSON.stringify(activationGateArguments(fixture, ...extra)),
@@ -3254,7 +3328,7 @@ process.stdout.write(JSON.stringify({ ...ended, stdout, stderr }));
       HOSTED_TEST_INTERRUPT_SIGNAL: signal,
     },
   });
-  assert.equal(orchestrator.status, 0, `${orchestrator.stdout}\n${orchestrator.stderr}`);
+  assert.equal(orchestrator.status, 0, `${phase}\n${orchestrator.stdout}\n${orchestrator.stderr}`);
   return JSON.parse(orchestrator.stdout);
 }
 
@@ -3539,7 +3613,7 @@ test("activation gate rejects missing, empty, extra or wrong platform-extension 
   }
 });
 
-test("SIGKILL at every activation boundary leaves a durable pending journal that can be recovered", () => {
+test("SIGKILL recovery is fail-closed once transaction-created containers exist", () => {
   const phases = [
     ["intent", "intent", []],
     ["quiesced", "creating", []],
@@ -3565,12 +3639,30 @@ test("SIGKILL at every activation boundary leaves a durable pending journal that
       assert.equal(pending.state, "pending");
       assert.equal(pending.phase, expectedJournalPhase);
       assert.equal(pending.releaseId, fixture.releaseId);
+      const dockerBeforeRecovery = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
+      const traceBeforeRecovery = fs.readFileSync(fixture.log, "utf8").length;
 
       const recovered = spawnSync("/bin/bash", activationGateArguments(
         fixture,
         "--lock", fixture.currentLock,
         "--recover-pending",
       ), { encoding: "utf8", env: fixture.environment });
+      if (!["intent", "quiesced"].includes(pausePoint)) {
+        assert.equal(recovered.status, 70, `${pausePoint}\n${recovered.stdout}\n${recovered.stderr}`);
+        assert.match(recovered.stderr, /pre-existing project containers are not transaction-owned/i);
+        assert.deepEqual(
+          JSON.parse(fs.readFileSync(fixture.dockerState, "utf8")),
+          dockerBeforeRecovery,
+          `${pausePoint} recovery changed a container`,
+        );
+        const recoveryTrace = fs.readFileSync(fixture.log, "utf8").slice(traceBeforeRecovery);
+        assert.doesNotMatch(recoveryTrace, /docker:.*(?: compose .* create | start | stop | rm )/);
+        assert.doesNotMatch(recoveryTrace, /^firewall:/m);
+        const retained = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+        assert.equal(retained.state, "pending");
+        assert.equal(retained.phase, expectedJournalPhase);
+        continue;
+      }
       assert.equal(recovered.status, 0, `${pausePoint}\n${recovered.stdout}\n${recovered.stderr}`);
       const journal = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
       const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
@@ -3582,9 +3674,56 @@ test("SIGKILL at every activation boundary leaves a durable pending journal that
       removeFixtureTree(root);
     }
   }
+  assertPartialComposeCreateRecovery();
 });
 
-test("a new trusted release context can recover a pending transaction from the retained prior context", () => {
+function assertPartialComposeCreateRecovery() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-partial-create-recovery-")));
+  try {
+    const fixture = activationGateFixture(root);
+    const partial = spawnSync("/bin/bash", activationGateArguments(
+      fixture,
+      "--lock", fixture.currentLock,
+    ), {
+      encoding: "utf8",
+      env: { ...fixture.environment, HOSTED_TEST_PARTIAL_CREATE_COUNT: "1" },
+    });
+    assert.equal(partial.status, 72, `${partial.stdout}\n${partial.stderr}`);
+    assert.match(partial.stderr, /exact never-started transaction containers were stopped and removed without volumes/i);
+    const pending = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+    assert.equal(pending.state, "pending");
+    assert.equal(pending.phase, "creating");
+    const afterPartial = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
+    assert.deepEqual(afterPartial.containers, {});
+    assert.ok(Object.keys(afterPartial.networks).length > 0, "partial create did not leave a resource to preserve");
+    const resourceSnapshot = structuredClone({
+      volumes: afterPartial.volumes,
+      networks: afterPartial.networks,
+    });
+    const traceBeforeRetry = fs.readFileSync(fixture.log, "utf8").length;
+
+    const recovered = spawnSync("/bin/bash", activationGateArguments(
+      fixture,
+      "--lock", fixture.currentLock,
+      "--recover-pending",
+    ), { encoding: "utf8", env: fixture.environment });
+    assert.equal(recovered.status, 0, `${recovered.stdout}\n${recovered.stderr}`);
+    const journal = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
+    assert.equal(journal.state, "complete");
+    assert.equal(journal.transactionId, pending.transactionId);
+    assert.equal(active.state, "hosted");
+    const finalState = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
+    assert.deepEqual({ volumes: finalState.volumes, networks: finalState.networks }, resourceSnapshot);
+    const retryTrace = fs.readFileSync(fixture.log, "utf8").slice(traceBeforeRetry);
+    assert.match(retryTrace, /docker:.* compose .* create /);
+    assert.doesNotMatch(retryTrace, /docker:.*(?: volume rm | network rm | compose .* down | prune |--remove-orphans)/);
+  } finally {
+    removeFixtureTree(root);
+  }
+}
+
+test("a new trusted release context cannot adopt containers from a pending prior transaction", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-cross-release-recovery-")));
   try {
     const fixture = activationGateFixture(root);
@@ -3598,6 +3737,8 @@ test("a new trusted release context can recover a pending transaction from the r
     const pending = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
     assert.equal(pending.releaseId, fixture.releaseId);
     const priorContextSha = pending.releaseContextSha256;
+    const dockerBeforeRecovery = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
+    const traceBeforeRecovery = fs.readFileSync(fixture.log, "utf8").length;
 
     const recovered = spawnSync("/bin/bash", activationGateArgumentsForContext(
       fixture,
@@ -3605,18 +3746,21 @@ test("a new trusted release context can recover a pending transaction from the r
       "--lock", fixture.currentLock,
       "--recover-pending",
     ), { encoding: "utf8", env: fixture.environment });
-    assert.equal(recovered.status, 0, `${recovered.stdout}\n${recovered.stderr}`);
-    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
-    assert.equal(active.releaseId, fixture.releaseId);
-    assert.notEqual(active.releaseContextSha256, priorContextSha);
-    assert.equal(active.state, "hosted");
-    assert.deepEqual(active.serviceNames, fixture.currentServices);
+    assert.equal(recovered.status, 70, `${recovered.stdout}\n${recovered.stderr}`);
+    assert.match(recovered.stderr, /different trusted release context; adoption is forbidden/i);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.dockerState, "utf8")), dockerBeforeRecovery);
+    const recoveryTrace = fs.readFileSync(fixture.log, "utf8").slice(traceBeforeRecovery);
+    assert.doesNotMatch(recoveryTrace, /docker:.*(?: compose .* create | start | stop | rm )/);
+    assert.doesNotMatch(recoveryTrace, /^firewall:/m);
+    const retained = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
+    assert.equal(retained.state, "pending");
+    assert.equal(retained.releaseContextSha256, priorContextSha);
   } finally {
     removeFixtureTree(root);
   }
 });
 
-test("SIGTERM during start runs the fail-closed rollback instead of leaving a pending transaction", () => {
+test("SIGTERM during start stops only exact transaction-created containers", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-term-start-")));
   try {
     const fixture = activationGateFixture(root);
@@ -3627,21 +3771,22 @@ test("SIGTERM during start runs the fail-closed rollback instead of leaving a pe
       "--lock", fixture.currentLock,
     );
     assert.equal(interrupted.signal, null);
-    assert.equal(interrupted.code, 71, `${interrupted.stdout}\n${interrupted.stderr}`);
+    assert.equal(interrupted.code, 72, `${interrupted.stdout}\n${interrupted.stderr}`);
+    assert.match(interrupted.stderr, /only containers registered as created by this transaction were stopped/i);
     const journal = JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8"));
-    assert.equal(journal.state, "complete");
-    assert.equal(journal.phase, "complete");
+    assert.equal(journal.state, "pending");
     const docker = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
-    for (const service of fixture.baseServices) {
-      const container = Object.values(docker.containers).find((candidate) => candidate.service === service);
-      assert.equal(container?.running, true, `${service} was not restored after SIGTERM`);
-    }
+    assert.ok(Object.values(docker.containers).every((container) => container.running === false));
+    const trace = fs.readFileSync(fixture.log, "utf8");
+    assert.match(trace, /docker:.* stop --time 30 /);
+    assert.doesNotMatch(trace, /docker:.* rm /);
+    assert.doesNotMatch(trace, /^firewall:--rollback:/m);
   } finally {
     removeFixtureTree(root);
   }
 });
 
-test("activation failure restores the canonical no-hosted state by creating every fallback service", () => {
+test("activation failure stops only the exact transaction-created set", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-rollback-")));
   try {
     const fixture = activationGateFixture(root);
@@ -3652,31 +3797,28 @@ test("activation failure restores the canonical no-hosted state by creating ever
       encoding: "utf8",
       env: { ...fixture.environment, HOSTED_TEST_FAIL_SERVICE: "current-app-web" },
     });
-    assert.equal(result.status, 71, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stderr, /canonical no-hosted state was restored/i);
+    assert.equal(result.status, 72, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /only containers registered as created by this transaction were stopped/i);
     const trace = fs.readFileSync(fixture.log, "utf8").trim().split("\n");
     const failedStartIndex = trace.findIndex((line) => /docker:.* start .*cid-current-app-web(?: |$)/.test(line));
-    const rollbackIndex = trace.findIndex((line) => line === "firewall:--rollback:");
     const createLines = trace.filter((line) => /docker:.* compose .* create /.test(line));
-    assert.ok(failedStartIndex >= 0 && rollbackIndex > failedStartIndex);
-    assert.equal(createLines.length, 2);
-    const fallbackCreate = createLines.at(-1);
-    for (const service of fixture.baseServices) assert.match(fallbackCreate, new RegExp(`(?:^| )${service}(?: |$)`));
-    assert.doesNotMatch(fallbackCreate, /(?:^| )current-app-web(?: |$)/);
+    assert.ok(failedStartIndex >= 0);
+    assert.equal(createLines.length, 1);
+    assert.equal(trace.some((line) => line === "firewall:--rollback:"), false);
+    assert.equal(trace.some((line) => /docker:.* rm /.test(line)), false);
     const docker = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
     for (const service of fixture.baseServices) {
       const container = Object.values(docker.containers).find((candidate) => candidate.service === service);
-      assert.equal(container?.running, true, `${service} was not restored running`);
+      assert.equal(container?.running, false, `${service} was not stopped fail-closed`);
     }
-    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
-    assert.equal(active.state, "no-hosted");
-    assert.equal(active.coreRenderSha256, active.combinedRenderSha256);
+    assert.equal(fs.existsSync(path.join(fixture.state, "active.json")), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.state, "journal.json"), "utf8")).state, "pending");
   } finally {
     removeFixtureTree(root);
   }
 });
 
-test("a supplied previous lock cannot mint a false previous-hosted rollback receipt", () => {
+test("a supplied previous lock cannot authorize rollback or adoption", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-previous-fallback-")));
   try {
     const fixture = activationGateFixture(root);
@@ -3688,12 +3830,8 @@ test("a supplied previous lock cannot mint a false previous-hosted rollback rece
       encoding: "utf8",
       env: { ...fixture.environment, HOSTED_TEST_FAIL_SERVICE: "current-app-web" },
     });
-    assert.equal(result.status, 71, `${result.stdout}\n${result.stderr}`);
-    const active = JSON.parse(fs.readFileSync(path.join(fixture.state, "active.json"), "utf8"));
-    assert.equal(active.state, "no-hosted");
-    assert.equal(active.releaseId, fixture.releaseId);
-    assert.notEqual(active.lockSha256, "b".repeat(64));
-    assert.deepEqual(active.serviceNames, fixture.baseServices);
+    assert.equal(result.status, 72, `${result.stdout}\n${result.stderr}`);
+    assert.equal(fs.existsSync(path.join(fixture.state, "active.json")), false);
     const trace = fs.readFileSync(fixture.log, "utf8");
     assert.doesNotMatch(trace, /docker:.* start .*cid-previous-app-web(?: |$)/);
   } finally {
@@ -3701,7 +3839,7 @@ test("a supplied previous lock cannot mint a false previous-hosted rollback rece
   }
 });
 
-test("hosted to explicit zero performs a real full-project transition and deactivates egress enforcement", () => {
+test("hosted to explicit zero refuses an unauthenticated brownfield teardown", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-zero-")));
   try {
     const fixture = activationGateFixture(root);
@@ -3717,43 +3855,23 @@ test("hosted to explicit zero performs a real full-project transition and deacti
     assert.equal(hostedActive.releaseId, fixture.releaseId);
 
     fs.writeFileSync(fixture.log, "");
+    const dockerBeforeZero = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
     const zero = spawnSync("/bin/bash", activationGateArguments(
       fixture,
       "--no-hosted-workloads",
       "--previous-lock", fixture.currentLock,
     ), { encoding: "utf8", env: fixture.environment });
-    assert.equal(zero.status, 0, `${zero.stdout}\n${zero.stderr}`);
+    assert.equal(zero.status, 70, `${zero.stdout}\n${zero.stderr}`);
+    assert.match(zero.stderr, /pre-existing project containers are not transaction-owned/i);
     const trace = fs.readFileSync(fixture.log, "utf8").trim().split("\n");
-    const projectStopIndex = trace.findIndex((line) => /docker:.* stop --time 30 /.test(line));
-    const removeIndex = trace.findIndex((line) => /docker:.* rm .*cid-current-app-web(?: |$)/.test(line));
-    const createIndex = trace.findIndex((line) => /docker:.* compose .* create /.test(line));
-    const deactivateIndex = trace.findIndex((line) => line === "firewall:--rollback:");
-    const startIndex = trace.findIndex((line) => /docker:.* start /.test(line));
-    assert.ok(
-      projectStopIndex >= 0
-      && projectStopIndex < removeIndex
-      && removeIndex < createIndex
-      && createIndex < deactivateIndex
-      && deactivateIndex < startIndex,
-    );
-    const createLine = trace[createIndex];
-    for (const service of fixture.baseServices) assert.match(createLine, new RegExp(`(?:^| )${service}(?: |$)`));
-    assert.doesNotMatch(createLine, /(?:^| )current-app-web(?: |$)/);
-    const docker = JSON.parse(fs.readFileSync(fixture.dockerState, "utf8"));
-    assert.deepEqual(
-      Object.values(docker.containers).map((container) => container.service).sort(),
-      fixture.baseServices,
-    );
-    assert.ok(Object.values(docker.containers).every((container) => container.running));
+    assert.equal(trace.some((line) => /docker:.*(?: stop | rm | compose .* create | start )/.test(line)), false);
+    assert.equal(trace.some((line) => line.startsWith("firewall:")), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.dockerState, "utf8")), dockerBeforeZero);
     const active = JSON.parse(fs.readFileSync(path.join(fixture.noHostedState, "active.json"), "utf8"));
-    const noHostedContext = JSON.parse(fs.readFileSync(fixture.noHostedReleaseContext, "utf8"));
-    assert.equal(active.state, "no-hosted");
+    assert.equal(active.state, "hosted");
     assert.equal(active.releaseId, fixture.releaseId);
-    assert.notEqual(active.releaseContextSha256, hostedActive.releaseContextSha256);
-    assert.equal(active.coreRenderSha256, noHostedContext.sourceRenderSha256);
-    assert.equal(active.combinedRenderSha256, noHostedContext.combinedRenderSha256);
-    assert.notEqual(active.coreRenderSha256, active.combinedRenderSha256);
-    assert.deepEqual(active.serviceNames, fixture.baseServices);
+    assert.equal(active.releaseContextSha256, hostedActive.releaseContextSha256);
+    assert.deepEqual(active.serviceNames, fixture.currentServices);
   } finally {
     removeFixtureTree(root);
   }

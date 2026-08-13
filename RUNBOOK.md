@@ -716,6 +716,16 @@ from configuration alone.
 
 ## VPS hardening and Cloudflare
 
+> **Existing-host stop gate:** the commands in this section are for a new host
+> or for a host already covered by a verified recovery plan. On the current
+> brownfield server, do not run any `--apply`, Docker daemon replacement,
+> Compose teardown, prune, reinstall, or rebuild until
+> [V1-BROWNFIELD-DEPLOYMENT.md](V1-BROWNFIELD-DEPLOYMENT.md) is satisfied, a new
+> complete PRE-DEPLOY backup exists on separate storage and all three provider
+> gates are authenticated. An intentional rebuild may replace Docker
+> identities only after that recovery evidence exists; the read-only baseline
+> is deny-only and cannot authorize mutation.
+
 Run on a new VPS Ubuntu LTS VPS before public traffic:
 
 ```sh
@@ -1003,23 +1013,12 @@ Run the manual `enterprise-live-evidence` workflow from the production
 environment after DNS, Cloudflare, provider monitors and VPS evidence are ready;
 it gathers external uptime, public Cloudflare load, Cloudflare Access, live
 go/no-go and complete evidence bundle reports without deploying.
-Run `enterprise-vps-evidence` from the same production environment to collect
-VPS bootstrap, hardening and host readiness reports from VPS over SSH. It
-requires `DEPLOY_SSH_KEY`, the independently provisioned host-key pin
-`DEPLOY_SSH_HOST_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
-`DEPLOY_REMOTE_DIR` and `VPS_HARDENED_SSH_PORT`; bootstrap/hardening only run
-when the workflow inputs explicitly enable them and `confirm_mutating_vps=true`.
-The host-key pin contains only the SSH algorithm and base64 public key; the
-workflow binds it to the separately configured host and port and uses strict
-single-entry `known_hosts` verification, never trust-on-first-use. The request
-carries the exact `${{ github.sha }}` and locally observed Git tree.
-The remote runner fetches that object, creates an isolated detached worktree and
-rejects commit, tree or clean-state drift before and after collection; it never
-pulls mutable `main`. Before extraction, the workflow validates a returned
-`platform.vps-evidence-receipt/v1` against the expected commit/tree, the exact
-archive SHA-256 and the allowed `reports/vps-*` entry set. Archive the uploaded
-receipt, provenance JSON and `reports/vps-*` outside Git. Repository tests prove
-the contract only; the actual SSH/VPS execution remains required live evidence.
+Do not run `enterprise-vps-evidence` for the existing V1 host. **V1 brownfield:
+unconditional STOP 78** occurs before SSH credential installation, SSH, Git
+fetch, bootstrap, hardening and receipt/archive generation. Workflow inputs,
+`confirm_mutating_vps` and local `NONAUTHORITATIVE` state cannot bypass it.
+There is no authoritative V1 admission consumer for this path yet;
+plan/read-only/local tests remain available, but they are not live evidence.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 
@@ -1128,15 +1127,25 @@ public monitoring, public load and off-site restore evidence are real.
 
 ### T23 production candidate verdict
 
-The candidate verified on 2026-07-11 remains `NO-GO`. The authoritative local
-receipt is
+The historical T23 clean candidate verified on 2026-07-11 remains `NO-GO`. The
+authoritative local receipt for that historical assessment is
 `/home/platform_infrastructure/remediation-work/20260711T044751Z-t23-production-candidate`.
-The clean candidate commit is `4c04042a6fabc42317e18896b949f16b35102c7a`.
-Functional health passed 11/11, but the exact runtime fingerprint correctly
-failed because the 24-service candidate core is not deployed over the 34-service
-historical runtime. Do not copy a passing flag into the report. Deploy in an
-approved maintenance window, then rerun the fingerprint from the deployed clean
-checkout with the production `.env`.
+Its historical clean candidate commit was
+`4c04042a6fabc42317e18896b949f16b35102c7a`. Functional health passed 11/11,
+but the exact runtime fingerprint correctly failed because the 24-service
+candidate core was not deployed over the 34-service historical runtime. That
+SHA is historical evidence, not a current deployment instruction. Do not copy a
+passing flag into the report and do not deploy it.
+
+For V1 brownfield remediation, `30fb7d6ebbaf1734e4f7eabfb95a6444417b0ed0`
+is only the base under remediation described in
+[V1-BROWNFIELD-DEPLOYMENT.md](V1-BROWNFIELD-DEPLOYMENT.md); it is not deployable.
+There is no current deployable SHA. A new clean candidate SHA can be selected
+only after the non-destructive implementation is complete, the canonical live
+baseline is complete, the immutable/CAS PRE-DEPLOY backup is authoritative and
+all provider, target and activation gates bind the exact candidate commit/tree
+and target root. Until then the production workflow and `deploy-vps.sh` stop
+before SSH or the ops-image activation path.
 
 The same verdict retains stale bootstrap/hardening evidence, UPS, complete
 pre-go-live, rotation, off-site DR and real alert delivery as local/maintenance
@@ -1360,26 +1369,19 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE=1` during the staging/VPS validation
    window once Restic, GitHub and provider credentials are ready.
 
-   For a repeatable same-host execution, generate a plan first and then run the
-   live orchestrator:
+   The same-host V1 helper is plan-only:
 
    ```sh
    sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence
-   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence
    ```
 
-   The orchestrator is plan-only by default. Live mode runs VPS readiness,
-   VPS preflight, post-deploy smoke/health against an already admitted runtime, final
-   go/no-go and evidence bundle in order. On a fresh VPS add `--bootstrap` to
-   install Git/Docker/Compose and `--apply-hardening` after SSH key access is
-   verified. Use `--reload-sshd` after the target SSH port is reachable so the
-   daemon actually enforces the hardened config. Use `--replace-docker-daemon-config` only after reviewing the
-   generated Docker daemon template on a host that already has
-   `/etc/docker/daemon.json`. The flow writes JSON/Markdown reports under
-   `reports/vps-go-live/`. It does not source `.env`; the file is passed
-   to the dedicated preflight/postdeploy commands. `--start-stack` is rejected;
-   only `deploy-vps.sh` may cross the production activation boundary.
+   The JSON/Markdown plan under `reports/vps-go-live/` is `NONAUTHORITATIVE`.
+   **V1 brownfield: unconditional STOP 78** makes `--confirmLive` terminate
+   before bootstrap, hardening, Docker restart, readiness or evidence creation.
+   No caller flag or local state can enable it while an authoritative V1
+   admission consumer does not exist. The plan/read-only/local tests remain available.
+   For a proven empty/new host, use the standalone fresh-host scripts separately;
+   do not reinterpret them as authority over the existing V1 server.
 
 7. Keep database/admin surfaces private. Do not publish phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO console or Traefik dashboard to public DNS.
 

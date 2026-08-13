@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:v1-authoritative-backup-attestation:v1",
+  "title": "V1 authoritative PREINSTALL backup attestation DSSE payload",
+  "description": "Closed preinstall payload requiring backupAuthority and sourceTargetCustodian signatures. It deliberately contains no final policy, final challenge, install receipt, Phase B envelope, or other post-install bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "attestationId", "backupTrustPolicySha256", "evidence", "expiresAt", "issuedAt", "preinstallTuple",
+    "preinstallTupleSha256", "producers", "schema"
+  ],
+  "properties": {
+    "attestationId": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+    },
+    "backupTrustPolicySha256": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backupArtifactSetSha256", "backupDeviceIdentity", "backupManifestSha256", "backupSetId",
+        "captureCompletedAt", "captureStartedAt", "dataRollbackAuthority", "databaseConsistency",
+        "evidenceArtifactSha256", "offHost", "offHostRetrieval", "restoreDrill", "sourceDeviceSetExcluded",
+        "sourceDeviceSetSha256", "structuralReceiptArtifactSha256", "structuralReceiptId",
+        "structuralReceiptVerifiedAt", "protectedArtifactCount", "protectedArtifactSetSha256",
+        "databaseCount", "databaseSetSha256", "verifiedAt", "writeConsistency"
+      ],
+      "properties": {
+        "backupArtifactSetSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "backupDeviceIdentity": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/identifier"
+        },
+        "backupManifestSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "backupSetId": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "captureCompletedAt": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+        },
+        "captureStartedAt": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+        },
+        "dataRollbackAuthority": { "const": false },
+        "databaseCount": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/safePositiveInteger"
+        },
+        "databaseConsistency": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/databaseConsistency"
+        },
+        "databaseSetSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "evidenceArtifactSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "offHost": { "const": true },
+        "offHostRetrieval": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/offHostRetrieval"
+        },
+        "protectedArtifactCount": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/safePositiveInteger"
+        },
+        "protectedArtifactSetSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "restoreDrill": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/restoreDrill"
+        },
+        "sourceDeviceSetExcluded": { "const": true },
+        "sourceDeviceSetSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "structuralReceiptArtifactSha256": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "structuralReceiptId": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+        },
+        "structuralReceiptVerifiedAt": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+        },
+        "verifiedAt": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+        },
+        "writeConsistency": {
+          "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/writeConsistency"
+        }
+      }
+    },
+    "expiresAt": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+    },
+    "issuedAt": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/timestamp"
+    },
+    "preinstallTuple": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/preinstallTuple"
+    },
+    "preinstallTupleSha256": {
+      "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/sha256"
+    },
+    "producers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backupAuthority", "sourceTargetCustodian"],
+      "properties": {
+        "backupAuthority": {
+          "allOf": [
+            { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/externalProducer" },
+            { "type": "object", "properties": { "role": { "const": "backupAuthority" } } }
+          ]
+        },
+        "sourceTargetCustodian": {
+          "allOf": [
+            { "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/targetRootProducer" },
+            { "type": "object", "properties": {
+              "role": { "const": "sourceTargetCustodian" },
+              "rootState": { "const": "EXISTING_EXACT" }
+            } }
+          ]
+        }
+      }
+    },
+    "schema": { "const": "platform.v1-authoritative-backup-attestation/v1" }
+  }
+}
