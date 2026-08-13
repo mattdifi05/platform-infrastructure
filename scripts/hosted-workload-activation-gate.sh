@@ -1157,7 +1157,13 @@ verify_privileged_helper() {
   else
     [[ "$helper" == "$INFRA_ROOT"/scripts/* ]] || return 1
   fi
-  identity=$(stat -f '%u|%Lp|%l' "$helper" 2>/dev/null || stat -c '%u|%a|%h' "$helper") || return 1
+  if identity=$(stat -c '%u|%a|%h' "$helper" 2>/dev/null); then
+    :
+  elif identity=$(stat -f '%u|%Lp|%l' "$helper" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
   IFS='|' read -r uid mode links <<< "$identity"
   if [[ "$SYSTEM_NAME" == Linux ]]; then
     [[ "$uid" == 0 ]] || return 1

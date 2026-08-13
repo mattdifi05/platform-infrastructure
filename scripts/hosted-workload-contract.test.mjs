@@ -2630,6 +2630,13 @@ exit 0
   }
 });
 
+function activationFixtureRoot(prefix) {
+  const base = process.platform === "linux"
+    ? fs.realpathSync.native(os.homedir())
+    : os.tmpdir();
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(base, prefix)));
+}
+
 function activationGateFixture(root) {
   const commitSha = "1".repeat(40);
   const sourceArchiveSha256 = "3".repeat(64);
@@ -3396,7 +3403,7 @@ test("Compose wrapper rejects late global overlays and hosted mutation bypasses"
 });
 
 test("activation gate requires an explicit lock and the canonical global project before mutation", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-empty-")));
+  const root = activationFixtureRoot("hosted-activation-empty-");
   try {
     const fixture = activationGateFixture(root);
     const missing = spawnSync("/bin/bash", activationGateArguments(fixture), {
@@ -3444,7 +3451,7 @@ test("activation gate requires an explicit lock and the canonical global project
 });
 
 test("activation gate rejects a byte-identical environment not authenticated by the release context", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-env-identity-")));
+  const root = activationFixtureRoot("hosted-activation-env-identity-");
   try {
     const fixture = activationGateFixture(root);
     const unboundEnvironment = path.join(fixture.repository, "unbound-environment.env");
@@ -3468,7 +3475,7 @@ test("activation gate rejects a byte-identical environment not authenticated by 
 });
 
 test("activation gate runs one canonical global transaction with core validation, firewall ordering and postdeploy", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-order-")));
+  const root = activationFixtureRoot("hosted-activation-order-");
   try {
     const fixture = activationGateFixture(root);
     const result = spawnSync("/bin/bash", activationGateArguments(
@@ -3513,7 +3520,7 @@ test("activation gate runs one canonical global transaction with core validation
 });
 
 test("lost post-durable commit acknowledgement is reconciled before any rollback", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-lost-commit-ack-")));
+  const root = activationFixtureRoot("hosted-activation-lost-commit-ack-");
   try {
     const fixture = activationGateFixture(root);
     const result = spawnSync("/bin/bash", activationGateArguments(
@@ -3540,7 +3547,7 @@ test("lost post-durable commit acknowledgement is reconciled before any rollback
 });
 
 test("an unavailable post-commit snapshot forbids rollback of an ambiguous durable outcome", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-ambiguous-commit-")));
+  const root = activationFixtureRoot("hosted-activation-ambiguous-commit-");
   try {
     const fixture = activationGateFixture(root);
     const result = spawnSync("/bin/bash", activationGateArguments(
@@ -3570,7 +3577,7 @@ test("an unavailable post-commit snapshot forbids rollback of an ambiguous durab
 });
 
 test("activation gate rejects a rendered workload-labelled service not present in the verified lock", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-extra-service-")));
+  const root = activationFixtureRoot("hosted-activation-extra-service-");
   try {
     const fixture = activationGateFixture(root);
     const model = JSON.parse(fs.readFileSync(fixture.currentModel, "utf8"));
@@ -3608,7 +3615,7 @@ test("activation gate rejects missing, empty, extra or wrong platform-extension 
     }],
   ];
   for (const [name, mutate] of variants) {
-    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `hosted-extension-${name}-`)));
+    const root = activationFixtureRoot(`hosted-extension-${name}-`);
     try {
       const fixture = activationGateFixture(root);
       const bundle = JSON.parse(fs.readFileSync(fixture.currentLock, "utf8"));
@@ -3642,7 +3649,7 @@ test("SIGKILL recovery is fail-closed once transaction-created containers exist"
     ["postdeploy", "runtime-verified", ["--run-postdeploy"]],
   ];
   for (const [pausePoint, expectedJournalPhase, extra] of phases) {
-    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `hosted-kill-${pausePoint}-`)));
+    const root = activationFixtureRoot(`hosted-kill-${pausePoint}-`);
     try {
       const fixture = activationGateFixture(root);
       const interrupted = interruptActivation(
@@ -3697,7 +3704,7 @@ test("SIGKILL recovery is fail-closed once transaction-created containers exist"
 });
 
 function assertPartialComposeCreateRecovery() {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-partial-create-recovery-")));
+  const root = activationFixtureRoot("hosted-partial-create-recovery-");
   try {
     const fixture = activationGateFixture(root);
     const partial = spawnSync("/bin/bash", activationGateArguments(
@@ -3743,7 +3750,7 @@ function assertPartialComposeCreateRecovery() {
 }
 
 test("a new trusted release context cannot adopt containers from a pending prior transaction", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-cross-release-recovery-")));
+  const root = activationFixtureRoot("hosted-cross-release-recovery-");
   try {
     const fixture = activationGateFixture(root);
     const interrupted = interruptActivation(
@@ -3780,7 +3787,7 @@ test("a new trusted release context cannot adopt containers from a pending prior
 });
 
 test("SIGTERM during start stops only exact transaction-created containers", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-term-start-")));
+  const root = activationFixtureRoot("hosted-term-start-");
   try {
     const fixture = activationGateFixture(root);
     const interrupted = interruptActivation(
@@ -3806,7 +3813,7 @@ test("SIGTERM during start stops only exact transaction-created containers", () 
 });
 
 test("activation failure stops only the exact transaction-created set", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-rollback-")));
+  const root = activationFixtureRoot("hosted-activation-rollback-");
   try {
     const fixture = activationGateFixture(root);
     const result = spawnSync("/bin/bash", activationGateArguments(
@@ -3838,7 +3845,7 @@ test("activation failure stops only the exact transaction-created set", () => {
 });
 
 test("a supplied previous lock cannot authorize rollback or adoption", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-previous-fallback-")));
+  const root = activationFixtureRoot("hosted-activation-previous-fallback-");
   try {
     const fixture = activationGateFixture(root);
     const result = spawnSync("/bin/bash", activationGateArguments(
@@ -3859,7 +3866,7 @@ test("a supplied previous lock cannot authorize rollback or adoption", () => {
 });
 
 test("hosted to explicit zero refuses an unauthenticated brownfield teardown", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-zero-")));
+  const root = activationFixtureRoot("hosted-activation-zero-");
   try {
     const fixture = activationGateFixture(root);
     const hosted = spawnSync("/bin/bash", activationGateArguments(
@@ -3897,7 +3904,7 @@ test("hosted to explicit zero refuses an unauthenticated brownfield teardown", (
 });
 
 test("the shared activation mutex serializes different trusted release contexts", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-contention-")));
+  const root = activationFixtureRoot("hosted-activation-contention-");
   let holder;
   try {
     const fixture = activationGateFixture(root);
@@ -3938,7 +3945,7 @@ time.sleep(30)
 });
 
 test("activation mutex symlink cannot truncate its target or bypass the global lock", () => {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-activation-mutex-")));
+  const root = activationFixtureRoot("hosted-activation-mutex-");
   try {
     const fixture = activationGateFixture(root);
     const sentinel = path.join(root, "mutex-sentinel");

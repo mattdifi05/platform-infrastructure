@@ -172,7 +172,7 @@ jobs:
           } >> .env
           node ./scripts/infra-ops.mjs network-segmentation-check --envFile .env
       - name: HA configuration check
-        run: node ./scripts/infra-ops.mjs ha-config-check
+        run: node ./scripts/infra-ops.mjs ha-config-check --noDocker
       - name: Managed secrets preflight
         run: node ./scripts/infra-ops.mjs managed-secrets-preflight --noDocker
       - name: Compose healthcheck coverage

@@ -175,8 +175,13 @@ verify_privileged_broker() {
   else
     [[ "$PRIVILEGED_STATE_BROKER" == "$INFRA_ROOT"/scripts/platform-activation-broker.py ]] || return 1
   fi
-  identity=$(stat -f '%u|%Lp|%l' "$PRIVILEGED_STATE_BROKER" 2>/dev/null \
-    || stat -c '%u|%a|%h' "$PRIVILEGED_STATE_BROKER") || return 1
+  if identity=$(stat -c '%u|%a|%h' "$PRIVILEGED_STATE_BROKER" 2>/dev/null); then
+    :
+  elif identity=$(stat -f '%u|%Lp|%l' "$PRIVILEGED_STATE_BROKER" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
   IFS='|' read -r uid mode links <<< "$identity"
   if [[ "$SYSTEM_NAME" == Linux ]]; then
     [[ "$uid" == 0 ]] || return 1
