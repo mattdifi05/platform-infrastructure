@@ -1,43 +1,29 @@
 #!/usr/bin/env sh
 set -eu
 
-echo "V1 brownfield existing-host path is STOP: no authoritative V1 consumer binds the verified PRE-DEPLOY backup and authenticated provider gates to target activation." >&2
-exit 78
-
-# This is deliberately a minimal transport shim. The candidate checkout never
-# selects release paths, installs privileged helpers, renders Compose, or
-# mutates Docker. The fixed provider-installed broker authenticates the bounded
-# request and derives every object from its hard-coded policy and CAS roots.
-
-BROKER=/usr/local/libexec/platform-activation-broker
-MAX_REQUEST_BYTES=1048576
+# This compatibility entrypoint is deliberately install-only. It accepts no
+# caller-selected path, release identity, request body, Docker command, or
+# activation input. The root-owned consumer carries the fixed V1 candidate and
+# has only additive authority to materialize that candidate into a new path.
+CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer
 SUDO=/usr/bin/sudo
 SYSTEM_NAME=$(/usr/bin/uname -s)
 if [ "$SYSTEM_NAME" != Linux ]; then
-  BROKER=${PLATFORM_ACTIVATION_TEST_BROKER:-$BROKER}
-  SUDO=${PLATFORM_ACTIVATION_TEST_SUDO:-$SUDO}
+  SUDO=${PLATFORM_V1_INSTALL_TEST_SUDO:-$SUDO}
 fi
 
 [ "$#" -eq 0 ] || {
-  echo "Usage: deploy-vps-remote.sh < activation-request.json" >&2
+  echo "Usage: deploy-vps-remote.sh" >&2
   exit 64
 }
 
-umask 077
-request=$(/usr/bin/mktemp /tmp/platform-activation-request.XXXXXX)
-cleanup() {
-  /bin/rm -f -- "$request"
-}
-trap cleanup EXIT HUP INT TERM
-
-/bin/dd if=/dev/stdin of="$request" bs=65536 count=17 2>/dev/null
-size=$(/usr/bin/wc -c < "$request" | /usr/bin/tr -d '[:space:]')
-case "$size" in
-  ''|*[!0-9]*) echo "Activation request size is invalid." >&2; exit 64 ;;
-esac
-[ "$size" -gt 0 ] && [ "$size" -le "$MAX_REQUEST_BYTES" ] || {
-  echo "Activation request is empty or exceeds the 1 MiB transport bound." >&2
+# Require EOF before crossing the privilege boundary. Reading one bounded byte
+# is fail-closed: a caller that leaves stdin open can only delay its own request
+# and can never reach sudo or the consumer.
+stdin_bytes=$(/bin/dd if=/dev/stdin bs=1 count=1 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d '[:space:]')
+[ "$stdin_bytes" = 0 ] || {
+  echo "The V1 install-only transport accepts no stdin." >&2
   exit 64
 }
 
-exec "$SUDO" -n "$BROKER" activate < "$request"
+exec "$SUDO" -n -- "$CONSUMER" install < /dev/null

@@ -5,6 +5,7 @@ import fs from "node:fs";
 const localSink = fs.readFileSync("scripts/deploy-vps.sh", "utf8");
 const remoteSink = fs.readFileSync("scripts/deploy-vps-remote.sh", "utf8");
 const workflow = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
+const installWorkflow = fs.readFileSync(".github/workflows/v1-install-only.yml", "utf8");
 const opsDockerfile = fs.readFileSync("docker/ops.Dockerfile", "utf8");
 
 const dastJobStart = workflow.indexOf("\n  dast-zap:");
@@ -154,18 +155,13 @@ lacks(localSink, "docker compose", "immutable client must not mutate Docker dire
 before(localSink, "node \"$SCRIPT_ROOT/activation-request.mjs\"", "ssh \"$@\" -- \"$REMOTE\"", "request v3 must be validated and emitted before SSH");
 before(localSink, "ssh \"$@\" -- \"$REMOTE\"", "node \"$SCRIPT_ROOT/activation-receipt-policy.mjs\"", "receipt v3 must be validated after the broker response");
 
-// The legacy compatibility transport remains present but is terminally
-// unreachable until an authoritative V1 consumer binds the verified backup
-// and provider gates. STOP must precede stdin, sudo, and every mutation.
-has(remoteSink, 'echo "V1 brownfield existing-host path is STOP:', "remote shim must expose the terminal V1 STOP");
-has(remoteSink, "exit 78", "remote shim must use the fail-closed V1 exit status");
-before(remoteSink, 'echo "V1 brownfield existing-host path is STOP:', "exit 78", "remote shim must announce STOP before exiting");
-before(remoteSink, "exit 78", "/bin/dd if=/dev/stdin", "remote shim must STOP before reading stdin");
-before(remoteSink, "exit 78", 'exec "$SUDO" -n "$BROKER" activate', "remote shim must STOP before sudo/broker activation");
-has(remoteSink, "BROKER=/usr/local/libexec/platform-activation-broker", "remote shim broker path is not fixed");
-has(remoteSink, "MAX_REQUEST_BYTES=1048576", "remote shim request size is not bounded");
-has(remoteSink, "/bin/dd if=/dev/stdin", "unreachable legacy transport must consume stdin only");
-has(remoteSink, 'exec "$SUDO" -n "$BROKER" activate < "$request"', "unreachable legacy transport must retain the fixed root broker");
+// The compatibility transport is now an install-only sink. It accepts no
+// request bytes and can invoke only the fixed root-owned V1 consumer.
+has(remoteSink, "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer", "remote install consumer path is not fixed");
+has(remoteSink, "/bin/dd if=/dev/stdin bs=1 count=1", "remote install transport does not prove stdin is empty");
+has(remoteSink, '[ "$stdin_bytes" = 0 ]', "remote install transport does not reject request bytes");
+has(remoteSink, 'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null', "remote install transport does not use the fixed root consumer");
+lacks(remoteSink, "platform-activation-broker", "install-only transport must not invoke the activation broker");
 for (const forbidden of [
   "git fetch",
   "git checkout",
@@ -177,6 +173,22 @@ for (const forbidden of [
   "base64",
   "curl ",
 ]) lacks(remoteSink, forbidden, `remote shim must not contain ${forbidden}`);
+
+assert.equal(
+  (installWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/gm) ?? []).length,
+  1,
+  "install-only workflow must expose one exact fixed sink",
+);
+checks += 1;
+for (const forbidden of [
+  "docker ",
+  "platform-activation-broker",
+  "release-admission",
+  "dast-zap",
+  "sigstore",
+  "promoter",
+  "activation-request",
+]) lacks(installWorkflow, forbidden, `install-only workflow must not contain ${forbidden}`);
 
 // Workflow validates and records the four semantically distinct receipt v3
 // identities; no binary bundle, envelope or DAST evidence is sent over SSH.
@@ -190,8 +202,8 @@ for (const binding of [
 assert.equal((workflow.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? []).length, 1,
   "workflow must contain exactly one trusted production mutation sink");
 checks += 1;
-matches(remoteSink, /\[ "\$size" -gt 0 \] && \[ "\$size" -le "\$MAX_REQUEST_BYTES" \]/,
-  "remote shim must enforce both non-empty and maximum request bounds");
+matches(remoteSink, /\/bin\/dd if=\/dev\/stdin bs=1 count=1[\s\S]*\[ "\$stdin_bytes" = 0 \]/,
+  "remote install-only shim must enforce exactly empty stdin");
 const executableClosure = opsDockerfile.slice(
   opsDockerfile.indexOf("&& chmod 0555"),
   opsDockerfile.indexOf("\n\nWORKDIR"),

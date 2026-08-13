@@ -315,6 +315,7 @@ jobs:
             scripts/v1-phase-a-authorization.test.mjs \
             scripts/v1-brownfield-bootstrap.test.mjs \
             scripts/v1-brownfield-admission.test.mjs \
+            scripts/v1-brownfield-install-consumer.test.mjs \
             scripts/v1-install-package.test.mjs \
             scripts/v1-phase-b-preinstall-authorization.test.mjs \
             scripts/v1-phase-b-replay-artifacts.test.mjs \

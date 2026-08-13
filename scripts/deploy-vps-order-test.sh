@@ -15,41 +15,24 @@ exit 99
 SH
 chmod 0555 "$TMP/bin/sudo"
 
-grep -Fx 'BROKER=/usr/local/libexec/platform-activation-broker' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -Fx 'SUDO=/usr/bin/sudo' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -Fx 'MAX_REQUEST_BYTES=1048576' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -F 'if [ "$SYSTEM_NAME" != Linux ]; then' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -F '/bin/dd if=/dev/stdin of="$request" bs=65536 count=17' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -F '[ "$size" -gt 0 ] && [ "$size" -le "$MAX_REQUEST_BYTES" ]' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -Fx 'exec "$SUDO" -n "$BROKER" activate < "$request"' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '/bin/dd if=/dev/stdin bs=1 count=1' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F '[ "$stdin_bytes" = 0 ]' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -Fx 'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 if grep -Eq 'exec[[:space:]]+sudo|/usr/bin/env[[:space:]]+sudo' "$SCRIPT_DIR/deploy-vps-remote.sh"; then
-  echo "FAIL: activation sink resolves sudo through caller PATH" >&2
+  echo "FAIL: install-only sink resolves sudo through caller PATH" >&2
   exit 1
 fi
-printf 'PASS\tlegacy-transport-remains-fixed-broker-only\n'
-
-remote_stop_line=$(grep -nF 'echo "V1 brownfield existing-host path is STOP:' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
-remote_exit_line=$(grep -n '^exit 78$' "$SCRIPT_DIR/deploy-vps-remote.sh" | head -n 1 | cut -d: -f1)
-remote_uname_line=$(grep -nF 'SYSTEM_NAME=$(/usr/bin/uname -s)' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
-remote_mktemp_line=$(grep -nF 'request=$(/usr/bin/mktemp ' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
-remote_stdin_line=$(grep -nF '/bin/dd if=/dev/stdin' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
-remote_sudo_line=$(grep -nF 'exec "$SUDO" -n "$BROKER" activate' "$SCRIPT_DIR/deploy-vps-remote.sh" | cut -d: -f1)
-[ "$remote_stop_line" -lt "$remote_exit_line" ] \
-  && [ "$remote_exit_line" -lt "$remote_uname_line" ] \
-  && [ "$remote_exit_line" -lt "$remote_mktemp_line" ] \
-  && [ "$remote_exit_line" -lt "$remote_stdin_line" ] \
-  && [ "$remote_exit_line" -lt "$remote_sudo_line" ] || {
-  echo "FAIL: remote V1 STOP 78 is not terminal before stdin, sudo and mutation" >&2
-  exit 1
-}
-printf 'PASS\tremote-v1-stop-before-stdin-sudo-and-mutation\n'
+printf 'PASS\tinstall-only-transport-is-fixed-consumer-only\n'
 
 rm -f "$TMP/path-shadow-invoked"
 set +e
 printf '%s\n' '{"schema":"platform-activation-request/v3"}' | env \
   PATH="$TMP/bin:$PATH" \
   PATH_SHADOW_INVOKED="$TMP/path-shadow-invoked" \
-  PLATFORM_ACTIVATION_TEST_SUDO="$TMP/bin/sudo" \
+  PLATFORM_V1_INSTALL_TEST_SUDO="$TMP/bin/sudo" \
   V1_BACKUP_GATE=SATISFIED \
   V1_PROVIDER_GATES=SATISFIED \
   V1_DEPLOYMENT_ADMISSION=AUTHORIZED \
@@ -58,13 +41,13 @@ printf '%s\n' '{"schema":"platform-activation-request/v3"}' | env \
   sh "$SCRIPT_DIR/deploy-vps-remote.sh" --force attacker >"$TMP/out" 2>"$TMP/err"
 status=$?
 set -e
-[ "$status" -eq 78 ] || {
-  echo "FAIL: caller arguments or environment bypassed remote V1 STOP (got $status)" >&2
+[ "$status" -eq 64 ] || {
+  echo "FAIL: caller arguments reached remote V1 consumer (got $status)" >&2
   exit 1
 }
 [ ! -e "$TMP/path-shadow-invoked" ]
-grep -F 'V1 brownfield existing-host path is STOP' "$TMP/err" >/dev/null
-printf 'PASS\tcaller-state-cannot-bypass-remote-v1-stop\n'
+grep -F 'Usage: deploy-vps-remote.sh' "$TMP/err" >/dev/null
+printf 'PASS\tcaller-state-cannot-select-install-target\n'
 
 grep -F "ssh \"\$@\" -- \"\$REMOTE\" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate'" \
   "$SCRIPT_DIR/deploy-vps.sh" >/dev/null
@@ -83,10 +66,10 @@ request_line=$(grep -n 'node "$SCRIPT_ROOT/activation-request.mjs"' "$SCRIPT_DIR
 ssh_line=$(grep -n "ssh \"\$@\" -- \"\$REMOTE\" '/usr/bin/sudo -n -- /usr/local/libexec/platform-activation-broker activate'" "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
 receipt_line=$(grep -n 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"' "$SCRIPT_DIR/deploy-vps.sh" | cut -d: -f1)
 [ "$v1_stop_line" -lt "$endpoint_line" ] && [ "$endpoint_line" -lt "$request_line" ] || {
-  echo "FAIL: authoritative V1 brownfield stop is not before the first remote endpoint operation" >&2
+  echo "FAIL: full-activation STOP is not before the first remote endpoint operation" >&2
   exit 1
 }
-printf 'PASS\tv1-brownfield-stop-before-remote-endpoint\n'
+printf 'PASS\tfull-activation-stop-before-remote-endpoint\n'
 
 [ "$request_line" -lt "$ssh_line" ] && [ "$ssh_line" -lt "$receipt_line" ] || {
   echo "FAIL: request, broker activation and receipt validation are not ordered" >&2

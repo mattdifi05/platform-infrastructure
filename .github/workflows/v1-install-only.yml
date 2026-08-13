@@ -1,0 +1,90 @@
+name: v1-install-only
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_candidate_sha:
+        description: Exact frozen V1 candidate commit to install without activation
+        required: true
+        type: string
+      approved_controller_sha:
+        description: Exact protected-main controller commit approved to perform install-only
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install-v1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    environment:
+      name: production
+    concurrency:
+      group: infra-production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact protected-main tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify frozen candidate approval and exact controller
+        env:
+          APPROVED_CANDIDATE_SHA: ${{ inputs.approved_candidate_sha }}
+          APPROVED_CONTROLLER_SHA: ${{ inputs.approved_controller_sha }}
+        run: |
+          set -eu
+          test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0
+          test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse --verify HEAD^{commit})" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Install pinned SSH identity
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+        run: |
+          set -eu
+          umask 077
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_SSH_HOST_KEY"
+          test -n "$DEPLOY_REMOTE"
+          test -n "$DEPLOY_SSH_PORT"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          node ./scripts/pinned-ssh-host-key.mjs render \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          node ./scripts/pinned-ssh-host-key.mjs verify \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            --file ~/.ssh/known_hosts
+      - name: Materialize frozen V1 release without activation
+        env:
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+        run: |
+          set -eu
+          receipt="${RUNNER_TEMP}/v1-install-only-receipt.json"
+          sh ./scripts/deploy-v1-install-only.sh > "$receipt"
+          node ./scripts/v1-brownfield-install-receipt.mjs verify \
+            --file "$receipt" \
+            --candidateCommit 832bf2baec47055342af7e7f73425444381b91e0 \
+            --candidateTree 91cee2380809cb0691b9ac47cafa2a673d434caa \
+            --sourceArchiveSha256 6eabff5f3fdbb4b129519d23a2dd9864f65477c5f0e1ecb58e1b8a9a79af3007
+      - name: Upload install-only receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: v1-install-only-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/v1-install-only-receipt.json
+          if-no-files-found: error
+          retention-days: 30

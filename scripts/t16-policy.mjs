@@ -31,6 +31,7 @@ const vpsWorkflow = read(".github/workflows/enterprise-vps-evidence.yml");
 const vpsRemote = read("scripts/vps-evidence-remote.sh");
 const deployVps = read("scripts/deploy-vps.sh");
 const deployVpsRemote = read("scripts/deploy-vps-remote.sh");
+const v1InstallWorkflow = read(".github/workflows/v1-install-only.yml");
 const readme = read("README.md");
 const runbook = read("RUNBOOK.md");
 const releaseTrustDoc = read("RELEASE-TRUST-AND-WORKFLOW-SECURITY.md");
@@ -147,32 +148,34 @@ record(
   "production deploy sends only the bounded canonical activation request on stdin",
 );
 record("deploy-vps-no-remote-argv", !includes(deployVps, "sh -s --") && !includes(deployVps, "REMOTE_SCRIPT"), "production deploy has no dynamic SSH argv or heredoc interpolation");
-const boundedActivationShim = [
-  "BROKER=/usr/local/libexec/platform-activation-broker",
+const boundedInstallOnlyShim = [
+  "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer",
   "SUDO=/usr/bin/sudo",
-  "MAX_REQUEST_BYTES=1048576",
   'SYSTEM_NAME=$(/usr/bin/uname -s)',
-  '/bin/dd if=/dev/stdin of="$request" bs=65536 count=17',
-  '[ "$size" -gt 0 ] && [ "$size" -le "$MAX_REQUEST_BYTES" ]',
-  'exec "$SUDO" -n "$BROKER" activate < "$request"',
+  "/bin/dd if=/dev/stdin bs=1 count=1",
+  '[ "$stdin_bytes" = 0 ]',
+  'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null',
 ].every((needle) => includes(deployVpsRemote, needle))
-  && /if \[ "\$SYSTEM_NAME" != Linux \]; then[\s\S]*BROKER=\$\{PLATFORM_ACTIVATION_TEST_BROKER:-\$BROKER\}[\s\S]*SUDO=\$\{PLATFORM_ACTIVATION_TEST_SUDO:-\$SUDO\}[\s\S]*fi/.test(deployVpsRemote);
-const remoteV1Stop = deployVpsRemote.indexOf('echo "V1 brownfield existing-host path is STOP:');
-const remoteV1Exit = deployVpsRemote.indexOf("exit 78", remoteV1Stop);
-const remoteFirstStdinRead = deployVpsRemote.indexOf("/bin/dd if=/dev/stdin");
-const remoteBrokerExecution = deployVpsRemote.indexOf('exec "$SUDO" -n "$BROKER" activate');
-const terminalRemoteV1Stop = /^#!\/usr\/bin\/env sh\nset -eu\n\necho "V1 brownfield existing-host path is STOP:[^\n]+" >&2\nexit 78\n\n/.test(deployVpsRemote)
-  && remoteV1Stop >= 0
-  && remoteV1Exit > remoteV1Stop
-  && remoteFirstStdinRead > remoteV1Exit
-  && remoteBrokerExecution > remoteV1Exit;
+  && /if \[ "\$SYSTEM_NAME" != Linux \]; then[\s\S]*SUDO=\$\{PLATFORM_V1_INSTALL_TEST_SUDO:-\$SUDO\}[\s\S]*fi/.test(deployVpsRemote);
 record(
   "deploy-vps-remote-revalidation",
-  terminalRemoteV1Stop
-    && boundedActivationShim
+  boundedInstallOnlyShim
     && includes(deployVps, 'node "$SCRIPT_ROOT/activation-receipt-policy.mjs"')
-    && !/decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
-  "remote sink stops before stdin/sudo; unreachable legacy transport remains fixed to the root broker",
+    && !/platform-activation-broker|decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
+  "remote compatibility sink accepts only empty stdin and invokes the fixed root install-only consumer",
+);
+const v1InstallSinks = v1InstallWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/gm) ?? [];
+record(
+  "v1-install-only-workflow-boundary",
+  v1InstallSinks.length === 1
+    && includes(v1InstallWorkflow, "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true")
+    && includes(v1InstallWorkflow, "group: infra-production-deploy")
+    && includes(v1InstallWorkflow, "name: production")
+    && includes(v1InstallWorkflow, 'test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    && includes(v1InstallWorkflow, 'test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
+    && includes(v1InstallWorkflow, "node ./scripts/v1-brownfield-install-receipt.mjs verify")
+    && !/\bdocker\b|platform-activation-broker|release-admission|dast-zap|sigstore|promoter|activation-request/i.test(v1InstallWorkflow),
+  "manual protected-main install-only uses one fixed client, shared production serialization and no activation or Docker path",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");
