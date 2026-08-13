@@ -113,6 +113,7 @@ jobs:
             --output "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" \
             https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-linux-x86_64
           printf '%s  %s\n' "$PLATFORM_TEST_DOCKER_COMPOSE_SHA256" "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" | sha256sum -c -
+          chmod 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN"
           install -m 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" "$HOME/.docker/cli-plugins/docker-compose"
           compose_version=$(docker compose version --short)
           test "$compose_version" = 5.3.1
@@ -244,6 +245,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: GitHub Actions workflow lint
         run: |
