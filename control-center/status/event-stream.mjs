@@ -150,7 +150,6 @@ export class StatusEventSubscription extends EventEmitter {
         this.waiter = null;
         resolve({ type: "timeout" });
       }, wait);
-      timer.unref?.();
       this.waiter = { resolve, timer };
     });
   }
@@ -258,7 +257,6 @@ export function writeSseFrame(response, frame, { timeoutMs = 5000, signal } = {}
     const onError = () => finish(new StatusEventStreamError("Status stream response failed during backpressure.", "STATUS_STREAM_WRITE_ERROR", 503));
     const onAbort = () => finish(new StatusEventStreamError("Status stream request was aborted.", "STATUS_STREAM_ABORTED", 499));
     const timer = setTimeout(() => finish(new StatusEventStreamError("Status stream backpressure timed out.", "STATUS_STREAM_BACKPRESSURE_TIMEOUT", 503)), timeout);
-    timer.unref?.();
     response.once("drain", onDrain);
     response.once("close", onClose);
     response.once("error", onError);

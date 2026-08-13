@@ -12370,6 +12370,7 @@ function staticSecurityInfraOnlyCheck() {
   const contract = readText(path.join(infraRoot, "scripts", "hosted-workload-contract.mjs"));
   const lockScript = readText(path.join(infraRoot, "scripts", "hosted-workload-lock.sh"));
   const prepareScript = readText(path.join(infraRoot, "scripts", "prepare-hosted-workloads.sh"));
+  const opsImageEntrypoint = readText(path.join(infraRoot, "scripts", "ops-image-entrypoint.sh"));
   const router = readText(path.join(infraRoot, "project-router", "server.mjs"));
   const alertmanager = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
   const dispatcher = readText(path.join(infraRoot, "platform-alert-dispatcher", "server.mjs"));
@@ -12394,7 +12395,8 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(lockScript, /\bnode\b/, "Hosted workload activation must not require Node on the minimal VPS host.");
   assertMatch(lockScript, /LOCK_READ_DIRECTORY[\s\S]*\/bin\/rm -- "\$LOCK_READ"[\s\S]*LOCK_JSON/, "Host lock reader must consume one unlinked private snapshot.");
   assertMatch(lockScript, /snapshotParentIdentity[\s\S]*rawPolicyReceipt/, "Host lock reader must enforce snapshot identity plus raw receipt binding.");
-  assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
+  assertMatch(prepareScript, /"\$OPS_IMAGE_ID" hosted-workload-contract resolve[\s\S]*"\$OPS_IMAGE_ID" hosted-workload-contract verify-render/, "Hosted workload preparation must use the contract validator through the admitted ops image.");
+  assertMatch(opsImageEntrypoint, /if \[ "\$\{1:-\}" = "hosted-workload-contract" \]; then[\s\S]*exec node "\$CODE_ROOT\/scripts\/hosted-workload-contract\.mjs" "\$@"/, "The admitted ops image must bind the hosted-workload command to the contract validator.");
   assertMatch(prepareScript, /ops-image-trust\.sh/, "Hosted workload preparation must obtain its runner from the trusted deployment admission chain.");
   assertMatch(prepareScript, /docker run --rm --pull=never[\s\S]*"\$OPS_IMAGE_ID"/, "Hosted workload preparation must execute only the admitted local image ID without pulling.");
   assertNoMatch(prepareScript, /platform\/ops:local|docker build|"\$OPS_IMAGE" scripts\//, "Hosted workload preparation must not retain a mutable, local-build, or caller-selected execution sink.");

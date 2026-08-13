@@ -141,6 +141,20 @@ jobs:
       - name: Network segmentation policy
         run: |
           install -m 600 .env.vps.example .env
+          {
+            printf '%s\n' 'PHP_PROJECTS_DIR=./.tmp/optional-project-source'
+            printf '%s\n' 'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox'
+            printf '%s\n' 'DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json'
+            printf '%s\n' 'DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active-receipt.json'
+            printf 'DOCKER_ACTION_RUNTIME_INTENT_ID=%s\n' "$DOCKER_ACTION_RUNTIME_INTENT_ID"
+            printf 'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256=%s\n' "$DOCKER_ACTION_ACTIVE_RECEIPT_SHA256"
+            printf 'DOCKER_ACTION_COMBINED_RENDER_SHA256=%s\n' "$DOCKER_ACTION_COMBINED_RENDER_SHA256"
+            printf 'PLATFORM_OPS_IMAGE=%s\n' "$PLATFORM_OPS_IMAGE"
+            printf 'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=%s\n' "$PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY"
+            printf 'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=%s\n' "$PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256"
+            printf 'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=%s\n' "$PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY"
+            printf 'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=%s\n' "$PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256"
+          } >> .env
           node ./scripts/infra-ops.mjs network-segmentation-check --envFile .env
       - name: HA configuration check
         run: node ./scripts/infra-ops.mjs ha-config-check
