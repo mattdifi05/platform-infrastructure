@@ -2691,6 +2691,26 @@ function activationGateFixture(root) {
       brokerSource.replace(productionCheck, "def production() -> bool:\n    return False"),
       { mode: 0o755 },
     );
+    const fixtureActivationState = path.join(scripts, "platform-activation-state.mjs");
+    const activationStateSource = fs.readFileSync(fixtureActivationState, "utf8");
+    const productionBoundary = `const PRODUCTION_ASSERT_UNMOUNTED_BOUNDARY = assertUnmountedBoundary({
+  platform: process.platform,
+  directory: process.platform === "linux" ? PRODUCTION_ACTIVATION_COORDINATOR : null,
+  expectedOwner: process.platform === "linux" ? 0 : (process.getuid?.() ?? 0),
+  mode: process.platform === "linux" ? 0o750 : 0o700,
+});`;
+    const fixtureBoundary = `const PRODUCTION_ASSERT_UNMOUNTED_BOUNDARY = assertUnmountedBoundary({
+  platform: "linux",
+  directory: ${JSON.stringify(activationCoordinator)},
+  expectedOwner: ${process.getuid()},
+  mode: 0o700,
+});`;
+    assert.equal(activationStateSource.split(productionBoundary).length - 1, 1);
+    fs.writeFileSync(
+      fixtureActivationState,
+      activationStateSource.replace(productionBoundary, fixtureBoundary),
+      { mode: 0o755 },
+    );
     fs.copyFileSync(
       path.join(import.meta.dirname, "platform-release-context.mjs"),
       path.join(scripts, "platform-release-context-implementation.mjs"),

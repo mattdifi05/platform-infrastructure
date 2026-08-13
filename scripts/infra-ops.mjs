@@ -5186,8 +5186,37 @@ async function managedSecretsPreflight(options = {}) {
   }, { noDocker: noDockerMode(options), envFile: options.envFile ?? argv.envFile ?? null, scope: "platform-infrastructure" });
 }
 
+function candidateCiComposeRenderer() {
+  const candidate = String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN ?? "").trim();
+  if (!candidate) return null;
+  if (process.env.EVIDENCE_REPORT_PHASE !== "candidate-ci") {
+    fail("The standalone Compose renderer is restricted to candidate-ci evidence.");
+  }
+  if (!path.isAbsolute(candidate) || path.normalize(candidate) !== candidate) {
+    fail("PLATFORM_TEST_DOCKER_COMPOSE_BIN must be one canonical absolute path.");
+  }
+  const expectedSha256 = String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_SHA256 ?? "");
+  if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
+    fail("PLATFORM_TEST_DOCKER_COMPOSE_BIN requires PLATFORM_TEST_DOCKER_COMPOSE_SHA256.");
+  }
+  const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      || (stat.mode & 0o022) !== 0) {
+    fail("The candidate-ci Compose renderer must be one owner-controlled regular file.");
+  }
+  const actualSha256 = sha256File(candidate);
+  if (actualSha256 !== expectedSha256) {
+    fail(`Candidate-ci Compose renderer SHA256 mismatch: expected ${expectedSha256}, got ${actualSha256}.`);
+  }
+  return candidate;
+}
+
 function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] }) {
-  const args = ["compose", "--env-file", envFile, "-p", projectName];
+  const standaloneRenderer = candidateCiComposeRenderer();
+  const args = standaloneRenderer
+    ? ["--env-file", envFile, "-p", projectName]
+    : ["compose", "--env-file", envFile, "-p", projectName];
   for (const file of files) {
     args.push("-f", file);
   }
@@ -5195,7 +5224,15 @@ function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] })
     args.push("--profile", profile);
   }
   args.push("config", "--format", "json");
-  const text = output("docker", args);
+  const text = output(standaloneRenderer ?? "docker", args, standaloneRenderer ? {
+    env: {
+      COMPOSE_ANSI: "never",
+      DOCKER_HOST: "unix:///tmp/platform-healthcheck-render-engine-must-not-exist.sock",
+      LANG: "C",
+      LC_ALL: "C",
+    },
+    unsetEnv: ["DOCKER_CONTEXT"],
+  } : {});
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -5205,6 +5242,16 @@ function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] })
 
 function composeServiceHasHealthcheck(service) {
   return Boolean(service?.healthcheck && service.healthcheck.disable !== true && service.healthcheck.test);
+}
+
+function composeOneShotDependencies(config) {
+  const dependencies = new Set();
+  for (const service of Object.values(config.services ?? {})) {
+    for (const [name, dependency] of Object.entries(service?.depends_on ?? {})) {
+      if (dependency?.condition === "service_completed_successfully") dependencies.add(name);
+    }
+  }
+  return dependencies;
 }
 
 async function composeHealthcheckCoverage() {
@@ -5218,8 +5265,14 @@ async function composeHealthcheckCoverage() {
   const stackReports = [];
   for (const stack of stacks) {
     const config = dockerComposeConfigJson(stack);
-    const services = Object.entries(config.services ?? {}).map(([name, service]) => ({ name, hasHealthcheck: composeServiceHasHealthcheck(service), restart: service.restart ?? null })).sort((a, b) => a.name.localeCompare(b.name));
-    const missing = services.filter((service) => !service.hasHealthcheck).map((service) => service.name);
+    const oneShotDependencies = composeOneShotDependencies(config);
+    const services = Object.entries(config.services ?? {}).map(([name, service]) => ({
+      name,
+      hasHealthcheck: composeServiceHasHealthcheck(service),
+      oneShot: service.restart === "no" && oneShotDependencies.has(name),
+      restart: service.restart ?? null,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    const missing = services.filter((service) => !service.hasHealthcheck && !service.oneShot).map((service) => service.name);
     missing.forEach((serviceName) => issues.push(`${stack.name}: service ${serviceName} has no healthcheck`));
     stackReports.push({ name: stack.name, envFile: stack.envFile, projectName: stack.projectName, services, missing });
   }
