@@ -94,6 +94,10 @@ function wiringIssues(source) {
   requireText("release-activation.bundle release-activation-bundle-manifest.json docker-runtime-activation.dsse.json dast-activation-authorization.json activation-admission.jsonl sigstore-trusted-root.json activation-promotion-receipt.json", "promoted activation flat file set is not exact v2");
   requireText('test "$(wc -c < "$RESULT" | tr -d \' \')" -le 1048576', "promotion result is not bounded before use");
   requireText('test "$(jq -er \'.dastChainSha256\' "$RESULT")" = "$(jq -er \'.chainSha256\' "$PROMOTED/dast-activation-authorization.json")"', "promotion result is not bound to the validated authorization chain");
+  const explicitlyExported = new Set(
+    [...deploy.matchAll(/^\s*export\s+([A-Z][A-Z0-9_]*(?:\s+[A-Z][A-Z0-9_]*)*)\s*$/gm)]
+      .flatMap((match) => match[1].split(/\s+/)),
+  );
   for (const variable of [
     "DEPLOY_ARTIFACT_RECEIPT_PATH:",
     "DEPLOY_ARTIFACT_RECEIPT_SHA256:",
@@ -124,7 +128,11 @@ function wiringIssues(source) {
     "DEPLOY_DOCKER_ACTIVATION_ENVELOPE_PAYLOAD_TYPE",
     "DEPLOY_DOCKER_ACTIVATION_RUNTIME_INTENT_ID",
     "DEPLOY_DOCKER_ACTIVATION_GENERATION",
-  ]) requireText(`export ${variable}=`, `trusted ops input ${variable} is not exported to the isolated runner`);
+  ]) {
+    if (!new RegExp(`^\\s*${variable}=`, "m").test(deploy) || !explicitlyExported.has(variable)) {
+      issues.push(`trusted ops input ${variable} is not assigned and exported to the isolated runner`);
+    }
+  }
   requireText("OPS_RESULT=\"$(sh ./scripts/ops-image-trust.sh)\"", "ops image is not checked against the provider receipt");
   requireText("docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges", "trusted ops runner lacks the fixed container hardening boundary");
   requireText('"$OPS_IMAGE_ID" deploy-vps', "production mutation does not use the admitted ops image entrypoint");
@@ -218,7 +226,14 @@ assert.notDeepEqual(wiringIssues(workflow.replaceAll("ACTIVATION_PROMOTION_READ_
 assert.notDeepEqual(wiringIssues(workflow.replaceAll("Install checksum-pinned GitHub attestation verifier", "Removed verifier install")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace('"$OPS_IMAGE_ID" deploy-vps', '"$OPS_IMAGE_ID" attacker-selected')), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("docker run --rm --read-only", "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --read-only")), []);
-assert.notDeepEqual(wiringIssues(workflow.replace("export DEPLOY_ENVIRONMENT_SHA256=", "DEPLOY_ENVIRONMENT_SHA256=")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace(
+  "export DEPLOY_ENVIRONMENT_SHA256 DEPLOY_DAST_PROVIDER_RECEIPT_SHA256",
+  "export DEPLOY_DAST_PROVIDER_RECEIPT_SHA256",
+)), []);
+assert.notDeepEqual(wiringIssues(workflow.replace(
+  "          DEPLOY_ENVIRONMENT_SHA256=\"$(jq -er '.runtimeIntent.environmentSha256' \"$DEPLOY_ADMISSION_RECEIPT_PATH\")\"",
+  "          true",
+)), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("platform-promoted-activation", "caller-selected-activation")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace(
   'test "$(find "$PROMOTED" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" -eq 7',

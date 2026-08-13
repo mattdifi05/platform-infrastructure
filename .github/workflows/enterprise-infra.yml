@@ -188,8 +188,7 @@ jobs:
           install -d -m 700 "${RUNNER_TEMP}/scheduler-state" projects-portal/state backups reports .tmp/ops
           docker run --rm --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m \
-            --tmpfs /etc/platform:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
-            --tmpfs /etc/crontabs:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+            --tmpfs /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m,mode=0700 \
             --tmpfs /var/log/platform:rw,noexec,nosuid,nodev,size=8m,mode=0700 \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
             -e PLATFORM_DOCKER_BROKER_STATUS=READY \
@@ -224,7 +223,7 @@ jobs:
           set +e
           docker run --rm --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m \
-            "$OPS_TEST_IMAGE_ID" backup-scheduler
+            "$OPS_TEST_IMAGE_ID"
           status=$?
           set -e
           test "$status" -eq 78
