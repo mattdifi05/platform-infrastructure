@@ -346,6 +346,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install locked Control Center test dependencies
+        working-directory: control-center
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Download gate evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -401,7 +404,7 @@ jobs:
       - name: Repository coverage audit
         run: node ./scripts/infra-ops.mjs repo-coverage-check
       - name: Linux portability check
-        run: node ./scripts/infra-ops.mjs linux-portability-check
+        run: node ./scripts/infra-ops.mjs linux-portability-check --skipShellSyntax
       - name: Evidence bundle smoke
         run: node ./scripts/infra-ops.mjs evidence-bundle --phase candidate-ci --strict --noArchive
       - name: Evidence bundle integrity verify

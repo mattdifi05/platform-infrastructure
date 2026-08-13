@@ -8953,31 +8953,49 @@ function evidenceBundleReportPasses(spec, payload) {
   if (spec.label === "runtime-fingerprint") {
     return { passed: payload.mode === "runtime-exact" && payload.status === "passed" && payload.git?.clean === true && /^[a-f0-9]{64}$/.test(String(payload.fingerprint ?? "")), detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} clean=${payload.git?.clean ?? "missing"}` };
   }
-  if (spec.label === "rate-limit-evidence") {
+  const candidatePolicyChecks = {
+    "rate-limit-evidence": [
+      "traefik-rate-limit-defined",
+      "rate-limit-trusted-client-key",
+      "forwarded-identity-fixed-waf-peer",
+      "waf-peer-address-bound",
+      "admin-routes-rate-limited",
+      "hosted-routes-rate-limited",
+      "waf-enabled",
+    ],
+    "audit-log-evidence": [
+      "admin-audit-file",
+      "append-only-admin-audit",
+      "audit-secret-redaction",
+      "central-log-shipping",
+    ],
+    "retention-evidence": [
+      "bounded-container-logs",
+      "prometheus-retention",
+      "loki-retention",
+      "backup-retention",
+      "platform-restore-evidence",
+    ],
+  }[spec.label];
+  if (candidatePolicyChecks) {
+    const checks = Array.isArray(payload.checks) ? payload.checks : [];
+    const issues = Array.isArray(payload.issues) ? payload.issues : ["missing"];
+    const checkNames = checks.map((check) => String(check?.name ?? ""));
+    const exactChecks = checkNames.length === candidatePolicyChecks.length
+      && checkNames.every((name, index) => name === candidatePolicyChecks[index]);
+    const modeValid = spec.label === "retention-evidence"
+      ? payload.mode === "platform-policy"
+      : payload.mode === undefined;
+    const passed = payload.status === "passed"
+      && payload.scope === "platform-infrastructure"
+      && modeValid
+      && issues.length === 0
+      && exactChecks
+      && checks.every((check) => check?.passed === true)
+      && payload.infraChecksPassed === checks.length;
     return {
-      passed: payload.status === "passed"
-        && Number(payload.summary?.failed ?? 1) === 0
-        && Number(payload.summary?.infraChecksPassed ?? 0) >= 4
-        && ["full", "infra-only"].includes(payload.mode),
-      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
-    };
-  }
-  if (spec.label === "audit-log-evidence") {
-    return {
-      passed: payload.status === "passed"
-        && Number(payload.summary?.failed ?? 1) === 0
-        && Number(payload.summary?.infraChecksPassed ?? 0) >= 9
-        && ["full", "infra-only"].includes(payload.mode),
-      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
-    };
-  }
-  if (spec.label === "retention-evidence") {
-    return {
-      passed: payload.status === "passed"
-        && Number(payload.summary?.failed ?? 1) === 0
-        && Number(payload.summary?.infraChecksPassed ?? 0) >= 14
-        && ["full", "infra-only"].includes(payload.mode),
-      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
+      passed,
+      detail: `mode=${payload.mode ?? "producer-default"} status=${payload.status ?? "missing"} issues=${issues.length} exactChecks=${exactChecks} infraPassed=${payload.infraChecksPassed ?? "missing"}`,
     };
   }
   if (spec.label === "secret-rotation-evidence") {
@@ -10225,8 +10243,9 @@ function repoCoverageCategory(filePath) {
     ["dns", /^dns\//],
     ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
     ["messaging", /^(?:nats\/|scripts\/(?:render-workload-broker-config|workload-broker-policy)\.mjs$)/],
-    ["operations-script", /^scripts\/.+\.(?:awk|sh|mjs)$/],
-    ["governance-policy", /^governance\/.+\.(?:json|jsonl|md)$/],
+    ["security-regression", /^(?:scripts\/postfix_evidence\/|tests\/pre-fix\/)/],
+    ["operations-script", /^scripts\/.+\.(?:awk|sh|mjs|py|rb)$/],
+    ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/docker-action-activation-policy\.json)$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
     ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
     ["identity", /^keycloak\//],
@@ -10351,7 +10370,7 @@ async function repoCoverageCheck() {
     ["shell-syntax", /for file in scripts\/\*\.sh/],
     ["workflow-dispatch", /workflow_dispatch:/],
     ["dast-manual", /dast-zap:[\s\S]*dast-zap-baseline\.sh/],
-    ["dast-run-bound-receipt", /dast-zap:[\s\S]*dast-admission-policy\.mjs[\s\S]*dast-admission-\$\{\{ github\.run_id \}\}/],
+    ["dast-run-bound-receipt", /dast-zap:[\s\S]*dast-runtime-receipt-policy\.mjs[\s\S]*name:\s*dast-verification-\$\{\{ github\.run_id \}\}/],
     ["deploy-provider-promotion", /deploy-vps:[\s\S]*activation-promotion-policy\.mjs/],
     ["deploy-trusted-ops-image", /deploy-vps:[\s\S]*ops-image-trust\.sh[\s\S]*"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"/],
     ["deploy-activation-receipt", /activation-receipt-\$\{\{ github\.run_id \}\}/],
