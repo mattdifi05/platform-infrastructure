@@ -426,7 +426,11 @@ def validate_install_checkpoint(pins: Pins) -> Snapshot:
     now = int(time.time())
     if not captured <= verified <= runtime_verified <= now + MAX_CLOCK_SKEW_SECONDS:
         stop("PRE-DEPLOY checkpoint timestamps are unordered or in the future.")
-    if now - verified > MAX_CHECKPOINT_AGE_SECONDS or now - runtime_verified > MAX_CHECKPOINT_AGE_SECONDS:
+    if (
+        now - captured > MAX_CHECKPOINT_AGE_SECONDS
+        or now - verified > MAX_CHECKPOINT_AGE_SECONDS
+        or now - runtime_verified > MAX_CHECKPOINT_AGE_SECONDS
+    ):
         stop("PRE-DEPLOY backup/runtime verification is stale.")
     return snapshot
 
