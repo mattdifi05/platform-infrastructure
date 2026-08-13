@@ -54,24 +54,29 @@ const run = (input, arguments_ = [], extraEnvironment = {}) => {
   });
 };
 
-async function assertOpenStdinCannotReachSudo() {
+async function assertOpenStdinCannotReachSudo(shell) {
   reset();
-  const child = spawn("/bin/sh", [script], {
+  const child = spawn(shell, [script], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
   });
   await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(fs.existsSync(sudoSentinel), false, "open stdin reached sudo before EOF");
+  assert.equal(fs.existsSync(sudoSentinel), false, `open stdin reached sudo before EOF under ${shell}`);
   child.stdin.end();
   const result = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (status, signal) => resolve({ status, signal }));
   });
-  assert.equal(result.status, 97, "EOF did not reach the fixed test sudo consumer");
+  assert.equal(result.status, 97, `EOF did not reach the fixed test sudo consumer under ${shell}`);
 }
 
 try {
-  await assertOpenStdinCannotReachSudo();
+  const transportShells = ["/bin/sh"];
+  if (fs.existsSync("/bin/dash")
+      && fs.realpathSync.native("/bin/dash") !== fs.realpathSync.native("/bin/sh")) {
+    transportShells.push("/bin/dash");
+  }
+  for (const shell of transportShells) await assertOpenStdinCannotReachSudo(shell);
 
   const empty = run(Buffer.alloc(0));
   assert.equal(empty.status, 97, `empty stdin did not reach the fixed consumer: ${empty.stderr.toString()}`);
@@ -88,6 +93,11 @@ try {
   assert.equal(request.status, 64, "request bytes were accepted by the install-only transport");
   assert.match(request.stderr.toString(), /accepts no stdin/);
   assert.equal(fs.existsSync(sudoSentinel), false, "request bytes reached sudo");
+
+  const nulByte = run(Buffer.from([0]));
+  assert.equal(nulByte.status, 64, "a NUL byte was mistaken for empty stdin");
+  assert.match(nulByte.stderr.toString(), /accepts no stdin/);
+  assert.equal(fs.existsSync(sudoSentinel), false, "a NUL byte reached sudo");
 
   const argumentsResult = run(Buffer.alloc(0), ["--force", "/tmp/attacker"]);
   assert.equal(argumentsResult.status, 64, "caller arguments were accepted");
@@ -107,14 +117,16 @@ try {
     "CONSUMER=/usr/local/libexec/platform-v1-brownfield-install-consumer",
     "SUDO=/usr/bin/sudo",
     "SYSTEM_NAME=$(/usr/bin/uname -s)",
-    "/bin/dd if=/dev/stdin bs=1 count=1",
-    '[ "$stdin_bytes" = 0 ]',
+    "exec 3<&0",
+    "/usr/bin/od -An -tu1 -N1 <&3",
+    "exec 3<&-",
+    '[ -z "$stdin_octet" ]',
     'exec "$SUDO" -n -- "$CONSUMER" install < /dev/null',
   ]) assert.ok(source.includes(required), `install-only transport is missing ${required}`);
   for (const forbidden of ["git ", "docker ", "compose", "platform-activation-broker", "sourceArchive", "releaseRoot"] ) {
     assert.ok(!source.includes(forbidden), `install-only transport contains forbidden ${forbidden}`);
   }
-  process.stdout.write("platform V1 install transport tests passed 6/6\n");
+  process.stdout.write("platform V1 install transport tests passed 7/7\n");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
