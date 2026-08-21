@@ -29,9 +29,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          umask 077
+          install -m 0600 .env.vps.example .env
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
           node ./scripts/infra-ops.mjs github-actions-run-evidence \
             --repo "${{ github.repository }}" \
-            --envFile .env.vps.example \
+            --envFile .env \
             --workflow enterprise-infra.yml \
             --branch "${{ github.event.workflow_run.head_branch }}" \
             --sha "${{ github.event.workflow_run.head_sha }}" \

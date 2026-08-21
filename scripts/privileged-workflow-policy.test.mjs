@@ -40,11 +40,16 @@ assert.match(
 const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
 const installOnly = fs.readFileSync(".github/workflows/v1-install-only.yml", "utf8");
 const localPrivate = fs.readFileSync(".github/workflows/v1-local-private.yml", "utf8");
+const runEvidence = fs.readFileSync(".github/workflows/enterprise-infra-run-evidence.yml", "utf8");
 const infraOps = fs.readFileSync("scripts/infra-ops.mjs", "utf8");
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
 assert.deepEqual(v1InstallOnlyWorkflowMismatches(installOnly), []);
 assert.deepEqual(v1LocalPrivateWorkflowMismatches(localPrivate), []);
+assert.match(runEvidence, /install -m 0600 \.env\.vps\.example \.env/);
+assert.match(runEvidence, /test -z "\$\(git status --porcelain=v1 --untracked-files=all\)"/);
+assert.match(runEvidence, /--envFile \.env(?:\s|\\)/);
+assert.doesNotMatch(runEvidence, /--envFile \.env\.vps\.example/);
 assert.match(
   v1InstallOnlyWorkflowMismatches(installOnly.replace("github.ref_protected == true", "true")).join(" "),
   /protected-main/,
@@ -348,5 +353,5 @@ assert.match(
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
 
-const total = fixtures.length * 3 + 1 + 56;
+const total = fixtures.length * 3 + 1 + 60;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);
