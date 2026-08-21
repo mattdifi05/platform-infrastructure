@@ -5,6 +5,7 @@ import {
   dastReceiptWiringMismatches,
   deploymentPrerequisiteMismatches,
   privilegedWorkflowMismatches,
+  runEvidenceWorkflowMismatches,
   v1InstallOnlyWorkflowMismatches,
   v1LocalPrivateWorkflowMismatches,
 } from "./privileged-workflow-policy.mjs";
@@ -50,6 +51,42 @@ assert.match(runEvidence, /install -m 0600 \.env\.vps\.example \.env/);
 assert.match(runEvidence, /test -z "\$\(git status --porcelain=v1 --untracked-files=all\)"/);
 assert.match(runEvidence, /--envFile \.env(?:\s|\\)/);
 assert.doesNotMatch(runEvidence, /--envFile \.env\.vps\.example/);
+assert.deepEqual(runEvidenceWorkflowMismatches(runEvidence), []);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
+    "/srv/platform/provider-activation/inbox",
+    "/tmp/provider-activation/inbox",
+  )).join(" "),
+  /exact deterministic non-secret Compose identity fixture/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace("2".repeat(64), "invalid-receipt-digest")).join(" "),
+  /exact deterministic non-secret Compose identity fixture/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace("          } >> .env", "          } > .env")).join(" "),
+  /exact deterministic non-secret Compose identity fixture|before clean-check and verification/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
+    "            printf '%s\\n' 'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox'",
+    "          } >> .env\n          printf '%s\\n' 'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox'\n          {",
+  )).join(" "),
+  /exact deterministic non-secret Compose identity fixture/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
+    "            printf 'ci-placeholder-%s-00000000000000000000000000000000\\n' \"$name\" > \"secrets/$name.txt\"\n",
+    "",
+  )).join(" "),
+  /exact deterministic non-secret Compose identity fixture/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence
+    .replace("          printf 'dummy-cert\\n' > traefik/certs/local-cert.pem\n", "")
+    .replace("          printf 'dummy-key\\n' > traefik/certs/local-key.pem\n", "")).join(" "),
+  /exact deterministic non-secret Compose identity fixture/,
+);
 assert.match(
   v1InstallOnlyWorkflowMismatches(installOnly.replace("github.ref_protected == true", "true")).join(" "),
   /protected-main/,
@@ -353,5 +390,5 @@ assert.match(
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
 
-const total = fixtures.length * 3 + 1 + 60;
+const total = fixtures.length * 3 + 1 + 67;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);
