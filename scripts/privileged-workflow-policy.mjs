@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 
 const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protected == true";
 const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "c7fc3315fbf74b2e599ee31ad2d15b2224abb5a366aeb10cc832f45dbd7bc88e";
+const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "52b53e470926339dcbf80558cb438329854eccc8f9c852b71768de5dfe46f533";
 
 function jobBlock(text, jobName) {
   const jobStart = text.search(new RegExp(`^  ${jobName}:`, "m"));
@@ -158,6 +159,72 @@ export function v1InstallOnlyWorkflowMismatches(workflowText) {
   const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
   if (productionEnvironments.length !== 1) {
     issues.push("V1 install-only workflow must expose exactly one production environment job");
+  }
+  return issues;
+}
+
+export function v1LocalPrivateWorkflowMismatches(workflowText) {
+  const text = String(workflowText);
+  const issues = [];
+  if (crypto.createHash("sha256").update(text, "utf8").digest("hex") !== V1_LOCAL_PRIVATE_WORKFLOW_SHA256) {
+    issues.push("V1 LOCAL_PRIVATE workflow bytes differ from the frozen candidate-specific controller");
+  }
+  const activation = jobBlock(text, "activate-v1-local-private");
+  if (!activation) return ["V1 LOCAL_PRIVATE workflow is missing activate-v1-local-private"];
+  if (!/^  workflow_dispatch:\s*$/m.test(text) || /^  (?:pull_request|push|schedule|workflow_call):\s*$/m.test(text)) {
+    issues.push("V1 LOCAL_PRIVATE workflow must be manual-only");
+  }
+  if (!/^permissions:\s*\n  contents:\s*read\s*$/m.test(text)
+    || /^\s{2}(?:actions|attestations|checks|deployments|id-token|packages|pull-requests|statuses):/m.test(text)) {
+    issues.push("V1 LOCAL_PRIVATE workflow permissions must be exactly contents read");
+  }
+  if (!activation.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
+    issues.push("V1 LOCAL_PRIVATE workflow lacks the exact protected-main manual guard");
+  }
+  if (!/environment:\s*\n\s+name:\s+production/.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow lacks the production environment gate");
+  }
+  if (!/concurrency:\s*\n\s+group:\s+infra-production-deploy\s*\n\s+cancel-in-progress:\s*false/.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow must serialize with full production deployment");
+  }
+  if (!/uses:\s*actions\/checkout@[a-f0-9]{40}[\s\S]*?with:\s*\n\s+ref:\s*\$\{\{ github\.sha \}\}\s*\n\s+persist-credentials:\s*false/.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow must checkout github.sha without persisted credentials");
+  }
+  if (!activation.includes('test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    || !activation.includes('test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
+    || !activation.includes('test "$(git rev-parse --verify \'HEAD^{commit}\')" = "$GITHUB_SHA"')
+    || !activation.includes('test -z "$(git status --porcelain=v1 --untracked-files=all)"')) {
+    issues.push("V1 LOCAL_PRIVATE workflow does not bind the frozen candidate approval and exact clean controller");
+  }
+  if (/^\s+needs:|continue-on-error:\s*true/m.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow must have no cross-job dependency or continue-on-error path");
+  }
+  const sinks = text.match(/^\s+sh \.\/scripts\/deploy-v1-local-private\.sh > "\$receipt"\s*$/gm) ?? [];
+  if (sinks.length !== 1 || !/^\s+sh \.\/scripts\/deploy-v1-local-private\.sh > "\$receipt"\s*$/m.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow must contain exactly one fixed activation sink");
+  }
+  if (!activation.includes("node ./scripts/v1-local-private-control-receipt.mjs verify")
+    || !activation.includes("--candidateCommit 832bf2baec47055342af7e7f73425444381b91e0")
+    || !activation.includes("--candidateTree 91cee2380809cb0691b9ac47cafa2a673d434caa")
+    || !activation.includes("--sourceArchiveSha256 6eabff5f3fdbb4b129519d23a2dd9864f65477c5f0e1ecb58e1b8a9a79af3007")
+    || !activation.includes('controller_sha256="$(sha256sum ./scripts/v1-local-private-control.py')
+    || !activation.includes('unit_sha256="$(sha256sum ./systemd/platform-v1-local-private-control.service')
+    || !activation.includes('--controllerSha256 "$controller_sha256"')
+    || !activation.includes('--unitSha256 "$unit_sha256"')) {
+    issues.push("V1 LOCAL_PRIVATE workflow does not revalidate the exact root receipt");
+  }
+  const artifacts = text.match(/uses:\s*actions\/upload-artifact@[a-f0-9]{40}/g) ?? [];
+  if (artifacts.length !== 1
+    || !activation.includes("path: ${{ runner.temp }}/v1-local-private-control-receipt.json")
+    || !activation.includes("if-no-files-found: error")) {
+    issues.push("V1 LOCAL_PRIVATE workflow must publish exactly one required receipt artifact");
+  }
+  if (/platform-activation-broker|deploy-vps\.sh|release-admission|dast-zap|sigstore|promoter|activation-request|docker-action/i.test(activation)) {
+    issues.push("V1 LOCAL_PRIVATE workflow crosses the enterprise provider activation boundary");
+  }
+  const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
+  if (productionEnvironments.length !== 1) {
+    issues.push("V1 LOCAL_PRIVATE workflow must expose exactly one production environment job");
   }
   return issues;
 }

