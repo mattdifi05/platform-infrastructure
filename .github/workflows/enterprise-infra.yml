@@ -324,6 +324,9 @@ jobs:
             scripts/v1-brownfield-scheduler-cutover.test.mjs \
             scripts/v1-brownfield-control-plane-policy.test.mjs \
             scripts/v1-brownfield-control-plane-gate.test.mjs \
+            scripts/v1-local-private-control.test.mjs \
+            scripts/v1-local-private-control.e2e.test.mjs \
+            scripts/deploy-v1-local-private.test.mjs \
             scripts/hosted-workload-preservation-guard.test.mjs
       - name: Upload supply-chain evidence reports
         if: always()

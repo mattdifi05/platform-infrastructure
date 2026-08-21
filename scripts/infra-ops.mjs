@@ -2882,6 +2882,10 @@ function infraTestingHygiene() {
     "scripts/v1-brownfield-install-receipt.mjs",
     "scripts/v1-brownfield-install-receipt.test.mjs",
     "scripts/deploy-v1-install-only.test.mjs",
+    "scripts/v1-local-private-control-receipt.mjs",
+    "scripts/v1-local-private-control.test.mjs",
+    "scripts/v1-local-private-control.e2e.test.mjs",
+    "scripts/deploy-v1-local-private.test.mjs",
     "scripts/platform-activation-transport.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
@@ -2928,6 +2932,9 @@ function infraTestingHygiene() {
     "--test",
     "scripts/v1-brownfield-install-receipt.test.mjs",
     "scripts/deploy-v1-install-only.test.mjs",
+    "scripts/v1-local-private-control.test.mjs",
+    "scripts/v1-local-private-control.e2e.test.mjs",
+    "scripts/deploy-v1-local-private.test.mjs",
   ], { cwd: infraRoot });
   run(process.execPath, ["scripts/platform-activation-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
@@ -3318,6 +3325,7 @@ function infraMaintainabilityHygiene() {
     "database-ownership-sandbox-test.sh",
     "deploy-vps-input-test.sh",
     "deploy-v1-install-only.sh",
+    "deploy-v1-local-private.sh",
     "deploy-vps-remote.sh",
     "helper-image-supply-chain-test.sh",
     "host-reliability-sandbox-test.sh",
@@ -10251,6 +10259,8 @@ function repoCoverageCategory(filePath) {
     ["object-storage", /^minio\//],
     ["documentation", /^[A-Z][A-Z0-9_-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
+    ["host-service", /^systemd\/[^/]+\.service$/],
+    ["host-privilege-policy", /^sudoers\/[^/]+$/],
     ["dns", /^dns\//],
     ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
     ["messaging", /^(?:nats\/|scripts\/(?:render-workload-broker-config|workload-broker-policy)\.mjs$)/],
