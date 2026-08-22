@@ -64,6 +64,13 @@ assert.match(
   /exact deterministic non-secret Compose identity fixture/,
 );
 assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
+    '            sed -i -E "/^${key}=/d" .env\n',
+    "",
+  )).join(" "),
+  /exact deterministic non-secret Compose identity fixture|before clean-check and verification/,
+);
+assert.match(
   runEvidenceWorkflowMismatches(runEvidence.replace("          } >> .env", "          } > .env")).join(" "),
   /exact deterministic non-secret Compose identity fixture|before clean-check and verification/,
 );

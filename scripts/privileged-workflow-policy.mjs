@@ -5,6 +5,7 @@ const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protect
 const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "c7fc3315fbf74b2e599ee31ad2d15b2224abb5a366aeb10cc832f45dbd7bc88e";
 const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "52b53e470926339dcbf80558cb438329854eccc8f9c852b71768de5dfe46f533";
 const RUN_EVIDENCE_SECRET_FIXTURES = "postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot";
+const RUN_EVIDENCE_ENV_OVERRIDE_KEYS = "DOMAIN PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256 ALERT_EMAIL_TO MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER";
 const RUN_EVIDENCE_COMPOSE_ENV_LINES = [
   "DOMAIN=fixture.invalid",
   "PROJECT_SOURCE_DIR=../compose-source",
@@ -69,6 +70,12 @@ export function runEvidenceWorkflowMismatches(workflowText) {
 
   const installIndex = verify.indexOf("install -m 0600 .env.vps.example .env");
   const fixtureIndex = verify.indexOf("mkdir -p ../compose-source secrets traefik/certs");
+  const overrideBlock = [
+    `          for key in ${RUN_EVIDENCE_ENV_OVERRIDE_KEYS}; do`,
+    '            sed -i -E "/^${key}=/d" .env',
+    "          done",
+  ].join("\n");
+  const overrideIndex = verify.indexOf(overrideBlock, installIndex);
   const envFixtureStart = verify.indexOf("          {\n", installIndex);
   const envFixtureEnd = verify.indexOf("          } >> .env", envFixtureStart);
   const envFixtureBlock = envFixtureStart >= 0 && envFixtureEnd > envFixtureStart
@@ -91,13 +98,16 @@ export function runEvidenceWorkflowMismatches(workflowText) {
 
   if (fixtureIndex < 0
       || filesystemFixture.some((line) => !verify.includes(line))
+      || overrideIndex < 0
+      || verify.indexOf(overrideBlock, overrideIndex + 1) >= 0
       || !exactEnvFixture
       || envFixtureBlock.length === 0) {
     issues.push("run evidence must append the exact deterministic non-secret Compose identity fixture once");
   }
   if (!(installIndex >= 0
       && fixtureIndex < installIndex
-      && installIndex < envFixtureStart
+      && installIndex < overrideIndex
+      && overrideIndex < envFixtureStart
       && envFixtureEnd < cleanIndex
       && cleanIndex < verifierIndex)) {
     issues.push("run evidence must materialize its Compose identity fixture before clean-check and verification");
