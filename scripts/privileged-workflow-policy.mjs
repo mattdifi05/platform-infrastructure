@@ -6,19 +6,27 @@ const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "c7fc3315fbf74b2e599ee31ad2d15b2224abb5a
 const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "52b53e470926339dcbf80558cb438329854eccc8f9c852b71768de5dfe46f533";
 const RUN_EVIDENCE_SECRET_FIXTURES = "postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot";
 const RUN_EVIDENCE_COMPOSE_ENV_LINES = [
-  "PROJECT_SOURCE_DIR=./.tmp/optional-project-source",
-  "PHP_PROJECTS_DIR=../src",
+  "DOMAIN=fixture.invalid",
+  "PROJECT_SOURCE_DIR=../compose-source",
+  "PHP_PROJECTS_DIR=../compose-source",
   "DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox",
   "DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json",
   "DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active-receipt.json",
-  "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.candidate-ci-compose-render-only",
-  `DOCKER_ACTION_ACTIVE_RECEIPT_SHA256=${"2".repeat(64)}`,
-  `DOCKER_ACTION_COMBINED_RENDER_SHA256=${"3".repeat(64)}`,
-  `PLATFORM_OPS_IMAGE=ghcr.io/example.invalid/platform-ops@sha256:${"0".repeat(64)}`,
-  "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=ghcr.io/example.invalid/platform-docker-action-broker",
-  `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"4".repeat(64)}`,
-  "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=ghcr.io/example.invalid/platform-provider-activation-sidecar",
-  `PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=${"5".repeat(64)}`,
+  "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.offline-compose-v2",
+  `DOCKER_ACTION_ACTIVE_RECEIPT_SHA256=${"a".repeat(64)}`,
+  `DOCKER_ACTION_COMBINED_RENDER_SHA256=${"b".repeat(64)}`,
+  `PLATFORM_OPS_IMAGE=registry.example.invalid/platform/ops@sha256:${"f".repeat(64)}`,
+  "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=registry.example.invalid/platform/backup-scheduler",
+  `PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256=${"e".repeat(64)}`,
+  "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=registry.example.invalid/platform/docker-action-broker",
+  `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"c".repeat(64)}`,
+  "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/platform/provider-activation",
+  `PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=${"d".repeat(64)}`,
+  "ALERT_EMAIL_TO=qa@fixture.invalid",
+  "MAILER_FROM=qa@fixture.invalid",
+  "MAILER_REPLY_TO=qa@fixture.invalid",
+  "SMTP_HOST=smtp.fixture.invalid",
+  "SMTP_USER=qa",
 ];
 
 function jobBlock(text, jobName) {
@@ -60,7 +68,7 @@ export function runEvidenceWorkflowMismatches(workflowText) {
   if (!verify) return ["run evidence workflow is missing github-actions-run-evidence"];
 
   const installIndex = verify.indexOf("install -m 0600 .env.vps.example .env");
-  const fixtureIndex = verify.indexOf("mkdir -p ../src .tmp/optional-project-source secrets traefik/certs");
+  const fixtureIndex = verify.indexOf("mkdir -p ../compose-source secrets traefik/certs");
   const envFixtureStart = verify.indexOf("          {\n", installIndex);
   const envFixtureEnd = verify.indexOf("          } >> .env", envFixtureStart);
   const envFixtureBlock = envFixtureStart >= 0 && envFixtureEnd > envFixtureStart
