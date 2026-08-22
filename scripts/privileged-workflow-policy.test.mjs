@@ -60,7 +60,7 @@ assert.match(
   /exact deterministic non-secret Compose identity fixture/,
 );
 assert.match(
-  runEvidenceWorkflowMismatches(runEvidence.replace("2".repeat(64), "invalid-receipt-digest")).join(" "),
+  runEvidenceWorkflowMismatches(runEvidence.replace("a".repeat(64), "invalid-receipt-digest")).join(" "),
   /exact deterministic non-secret Compose identity fixture/,
 );
 assert.match(
