@@ -41,6 +41,9 @@ jobs:
           printf 'dummy-key\n' > traefik/certs/local-key.pem
           chmod 644 traefik/certs/local-cert.pem traefik/certs/local-key.pem
           install -m 0600 .env.vps.example .env
+          for key in DOMAIN PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256 ALERT_EMAIL_TO MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER; do
+            sed -i -E "/^${key}=/d" .env
+          done
           {
             printf '%s\n' 'DOMAIN=fixture.invalid'
             printf '%s\n' 'PROJECT_SOURCE_DIR=../compose-source'
