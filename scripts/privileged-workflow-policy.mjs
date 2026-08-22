@@ -6,6 +6,8 @@ const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "c7fc3315fbf74b2e599ee31ad2d15b2224abb5a
 const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "52b53e470926339dcbf80558cb438329854eccc8f9c852b71768de5dfe46f533";
 const RUN_EVIDENCE_SECRET_FIXTURES = "postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot";
 const RUN_EVIDENCE_ENV_OVERRIDE_KEYS = "DOMAIN PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256 ALERT_EMAIL_TO MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER";
+const RUN_EVIDENCE_COMPOSE_VERSION = "5.3.1";
+const RUN_EVIDENCE_COMPOSE_SHA256 = "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959";
 const RUN_EVIDENCE_COMPOSE_ENV_LINES = [
   "DOMAIN=fixture.invalid",
   "PROJECT_SOURCE_DIR=../compose-source",
@@ -68,6 +70,19 @@ export function runEvidenceWorkflowMismatches(workflowText) {
   const verify = jobBlock(text, "github-actions-run-evidence");
   if (!verify) return ["run evidence workflow is missing github-actions-run-evidence"];
 
+  const rendererBlock = [
+    "      - name: Install SHA-pinned Compose renderer",
+    `          PLATFORM_TEST_DOCKER_COMPOSE_BIN: /tmp/platform-ci-docker-compose-v${RUN_EVIDENCE_COMPOSE_VERSION}`,
+    `          PLATFORM_TEST_DOCKER_COMPOSE_SHA256: ${RUN_EVIDENCE_COMPOSE_SHA256}`,
+    '          install -d -m 700 "$HOME/.docker/cli-plugins"',
+    `            https://github.com/docker/compose/releases/download/v${RUN_EVIDENCE_COMPOSE_VERSION}/docker-compose-linux-x86_64`,
+    `          printf '%s  %s\\n' "$PLATFORM_TEST_DOCKER_COMPOSE_SHA256" "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" | sha256sum -c -`,
+    '          install -m 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" "$HOME/.docker/cli-plugins/docker-compose"',
+    "          compose_version=$(docker compose version --short)",
+    `          test "$compose_version" = ${RUN_EVIDENCE_COMPOSE_VERSION}`,
+  ];
+  const rendererIndex = verify.indexOf(rendererBlock[0]);
+  const verifyStepIndex = verify.indexOf("      - name: Verify completed enterprise infra run");
   const installIndex = verify.indexOf("install -m 0600 .env.vps.example .env");
   const fixtureIndex = verify.indexOf("mkdir -p ../compose-source secrets traefik/certs");
   const overrideBlock = [
@@ -95,6 +110,13 @@ export function runEvidenceWorkflowMismatches(workflowText) {
   const exactEnvFixture = RUN_EVIDENCE_COMPOSE_ENV_LINES.every((line) =>
     (verify.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length === 1
       && envFixtureBlock.includes(`'${line}'`));
+
+  if (rendererIndex < 0
+      || rendererBlock.some((line) => !verify.includes(line))
+      || verify.indexOf(rendererBlock[0], rendererIndex + 1) >= 0
+      || !(rendererIndex < verifyStepIndex && verifyStepIndex < fixtureIndex)) {
+    issues.push("run evidence must install the exact SHA-pinned Compose renderer before verification");
+  }
 
   if (fixtureIndex < 0
       || filesystemFixture.some((line) => !verify.includes(line))

@@ -54,6 +54,20 @@ assert.doesNotMatch(runEvidence, /--envFile \.env\.vps\.example/);
 assert.deepEqual(runEvidenceWorkflowMismatches(runEvidence), []);
 assert.match(
   runEvidenceWorkflowMismatches(runEvidence.replace(
+    "releases/download/v5.3.1/docker-compose-linux-x86_64",
+    "releases/download/v2.38.2/docker-compose-linux-x86_64",
+  )).join(" "),
+  /SHA-pinned Compose renderer/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
+    "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959",
+    "0".repeat(64),
+  )).join(" "),
+  /SHA-pinned Compose renderer/,
+);
+assert.match(
+  runEvidenceWorkflowMismatches(runEvidence.replace(
     "/srv/platform/provider-activation/inbox",
     "/tmp/provider-activation/inbox",
   )).join(" "),

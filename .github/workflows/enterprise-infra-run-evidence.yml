@@ -25,6 +25,21 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
+      - name: Install SHA-pinned Compose renderer
+        env:
+          PLATFORM_TEST_DOCKER_COMPOSE_BIN: /tmp/platform-ci-docker-compose-v5.3.1
+          PLATFORM_TEST_DOCKER_COMPOSE_SHA256: f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959
+        run: |
+          install -d -m 700 "$HOME/.docker/cli-plugins"
+          curl --fail --silent --show-error --location \
+            --output "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" \
+            https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-linux-x86_64
+          printf '%s  %s\n' "$PLATFORM_TEST_DOCKER_COMPOSE_SHA256" "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" | sha256sum -c -
+          chmod 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN"
+          install -m 700 "$PLATFORM_TEST_DOCKER_COMPOSE_BIN" "$HOME/.docker/cli-plugins/docker-compose"
+          compose_version=$(docker compose version --short)
+          test "$compose_version" = 5.3.1
+
       - name: Verify completed enterprise infra run
         env:
           GITHUB_TOKEN: ${{ github.token }}
