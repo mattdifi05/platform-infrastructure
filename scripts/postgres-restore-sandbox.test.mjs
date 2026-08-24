@@ -34,9 +34,8 @@ test("all PostgreSQL drill paths use the isolated helper, not the live database"
   const here = path.dirname(fileURLToPath(import.meta.url));
   const source = fs.readFileSync(path.join(here, "infra-ops.mjs"), "utf8");
   const body = source.match(/async function restoreTestPostgres\(options = \{\}\) \{([\s\S]*?)\n\}\n\nasync function backupRestoreDrill/)?.[1] ?? "";
-  assert.match(body, /postgresRestoreSandboxPlan/);
+  assert.match(body, /evidencePostgresRestoreSandboxPlan/);
   assert.doesNotMatch(body, /dockerExec\(container/);
   assert.doesNotMatch(body, /drop database if exists/);
   assert.match(body, /liveSourceTouched: false/);
 });
-
