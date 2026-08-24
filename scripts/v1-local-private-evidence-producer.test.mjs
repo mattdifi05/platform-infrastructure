@@ -1111,6 +1111,290 @@ test("fixture producer completes one exact PRE evidence transaction", { timeout:
   }
 });
 
+test("artifact staging root and family stay caller-owned 0700 under umask 0022", () => {
+  const fixture = createFixture();
+  try {
+    const result = runPure(fixture, String.raw`
+import json, os, stat
+root = module.physical("/dev/shm/artifact-staging-mode-unit")
+os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
+os.mkdir(root, mode=0o700)
+old_umask = os.umask(0o022)
+try:
+    staging = module.create_artifact_staging_root(root)
+    source = os.path.join(root, "source.bin")
+    with open(source, "wb") as handle:
+        handle.write(b"fixture artifact\n")
+    family = os.path.join(staging, "11-mariadb")
+    module.snapshot_regular_file(source, os.path.join(family, "mariadb.sql.gz"), 4096)
+    staging_metadata = os.lstat(staging)
+    family_metadata = os.lstat(family)
+
+    os.chmod(staging, 0o755)
+    mode_rejected = False
+    try:
+        module.assert_artifact_staging_root(staging)
+    except module.Stop:
+        mode_rejected = True
+    os.chmod(staging, 0o700)
+
+    original_lstat = module.os.lstat
+    ordinary_metadata = original_lstat(staging)
+    class ForeignOwnedMetadata:
+        st_mode = ordinary_metadata.st_mode
+        st_uid = ordinary_metadata.st_uid + 1
+    def foreign_owner_lstat(pathname):
+        return ForeignOwnedMetadata() if pathname == staging else original_lstat(pathname)
+    module.os.lstat = foreign_owner_lstat
+    foreign_owner_rejected = False
+    try:
+        module.assert_artifact_staging_root(staging)
+    except module.Stop:
+        foreign_owner_rejected = True
+    finally:
+        module.os.lstat = original_lstat
+
+    symlink_parent = os.path.join(root, "symlink-case")
+    symlink_target = os.path.join(root, "symlink-target")
+    os.mkdir(symlink_parent, mode=0o700)
+    os.mkdir(symlink_target, mode=0o700)
+    symlink_staging = os.path.join(symlink_parent, "artifact-staging")
+    os.symlink(symlink_target, symlink_staging)
+    symlink_rejected = False
+    try:
+        module.assert_artifact_staging_root(symlink_staging)
+    except module.Stop:
+        symlink_rejected = True
+
+    sys.stdout.write(json.dumps({
+        "familyMode": stat.S_IMODE(family_metadata.st_mode),
+        "foreignOwnerRejected": foreign_owner_rejected,
+        "modeRejected": mode_rejected,
+        "rootMode": stat.S_IMODE(staging_metadata.st_mode),
+        "rootOwned": staging_metadata.st_uid == os.geteuid(),
+        "symlinkRejected": symlink_rejected,
+    }))
+finally:
+    os.umask(old_umask)
+    module.shutil.rmtree(root)
+`);
+    requireSuccess(result, "artifact staging mode unit");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      familyMode: 0o700,
+      foreignOwnerRejected: true,
+      modeRejected: true,
+      rootMode: 0o700,
+      rootOwned: true,
+      symlinkRejected: true,
+    });
+
+    const source = fs.readFileSync(PRODUCER, "utf8");
+    const recordsBody = source.slice(
+      source.indexOf("def create_artifact_records("),
+      source.indexOf("\ndef run_local_restores(", source.indexOf("def create_artifact_records(")),
+    );
+    assert.ok(
+      recordsBody.indexOf("artifact_root = create_artifact_staging_root(temp_root)")
+        < recordsBody.indexOf("snapshot_artifact_record("),
+      "artifact staging root must be explicitly created and validated before snapshots",
+    );
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("application restore verifies actual metadata under the service UMask", () => {
+  const fixture = createFixture();
+  try {
+    const result = runPure(fixture, String.raw`
+import hashlib, io, json, os, tarfile
+root = module.physical("/dev/shm/application-restore-metadata-unit")
+os.makedirs(root, mode=0o700)
+archive_path = os.path.join(root, "anniversary.tar.gz")
+payload = b"fixture application payload\n"
+with tarfile.open(archive_path, "w:gz") as archive:
+    project = tarfile.TarInfo("anniversary")
+    project.type = tarfile.DIRTYPE
+    project.mode = 0o755
+    archive.addfile(project)
+    assets = tarfile.TarInfo("anniversary/assets")
+    assets.type = tarfile.DIRTYPE
+    assets.mode = 0o755
+    archive.addfile(assets)
+    application = tarfile.TarInfo("anniversary/assets/app.txt")
+    application.mode = 0o644
+    application.size = len(payload)
+    archive.addfile(application, io.BytesIO(payload))
+
+rows = [
+    {"mode": 0o755, "path": "assets", "type": "directory"},
+    {
+        "mode": 0o644,
+        "path": "assets/app.txt",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "sizeBytes": len(payload),
+        "type": "file",
+    },
+]
+expected = {
+    "entryCount": len(rows),
+    "rows": rows,
+    "treeSha256": module.digest_bytes(module.canonical_bytes(rows)),
+}
+
+old_umask = os.umask(0o077)
+try:
+    receipt = module.restore_application(
+        {"logicalKey": "anniversary", "path": archive_path}, expected, root,
+    )
+    restored_root = os.path.join(root, "restore-app-anniversary", "anniversary")
+    actual_rows = module.capture_restored_application_tree(restored_root)
+    actual_tree_sha256 = module.digest_bytes(module.canonical_bytes(actual_rows))
+    actual_directory_mode = os.lstat(os.path.join(restored_root, "assets")).st_mode & 0o7777
+
+    fault_root = os.path.join(root, "fault")
+    original_chmod = module.os.chmod
+    def omit_directory_chmod(pathname, mode):
+        if os.path.isdir(pathname):
+            return None
+        return original_chmod(pathname, mode)
+    module.os.chmod = omit_directory_chmod
+    actual_metadata_gate_error = ""
+    try:
+        module.restore_application(
+            {"logicalKey": "anniversary", "path": archive_path}, expected, fault_root,
+        )
+    except module.Stop as error:
+        actual_metadata_gate_error = str(error)
+    finally:
+        module.os.chmod = original_chmod
+
+    special_path = os.path.join(root, "special.tar.gz")
+    with tarfile.open(special_path, "w:gz") as archive:
+        project = tarfile.TarInfo("fiplatform")
+        project.type = tarfile.DIRTYPE
+        project.mode = 0o755
+        archive.addfile(project)
+        executable = tarfile.TarInfo("fiplatform/tool")
+        executable.mode = 0o4755
+        executable.size = len(payload)
+        archive.addfile(executable, io.BytesIO(payload))
+    special_rows = [{
+        "mode": 0o4755,
+        "path": "tool",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "sizeBytes": len(payload),
+        "type": "file",
+    }]
+    special_expected = {
+        "entryCount": len(special_rows),
+        "rows": special_rows,
+        "treeSha256": module.digest_bytes(module.canonical_bytes(special_rows)),
+    }
+    special_bits_error = ""
+    try:
+        module.restore_application(
+            {"logicalKey": "fiplatform", "path": special_path}, special_expected, root,
+        )
+    except module.Stop as error:
+        special_bits_error = str(error)
+
+    sys.stdout.write(json.dumps({
+        "actualDirectoryMode": actual_directory_mode,
+        "actualMetadataGateError": actual_metadata_gate_error,
+        "receiptMatchesReadback": receipt["restoredTreeSha256"] == actual_tree_sha256,
+        "specialBitsError": special_bits_error,
+    }))
+finally:
+    os.umask(old_umask)
+    module.shutil.rmtree(root)
+`);
+    requireSuccess(result, "application restore metadata unit");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      actualDirectoryMode: 0o755,
+      actualMetadataGateError: "application isolated restore tree differs from the captured source tree.",
+      receiptMatchesReadback: true,
+      specialBitsError: "application restore archive member contains unsupported special permission bits.",
+    });
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("confidential plaintext is removed and verified before PASS evidence publication", () => {
+  const fixture = createFixture();
+  try {
+    const result = runPure(fixture, String.raw`
+import json, os
+root = module.physical("/dev/shm/plaintext-cleanup-unit")
+tree = os.path.join(root, "tree")
+file_path = os.path.join(root, "readback.tar")
+os.makedirs(tree, mode=0o700)
+with open(os.path.join(tree, "secret"), "wb") as handle: handle.write(b"secret")
+module.remove_plaintext_tree(tree, "unit plaintext tree")
+with open(file_path, "wb") as handle: handle.write(b"secret")
+module.remove_plaintext_file(file_path, "unit plaintext file")
+fault_tree = os.path.join(root, "fault-tree")
+os.makedirs(fault_tree, mode=0o700)
+original_rmtree = module.shutil.rmtree
+module.shutil.rmtree = lambda pathname: None
+fault_stopped = False
+try:
+    module.remove_plaintext_tree(fault_tree, "fault plaintext tree")
+except module.Stop:
+    fault_stopped = True
+finally:
+    module.shutil.rmtree = original_rmtree
+original_rmtree(fault_tree)
+stage = os.path.join(root, "confidential-stage")
+os.makedirs(stage, mode=0o700)
+publication_guard_stopped = False
+try:
+    module.assert_confidential_plaintext_absent(root)
+except module.Stop:
+    publication_guard_stopped = True
+original_rmtree(stage)
+os.rmdir(root)
+sys.stdout.write(json.dumps({
+    "faultStopped": fault_stopped,
+    "fileAbsent": not os.path.lexists(file_path),
+    "publicationGuardStopped": publication_guard_stopped,
+    "treeAbsent": not os.path.lexists(tree),
+}))
+`);
+    requireSuccess(result, "confidential plaintext cleanup unit");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      faultStopped: true,
+      fileAbsent: true,
+      publicationGuardStopped: true,
+      treeAbsent: true,
+    });
+
+    const source = fs.readFileSync(PRODUCER, "utf8");
+    const buildBody = source.slice(
+      source.indexOf("def build_confidential_artifact("),
+      source.indexOf("\ndef safe_member_name(", source.indexOf("def build_confidential_artifact(")),
+    );
+    assert.ok(buildBody.indexOf("remove_plaintext_tree(stage") < buildBody.indexOf("return signed, manifest"));
+    const restoreBody = source.slice(
+      source.indexOf("def restore_confidential("),
+      source.indexOf("\ndef require_nonnegative_integer(", source.indexOf("def restore_confidential(")),
+    );
+    assert.match(restoreBody, /finally:\n\s+remove_plaintext_file\(plain_tar,/);
+    const produceBody = source.slice(
+      source.indexOf("def produce(operation:"),
+      source.indexOf("\ndef main(", source.indexOf("def produce(operation:")),
+    );
+    assert.ok(
+      produceBody.indexOf("assert_confidential_plaintext_absent(temp_root)")
+        < produceBody.indexOf("receipt = publish_evidence("),
+      "the plaintext absence gate must run before any PASS evidence is written",
+    );
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("typed executor response identity and framing fail closed", { timeout: 30_000 }, () => {
   for (const fault of ["id-mismatch", "noncanonical"]) {
     const fixture = createFixture();
@@ -1125,5 +1409,226 @@ test("typed executor response identity and framing fail closed", { timeout: 30_0
     } finally {
       fs.rmSync(fixture.root, { recursive: true, force: true });
     }
+  }
+});
+
+test("typed PRE-style skipEvidence leaves persistent backup-run state and reports byte-identical", { timeout: 30_000 }, () => {
+  const fixtureRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-skip-evidence-")));
+  const dataRoot = path.join(fixtureRoot, "data");
+  const stateRoot = path.join(fixtureRoot, "state");
+  const metricsRoot = path.join(stateRoot, "node-exporter-textfile");
+  const historyFile = path.join(stateRoot, "backup-restore-runs.jsonl");
+  const metricsFile = path.join(metricsRoot, "backup-restore.prom");
+  const backupReportsRoot = path.join(dataRoot, "reports", "backups");
+  const historicalJsonReport = path.join(backupReportsRoot, "historical.json");
+  const historicalMarkdownReport = path.join(backupReportsRoot, "historical.md");
+  const applicationSourceRoot = path.join(fixtureRoot, "src");
+  const signingKeysFile = path.join(fixtureRoot, "backup-signing-keys.txt");
+  const historicalRecord = `${JSON.stringify({
+    operation: "backup",
+    status: "success",
+    finishedAt: "2020-01-01T00:00:00.000Z",
+  })}\n`;
+  const historicalMetrics = "# existing immutable fixture\nbackup_restore_last_success_age_seconds{operation=\"backup\"} 1\n";
+  const historicalJson = `${JSON.stringify({ engine: "postgres", status: "success" })}\n`;
+  const historicalMarkdown = "# Existing immutable backup report\n";
+
+  try {
+    fs.mkdirSync(metricsRoot, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(backupReportsRoot, { recursive: true, mode: 0o700 });
+    writeFile(historyFile, historicalRecord, 0o600);
+    writeFile(metricsFile, historicalMetrics, 0o600);
+    writeFile(historicalJsonReport, historicalJson, 0o600);
+    writeFile(historicalMarkdownReport, historicalMarkdown, 0o600);
+    writeFile(path.join(applicationSourceRoot, "sample", "app.txt"), "application fixture\n", 0o644);
+    writeFile(signingKeysFile, `active=${"a".repeat(64)}\n`, 0o400);
+    const fixedTime = new Date("2020-01-02T00:00:00.000Z");
+    fs.utimesSync(historyFile, fixedTime, fixedTime);
+    fs.utimesSync(metricsFile, fixedTime, fixedTime);
+    fs.utimesSync(historicalJsonReport, fixedTime, fixedTime);
+    fs.utimesSync(historicalMarkdownReport, fixedTime, fixedTime);
+    fs.utimesSync(backupReportsRoot, fixedTime, fixedTime);
+    const before = {
+      history: fs.readFileSync(historyFile),
+      historyMtimeMs: fs.statSync(historyFile).mtimeMs,
+      metrics: fs.readFileSync(metricsFile),
+      metricsMtimeMs: fs.statSync(metricsFile).mtimeMs,
+      reportDirectoryMtimeMs: fs.statSync(backupReportsRoot).mtimeMs,
+      reportJson: fs.readFileSync(historicalJsonReport),
+      reportJsonMtimeMs: fs.statSync(historicalJsonReport).mtimeMs,
+      reportListing: fs.readdirSync(backupReportsRoot).sort(),
+      reportMarkdown: fs.readFileSync(historicalMarkdownReport),
+      reportMarkdownMtimeMs: fs.statSync(historicalMarkdownReport).mtimeMs,
+    };
+
+    const result = run(NODE, [
+      INFRA_OPS,
+      "backup-postgres",
+      "--skipEvidence", "true",
+      "--container", "enterprise-postgres",
+      "--database", "stexor",
+      "--user", "postgres",
+    ], {
+      env: {
+        HOME: fixtureRoot,
+        LANG: "C",
+        LC_ALL: "C",
+        PATH: "/usr/bin:/bin",
+        PLATFORM_DATA_ROOT: dataRoot,
+        PLATFORM_INFRA_ROOT: ROOT,
+        PROJECT_STATE_ROOT: stateRoot,
+      },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, "closed Docker gate unexpectedly admitted a non-typed fixture");
+    assert.match(result.stdout, /Creating PostgreSQL backup/);
+    assert.match(result.stderr, /Raw Docker execution is disabled outside the closed typed V1 evidence infra invocation/);
+
+    const applicationResult = run(NODE, [
+      INFRA_OPS,
+      "backup-applications",
+      "--skipEvidence", "true",
+      "--project", "sample",
+    ], {
+      env: {
+        HOME: fixtureRoot,
+        LANG: "C",
+        LC_ALL: "C",
+        PATH: "/usr/bin:/bin",
+        BACKUP_SIGNING_KEYS_FILE: signingKeysFile,
+        PLATFORM_DATA_ROOT: dataRoot,
+        PLATFORM_INFRA_ROOT: ROOT,
+        PROJECT_SOURCE_ROOT: applicationSourceRoot,
+        PROJECT_STATE_ROOT: stateRoot,
+      },
+    });
+    requireSuccess(applicationResult, "skipEvidence application backup");
+    assert.match(applicationResult.stdout, /Application source backups written/);
+    assert.equal(applicationResult.stdout.includes("Application backup reports written"), false);
+    assert.ok(
+      fs.readdirSync(path.join(dataRoot, "backups", "applications", "sample"))
+        .some((name) => name.endsWith(".tar.gz")),
+      "the application backup did not reach its successful custom-report branch",
+    );
+
+    assert.deepEqual(fs.readFileSync(historyFile), before.history);
+    assert.deepEqual(fs.readFileSync(metricsFile), before.metrics);
+    assert.equal(fs.statSync(historyFile).mtimeMs, before.historyMtimeMs);
+    assert.equal(fs.statSync(metricsFile).mtimeMs, before.metricsMtimeMs);
+    assert.deepEqual(fs.readdirSync(backupReportsRoot).sort(), before.reportListing);
+    assert.deepEqual(fs.readFileSync(historicalJsonReport), before.reportJson);
+    assert.deepEqual(fs.readFileSync(historicalMarkdownReport), before.reportMarkdown);
+    assert.equal(fs.statSync(historicalJsonReport).mtimeMs, before.reportJsonMtimeMs);
+    assert.equal(fs.statSync(historicalMarkdownReport).mtimeMs, before.reportMarkdownMtimeMs);
+    assert.equal(fs.statSync(backupReportsRoot).mtimeMs, before.reportDirectoryMtimeMs);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+const V1_APPLICATION_SLUGS = FAMILIES.slice(0, 8);
+
+function applicationBackupPolicyFixture(names, { typed = true } = {}) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-app-backup-policy-")));
+  const sourceRoot = path.join(root, "source");
+  const dataRoot = path.join(root, "data");
+  const keyFile = path.join(root, "backup-signing-keys.txt");
+  const patchedInfraOps = path.join(root, "infra-ops-typed-app-fixture.mjs");
+  fs.mkdirSync(sourceRoot, { mode: 0o700 });
+  for (const name of names) {
+    const directory = path.join(sourceRoot, name);
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(path.join(directory, "index.txt"), `${name}\n`, { mode: 0o600 });
+  }
+  fs.writeFileSync(
+    keyFile,
+    `fixture-v1=${crypto.randomBytes(48).toString("base64url")}\n`,
+    { mode: 0o600 },
+  );
+
+  const initializer = "const typedEvidenceInvocation = initializeTypedEvidenceInvocation();";
+  const source = fs.readFileSync(INFRA_OPS, "utf8");
+  assert.equal(source.split(initializer).length, 2, "typed invocation initializer must remain unique");
+  const absoluteImports = source.replace(
+    /from "((?:\.\.\/|\.\/)[^"]+)";/g,
+    (_match, specifier) => `from ${JSON.stringify(new URL(specifier, import.meta.url).href)};`,
+  );
+  fs.writeFileSync(
+    patchedInfraOps,
+    absoluteImports.replace(
+      initializer,
+      typed
+        ? 'const typedEvidenceInvocation = Object.freeze({ action: "BACKUP_APPLICATIONS" });'
+        : "const typedEvidenceInvocation = null;",
+    ),
+    { mode: 0o700 },
+  );
+
+  return {
+    root,
+    dataRoot,
+    run() {
+      return run(NODE, [patchedInfraOps, "backup-applications", "--skipEvidence", "true"], {
+        cwd: ROOT,
+        env: {
+          ...process.env,
+          BACKUP_SIGNING_KEYS_FILE: keyFile,
+          PLATFORM_DATA_ROOT: dataRoot,
+          PLATFORM_INFRA_ROOT: ROOT,
+          PROJECT_SOURCE_ROOT: sourceRoot,
+        },
+      });
+    },
+  };
+}
+
+for (const [label, names] of [
+  ["extra source", [...V1_APPLICATION_SLUGS, "rogue"]],
+  ["missing source", V1_APPLICATION_SLUGS.filter((name) => name !== "stream")],
+  ["normalized slug collision", [...V1_APPLICATION_SLUGS, "opstudents-"]],
+]) {
+  test(`typed BACKUP_APPLICATIONS rejects ${label} before writing artifacts`, () => {
+    const fixture = applicationBackupPolicyFixture(names);
+    try {
+      const result = fixture.run();
+      assert.equal(result.status, 1, result.stderr || result.stdout);
+      assert.match(result.stderr, /exact closed eight applications/);
+      assert.equal(fs.existsSync(path.join(fixture.dataRoot, "backups")), false);
+      assert.equal(fs.existsSync(path.join(fixture.dataRoot, "reports")), false);
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("typed BACKUP_APPLICATIONS writes exactly the eight closed application families", () => {
+  const fixture = applicationBackupPolicyFixture(V1_APPLICATION_SLUGS);
+  try {
+    const result = fixture.run();
+    requireSuccess(result, "exact typed application source set");
+    const applicationsRoot = path.join(fixture.dataRoot, "backups", "applications");
+    assert.deepEqual(fs.readdirSync(applicationsRoot).sort(), V1_APPLICATION_SLUGS);
+    for (const slug of V1_APPLICATION_SLUGS) {
+      const files = fs.readdirSync(path.join(applicationsRoot, slug));
+      assert.equal(files.filter((name) => name.endsWith(".tar.gz")).length, 1, slug);
+      assert.equal(files.filter((name) => name.endsWith(".tar.gz.sha256")).length, 1, slug);
+      assert.equal(files.filter((name) => name.endsWith(".tar.gz.sig.json")).length, 1, slug);
+    }
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("ordinary application backups preserve the existing open project selection", () => {
+  const fixture = applicationBackupPolicyFixture(["alpha", "beta", "docs"], { typed: false });
+  try {
+    const result = fixture.run();
+    requireSuccess(result, "ordinary application source selection");
+    assert.deepEqual(
+      fs.readdirSync(path.join(fixture.dataRoot, "backups", "applications")).sort(),
+      ["alpha", "beta"],
+    );
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
   }
 });

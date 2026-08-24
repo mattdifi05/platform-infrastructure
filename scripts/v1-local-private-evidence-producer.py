@@ -1064,10 +1064,33 @@ def snapshot_regular_file(source: str, destination: str, maximum: int) -> Tuple[
             os.close(destination_fd)
 
 
+def assert_artifact_staging_root(pathname: str) -> None:
+    try:
+        metadata = os.lstat(pathname)
+    except OSError as error:
+        stop(f"cannot inspect the transaction artifact-staging root: {error.strerror}.")
+    expected_uid = os.geteuid() if TEST_ROOT else 0
+    if (
+        not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != expected_uid or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        stop("transaction artifact-staging root is not one caller-owned non-symlink 0700 directory.")
+
+
+def create_artifact_staging_root(temp_root: str) -> str:
+    pathname = os.path.join(temp_root, "artifact-staging")
+    try:
+        os.mkdir(pathname, mode=0o700)
+    except OSError as error:
+        stop(f"cannot create the transaction artifact-staging root: {error.strerror}.")
+    assert_artifact_staging_root(pathname)
+    return pathname
+
+
 def snapshot_artifact_record(
-    verified: Dict[str, object], index: int, logical_key: str, logical_path: str, temp_root: str,
+    verified: Dict[str, object], index: int, logical_key: str, logical_path: str, artifact_root: str,
 ) -> Dict[str, object]:
-    root = os.path.join(temp_root, "artifact-staging", f"{index:02d}-{logical_key}")
+    root = os.path.join(artifact_root, f"{index:02d}-{logical_key}")
     mappings = (
         ("path", "sha256", MAX_ARCHIVE), ("checksumPath", "checksumSha256", 4096), ("hmacPath", "hmacSha256", 65536),
     )
@@ -1160,6 +1183,37 @@ def copy_regular(source: str, destination: str) -> Dict[str, object]:
     }
 
 
+def remove_plaintext_tree(pathname: str, label: str) -> None:
+    try:
+        shutil.rmtree(pathname)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        stop(f"cannot remove {label}: {error.strerror}.")
+    if os.path.lexists(pathname):
+        stop(f"{label} remained after verified cleanup.")
+
+
+def remove_plaintext_file(pathname: str, label: str) -> None:
+    try:
+        os.unlink(pathname)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        stop(f"cannot remove {label}: {error.strerror}.")
+    if os.path.lexists(pathname):
+        stop(f"{label} remained after verified cleanup.")
+
+
+def assert_confidential_plaintext_absent(temp_root: str) -> None:
+    for name, label in (
+        ("confidential-stage", "confidential recovery staging tree"),
+        ("confidential-readback.tar", "confidential recovery readback archive"),
+    ):
+        if os.path.lexists(os.path.join(temp_root, name)):
+            stop(f"{label} exists before evidence publication.")
+
+
 def build_confidential_artifact(
     run_id: str, temp_root: str, secret_metadata: Dict[str, object],
 ) -> Tuple[Dict[str, object], Dict[str, Dict[str, object]]]:
@@ -1229,7 +1283,9 @@ def build_confidential_artifact(
             os.unlink(staging)
         except FileNotFoundError:
             pass
-    return sign_artifact(final), manifest
+    signed = sign_artifact(final)
+    remove_plaintext_tree(stage, "confidential recovery staging tree")
+    return signed, manifest
 
 
 def safe_member_name(name: str) -> str:
@@ -1248,6 +1304,13 @@ def application_path_excluded(relative: str) -> bool:
     return any(relative == prefix or relative.startswith(f"{prefix}/") for prefix in APPLICATION_EXCLUDE_PATHS)
 
 
+def application_entry_mode(raw_mode: int, label: str) -> int:
+    mode = stat.S_IMODE(raw_mode)
+    if mode & 0o7000:
+        stop(f"{label} contains unsupported special permission bits.")
+    return mode
+
+
 def capture_application_source(slug: str) -> Dict[str, object]:
     root = os.path.join(physical(PROJECT_SOURCE_ROOT), slug)
     if not os.path.isdir(root) or os.path.islink(root):
@@ -1263,15 +1326,16 @@ def capture_application_source(slug: str) -> Dict[str, object]:
                 continue
             pathname = os.path.join(current, name)
             metadata = os.lstat(pathname)
+            mode = application_entry_mode(metadata.st_mode, "application source directory entry")
             if stat.S_ISLNK(metadata.st_mode):
                 target = os.readlink(pathname)
                 resolved = os.path.realpath(pathname)
                 if os.path.isabs(target) or os.path.commonpath((root, resolved)) != root:
                     stop("application source contains an escaping symbolic link.")
-                rows.append({"mode": stat.S_IMODE(metadata.st_mode), "path": relative, "target": target, "type": "symlink"})
+                rows.append({"mode": mode, "path": relative, "target": target, "type": "symlink"})
             elif stat.S_ISDIR(metadata.st_mode):
                 kept_directories.append(name)
-                rows.append({"mode": stat.S_IMODE(metadata.st_mode), "path": relative, "type": "directory"})
+                rows.append({"mode": mode, "path": relative, "type": "directory"})
             else:
                 stop("application source contains a special directory entry.")
         directories[:] = kept_directories
@@ -1281,15 +1345,16 @@ def capture_application_source(slug: str) -> Dict[str, object]:
                 continue
             pathname = os.path.join(current, name)
             metadata = os.lstat(pathname)
+            mode = application_entry_mode(metadata.st_mode, "application source file entry")
             if stat.S_ISLNK(metadata.st_mode):
                 target = os.readlink(pathname)
                 resolved = os.path.realpath(pathname)
                 if os.path.isabs(target) or os.path.commonpath((root, resolved)) != root:
                     stop("application source contains an escaping symbolic link.")
-                rows.append({"mode": stat.S_IMODE(metadata.st_mode), "path": relative, "target": target, "type": "symlink"})
+                rows.append({"mode": mode, "path": relative, "target": target, "type": "symlink"})
             elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
                 rows.append({
-                    "mode": stat.S_IMODE(metadata.st_mode), "path": relative, "sha256": digest_file(
+                    "mode": mode, "path": relative, "sha256": digest_file(
                         pathname[len(TEST_ROOT):] if TEST_ROOT and pathname.startswith(TEST_ROOT) else pathname,
                         max(1, metadata.st_size + 1), allow_empty=True,
                     ), "sizeBytes": metadata.st_size, "type": "file",
@@ -1302,11 +1367,58 @@ def capture_application_source(slug: str) -> Dict[str, object]:
     return {"entryCount": len(rows), "rows": rows, "treeSha256": digest_bytes(canonical_bytes(rows))}
 
 
+def capture_restored_application_tree(root: str) -> List[Dict[str, object]]:
+    rows = []
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        relative_parent = os.path.relpath(current, root)
+        relative_parent = "" if relative_parent == "." else relative_parent.replace(os.sep, "/")
+        kept_directories = []
+        for name in sorted(directories):
+            relative = f"{relative_parent}/{name}".lstrip("/")
+            pathname = os.path.join(current, name)
+            metadata = os.lstat(pathname)
+            mode = application_entry_mode(metadata.st_mode, "restored application directory entry")
+            if stat.S_ISLNK(metadata.st_mode):
+                link_target = os.readlink(pathname)
+                resolved = os.path.realpath(pathname)
+                if os.path.isabs(link_target) or os.path.commonpath((root, resolved)) != root:
+                    stop("restored application contains an escaping symbolic link.")
+                rows.append({"mode": mode, "path": relative, "target": link_target, "type": "symlink"})
+            elif stat.S_ISDIR(metadata.st_mode):
+                kept_directories.append(name)
+                rows.append({"mode": mode, "path": relative, "type": "directory"})
+            else:
+                stop("restored application contains a special directory entry.")
+        directories[:] = kept_directories
+        for name in sorted(files):
+            relative = f"{relative_parent}/{name}".lstrip("/")
+            pathname = os.path.join(current, name)
+            metadata = os.lstat(pathname)
+            mode = application_entry_mode(metadata.st_mode, "restored application file entry")
+            if stat.S_ISLNK(metadata.st_mode):
+                link_target = os.readlink(pathname)
+                resolved = os.path.realpath(pathname)
+                if os.path.isabs(link_target) or os.path.commonpath((root, resolved)) != root:
+                    stop("restored application contains an escaping symbolic link.")
+                rows.append({"mode": mode, "path": relative, "target": link_target, "type": "symlink"})
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                logical = pathname[len(TEST_ROOT):] if TEST_ROOT and pathname.startswith(TEST_ROOT) else pathname
+                rows.append({
+                    "mode": mode, "path": relative,
+                    "sha256": digest_file(logical, max(1, metadata.st_size + 1), allow_empty=True),
+                    "sizeBytes": metadata.st_size, "type": "file",
+                })
+            else:
+                stop("restored application contains a special or hard-linked file.")
+    rows.sort(key=lambda item: (item["path"], item["type"]))
+    return rows
+
+
 def restore_application(record: Dict[str, object], expected: Dict[str, object], temp_root: str) -> Dict[str, object]:
     slug = str(record["logicalKey"])
     target = os.path.join(temp_root, f"restore-app-{slug}")
     os.makedirs(target, mode=0o700)
-    rows = []
+    declared_rows = []
     deferred_links = []
     try:
         with tarfile.open(record["path"], "r:gz") as archive:
@@ -1314,17 +1426,21 @@ def restore_application(record: Dict[str, object], expected: Dict[str, object], 
                 name = safe_member_name(member.name)
                 if name != slug and not name.startswith(f"{slug}/"):
                     stop("application restore archive contains a foreign project path.")
+                if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
+                    stop("application restore archive contains a link or special entry.")
+                member_mode = application_entry_mode(member.mode, "application restore archive member")
                 relative = name[len(slug):].lstrip("/")
                 if not relative:
+                    if not member.isdir():
+                        stop("application restore archive project root is not a directory.")
                     continue
                 if application_path_excluded(relative):
                     stop("application restore archive contains an excluded path.")
-                if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
-                    stop("application restore archive contains a link or special entry.")
                 destination = os.path.join(target, name)
                 if member.isdir():
-                    os.makedirs(destination, mode=member.mode & 0o777)
-                    rows.append({"mode": member.mode & 0o7777, "path": relative, "type": "directory"})
+                    os.makedirs(destination, mode=member_mode)
+                    os.chmod(destination, member_mode)
+                    declared_rows.append({"mode": member_mode, "path": relative, "type": "directory"})
                     continue
                 if member.issym():
                     link_target = member.linkname
@@ -1333,7 +1449,7 @@ def restore_application(record: Dict[str, object], expected: Dict[str, object], 
                     if os.path.isabs(link_target) or os.path.commonpath((project_target, resolved)) != project_target:
                         stop("application restore archive contains an escaping symbolic link.")
                     deferred_links.append((destination, link_target))
-                    rows.append({"mode": member.mode & 0o7777, "path": relative, "target": link_target, "type": "symlink"})
+                    declared_rows.append({"mode": member_mode, "path": relative, "target": link_target, "type": "symlink"})
                     continue
                 source = archive.extractfile(member)
                 if source is None:
@@ -1349,16 +1465,19 @@ def restore_application(record: Dict[str, object], expected: Dict[str, object], 
                         output.write(chunk)
                         hasher.update(chunk)
                         size += len(chunk)
-                os.chmod(destination, member.mode & 0o777)
-                rows.append({
-                    "mode": member.mode & 0o7777, "path": relative, "sha256": hasher.hexdigest(),
+                os.chmod(destination, member_mode)
+                declared_rows.append({
+                    "mode": member_mode, "path": relative, "sha256": hasher.hexdigest(),
                     "sizeBytes": size, "type": "file",
                 })
             for destination, link_target in deferred_links:
                 os.symlink(link_target, destination)
     except (OSError, tarfile.TarError) as error:
         stop(f"application restore failed: {error}.")
-    rows.sort(key=lambda item: (item["path"], item["type"]))
+    declared_rows.sort(key=lambda item: (item["path"], item["type"]))
+    if declared_rows != expected["rows"]:
+        stop("application restore archive metadata differs from the captured source tree.")
+    rows = capture_restored_application_tree(os.path.join(target, slug))
     if rows != expected["rows"]:
         stop("application isolated restore tree differs from the captured source tree.")
     if not any(item["type"] == "file" for item in rows):
@@ -1376,41 +1495,44 @@ def restore_confidential(record: Dict[str, object], expected: Dict[str, Dict[str
          "--passphrase-file", physical(CONFIDENTIAL_PASSPHRASE), "--decrypt", record["path"]],
         "confidential backup decrypt", timeout=300, maximum_output=MAX_ARCHIVE,
     )
-    with open(plain_tar, "xb") as handle:
-        handle.write(output)
-        handle.flush()
-        os.fsync(handle.fileno())
-    observed: Dict[str, Dict[str, object]] = {}
     try:
-        with tarfile.open(plain_tar, "r:") as archive:
-            for member in archive.getmembers():
-                name = safe_member_name(member.name)
-                if member.isdir():
-                    continue
-                if member.issym() or member.islnk() or not member.isfile() or name in observed:
-                    stop("confidential restore contains a link, special or duplicate entry.")
-                source = archive.extractfile(member)
-                if source is None:
-                    stop("confidential restore member is unreadable.")
-                hasher = hashlib.sha256()
-                size = 0
-                while True:
-                    chunk = source.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    hasher.update(chunk)
-                observed[name] = {"gid": member.gid, "mode": member.mode & 0o7777, "sha256": hasher.hexdigest(), "sizeBytes": size, "uid": member.uid}
-    except (OSError, tarfile.TarError) as error:
-        stop(f"confidential restore archive is invalid: {error}.")
-    if observed != expected:
-        stop("confidential restore content/metadata differs from its source snapshot.")
-    tree_sha = digest_bytes(canonical_bytes(observed))
-    return {
-        "entryCount": len(observed), "restoreMode": "GPG_DECRYPT_TMPFS_CONTENT_METADATA_VERIFY",
-        "restoredTreeSha256": tree_sha, "sourceTreeSha256": digest_bytes(canonical_bytes(expected)),
-        "treeSha256": tree_sha,
-    }
+        with open(plain_tar, "xb") as handle:
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        observed: Dict[str, Dict[str, object]] = {}
+        try:
+            with tarfile.open(plain_tar, "r:") as archive:
+                for member in archive.getmembers():
+                    name = safe_member_name(member.name)
+                    if member.isdir():
+                        continue
+                    if member.issym() or member.islnk() or not member.isfile() or name in observed:
+                        stop("confidential restore contains a link, special or duplicate entry.")
+                    source = archive.extractfile(member)
+                    if source is None:
+                        stop("confidential restore member is unreadable.")
+                    hasher = hashlib.sha256()
+                    size = 0
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        hasher.update(chunk)
+                    observed[name] = {"gid": member.gid, "mode": member.mode & 0o7777, "sha256": hasher.hexdigest(), "sizeBytes": size, "uid": member.uid}
+        except (OSError, tarfile.TarError) as error:
+            stop(f"confidential restore archive is invalid: {error}.")
+        if observed != expected:
+            stop("confidential restore content/metadata differs from its source snapshot.")
+        tree_sha = digest_bytes(canonical_bytes(observed))
+        return {
+            "entryCount": len(observed), "restoreMode": "GPG_DECRYPT_TMPFS_CONTENT_METADATA_VERIFY",
+            "restoredTreeSha256": tree_sha, "sourceTreeSha256": digest_bytes(canonical_bytes(expected)),
+            "treeSha256": tree_sha,
+        }
+    finally:
+        remove_plaintext_file(plain_tar, "confidential recovery readback archive")
 
 
 def require_nonnegative_integer(value: object, label: str, *, minimum: int = 0) -> int:
@@ -1656,12 +1778,13 @@ def create_artifact_records(
     confidential, confidential_manifest = build_confidential_artifact(run_id, temp_root, secret_metadata)
     for key in ("path", "checksumPath", "hmacPath"):
         os.unlink(str(secret_metadata[key]))
+    artifact_root = create_artifact_staging_root(temp_root)
     paths = [by_slug[slug] for slug in APP_SLUGS] + [stexor, keycloak_db, mariadb, minio, keycloak_config, confidential["path"]]
     records = []
     for index, (key, path) in enumerate(zip(LOGICAL_KEYS, paths), start=1):
         verified = confidential if key == "confidential" else verify_artifact(path)
         logical_path = path[len(TEST_ROOT):] if TEST_ROOT and path.startswith(TEST_ROOT) else path
-        staged = snapshot_artifact_record(verified, index, key, logical_path, temp_root)
+        staged = snapshot_artifact_record(verified, index, key, logical_path, artifact_root)
         records.append({**staged, "artifactIndex": index, "logicalKey": key})
     if len(records) != 14 or [item["logicalKey"] for item in records] != list(LOGICAL_KEYS):
         stop("fresh artifact record set is not exactly fourteen ordered families.")
@@ -2382,6 +2505,7 @@ def produce(operation: str) -> Dict[str, object]:
         revalidate_post_transaction(binding)
         after = docker_inventory(run_id)
         ensure_runtime_unchanged(before, after, operation)
+        assert_confidential_plaintext_absent(temp_root)
         receipt = publish_evidence(
             operation, binding, run_id, records, restores, offsite, recovery_escrow, before, after,
             backup_completed, restore_completed, offsite_completed, recovery, preimage,

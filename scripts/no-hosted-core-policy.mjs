@@ -7142,7 +7142,14 @@ function validateCurrentEnvironmentSafety(serviceName, service, environment, vio
   }
 }
 
-function validateAndNormalizeServices(config, rootDirectory, environment, normalized, violations) {
+function validateAndNormalizeServices(
+  config,
+  rootDirectory,
+  environment,
+  normalized,
+  violations,
+  prevalidatedSiblingSource = null,
+) {
   const runtimeIdentity = runtimeIdentityProjection(environment);
   for (const [serviceName, service] of Object.entries(config.services ?? {})) {
     if (!plainObject(service)) continue;
@@ -7252,9 +7259,12 @@ function validateAndNormalizeServices(config, rootDirectory, environment, normal
 
   const siblingSource = path.resolve(rootDirectory, envOr(environment, "PHP_PROJECTS_DIR", "../src"));
   const workspaceParent = path.resolve(rootDirectory, "..");
-  if (!pathWithinRoot(siblingSource, workspaceParent)
-      || siblingSource === workspaceParent
-      || !filesystemPathAuthority(siblingSource, workspaceParent, { expectedType: "directory" })) {
+  const standardSiblingAuthority = pathWithinRoot(siblingSource, workspaceParent)
+    && siblingSource !== workspaceParent
+    && filesystemPathAuthority(siblingSource, workspaceParent, { expectedType: "directory" });
+  const prevalidatedLocalPrivateAuthority = prevalidatedSiblingSource !== null
+    && siblingSource === prevalidatedSiblingSource;
+  if (!standardSiblingAuthority && !prevalidatedLocalPrivateAuthority) {
     violations.push("paths:hosted-source-authority");
   }
   const activationInbox = environment.get("DOCKER_ACTION_ACTIVATION_INBOX");
@@ -7486,6 +7496,23 @@ export function projectLocalPrivateNoHostedAuthority(
     ? path.join(certificatesDirectory, "local-key.pem")
     : null;
   const localLock = path.join(root, "config/no-hosted-workloads.local-private.lock.json");
+  const sourceParent = dataRoot === null ? null : path.dirname(dataRoot);
+  const fixedSiblingSource = sourceParent === null
+    ? null
+    : path.join(sourceParent, "src");
+  const projectSource = exactAbsoluteEnvironmentPath(environment, "PROJECT_SOURCE_DIR");
+  const phpProjectsSource = exactAbsoluteEnvironmentPath(environment, "PHP_PROJECTS_DIR");
+  const sourceAuthorityValid = sourceParent !== null
+    && fixedSiblingSource !== null
+    && sourceParent !== dataRoot
+    && projectSource === fixedSiblingSource
+    && phpProjectsSource === fixedSiblingSource
+    && filesystemPathAuthority(fixedSiblingSource, sourceParent, {
+      expectedType: "directory",
+    });
+  if (!sourceAuthorityValid) {
+    violations.push("local-private:project-source-authority");
+  }
 
   const rootsValid = dataRoot !== null
     && secretsRoot !== null
@@ -7823,6 +7850,7 @@ export function projectLocalPrivateNoHostedAuthority(
     };
   }
   return {
+    prevalidatedSiblingSource: sourceAuthorityValid ? fixedSiblingSource : null,
     projectedConfig,
     projectedEnvironment,
     projectedLock,
@@ -7836,6 +7864,7 @@ function evaluateCurrentNoHostedExactAuthorityInternal(
   rootDirectory,
   environment = new Map(),
   prevalidatedSecretNames = new Set(),
+  prevalidatedSiblingSource = null,
 ) {
   const violations = [];
   if (!plainObject(config) || !plainObject(config.services)) {
@@ -7858,6 +7887,7 @@ function evaluateCurrentNoHostedExactAuthorityInternal(
     environment,
     normalized,
     violations,
+    prevalidatedSiblingSource,
   );
   const normalizedSha256 = crypto
     .createHash("sha256")
@@ -7912,6 +7942,7 @@ export function validateNoHostedCoreAuthority(lock, config, rootDirectory, envir
     variant === "LOCAL_PRIVATE"
       ? new Set(Object.keys(CORE_SEMANTIC_POLICY.secretFiles))
       : new Set(),
+    localPrivate?.prevalidatedSiblingSource ?? null,
   );
   const violations = [
     ...(localPrivate?.violations ?? []),

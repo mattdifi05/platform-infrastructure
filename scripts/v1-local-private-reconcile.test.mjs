@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -20,6 +22,156 @@ function runPython(body) {
 
 function jsonPython(body) {
   return JSON.parse(runPython(body));
+}
+
+const prerequisiteNewManagerNames = [
+  "control_center_vault_keys",
+  "docker_action_backup_catalog",
+  "docker_action_backup_job_execute",
+  "docker_action_backup_offsite_sync",
+  "docker_action_backup_prune_apply",
+  "docker_action_backup_prune_plan",
+  "docker_action_evidence_runtime_snapshot",
+  "docker_action_restore_drill_full",
+  "docker_action_runtime_intent_trust_key",
+];
+
+function runFixtureCommand(command, args) {
+  const result = spawnSync(command, args, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" } });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function seedPrerequisiteFixture() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-prerequisite-cohort-")));
+  fs.chmodSync(root, 0o700);
+  const logical = (value) => path.join(root, value.replace(/^\//, ""));
+  const deploymentHome = logical("/home/platform_infrastructure");
+  const deploymentRoot = logical("/home/platform_infrastructure/platform-infrastructure");
+  const sourceRoot = logical("/home/platform_infrastructure/src");
+  const projectsRoot = path.join(deploymentRoot, "projects-portal");
+  const stateRoot = path.join(projectsRoot, "state");
+  const traefikRoot = path.join(deploymentRoot, "traefik");
+  const certificatesRoot = path.join(traefikRoot, "certs");
+  const secretsRoot = path.join(deploymentRoot, "secrets");
+  for (const directory of [deploymentHome, deploymentRoot, sourceRoot, projectsRoot, stateRoot, traefikRoot, certificatesRoot, secretsRoot]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o755 });
+  }
+  fs.chmodSync(secretsRoot, 0o700);
+  fs.writeFileSync(path.join(deploymentRoot, ".env"), "\n", { mode: 0o600 });
+
+  const openssl = "/usr/bin/openssl";
+  const caKey = path.join(certificatesRoot, "ca-key.pem");
+  const ca = path.join(certificatesRoot, "ca.pem");
+  const localKey = path.join(certificatesRoot, "local-key.pem");
+  const request = path.join(certificatesRoot, "local.csr");
+  const certificate = path.join(certificatesRoot, "local-cert.pem");
+  runFixtureCommand(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=V1 Fixture CA", "-keyout", caKey, "-out", ca]);
+  runFixtureCommand(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=platform.fixture", "-keyout", localKey, "-out", request]);
+  runFixtureCommand(openssl, ["x509", "-req", "-days", "2", "-in", request, "-CA", ca, "-CAkey", caKey, "-CAcreateserial", "-out", certificate]);
+  fs.rmSync(request, { force: true });
+  fs.chmodSync(localKey, 0o644);
+  fs.chmodSync(certificate, 0o644);
+  fs.chmodSync(ca, 0o644);
+
+  const commit = "1".repeat(40);
+  const archiveBytes = Buffer.from("v1 prerequisite exact source archive fixture\n");
+  const archive = crypto.createHash("sha256").update(archiveBytes).digest("hex");
+  const release = `/srv/platform-infrastructure/releases/${commit}-${archive}`;
+  const releaseScripts = path.join(logical(release), "scripts");
+  fs.mkdirSync(releaseScripts, { recursive: true, mode: 0o755 });
+  for (const name of ["infra-secret-manager.mjs", "secret-store-metadata.mjs"]) {
+    fs.copyFileSync(path.join(here, name), path.join(releaseScripts, name));
+    fs.chmodSync(path.join(releaseScripts, name), 0o444);
+  }
+
+  const managerArgs = [
+    path.join(here, "infra-secret-manager.mjs"),
+    "--secretsDir", secretsRoot,
+    "--store", path.join(secretsRoot, "infra-secret-manager-store.json"),
+    "--masterKey", path.join(secretsRoot, "infra-secret-manager-master.key"),
+    "--auditLog", path.join(secretsRoot, "infra-secret-manager-audit.log"),
+    "--envFile", path.join(deploymentRoot, ".env"),
+  ];
+  const manager = (operation, extra = []) => {
+    const result = spawnSync(process.execPath, [managerArgs[0], operation, ...managerArgs.slice(1), ...extra], {
+      encoding: "utf8",
+      env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  manager("init");
+  const customNames = [
+    "app_db_password", "cloudflare_turnstile_secret_key", "database_url", "github_token",
+    "hash_pepper_keys", "nats_url", "session_secret", "session_signing_keys",
+  ];
+  const valueFile = path.join(root, "custom-value.txt");
+  for (const name of customNames) {
+    fs.writeFileSync(valueFile, `fixture_${name}_${"x".repeat(64)}\n`, { mode: 0o600 });
+    manager("set", ["--name", name, "--valueFile", valueFile]);
+  }
+  fs.rmSync(valueFile, { force: true });
+  const storePath = path.join(secretsRoot, "infra-secret-manager-store.json");
+  const fullStore = JSON.parse(fs.readFileSync(storePath, "utf8"));
+  const completeStore = structuredClone(fullStore);
+  for (const name of prerequisiteNewManagerNames) {
+    delete fullStore.secrets[name];
+    fs.rmSync(path.join(secretsRoot, `${name}.txt`));
+  }
+  assert.equal(Object.keys(fullStore.secrets).length, 21);
+  fs.writeFileSync(storePath, `${JSON.stringify(fullStore, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(storePath, 0o600);
+  for (const directory of [deploymentRoot, projectsRoot, stateRoot, traefikRoot, certificatesRoot]) fs.chmodSync(directory, 0o775);
+  fs.chmodSync(sourceRoot, 0o775);
+  return { root, release, logical, secretsRoot, storePath, completeStore, commit, archive, archiveBytes };
+}
+
+function runPrerequisiteCohort(fixture, fault = "") {
+  const body = [
+    "import json,runpy",
+    `m=runpy.run_path(${JSON.stringify(reconciler)},run_name='v1_prerequisite_fixture')`,
+    "m['configure_environment']()",
+    `print(json.dumps(m['prepare_live_prerequisite_cohort'](${JSON.stringify(fixture.release)}),sort_keys=True))`,
+  ].join("\n");
+  const env = {
+    PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C",
+    PLATFORM_V1_RECONCILE_TEST_ROOT: fixture.root,
+    PLATFORM_V1_RECONCILE_TEST_NODE: process.execPath,
+    PLATFORM_V1_RECONCILE_TEST_OPENSSL: "/usr/bin/openssl",
+  };
+  if (fault) env.PLATFORM_V1_RECONCILE_TEST_FAULT = fault;
+  return spawnSync(python, ["-c", body], { encoding: "utf8", env });
+}
+
+function clonePrerequisiteFixture(seed) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-prerequisite-clone-")));
+  fs.cpSync(seed.root, root, { recursive: true, preserveTimestamps: true });
+  // infra-ops intentionally runs with umask 0077.  Node's recursive cp masks
+  // source modes with that process umask, so restore the fixture's declared
+  // metadata explicitly instead of letting the test depend on its caller.
+  const restoreModes = (sourcePath, destinationPath) => {
+    const sourceMetadata = fs.lstatSync(sourcePath);
+    if (sourceMetadata.isSymbolicLink()) return;
+    fs.chmodSync(destinationPath, sourceMetadata.mode & 0o7777);
+    if (!sourceMetadata.isDirectory()) return;
+    for (const name of fs.readdirSync(sourcePath)) {
+      restoreModes(path.join(sourcePath, name), path.join(destinationPath, name));
+    }
+  };
+  restoreModes(seed.root, root);
+  fs.chmodSync(root, 0o700);
+  const logical = (value) => path.join(root, value.replace(/^\//, ""));
+  const secretsRoot = logical("/home/platform_infrastructure/platform-infrastructure/secrets");
+  return {
+    root,
+    release: seed.release,
+    logical,
+    secretsRoot,
+    storePath: path.join(secretsRoot, "infra-secret-manager-store.json"),
+    completeStore: seed.completeStore,
+    commit: seed.commit,
+    archive: seed.archive,
+    archiveBytes: seed.archiveBytes,
+  };
 }
 
 test("closed V1 cardinalities, dependency order, images, artifacts and CLI remain exact", () => {
@@ -145,7 +297,7 @@ def materialize(lines):
   'PLATFORM_CERTS_DIR','PLATFORM_DATA_ROOT',
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY','PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256',
-  'PLATFORM_STATE_DIR',
+  'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
  _,final_values=m['materialize_environment'](root,ops_image,runtime)
@@ -225,6 +377,8 @@ print(json.dumps({
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: "c".repeat(64),
         PLATFORM_STATE_DIR: "/home/platform_infrastructure/platform-infrastructure/projects-portal/state",
+        PHP_PROJECTS_DIR: "/home/platform_infrastructure/src",
+        PROJECT_SOURCE_DIR: "/home/platform_infrastructure/src",
       },
       providerLines: {
         CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: 1,
@@ -243,6 +397,8 @@ print(json.dumps({
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: 1,
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: 1,
         PLATFORM_STATE_DIR: 1,
+        PHP_PROJECTS_DIR: 1,
+        PROJECT_SOURCE_DIR: 1,
       },
       providerStable: true,
       runtimeComplete: true,
@@ -366,6 +522,14 @@ test("apply reopens the exact fresh PRE checkpoint, five evidence files and reco
   const value = jsonPython(`
 import os,tempfile,time,copy
 g=m['validate_pre_mutation_checkpoint'].__globals__; g['OWNER_UID']=os.geteuid()
+# This test isolates checkpoint/file/recovery mechanics and the cheap row-shape
+# guard; the full shared PRE/POST semantic validator is exercised below.
+semantic_calls=[]
+def semantic_guard(authority,documents,reconciliation_sha,transaction_id,began_at,now,evidence_phase):
+ semantic_calls.append({'artifacts':len(documents['logicalBackupEvidenceSha256']['artifacts']),
+  'phase':evidence_phase,'proofs':len(documents['offHostBackupEvidenceSha256']['proofs']),
+  'results':len(documents['restoreEvidenceSha256']['results'])})
+g['validate_backup_evidence_bundle']=semantic_guard
 def put(logical,value,mode=0o400,raw=False):
  p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True)
  if os.path.exists(p): os.chmod(p,0o600)
@@ -385,17 +549,18 @@ def scenario(kind):
   'authoritySha256':m['digest'](authority_bytes),'backupSetSha256':'8'*64,'backupToolImages':tools,
   'candidateCommit':commit,'candidateTree':tree,'evidencePhase':'PRE','reconciliationSha256':None,
   'runId':'20260824T120000Z-abcdef12','sourceArchiveSha256':archive,'transactionId':None}
- logical={**common,'artifactCount':14,'artifactManifestSha256':'9'*64,'artifacts':[],'backupCompletedUnixSeconds':captured,
+ rows=[{'logicalKey':key} for key in m['EVIDENCE_LOGICAL_KEYS']]
+ logical={**common,'artifactCount':14,'artifactManifestSha256':'9'*64,'artifacts':copy.deepcopy(rows),'backupCompletedUnixSeconds':captured,
   'capturedAtUnixSeconds':captured,'checksumVerifiedCount':14,'freshArtifactStreamHashCount':14,
   'generatedAtUnixSeconds':generated,'hmacVerifiedCount':14,'schema':'platform.v1-local-private-logical-backup-evidence/v1',
   'sourceSummarySha256':'a'*64,'status':'PASS','totalArtifactBytes':14}
  offhost={**common,'artifactCount':14,'completedAtUnixSeconds':generated-1,'distinctSnapshotCount':14,
   'exactPayloadReadbackCount':14,'freshExactSnapshotCount':14,'generatedAtUnixSeconds':generated,'hostingerUsed':False,
-  'noPrune':True,'offsiteProofSha256':'b'*64,'proofs':[],'recoveryEscrow':{},
+  'noPrune':True,'offsiteProofSha256':'b'*64,'proofs':copy.deepcopy(rows),'recoveryEscrow':{},
   'repository':'rclone:platform-onedrive:platform-infrastructure/restic','repositoryProvider':'OneDrive','retentionSkipped':True,
   'schema':'platform.v1-local-private-offhost-backup-evidence/v1','sourceSummarySha256':'a'*64,'status':'PASS'}
  restore={**common,'artifactCount':14,'completedAtUnixSeconds':generated-1,'expectedRestoreCount':14,
-  'generatedAtUnixSeconds':generated,'localRestoreResultsSha256':'c'*64,'passedRestoreCount':14,'results':[],
+  'generatedAtUnixSeconds':generated,'localRestoreResultsSha256':'c'*64,'passedRestoreCount':14,'results':copy.deepcopy(rows),
   'schema':'platform.v1-local-private-restore-evidence/v1','sourceSummarySha256':'a'*64,'status':'PASS'}
  secret={**common,'backupCompletedUnixSeconds':captured,'capturedAtUnixSeconds':captured,'encryptedArtifact':{},
   'generatedAtUnixSeconds':generated,'plaintextTemporaryStateAbsent':True,'recoveryEscrow':{},
@@ -407,6 +572,10 @@ def scenario(kind):
   'generatedAtUnixSeconds':generated,'recovery':{'exportSha256':export_snapshot['sha256'],'recoveryImageId':recovery_id,
   'runningImageId':running_id},'schema':'platform.v1-local-private-runtime-inventory-evidence/v1','status':'PASS',
   'volumeCount':1,'volumeSetSha256':'1'*64}
+ if kind=='emptyBundle':
+  logical['artifacts']=[]; offhost['proofs']=[]; restore['results']=[]
+ elif kind=='shortBundle': offhost['proofs'].pop()
+ elif kind=='unorderedBundle': restore['results'][0],restore['results'][1]=restore['results'][1],restore['results'][0]
  documents={'logicalBackupEvidenceSha256':logical,'offHostBackupEvidenceSha256':offhost,
   'restoreEvidenceSha256':restore,'runtimeInventorySha256':runtime,'secretsBackupEvidenceSha256':secret}
  digests={key:m['digest'](put(m['CHECKPOINT_EVIDENCE_PATHS'][key],document)) for key,document in documents.items()}
@@ -439,7 +608,9 @@ def scenario(kind):
  try:
   m['validate_pre_mutation_checkpoint'](authority,authority_bytes,reconciliation); return True
  except m['Stop']: return False
-results={kind:scenario(kind) for kind in ('baseline','crossedSecond','stale','checkpoint','evidence','authority','export','recovery')}
+results={kind:scenario(kind) for kind in (
+ 'baseline','crossedSecond','stale','checkpoint','evidence','authority','emptyBundle','shortBundle','unorderedBundle','export','recovery'
+)}
 calls=[]
 g=m['apply'].__globals__
 spy_authority={'documentId':'4'*64}; spy_authority_bytes=m['canonical_bytes'](spy_authority); spy_reconciliation={}
@@ -453,20 +624,27 @@ for name in ('configure_secret_anchor','read_or_create_journal','promote_live_en
  g[name]=lambda *args,n=name:calls.append(n)
 try: m['apply']()
 except m['Stop']: pass
-print(json.dumps({'calls':calls,'results':results},sort_keys=True))`);
+print(json.dumps({'calls':calls,'results':results,'semanticCalls':semantic_calls},sort_keys=True))`);
   assert.deepEqual(value.results, {
     authority: false,
     baseline: true,
     checkpoint: false,
     crossedSecond: true,
+    emptyBundle: false,
     evidence: false,
     export: false,
     recovery: false,
+    shortBundle: false,
     stale: false,
+    unorderedBundle: false,
   });
   assert.deepEqual(value.calls, ["maintenance", "guard"]);
+  assert.ok(value.semanticCalls.length > 0);
+  assert.ok(value.semanticCalls.every((call) => call.phase === "PRE" && call.artifacts === 14 && call.proofs === 14 && call.results === 14));
   const applySource = runPython("import inspect; print(inspect.getsource(m['apply']))");
+  const preGuardSource = runPython("import inspect; print(inspect.getsource(m['validate_pre_mutation_checkpoint']))");
   assert.match(applySource, /validate_pre_mutation_checkpoint[\s\S]*configure_secret_anchor[\s\S]*read_or_create_journal[\s\S]*promote_live_environment/);
+  assert.match(preGuardSource, /validate_backup_evidence_bundle\([\s\S]*"PRE"/);
 });
 
 test("legacy compatibility authority is the proven routing/dependency matrix", () => {
@@ -549,7 +727,380 @@ test("prepare is checkpoint/staging-bound and Git cannot execute caller or repos
   assert.match(envSource, /stat\.S_IMODE\(info\.st_mode\) not in \(0o400, 0o600\)/);
   assert.match(envSource, /current\.st_dev, current\.st_ino, current\.st_size, current\.st_mtime_ns/);
   assert.match(envSource, /set\(replacements\).*LOCAL_IMAGE_BUILDS/);
-  assert.match(prepareSource, /recovery_escrow_certificate_binding\(release\)[\s\S]*provision_confidential_backup_passphrase\(\)[\s\S]*materialize_environment/);
+  assert.match(prepareSource, /recovery_escrow_certificate_binding\(release\)[\s\S]*prepare_live_prerequisite_cohort\(release\)[\s\S]*provision_confidential_backup_passphrase\(\)[\s\S]*materialize_environment/);
+});
+
+test("one simulated prepare crosses the real path/secret cohort, both renders and the exact PRE boundary without workload or database mutation", { timeout: 120_000 }, () => {
+  const fixture = seedPrerequisiteFixture();
+  try {
+    const tree = "2".repeat(40);
+    const stagingLogical = `/home/platform_infrastructure/.v1-release-staging/${fixture.commit}`;
+    const staging = fixture.logical(stagingLogical);
+    fs.mkdirSync(staging, { recursive: true, mode: 0o755 });
+    fs.chmodSync(staging, 0o755);
+    const opsImage = `127.0.0.1:5000/platform/ops@sha256:${"a".repeat(64)}`;
+    fs.writeFileSync(path.join(staging, ".env"), `PLATFORM_OPS_IMAGE=${opsImage}\n`, { mode: 0o600 });
+    fs.chmodSync(path.join(staging, ".env"), 0o600);
+
+    const installedReconciler = fixture.logical("/usr/local/libexec/platform-v1-local-private-reconcile");
+    fs.mkdirSync(path.dirname(installedReconciler), { recursive: true, mode: 0o755 });
+    fs.copyFileSync(reconciler, installedReconciler);
+    fs.chmodSync(installedReconciler, 0o555);
+    const releaseReconciler = fixture.logical(`${fixture.release}/scripts/v1-local-private-reconcile.py`);
+    fs.copyFileSync(reconciler, releaseReconciler);
+    fs.chmodSync(releaseReconciler, 0o444);
+    const workloadLock = fixture.logical(`${fixture.release}/config/no-hosted-workloads.local-private.lock.json`);
+    fs.mkdirSync(path.dirname(workloadLock), { recursive: true, mode: 0o755 });
+    fs.writeFileSync(workloadLock, "{}\n", { mode: 0o444 });
+    fs.chmodSync(workloadLock, 0o444);
+
+    const body = `
+import json,os
+m['configure_environment']()
+g=m['prepare'].__globals__
+events=[]
+forbidden=[]
+commit=${JSON.stringify(fixture.commit)}
+tree=${JSON.stringify(tree)}
+archive_bytes=${JSON.stringify(fixture.archiveBytes.toString("base64"))}
+archive_bytes=__import__('base64').b64decode(archive_bytes)
+release=${JSON.stringify(fixture.release)}
+ops_image=${JSON.stringify(opsImage)}
+
+g['install_binding']=lambda: events.append('binding') or {
+ 'candidateCommit':commit,'candidateTree':tree,'releaseRoot':release,
+ 'sourceArchiveSha256':m['digest'](archive_bytes)}
+checkout_calls={'count':0}
+def fixed_checkout(repo):
+ checkout_calls['count']+=1; events.append(f"checkout-{checkout_calls['count']}")
+ assert repo==m['physical'](${JSON.stringify(stagingLogical)})
+ return commit,tree
+g['clean_checkout']=fixed_checkout
+g['git_archive']=lambda repo: events.append('archive') or archive_bytes
+images={
+ 'CONTROL_CENTER_IMAGE':'127.0.0.1:5000/platform/control-center@sha256:'+'b'*64,
+ 'PLATFORM_ALERT_DISPATCHER_IMAGE':'127.0.0.1:5000/platform/alert-dispatcher@sha256:'+'c'*64,
+ 'PLATFORM_OPS_IMAGE':ops_image,
+ 'PROJECT_ROUTER_IMAGE':'127.0.0.1:5000/platform/project-router@sha256:'+'d'*64,
+}
+g['build_and_publish_local_images']=lambda repo,candidate_release,candidate_commit: events.append('images-simulated') or images
+g['recovery_escrow_certificate_binding']=lambda candidate_release: events.append('escrow-certificate') or {
+ 'path':candidate_release+'/config/local-private-recovery-escrow-cert.pem','sha256':'e'*64,'sha256Fingerprint':'f'*64}
+
+original_run_result=g['run_result']
+def guarded_run(command,label,**kwargs):
+ executable=command[0] if command else ''
+ if executable not in (m['node_binary'](),m['openssl_binary']()):
+  forbidden.append({'command':os.path.basename(executable),'label':label})
+  raise AssertionError('prepare attempted a non-manager/non-certificate subprocess before PRE')
+ return original_run_result(command,label,**kwargs)
+g['run_result']=guarded_run
+
+original_cohort=g['prepare_live_prerequisite_cohort']
+def real_cohort(candidate_release):
+ events.append('cohort-enter')
+ value=original_cohort(candidate_release)
+ events.append('cohort-pass')
+ return value
+g['prepare_live_prerequisite_cohort']=real_cohort
+
+original_passphrase=g['provision_confidential_backup_passphrase']
+def real_passphrase():
+ events.append('passphrase-enter'); original_passphrase(); events.append('passphrase-pass')
+g['provision_confidential_backup_passphrase']=real_passphrase
+
+required=[m['DATABASE_SECRET'],m['BOOTSTRAP_SECRET'],m['KEYCLOAK_CLIENT_SECRET']]+[
+ f"{m['SECRET_DIR']}/{name}.txt" for name in m['SECRET_MANAGER_NEW_REQUIRED']]
+original_materialize=g['materialize_environment']
+materialize_calls={'count':0}
+def real_materialize(repo,local_ops,runtime_identity=None):
+ assert events[-1] in ('passphrase-pass','runtime-identity')
+ assert all(os.path.isfile(m['physical'](item)) for item in required)
+ assert all(os.stat(m['physical'](item),follow_symlinks=False).st_nlink==1 for item in required)
+ data,values=original_materialize(repo,local_ops,runtime_identity)
+ assert values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT']
+ assert values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
+ materialize_calls['count']+=1
+ events.append('materialize-source' if runtime_identity is None else 'materialize-final')
+ return data,values
+g['materialize_environment']=real_materialize
+
+render_calls={'count':0}
+def simulated_render(candidate_release,environment_sha):
+ descriptor=m['secure_file'](m['RENDER_ENV'],'simulated exact render environment',1024*1024,0o400)
+ assert m['digest'](descriptor)==environment_sha
+ _,values=m['parse_env'](descriptor,'simulated exact render environment')
+ labels={}
+ if set(m['RUNTIME_IDENTITY_ENV']).issubset(values):
+  labels={m['RUNTIME_IDENTITY_LABEL_BY_ENV'][name]:values[name] for name in m['RUNTIME_IDENTITY_ENV']}
+ services={name:{'labels':dict(labels)} for name in m['MANAGED_CONTAINER_BY_SERVICE']}
+ render_calls['count']+=1
+ events.append('render-source' if render_calls['count']==1 else 'render-final')
+ return m['canonical_bytes']({'services':services})
+g['render_with_wrapper']=simulated_render
+
+original_runtime_identity=g['runtime_identity_environment']
+def real_runtime_identity(*args):
+ value=original_runtime_identity(*args); events.append('runtime-identity'); return value
+g['runtime_identity_environment']=real_runtime_identity
+
+authority_holder={}
+def simulated_authority(candidate_commit,candidate_tree,archive_sha,candidate_release,env_bytes,render_bytes,env_values,runtime_environment):
+ assert candidate_commit==commit and candidate_tree==tree and candidate_release==release
+ assert archive_sha==m['digest'](archive_bytes)
+ assert env_values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT']
+ assert env_values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
+ base={'candidateCommit':candidate_commit,'candidateTree':candidate_tree,'releaseRoot':candidate_release,
+  'renderEnvironment':{'path':m['RENDER_ENV'],'sha256':m['digest'](env_bytes)},
+  'renderSha256':m['digest'](render_bytes),'sourceArchiveSha256':archive_sha,'status':'AUTHORIZED'}
+ base['documentId']=m['digest'](m['canonical_bytes'](base))
+ authority_holder['value']=base; events.append('authority-built'); return base
+g['build_authority']=simulated_authority
+
+def simulated_read_authority():
+ value=authority_holder['value']; data=m['secure_file'](m['AUTHORITY'],'simulated authority',m['MAX_AUTHORITY'],0o444)
+ assert data==m['canonical_bytes'](value)
+ assert m['digest'](m['secure_file'](m['RENDER'],'simulated render',m['MAX_JSON'],0o444))==value['renderSha256']
+ assert m['digest'](m['secure_file'](m['SOURCE_ARCHIVE'],'simulated source archive',m['MAX_ARCHIVE'],0o444))==value['sourceArchiveSha256']
+ events.append('authority-reopened'); return value,data
+g['read_authority']=simulated_read_authority
+
+def pre_entry(value,operation):
+ assert operation=='pre'
+ assert events[-1]=='authority-reopened'
+ assert not forbidden
+ assert all(os.path.isfile(m['physical'](item)) for item in required)
+ assert all(__import__('stat').S_IMODE(os.stat(m['physical'](item),follow_symlinks=False).st_mode)==0o600 for item in required)
+ env=m['secure_file'](m['RENDER_ENV'],'PRE render environment',1024*1024,0o400)
+ _,values=m['parse_env'](env,'PRE render environment')
+ assert values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT'] and values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
+ events.append('pre-entered')
+ return {'status':'PASS'}
+g['invoke_evidence_producer']=pre_entry
+def checkpoint(value):
+ assert events[-1]=='pre-entered'; events.append('checkpoint-refreshed')
+g['refresh_local_checkpoint']=checkpoint
+
+for name in ('apply_database_prerequisites','apply_data_prerequisites','compose_refresh','apply'):
+ if name in g:
+  g[name]=lambda *args,_name=name,**kwargs: (_ for _ in ()).throw(AssertionError(_name+' must not run during prepare'))
+
+result=m['prepare']()
+print(json.dumps({'events':events,'forbidden':forbidden,'materializeCalls':materialize_calls['count'],
+ 'renderCalls':render_calls['count'],'result':result},sort_keys=True))`;
+    const execution = spawnSync(python, ["-c", `import runpy\nm=runpy.run_path(${JSON.stringify(reconciler)},run_name='v1_prepare_path_fixture')\n${body}`], {
+      encoding: "utf8",
+      env: {
+        PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C",
+        PLATFORM_V1_RECONCILE_TEST_ROOT: fixture.root,
+        PLATFORM_V1_RECONCILE_TEST_NODE: process.execPath,
+        PLATFORM_V1_RECONCILE_TEST_OPENSSL: "/usr/bin/openssl",
+        PLATFORM_V1_RECONCILE_TEST_REPO: staging,
+      },
+    });
+    assert.equal(execution.status, 0, execution.stderr);
+    const value = JSON.parse(execution.stdout);
+    assert.deepEqual(value.forbidden, []);
+    assert.equal(value.materializeCalls, 2);
+    assert.equal(value.renderCalls, 2);
+    assert.deepEqual(value.events, [
+      "binding", "checkout-1", "archive", "checkout-2", "images-simulated", "escrow-certificate",
+      "cohort-enter", "cohort-pass", "passphrase-enter", "passphrase-pass", "materialize-source",
+      "render-source", "runtime-identity", "materialize-final", "render-final", "authority-built",
+      "authority-reopened", "pre-entered", "checkpoint-refreshed",
+    ]);
+    assert.equal(value.result.status, "PREPARED");
+    assert.equal(value.result.sourceArchiveSha256, fixture.archive);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("pre-PRE prerequisite cohort preserves brownfield bytes and converges idempotently through the real candidate manager", { timeout: 120_000 }, () => {
+  const fixture = seedPrerequisiteFixture();
+  try {
+    const oldStore = fs.readFileSync(fixture.storePath);
+    const oldMasterPath = path.join(fixture.secretsRoot, "infra-secret-manager-master.key");
+    const oldMaster = fs.readFileSync(oldMasterPath);
+    const oldMasterStat = fs.statSync(oldMasterPath);
+    const oldNames = Object.keys(JSON.parse(oldStore).secrets).sort();
+    const oldSecrets = Object.fromEntries(oldNames.map((name) => {
+      const file = path.join(fixture.secretsRoot, `${name}.txt`);
+      const metadata = fs.statSync(file);
+      return [name, {
+        bytes: fs.readFileSync(file), ino: metadata.ino, uid: metadata.uid, gid: metadata.gid,
+        mode: metadata.mode & 0o777,
+      }];
+    }));
+    const auditPath = path.join(fixture.secretsRoot, "infra-secret-manager-audit.log");
+    const auditBefore = fs.readFileSync(auditPath);
+
+    const first = runPrerequisiteCohort(fixture);
+    assert.equal(first.status, 0, first.stderr);
+    const receipt = JSON.parse(first.stdout);
+    assert.deepEqual(receipt, {
+      managerRecords: 30,
+      publishedPrerequisiteLeaves: 12,
+      resumedPrerequisiteLeaves: 0,
+      status: "PASS",
+      storeState: "V1_COMPLETE",
+    });
+    const finalStoreBytes = fs.readFileSync(fixture.storePath);
+    const finalStore = JSON.parse(finalStoreBytes);
+    assert.deepEqual(Object.keys(finalStore.secrets).sort(), [...oldNames, ...prerequisiteNewManagerNames].sort());
+    assert.deepEqual(fs.readFileSync(oldMasterPath), oldMaster);
+    const finalMasterStat = fs.statSync(oldMasterPath);
+    assert.equal(finalMasterStat.ino, oldMasterStat.ino);
+    assert.equal(finalMasterStat.uid, oldMasterStat.uid);
+    assert.equal(finalMasterStat.gid, oldMasterStat.gid);
+    assert.deepEqual(fs.readFileSync(auditPath), auditBefore, "candidate checks must write only to the private stage audit");
+    for (const [name, expected] of Object.entries(oldSecrets)) {
+      const file = path.join(fixture.secretsRoot, `${name}.txt`);
+      const metadata = fs.statSync(file);
+      assert.deepEqual(fs.readFileSync(file), expected.bytes, name);
+      assert.equal(metadata.ino, expected.ino, name);
+      assert.equal(metadata.uid, expected.uid, name);
+      assert.equal(metadata.gid, expected.gid, name);
+      assert.equal(metadata.mode & 0o777, expected.mode, name);
+    }
+    assert.equal(fs.statSync(path.join(fixture.secretsRoot, "app_db_password.txt")).mode & 0o777, 0o640);
+    assert.equal(fs.statSync(path.join(fixture.secretsRoot, "alertmanager_webhook_token.txt")).mode & 0o777, 0o640);
+    for (const name of prerequisiteNewManagerNames) {
+      const metadata = fs.statSync(path.join(fixture.secretsRoot, `${name}.txt`));
+      assert.equal(metadata.mode & 0o777, 0o600, name);
+      assert.equal(metadata.nlink, 1, name);
+    }
+    for (const name of [
+      "control_center_database_url.txt",
+      "control_center_first_configuration_bootstrap_token.txt",
+      "control_center_first_configuration_keycloak_client_secret.txt",
+    ]) {
+      const metadata = fs.statSync(path.join(fixture.secretsRoot, name));
+      assert.equal(metadata.mode & 0o777, 0o600, name);
+      assert.ok(metadata.size > 1, name);
+    }
+    for (const logical of [
+      "/home/platform_infrastructure/platform-infrastructure",
+      "/home/platform_infrastructure/platform-infrastructure/projects-portal",
+      "/home/platform_infrastructure/platform-infrastructure/projects-portal/state",
+      "/home/platform_infrastructure/platform-infrastructure/traefik",
+      "/home/platform_infrastructure/platform-infrastructure/traefik/certs",
+      "/home/platform_infrastructure/src",
+    ]) assert.equal(fs.statSync(fixture.logical(logical)).mode & 0o022, 0, logical);
+    assert.equal(fs.statSync(fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/local-key.pem")).mode & 0o777, 0o600);
+    assert.equal(fs.existsSync(fixture.logical("/run/platform-v1-local-private-secret-prep")), false);
+
+    const second = runPrerequisiteCohort(fixture);
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(JSON.parse(second.stdout), {
+      managerRecords: 30,
+      publishedPrerequisiteLeaves: 0,
+      resumedPrerequisiteLeaves: 12,
+      status: "PASS",
+      storeState: "V1_COMPLETE",
+    });
+    assert.deepEqual(fs.readFileSync(fixture.storePath), finalStoreBytes, "idempotent retry must not rewrap the store");
+    assert.deepEqual(fs.readFileSync(oldMasterPath), oldMaster);
+    assert.deepEqual(fs.readFileSync(auditPath), auditBefore);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("every prerequisite leaf/store interruption resumes forward without rotating an already-published byte", { timeout: 240_000 }, () => {
+  const seed = seedPrerequisiteFixture();
+  const boundaries = [
+    ...Array.from({ length: 12 }, (_, index) => `prerequisite-leaf-${index + 1}`),
+    "prerequisite-store-committed",
+  ];
+  try {
+    for (const [boundaryIndex, boundary] of boundaries.entries()) {
+      const fixture = clonePrerequisiteFixture(seed);
+      try {
+        const masterBefore = fs.readFileSync(path.join(fixture.secretsRoot, "infra-secret-manager-master.key"));
+        const existingBefore = Object.fromEntries(Object.keys(JSON.parse(fs.readFileSync(fixture.storePath)).secrets).map((name) => [
+          name, fs.readFileSync(path.join(fixture.secretsRoot, `${name}.txt`)),
+        ]));
+        const interrupted = runPrerequisiteCohort(fixture, boundary);
+        assert.notEqual(interrupted.status, 0, `${boundary} unexpectedly completed`);
+        assert.match(interrupted.stderr, /isolated reconciliation fault/);
+        assert.doesNotMatch(interrupted.stderr, /fixture_(?:app|github|session)/i);
+        const published = Object.fromEntries([
+          "control_center_database_url.txt",
+          "control_center_first_configuration_bootstrap_token.txt",
+          "control_center_first_configuration_keycloak_client_secret.txt",
+          ...prerequisiteNewManagerNames.map((name) => `${name}.txt`),
+        ].filter((name) => fs.existsSync(path.join(fixture.secretsRoot, name))).map((name) => [
+          name, fs.readFileSync(path.join(fixture.secretsRoot, name)),
+        ]));
+        const resumed = runPrerequisiteCohort(fixture);
+        assert.equal(resumed.status, 0, `${boundary}: ${resumed.stderr}`);
+        const receipt = JSON.parse(resumed.stdout);
+        assert.equal(receipt.status, "PASS", boundary);
+        assert.equal(receipt.resumedPrerequisiteLeaves, Math.min(boundaryIndex + 1, 12), boundary);
+        assert.deepEqual(fs.readFileSync(path.join(fixture.secretsRoot, "infra-secret-manager-master.key")), masterBefore, boundary);
+        for (const [name, bytes] of Object.entries(existingBefore)) {
+          assert.deepEqual(fs.readFileSync(path.join(fixture.secretsRoot, `${name}.txt`)), bytes, `${boundary}:${name}`);
+        }
+        for (const [name, bytes] of Object.entries(published)) {
+          assert.deepEqual(fs.readFileSync(path.join(fixture.secretsRoot, name)), bytes, `${boundary}:${name}`);
+        }
+        assert.equal(Object.keys(JSON.parse(fs.readFileSync(fixture.storePath)).secrets).length, 30, boundary);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    fs.rmSync(seed.root, { recursive: true, force: true });
+  }
+});
+
+test("prerequisite cohort rejects hostile metadata, non-prefix state, raw drift and certificate mismatch before PRE", { timeout: 180_000 }, () => {
+  const seed = seedPrerequisiteFixture();
+  const scenarios = [
+    ["legacy app mode", (fixture) => fs.chmodSync(path.join(fixture.secretsRoot, "app_db_password.txt"), 0o600)],
+    ["github mode", (fixture) => fs.chmodSync(path.join(fixture.secretsRoot, "github_token.txt"), 0o640)],
+    ["missing master", (fixture) => fs.rmSync(path.join(fixture.secretsRoot, "infra-secret-manager-master.key"))],
+    ["non-prefix orphan", (fixture) => fs.writeFileSync(path.join(fixture.secretsRoot, "control_center_vault_keys.txt"), "v1_fixture_orphan\n", { mode: 0o600 })],
+    ["raw CRLF drift", (fixture) => fs.appendFileSync(path.join(fixture.secretsRoot, "session_secret.txt"), "\r\n")],
+    ["linked raw leaf", (fixture) => fs.linkSync(path.join(fixture.secretsRoot, "session_secret.txt"), path.join(fixture.secretsRoot, "linked-session-secret"))],
+    ["partial manager store", (fixture) => {
+      const store = JSON.parse(fs.readFileSync(fixture.storePath, "utf8"));
+      store.secrets.control_center_vault_keys = fixture.completeStore.secrets.control_center_vault_keys;
+      fs.writeFileSync(fixture.storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+      fs.chmodSync(fixture.storePath, 0o600);
+    }],
+    ["audit symlink", (fixture) => {
+      const audit = path.join(fixture.secretsRoot, "infra-secret-manager-audit.log");
+      fs.rmSync(audit);
+      fs.symlinkSync(fixture.storePath, audit);
+    }],
+    ["certificate mismatch", (fixture) => {
+      fs.copyFileSync(
+        fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/ca.pem"),
+        fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/local-cert.pem"),
+      );
+      fs.chmodSync(fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/local-cert.pem"), 0o644);
+    }],
+  ];
+  try {
+    for (const [label, mutate] of scenarios) {
+      const fixture = clonePrerequisiteFixture(seed);
+      try {
+        mutate(fixture);
+        const storeBeforeRun = fs.readFileSync(fixture.storePath);
+        const result = runPrerequisiteCohort(fixture);
+        assert.notEqual(result.status, 0, `${label} unexpectedly passed`);
+        assert.deepEqual(fs.readFileSync(fixture.storePath), storeBeforeRun, label);
+        assert.equal(fs.existsSync(path.join(fixture.secretsRoot, "control_center_database_url.txt")), false, label);
+        assert.doesNotMatch(result.stderr, /fixture_(?:app|github|session)/i, label);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    fs.rmSync(seed.root, { recursive: true, force: true });
+  }
 });
 
 test("prepare install binding accepts only the fresh non-authoritative transport checkpoint", () => {
@@ -775,18 +1326,23 @@ g=m['execute_typed_infra_action'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID
 commit='1'*40; archive='2'*64; release=m['release_root'](commit,archive); run='20260824T120000Z-a1b2c3d4'
 def materialize(logical,data,mode):
  pathname=m['physical'](logical); os.makedirs(os.path.dirname(pathname),mode=0o700,exist_ok=True)
+ if os.path.exists(pathname): os.chmod(pathname,0o600)
  with open(pathname,'wb') as handle: handle.write(data)
  os.chmod(pathname,mode); return pathname
 materialize(f'{release}/scripts/infra-ops.mjs',b'// exact fixture\\n',0o444)
-env_bytes=b'KC_BOOTSTRAP_ADMIN_USERNAME=admin\\nPOSTGRES_OPS_SCHEMA=ops\\n'
+env_bytes=b'KEYCLOAK_ADMIN=source-admin\\nKC_BOOTSTRAP_ADMIN_USERNAME=forged-source-value\\nPOSTGRES_OPS_SCHEMA=ops\\n'
 materialize(m['RENDER_ENV'],env_bytes,0o400)
+render_bytes=m['canonical_bytes']({'services':{'keycloak':{'environment':{
+ 'KC_BOOTSTRAP_ADMIN_USERNAME':'render-admin'}}}})
+materialize(m['RENDER'],render_bytes,0o444)
 tools={name:{'imageId':'sha256:'+char*64,'imageReference':f'registry.invalid/{name}@sha256:{char*64}'} for name,char in zip(
  ('mariadbRestore','minioRestore','nodeUtility','postgresRestore','resticRclone'),'34567')}
 service_chars={'enterprise-postgres':'a','mariadb':'b','enterprise-minio':'c','enterprise-keycloak':'d'}
 targets=[{'containerName':name,'semantic':{'imageId':'sha256:'+char*64,'imageReference':f'registry.invalid/{name}@sha256:{char*64}'}}
  for name,char in service_chars.items()]
 authority={'backupToolImages':tools,'candidateCommit':commit,'documentId':'e'*64,'releaseRoot':release,
- 'renderEnvironment':{'path':m['RENDER_ENV'],'sha256':m['digest'](env_bytes)},'serviceTargets':targets,'sourceArchiveSha256':archive}
+ 'renderEnvironment':{'path':m['RENDER_ENV'],'sha256':m['digest'](env_bytes)},'renderSha256':m['digest'](render_bytes),
+ 'serviceTargets':targets,'sourceArchiveSha256':archive}
 for logical_key in ('pg-stexor','mariadb','minio','keycloak-config'):
  index=m['EVIDENCE_LOGICAL_KEYS'].index(logical_key)+1
  directory=f'/dev/shm/platform-v1-evidence-{run}-transaction/artifact-staging/{index:02d}-{logical_key}'
@@ -817,7 +1373,19 @@ try:
   status,stdout,stderr=m['execute_typed_infra_action'](authority,action,parameters)
   results.append({'action':action,'status':status,'value':json.loads(stdout)})
 finally: g['run_result']=original
-print(json.dumps({'calls':calls,'results':results,'root':root,'run':run},sort_keys=True))`);
+missing_admin_render=m['canonical_bytes']({'services':{'keycloak':{'environment':{}}}})
+os.chmod(m['physical'](m['RENDER']),0o600)
+materialize(m['RENDER'],missing_admin_render,0o444)
+render_failures={}
+for label,candidate in (
+ ('digestMismatch',authority),
+ ('missingAdmin',{**authority,'renderSha256':m['digest'](missing_admin_render)}),
+):
+ try:
+  m['executor_infra_environment'](candidate,'BACKUP_KEYCLOAK',run); render_failures[label]=False
+ except m['Stop']:
+  render_failures[label]=True
+print(json.dumps({'calls':calls,'renderFailures':render_failures,'results':results,'root':root,'run':run},sort_keys=True))`);
   assert.deepEqual(value.results.map((item) => [item.action, item.status, item.value.status]), [
     "BACKUP_APPLICATIONS", "BACKUP_POSTGRES", "BACKUP_MARIADB", "BACKUP_MINIO", "BACKUP_KEYCLOAK",
     "BACKUP_SECRET_METADATA", "RESTORE_POSTGRES", "RESTORE_MARIADB", "RESTORE_MINIO", "RESTORE_KEYCLOAK",
@@ -826,10 +1394,12 @@ print(json.dumps({'calls':calls,'results':results,'root':root,'run':run},sort_ke
     "backup-applications", "backup-postgres", "backup-mariadb", "backup-minio", "backup-keycloak",
     "backup-secret-manager-metadata", "restore-test-postgres", "restore-test-mariadb", "restore-test-minio", "restore-test-keycloak",
   ]);
+  assert.deepEqual(value.renderFailures, { digestMismatch: true, missingAdmin: true });
   for (const call of value.calls) {
     assert.equal(call.environment.PLATFORM_V1_EVIDENCE_NETWORK_MODE, "none");
     assert.equal(call.environment.PLATFORM_V1_EVIDENCE_RUN_ID, value.run);
     assert.equal(call.environment.PLATFORM_CLOSED_HOST_PATH_MAPPINGS, "1");
+    assert.equal(call.environment.KC_BOOTSTRAP_ADMIN_USERNAME, "render-admin");
     assert.equal(call.command[call.command.indexOf("--skipEvidence") + 1], "true");
     assert.ok(!call.command.join(" ").includes("enterprise-backup-scheduler"));
   }
@@ -842,6 +1412,9 @@ print(json.dumps({'calls':calls,'results':results,'root':root,'run':run},sort_ke
   assert.doesNotMatch(mappingSource, /enterprise-backup-scheduler|INFRA_DOCKER|PRODUCER_DOCKER/);
   assert.match(mappingSource, /PLATFORM_V1_EVIDENCE_NETWORK_MODE.*none/);
   assert.match(mappingSource, /executor_primary_artifact/);
+  assert.match(mappingSource, /secure_file\(RENDER, "typed evidence exact Compose render"/);
+  assert.match(mappingSource, /keycloak_environment\.get\("KC_BOOTSTRAP_ADMIN_USERNAME"\)/);
+  assert.doesNotMatch(mappingSource, /rendered\.get\("KC_BOOTSTRAP_ADMIN_USERNAME"/);
 });
 
 test("apply attaches legacy bridges before data and fixed-order one-service refresh", () => {
@@ -950,7 +1523,7 @@ print(json.dumps({'allBound':all_bound,'stopped':stopped,'unchanged':unchanged})
   assert.deepEqual(value, { allBound: true, stopped: true, unchanged: true });
 });
 
-test("POST backup bundle rejects candidate, artifact, offsite, restore, secret and transaction substitutions", () => {
+test("shared PRE/POST backup validator rejects skeletal rows, false aggregates and substitutions", () => {
   const value = jsonPython(`
 import base64,copy,hashlib,time
 now=int(time.time()); began=now-60; rec='a'*64; tx='b'*64; run_id='20260822T120000Z-1234abcd'
@@ -1055,9 +1628,22 @@ secret={**common,'backupCompletedUnixSeconds':now-20,'capturedAtUnixSeconds':now
 base={'logicalBackupEvidenceSha256':logical,'offHostBackupEvidenceSha256':offhost,
  'restoreEvidenceSha256':restore,'secretsBackupEvidenceSha256':secret}
 m['validate_post_backup_bundle'](authority,base,rec,tx,began,now)
+pre=copy.deepcopy(base)
+pre_common=copy.deepcopy(common)
+pre_common.update({'evidencePhase':'PRE','reconciliationSha256':None,'transactionId':None})
+pre_common['backupSetSha256']=m['digest'](m['canonical_bytes']({
+ **{key:value for key,value in pre_common.items() if key!='backupSetSha256'},'artifacts':identities}))
+for document in pre.values():
+ for key,value in pre_common.items(): document[key]=copy.deepcopy(value)
+m['validate_backup_evidence_bundle'](authority,pre,None,None,began,now,'PRE')
 def rejected(mutator):
  candidate=copy.deepcopy(base); mutator(candidate)
  try: m['validate_post_backup_bundle'](authority,candidate,rec,tx,began,now)
+ except m['Stop']: return True
+ return False
+def pre_rejected(mutator):
+ candidate=copy.deepcopy(pre); mutator(candidate)
+ try: m['validate_backup_evidence_bundle'](authority,candidate,None,None,began,now,'PRE')
  except m['Stop']: return True
  return False
 def mutate_restore_verification(d,index,mutator):
@@ -1080,8 +1666,31 @@ mutants={
  'transaction':rejected(lambda d:[item.__setitem__('transactionId','0'*64) for item in d.values()]),
  'extraField':rejected(lambda d:d['restoreEvidenceSha256'].__setitem__('untrusted',True)),
 }
-print(json.dumps({'baseline':True,'mutants':mutants},sort_keys=True))`);
+pre_mutants={
+ 'artifactCounter':pre_rejected(lambda d:d['logicalBackupEvidenceSha256'].__setitem__('artifactCount',13)),
+ 'artifactManifestDigest':pre_rejected(lambda d:d['logicalBackupEvidenceSha256'].__setitem__('artifactManifestSha256','0'*64)),
+ 'offhostCounter':pre_rejected(lambda d:d['offHostBackupEvidenceSha256'].__setitem__('exactPayloadReadbackCount',13)),
+ 'offhostProofDigest':pre_rejected(lambda d:d['offHostBackupEvidenceSha256'].__setitem__('offsiteProofSha256','0'*64)),
+ 'restoreCounter':pre_rejected(lambda d:d['restoreEvidenceSha256'].__setitem__('passedRestoreCount',13)),
+ 'restoreResultsDigest':pre_rejected(lambda d:d['restoreEvidenceSha256'].__setitem__('localRestoreResultsSha256','0'*64)),
+ 'skeletalRows':pre_rejected(lambda d:(
+  d['logicalBackupEvidenceSha256'].__setitem__('artifacts',[{'logicalKey':key} for key in m['EVIDENCE_LOGICAL_KEYS']]),
+  d['offHostBackupEvidenceSha256'].__setitem__('proofs',[{'logicalKey':key} for key in m['EVIDENCE_LOGICAL_KEYS']]),
+  d['restoreEvidenceSha256'].__setitem__('results',[{'logicalKey':key} for key in m['EVIDENCE_LOGICAL_KEYS']])
+ )),
+}
+print(json.dumps({'baseline':True,'mutants':mutants,'preBaseline':True,'preMutants':pre_mutants},sort_keys=True))`);
   assert.equal(value.baseline, true);
+  assert.equal(value.preBaseline, true);
+  assert.deepEqual(value.preMutants, {
+    artifactCounter: true,
+    artifactManifestDigest: true,
+    offhostCounter: true,
+    offhostProofDigest: true,
+    restoreCounter: true,
+    restoreResultsDigest: true,
+    skeletalRows: true,
+  });
   assert.deepEqual(value.mutants, {
     candidate: true,
     escrowCiphertext: true,
