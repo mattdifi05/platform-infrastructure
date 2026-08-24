@@ -4,6 +4,7 @@ import {
   AuthConfigurationError,
   createControlCenterAuth,
   MemoryAuthStore,
+  providerScopeAdvisoryLockKey,
   readAuthConfig,
 } from "../auth/oidc.mjs";
 
@@ -135,6 +136,16 @@ test("memory auth store consumes transactions once and revokes sessions", async 
   assert.equal((await store.getSession("session-hash", 60)).role, "owner");
   await store.revokeSession("session-hash");
   assert.equal(await store.getSession("session-hash", 60), null);
+});
+
+test("provider scope advisory keys are PostgreSQL-text-safe and preserve tuple boundaries", () => {
+  const key = providerScopeAdvisoryLockKey("issuer\0segment", "subject", "owner\0segment");
+  assert.equal(key.includes("\0"), false);
+  assert.deepEqual(JSON.parse(key), ["issuer\0segment", "subject", "owner\0segment"]);
+  assert.notEqual(
+    providerScopeAdvisoryLockKey("issuer", "subject\0owner", "value"),
+    providerScopeAdvisoryLockKey("issuer\0subject", "owner", "value"),
+  );
 });
 
 test("memory auth store revokes by issuer sid and subject with replay protection", async () => {

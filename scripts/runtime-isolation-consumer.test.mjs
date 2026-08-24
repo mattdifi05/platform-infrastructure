@@ -1773,7 +1773,7 @@ test("QA7 no-hosted rejects isolated top-level and sensitive-source authority mu
         config.configs.enterprise_traefik_routes = { file: "/etc/shadow" };
       }],
       ["secret host file", (config) => {
-        config.secrets.smtp_password = { file: "/etc/shadow" };
+        config.secrets["smtp_password"] = { file: "/etc/shadow" };
       }],
       ["volume driver opts", (config) => {
         config.volumes.enterprise_redis_data = {
