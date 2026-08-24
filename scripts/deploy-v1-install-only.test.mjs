@@ -211,7 +211,7 @@ const stable = (value) => Array.isArray(value) ? \`[\${value.map(stable).join(",
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 fs.appendFileSync(process.env.PLATFORM_V1_INSTALL_TEST_SSH_ARGUMENTS, \`CALL\\n\${args.join("\\n")}\\n\`);
 fs.appendFileSync(process.env.PLATFORM_V1_INSTALL_TEST_SSH_STDIN_SIZE, \`\${input.length}\\n\`);
-if (command.includes("/usr/bin/install -d -m 0700 /home/platform_infrastructure/.v1-bootstrap-upload")) {
+if (command.startsWith("/usr/bin/python3 -I -c ") && command.includes("tempfile.mkstemp")) {
   fs.writeFileSync(process.env.PLATFORM_V1_INSTALL_TEST_UPLOADED_BRIDGE, input);
 } else if (command === "/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply") {
   fs.writeFileSync(process.env.PLATFORM_V1_INSTALL_TEST_BOOTSTRAP_FRAME, input);
@@ -310,6 +310,41 @@ function cleanup(current) {
   fs.rmSync(current.root, { recursive: true, force: true });
 }
 
+function remoteUploadPython(uploadRoot) {
+  const source = fs.readFileSync(productionScript, "utf8");
+  const assignment = source.match(/^UPLOAD_BRIDGE_REMOTE_COMMAND="(.*)"$/m);
+  assert.ok(assignment);
+  const command = assignment[1].replaceAll('\\\"', '"');
+  const prefix = "/usr/bin/python3 -I -c '";
+  assert.ok(command.startsWith(prefix) && command.endsWith("'"));
+  return command.slice(prefix.length, -1).replace(
+    'd="/home/platform_infrastructure/.v1-bootstrap-upload"',
+    `d=${JSON.stringify(uploadRoot)}`,
+  );
+}
+
+test("remote bridge upload is FIFO-compatible, bounded, atomic, and mode-exact", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-bridge-upload-test-")));
+  const target = path.join(root, "v1-brownfield-bootstrap-bridge.py");
+  const payload = fs.readFileSync(path.join(import.meta.dirname, "v1-brownfield-bootstrap-bridge.py"));
+  try {
+    const uploaded = spawnSync("/usr/bin/python3", ["-I", "-c", remoteUploadPython(root)], { input: payload, encoding: null });
+    assert.equal(uploaded.status, 0, uploaded.stderr?.toString());
+    assert.deepEqual(fs.readFileSync(target), payload);
+    assert.equal(fs.statSync(target).mode & 0o777, 0o500);
+    assert.deepEqual(fs.readdirSync(root), ["v1-brownfield-bootstrap-bridge.py"]);
+
+    fs.rmSync(target);
+    for (const rejected of [Buffer.alloc(0), Buffer.alloc(2 * 1024 * 1024 + 1)]) {
+      const result = spawnSync("/usr/bin/python3", ["-I", "-c", remoteUploadPython(root)], { input: rejected, encoding: null });
+      assert.equal(result.status, 65, result.stderr?.toString());
+      assert.equal(fs.existsSync(target), false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runs the fixed install, release bootstrap, prepare, and double authority read sequence", () => {
   const current = fixture();
   try {
@@ -342,8 +377,11 @@ test("runs the fixed install, release bootstrap, prepare, and double authority r
     for (const filename of [current.bootstrapOutput, current.controlOutput, current.nodeRuntimeOutput, current.prepareOutput, current.authorityOutput]) assert.equal(fs.statSync(filename).mode & 0o777, 0o400);
     const calls = fs.readFileSync(current.argumentsFile, "utf8").split(/^CALL$/m).slice(1).map((item) => item.trim().split("\n"));
     assert.equal(calls.length, 5);
-    assert.deepEqual(calls.map((call) => call.at(-1)), [
-      "/bin/sh -c 'umask 077; /usr/bin/install -d -m 0700 /home/platform_infrastructure/.v1-bootstrap-upload && /usr/bin/install -m 0500 /dev/stdin /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py'",
+    const commands = calls.map((call) => call.at(-1));
+    assert.match(commands[0], /^\/usr\/bin\/python3 -I -c /);
+    assert.match(commands[0], /tempfile\.mkstemp/);
+    assert.doesNotMatch(commands[0], /\/dev\/stdin/);
+    assert.deepEqual(commands.slice(1), [
       "/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
@@ -459,6 +497,12 @@ test("source derives exact-main identity and exposes only the closed staging seq
   for (const stale of ["832bf2baec47055342af" + "7e7f73425444381b91e0", "91cee2380809cb0691b9" + "ac47cafa2a673d434caa"]) {
     assert.equal(source.includes(stale), false);
   }
+  assert.match(source, /UPLOAD_BRIDGE_REMOTE_COMMAND="\/usr\/bin\/python3 -I -c '/);
+  assert.match(source, /sys\.stdin\.buffer\.read\(2097153\)/);
+  assert.match(source, /tempfile\.mkstemp\(prefix=\\\"\.bridge-upload-\\\",dir=d\)/);
+  assert.match(source, /os\.replace\(p,t\)/);
+  assert.match(source, /stat\.S_IMODE\(s\.st_mode\)==0o500/);
+  assert.doesNotMatch(source, /install -m 0500 \/dev\/stdin/);
   assert.doesNotMatch(source, /git (?:fetch|pull|checkout)|docker |scp |sftp |sh -s|platform-activation-broker/);
   assert.doesNotMatch(source, /sudo -n -- \/usr\/bin\/python3 -I \/srv\/platform-infrastructure\/releases\/.*v1-node-runtime-prerequisite/);
 });
