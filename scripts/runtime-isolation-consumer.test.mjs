@@ -356,6 +356,30 @@ function removeSandbox(sandbox) {
   fs.rmSync(sandbox.cleanupRoot ?? sandbox.root, { recursive: true, force: true });
 }
 
+function freezeReleaseTree(root) {
+  const visit = (current) => {
+    const metadata = fs.lstatSync(current);
+    if (metadata.isDirectory()) {
+      for (const name of fs.readdirSync(current)) visit(path.join(current, name));
+      fs.chmodSync(current, 0o555);
+      return;
+    }
+    assert.equal(metadata.isFile(), true, `release fixture contains non-regular entry: ${current}`);
+    fs.chmodSync(current, (metadata.mode & 0o111) === 0 ? 0o444 : 0o555);
+  };
+  visit(root);
+}
+
+function thawReleaseTree(root) {
+  const visit = (current) => {
+    const metadata = fs.lstatSync(current);
+    if (!metadata.isDirectory()) return;
+    fs.chmodSync(current, 0o700);
+    for (const name of fs.readdirSync(current)) visit(path.join(current, name));
+  };
+  if (fs.existsSync(root)) visit(root);
+}
+
 function runWrapper(sandbox, arguments_ = ["runtime-isolation-envelope"], overrides = {}) {
   return spawnSync("/bin/bash", [sandbox.composeVps, ...arguments_], {
     encoding: "utf8",
@@ -3143,6 +3167,46 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets 
       ["policy-binding"],
     );
   } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE accepts the exact immutable release modes produced by the install consumer", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const fixture = localPrivateQa8Fixture(sandbox);
+    freezeReleaseTree(sandbox.root);
+    assert.equal(
+      fs.statSync(path.join(sandbox.root, "config", "no-hosted-workloads.local-private.lock.json")).mode & 0o777,
+      0o444,
+    );
+    assert.equal(
+      fs.statSync(path.join(sandbox.root, "postgres", "entrypoint-with-init-secrets.sh")).mode & 0o777,
+      0o555,
+    );
+    const violations = validateNoHostedCoreAuthority(
+      fixture.lock,
+      fixture.config,
+      sandbox.root,
+      fixture.environment,
+    );
+    assert.deepEqual(violations, [], `immutable release authority rejected: ${violations.join(",")}`);
+
+    fs.chmodSync(
+      path.join(sandbox.root, "config", "no-hosted-workloads.local-private.lock.json"),
+      0o400,
+    );
+    assert.ok(
+      validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        fixture.environment,
+      ).includes("local-private:runtime-lock-authority"),
+      "an unlisted runtime-lock mode escaped the exact immutable-mode pair",
+    );
+  } finally {
+    thawReleaseTree(sandbox.root);
     removeSandbox(sandbox);
   }
 });
