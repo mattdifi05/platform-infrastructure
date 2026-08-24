@@ -74,6 +74,7 @@ import { snapshotFileArtifact, snapshotJsonArtifact } from "./stable-json-artifa
 import { validateExactSourceArchive } from "./source-archive-policy.mjs";
 import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
 import { validateRegistryResolutionReceipt } from "./release-registry-resolution.mjs";
+import { assertCoreProjectGenericSources } from "./local-private-compatibility-source-boundary.mjs";
 import {
   buildReleaseAdmissionReceipt,
   approvedReleaseSubjects,
@@ -3313,6 +3314,8 @@ function infraTestingHygiene() {
     "scripts/backup-artifact-publication.mjs",
     "scripts/backup-artifact-publication.test.mjs",
     "scripts/database-restore-semantic-comparator.test.mjs",
+    "scripts/local-private-compatibility-source-boundary.mjs",
+    "scripts/local-private-compatibility-source-boundary.test.mjs",
     "scripts/command-safety.mjs",
     "scripts/restic-secret-transport.mjs",
     "scripts/restic-secret-transport.test.mjs",
@@ -3385,6 +3388,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-restore-semantic-comparator.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/local-private-compatibility-source-boundary.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
@@ -3790,7 +3794,7 @@ function infraMaintainabilityHygiene() {
   assertMatch(opsWrapper, /ops-image-trust\.sh/, "infra-ops wrapper must obtain its runner from the trusted deployment admission chain.");
   assertMatch(opsWrapper, /run_ops_container\(\) \{[\s\S]*set -- "\$OPS_IMAGE_ID" "\$@"[\s\S]*docker run --rm --pull=never[\s\S]*"\$@"[\s\S]*\}/, "infra-ops wrapper must execute only the admitted local image ID without pulling.");
   assertNoMatch(opsWrapper, /docker build|platform\/ops:local|PLATFORM_OPS_USE_HOST_NODE|OPS_FINGERPRINT_LABEL/, "infra-ops wrapper must not build, self-attest, or expose a host-Node bypass.");
-  assertNoMatch(`${compose}\n${controlCenterServer}\n${projectRouterServer}`, /stexor|fireport|matthewdifilippo/i, "Core infrastructure must stay project-generic.");
+  assertCoreProjectGenericSources({ compose, controlCenterServer, projectRouterServer });
   assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(/, "Project router must stay proxy-only.");
   const shellWrappers = fs.readdirSync(path.join(infraRoot, "scripts"))
     .filter((name) => name.endsWith(".sh"))
