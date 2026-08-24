@@ -438,11 +438,25 @@ source_render={'name':'platform_infra_vps','services':{service:{'image':'registr
 source_bytes=m['canonical_bytes'](source_render); runtime=m['runtime_identity_environment'](commit,tree,release,source_bytes)
 document=m['runtime_identity_document'](runtime); final=copy.deepcopy(source_render); labels=m['runtime_identity_labels'](document)
 for service in final['services'].values(): service['labels']=dict(labels)
+final['x-platform-runtime-labels']=dict(labels)
 m['validate_runtime_identity_document'](document,commit,tree,release,final,runtime)
 bad_label=copy.deepcopy(final); del bad_label['services']['postgres']['labels']['com.platform.runtime.commit']
 label_rejected=False
 try: m['validate_runtime_identity_document'](document,commit,tree,release,bad_label,runtime)
 except m['Stop']: label_rejected=True
+extension_rejected={}
+missing_extension=copy.deepcopy(final); del missing_extension['x-platform-runtime-labels']
+wrong_extension=copy.deepcopy(final); wrong_extension['x-platform-runtime-labels']['com.platform.runtime.commit']='9'*40
+extra_extension=copy.deepcopy(final); extra_extension['x-platform-runtime-labels']['unexpected']='value'
+for name,candidate in (
+ ('missing',missing_extension),('wrong',wrong_extension),('extra',extra_extension),
+):
+ try: m['validate_runtime_identity_document'](document,commit,tree,release,candidate,runtime); extension_rejected[name]=False
+ except m['Stop']: extension_rejected[name]=True
+drift=copy.deepcopy(final); drift['services']['postgres']['image']='registry.invalid/postgres@sha256:'+'8'*64
+drift_rejected=False
+try: m['validate_runtime_identity_document'](document,commit,tree,release,drift,runtime)
+except m['Stop']: drift_rejected=True
 bad_document=dict(document); bad_document['sourceRenderSha256']='0'*64
 source_rejected=False
 try: m['validate_runtime_identity_document'](bad_document,commit,tree,release,final,runtime)
@@ -450,12 +464,15 @@ except m['Stop']: source_rejected=True
 print(json.dumps({'activeServices':len(final['services']),'candidateDerived':document['candidateId']==m['digest'](m['canonical']({
  'candidateCommit':commit,'candidateTree':tree,'sourceRenderSha256':m['digest'](source_bytes),
  'workloadLockSha256':m['digest'](b'{"state":"verified"}\\n')}).encode()),
- 'identityProjection':m['source_render_without_runtime_identity'](final)==source_bytes,
+ 'driftRejected':drift_rejected,'extensionRejected':extension_rejected,
+ 'identityProjection':m['source_render_without_runtime_identity'](final,document)==source_bytes,
  'labelRejected':label_rejected,'legacy':list(m['LEGACY_UNMANAGED']),'sourceRejected':source_rejected}))`);
   assert.equal(value.activeServices, 20, "source/final render contains 17 active plus 3 backup-profile services");
   assert.equal(value.candidateDerived, true);
   assert.equal(value.identityProjection, true);
   assert.equal(value.labelRejected, true);
+  assert.deepEqual(value.extensionRejected, { extra: true, missing: true, wrong: true });
+  assert.equal(value.driftRejected, true);
   assert.equal(value.sourceRejected, true);
   assert.equal(value.legacy.length, 19);
   assert.deepEqual(value.legacy.map((item) => item.containerName), [...value.legacy.map((item) => item.containerName)].sort());

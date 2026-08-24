@@ -14,6 +14,53 @@ function runPython(source) {
   return JSON.parse(result.stdout);
 }
 
+test("controller runtime identity projection requires the exact Compose extension", () => {
+  const output = runPython(String.raw`
+import copy, importlib.util, json
+spec=importlib.util.spec_from_file_location("control", ${JSON.stringify(controller)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+commit='1'*40; tree='2'*40; lock=b'{"state":"verified"}\\n'; release='/srv/platform-infrastructure/releases/test'
+source={'name':'platform_infra_vps','services':{service:{'image':'registry.invalid/'+service+'@sha256:'+'3'*64} for service in m.MANAGED_CONTAINER_BY_SERVICE}}
+source_bytes=m.canonical_bytes(source); source_sha=m.digest(source_bytes); lock_sha=m.digest(lock)
+candidate=m.digest(m.canonical({'candidateCommit':commit,'candidateTree':tree,'sourceRenderSha256':source_sha,'workloadLockSha256':lock_sha}).encode())
+identity={'candidateId':candidate,'commit':commit,'deploymentId':'v1-local-private:'+candidate,'sourceRenderSha256':source_sha,'tree':tree,'workloadLockSha256':lock_sha}
+labels={
+ 'com.platform.runtime.candidate-id':candidate,
+ 'com.platform.runtime.commit':commit,
+ 'com.platform.runtime.deployment-id':'v1-local-private:'+candidate,
+ 'com.platform.runtime.source-render-sha256':source_sha,
+ 'com.platform.runtime.tree':tree,
+ 'com.platform.runtime.workload-lock-sha256':lock_sha,
+}
+final=copy.deepcopy(source); final['x-platform-runtime-labels']=dict(labels)
+for service in final['services'].values(): service['labels']=dict(labels)
+environment={
+ 'PLATFORM_RUNTIME_CANDIDATE_ID':candidate,
+ 'PLATFORM_RUNTIME_COMMIT':commit,
+ 'PLATFORM_RUNTIME_DEPLOYMENT_ID':'v1-local-private:'+candidate,
+ 'PLATFORM_RUNTIME_SOURCE_RENDER_SHA256':source_sha,
+ 'PLATFORM_RUNTIME_TREE':tree,
+ 'PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256':lock_sha,
+}
+environment_lines=[name+'='+value for name,value in environment.items()]
+m.secure_file=lambda *_args,**_kwargs: lock
+accepted=m.validate_runtime_identity(identity,final,environment_lines,commit,tree,release)==identity
+rejected={}
+missing=copy.deepcopy(final); del missing['x-platform-runtime-labels']
+wrong=copy.deepcopy(final); wrong['x-platform-runtime-labels']['com.platform.runtime.commit']='4'*40
+extra=copy.deepcopy(final); extra['x-platform-runtime-labels']['unexpected']='value'
+drift=copy.deepcopy(final); drift['services']['postgres']['image']='registry.invalid/postgres@sha256:'+'5'*64
+for name,candidate_render in (('missing',missing),('wrong',wrong),('extra',extra),('drift',drift)):
+ try: m.validate_runtime_identity(identity,candidate_render,environment_lines,commit,tree,release); rejected[name]=False
+ except m.Stop: rejected[name]=True
+print(json.dumps({'accepted':accepted,'rejected':rejected}))
+`);
+  assert.deepEqual(output, {
+    accepted: true,
+    rejected: { drift: true, extra: true, missing: true, wrong: true },
+  });
+});
+
 test("pure reconciliation model removes scheduler, retains legacy, and derives mutation truth", () => {
   const output = runPython(String.raw`
 import importlib.util, json

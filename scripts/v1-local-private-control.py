@@ -1232,6 +1232,9 @@ def validate_runtime_identity(
     if not isinstance(services, dict) or set(services) != set(MANAGED_CONTAINER_BY_SERVICE):
         stop("V1 final render is not the exact active plus disabled service set.")
     source_render = parse_json(canonical_bytes(render), "V1 final render source projection", True)
+    if source_render.get("x-platform-runtime-labels") != expected_labels:
+        stop("V1 final render lacks exact top-level runtime identity labels.")
+    source_render.pop("x-platform-runtime-labels")
     for service_name, service in services.items():
         labels = service.get("labels") if isinstance(service, dict) else None
         if not isinstance(labels, dict) or any(labels.get(name) != label for name, label in expected_labels.items()):
