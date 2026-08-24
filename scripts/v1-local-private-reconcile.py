@@ -1275,6 +1275,8 @@ def materialize_environment(
     data = read_deployment_environment(repo_root)
     lines, values = parse_env(data, "deployment environment")
     replacements = {
+        "HOSTED_WORKLOAD_LOCK": "",
+        "HOSTED_WORKLOAD_MODE": "no-hosted",
         "PLATFORM_COMPOSE_VARIANT": "LOCAL_PRIVATE",
         "PLATFORM_SECRETS_ROOT": SECRET_DIR,
         "CONTROL_CENTER_DATABASE_URL_SECRET_FILE": DATABASE_SECRET,
