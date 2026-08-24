@@ -13,7 +13,16 @@ function requiredSha256(value, label) {
   return clean;
 }
 
-const NO_HOSTED_WORKLOAD_LOCK_SHA256 = "61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0";
+const NO_HOSTED_WORKLOAD_LOCKS = Object.freeze({
+  VPS: Object.freeze({
+    path: "config/no-hosted-workloads.lock.json",
+    sha256: "61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0",
+  }),
+  LOCAL_PRIVATE: Object.freeze({
+    path: "config/no-hosted-workloads.local-private.lock.json",
+    sha256: "af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c",
+  }),
+});
 
 function displayPath(root, filePath) {
   const relative = path.relative(root, filePath).replaceAll("\\", "/");
@@ -26,12 +35,17 @@ export function canonicalVpsTopologyPlan({
   projectName = "platform_infra_vps",
   workloadLock = "",
   workloadMode,
+  composeVariant = "VPS",
 }) {
   const root = path.resolve(String(infraRoot ?? ""));
   const resolvedEnvFile = path.resolve(root, String(envFile ?? ""));
   const cleanProjectName = requiredIdentifier(projectName, "Compose project name");
   const rawLock = String(workloadLock ?? "").trim();
   const cleanWorkloadMode = String(workloadMode ?? "").trim();
+  const cleanComposeVariant = String(composeVariant ?? "").trim();
+  if (!Object.hasOwn(NO_HOSTED_WORKLOAD_LOCKS, cleanComposeVariant)) {
+    throw new Error("Canonical VPS topology requires exact VPS or LOCAL_PRIVATE Compose variant.");
+  }
   if (!new Set(["hosted", "no-hosted"]).has(cleanWorkloadMode)) {
     throw new Error("Canonical VPS topology requires exact hosted or no-hosted workload mode.");
   }
@@ -41,9 +55,13 @@ export function canonicalVpsTopologyPlan({
   if (cleanWorkloadMode === "no-hosted" && rawLock) {
     throw new Error("No-hosted canonical VPS topology forbids a Hosted workload lock.");
   }
+  if (cleanComposeVariant === "LOCAL_PRIVATE" && cleanWorkloadMode !== "no-hosted") {
+    throw new Error("LOCAL_PRIVATE Compose variant requires the canonical no-hosted runtime.");
+  }
+  const noHostedAuthority = NO_HOSTED_WORKLOAD_LOCKS[cleanComposeVariant];
   const resolvedWorkloadLock = cleanWorkloadMode === "hosted"
     ? path.resolve(root, rawLock)
-    : path.join(root, "config", "no-hosted-workloads.lock.json");
+    : path.join(root, noHostedAuthority.path);
   const wrapper = path.join(root, "scripts", "compose-vps.sh");
   const lockVerifier = path.join(root, "scripts", "hosted-workload-lock.sh");
   return {
@@ -52,11 +70,12 @@ export function canonicalVpsTopologyPlan({
     envFile: resolvedEnvFile,
     envFileDisplay: displayPath(root, resolvedEnvFile),
     projectName: cleanProjectName,
+    composeVariant: cleanComposeVariant,
     workloadMode: cleanWorkloadMode,
     workloadLock: resolvedWorkloadLock,
     workloadLockDisplay: displayPath(root, resolvedWorkloadLock),
     expectedWorkloadLockSha256: cleanWorkloadMode === "no-hosted"
-      ? NO_HOSTED_WORKLOAD_LOCK_SHA256
+      ? noHostedAuthority.sha256
       : null,
     verification: cleanWorkloadMode === "hosted" ? {
       bin: "sh",
@@ -72,6 +91,9 @@ export function canonicalVpsTopologyPlan({
         HOSTED_WORKLOAD_LOCK: cleanWorkloadMode === "hosted" ? resolvedWorkloadLock : "",
         HOSTED_WORKLOAD_MODE: cleanWorkloadMode,
         HOSTED_WORKLOAD_ALLOW_RESOLVED: "0",
+        ...(cleanComposeVariant === "LOCAL_PRIVATE"
+          ? { PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE" }
+          : {}),
         ...(cleanWorkloadMode === "no-hosted"
           ? { HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: resolvedWorkloadLock }
           : {}),

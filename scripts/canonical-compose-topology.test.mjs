@@ -11,6 +11,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workloadLock = "secrets/hosted-workloads.lock.json";
 const workloadLockSha256 = "a".repeat(64);
 const noHostedWorkloadLockSha256 = "61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0";
+const localPrivateNoHostedWorkloadLockSha256 = "af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c";
 
 test("canonical plan invokes the deployment wrapper with a verified workload lock", () => {
   const plan = canonicalVpsTopologyPlan({
@@ -26,6 +27,7 @@ test("canonical plan invokes the deployment wrapper with a verified workload loc
   assert.equal(plan.command.env.COMPOSE_ENV_FILE, path.join(repositoryRoot, ".env.vps.example"));
   assert.equal(plan.command.env.HOSTED_WORKLOAD_LOCK, path.join(repositoryRoot, workloadLock));
   assert.equal(plan.command.env.HOSTED_WORKLOAD_ALLOW_RESOLVED, "0");
+  assert.equal(Object.hasOwn(plan.command.env, "PLATFORM_COMPOSE_VARIANT"), false);
   assert.deepEqual(plan.verification.args, [
     path.join(repositoryRoot, "scripts", "hosted-workload-lock.sh"),
     path.join(repositoryRoot, workloadLock),
@@ -91,7 +93,38 @@ test("invalid or empty canonical renders fail closed", () => {
   assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "", workloadMode: "hosted" }), /workload lock is required/i);
   assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock, workloadMode: "no-hosted" }), /forbids a Hosted workload lock/i);
   assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "", workloadMode: "" }), /exact hosted or no-hosted/i);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock: "", workloadMode: "no-hosted", composeVariant: "local_private" }), /VPS or LOCAL_PRIVATE/i);
+  assert.throws(() => canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env", workloadLock, workloadMode: "hosted", composeVariant: "LOCAL_PRIVATE" }), /requires the canonical no-hosted runtime/i);
   assert.throws(() => parseCanonicalVpsTopology(JSON.stringify({ services: { core: {} }, networks: { core: {} } }), plan), /workload authority lock SHA256/);
+});
+
+test("LOCAL_PRIVATE no-hosted plan selects its distinct exact lock and wrapper flag", () => {
+  const plan = canonicalVpsTopologyPlan({
+    infraRoot: repositoryRoot,
+    envFile: ".env.vps.example",
+    workloadLock: "",
+    workloadMode: "no-hosted",
+    composeVariant: "LOCAL_PRIVATE",
+  });
+  assert.equal(plan.composeVariant, "LOCAL_PRIVATE");
+  assert.equal(
+    plan.workloadLock,
+    path.join(repositoryRoot, "config", "no-hosted-workloads.local-private.lock.json"),
+  );
+  assert.equal(plan.expectedWorkloadLockSha256, localPrivateNoHostedWorkloadLockSha256);
+  assert.equal(plan.command.env.PLATFORM_COMPOSE_VARIANT, "LOCAL_PRIVATE");
+  assert.equal(plan.command.env.HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE, plan.workloadLock);
+  const rendered = JSON.stringify({ services: { core: {} }, networks: { core: {} } });
+  const { evidence } = parseCanonicalVpsTopology(rendered, plan, {
+    workloadLockSha256: localPrivateNoHostedWorkloadLockSha256,
+  });
+  assert.equal(evidence.workloadLock.path, "config/no-hosted-workloads.local-private.lock.json");
+  assert.throws(
+    () => parseCanonicalVpsTopology(rendered, plan, {
+      workloadLockSha256: noHostedWorkloadLockSha256,
+    }),
+    /no-hosted workload lock SHA256 mismatch/i,
+  );
 });
 
 test("no-hosted canonical plan binds the exact checked-in authority lock without claiming Hosted activation", () => {

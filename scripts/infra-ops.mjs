@@ -188,6 +188,196 @@ function positiveInteger(value, optionName, minimum = 1) {
   return next;
 }
 
+const typedEvidenceActionToOperation = Object.freeze({
+  BACKUP_APPLICATIONS: "backup-applications",
+  BACKUP_POSTGRES: "backup-postgres",
+  BACKUP_MARIADB: "backup-mariadb",
+  BACKUP_MINIO: "backup-minio",
+  BACKUP_KEYCLOAK: "backup-keycloak",
+  BACKUP_SECRET_METADATA: "backup-secret-manager-metadata",
+  RESTORE_POSTGRES: "restore-test-postgres",
+  RESTORE_MARIADB: "restore-test-mariadb",
+  RESTORE_MINIO: "restore-test-minio",
+  RESTORE_KEYCLOAK: "restore-test-keycloak",
+});
+const typedEvidenceRunIdPattern = /^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$/;
+const typedEvidenceImageIdPattern = /^sha256:[a-f0-9]{64}$/;
+const typedEvidenceReleaseRootPattern = /^\/srv\/platform-infrastructure\/releases\/[a-f0-9]{40}-[a-f0-9]{64}$/;
+const typedEvidenceEnvironmentKeys = Object.freeze([
+  "BACKUP_SIGNING_KEYS_FILE",
+  "DOCKER_HOST",
+  "HOME",
+  "KC_BOOTSTRAP_ADMIN_USERNAME",
+  "LANG",
+  "LC_ALL",
+  "MARIADB_IMAGE",
+  "MINIO_IMAGE",
+  "NODE_IMAGE",
+  "PATH",
+  "PLATFORM_CLOSED_HOST_PATH_MAPPINGS",
+  "PLATFORM_DATA_CONTAINER_ROOT",
+  "PLATFORM_DATA_HOST_ROOT",
+  "PLATFORM_DATA_ROOT",
+  "PLATFORM_INFRA_CONTAINER_ROOT",
+  "PLATFORM_INFRA_HOST_ROOT",
+  "PLATFORM_INFRA_ROOT",
+  "PLATFORM_RELEASE_CONTAINER_ROOT",
+  "PLATFORM_RELEASE_HOST_ROOT",
+  "PLATFORM_SECRETS_CONTAINER_ROOT",
+  "PLATFORM_SECRETS_HOST_ROOT",
+  "PLATFORM_SECRETS_ROOT",
+  "PLATFORM_STATE_CONTAINER_ROOT",
+  "PLATFORM_STATE_HOST_ROOT",
+  "PLATFORM_V1_EVIDENCE_ARTIFACT_ROOT",
+  "PLATFORM_V1_EVIDENCE_AUTHORITY_SHA256",
+  "PLATFORM_V1_EVIDENCE_INFRA_OPERATION",
+  "PLATFORM_V1_EVIDENCE_NETWORK_MODE",
+  "PLATFORM_V1_EVIDENCE_RUN_ID",
+  "PLATFORM_V1_TYPED_EVIDENCE_ACTION",
+  "POSTGRES_IMAGE",
+  "POSTGRES_OPS_SCHEMA",
+  "POSTGRES_RESTORE_TEST_IMAGE",
+  "PROJECT_SOURCE_HOST_ROOT",
+  "PROJECT_SOURCE_ROOT",
+  "PROJECT_STATE_ROOT",
+].sort());
+
+function sameStringArray(left, right) {
+  return Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function assertTypedEvidenceArtifactArgument(filePath, action, artifactRoot) {
+  const expected = {
+    RESTORE_POSTGRES: [
+      ["09-pg-stexor", /^stexor-[0-9]{8}-[0-9]{6}\.dump$/],
+      ["10-pg-keycloak", /^keycloak-[0-9]{8}-[0-9]{6}\.dump$/],
+    ],
+    RESTORE_MARIADB: [["11-mariadb", /^mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz$/]],
+    RESTORE_MINIO: [["12-minio", /^minio-data-[0-9]{8}-[0-9]{6}\.tar\.gz$/]],
+    RESTORE_KEYCLOAK: [["13-keycloak-config", /^keycloak-config-[0-9]{8}-[0-9]{6}\.tar\.gz$/]],
+  }[action];
+  if (!expected) fail("Typed V1 evidence action has no restore artifact contract.");
+  const resolved = path.resolve(String(filePath ?? ""));
+  const relative = path.relative(artifactRoot, resolved).split(path.sep).join("/");
+  const [family, name, ...tail] = relative.split("/");
+  const matchingFamily = expected.find(([directory, pattern]) => directory === family && pattern.test(name ?? ""));
+  if (tail.length || !matchingFamily || resolved !== path.join(artifactRoot, family, name)) {
+    fail("Typed V1 restore artifact argument is outside its fixed transaction family.");
+  }
+  return { filePath: resolved, family };
+}
+
+function expectedTypedEvidenceCli(action, artifactRoot) {
+  const backupFile = argv.backupFile;
+  const base = [typedEvidenceActionToOperation[action], "--skipEvidence", "true"];
+  if (action === "BACKUP_APPLICATIONS" || action === "BACKUP_SECRET_METADATA") return base;
+  if (action === "BACKUP_POSTGRES") {
+    if (!['stexor', 'keycloak'].includes(String(argv.database ?? ""))) {
+      fail("Typed PostgreSQL backup database is outside the fixed pair.");
+    }
+    return [...base, "--container", "enterprise-postgres", "--database", argv.database, "--user", "postgres"];
+  }
+  if (action === "BACKUP_MARIADB") return [...base, "--container", "mariadb"];
+  if (action === "BACKUP_MINIO") return [...base, "--container", "enterprise-minio"];
+  if (action === "BACKUP_KEYCLOAK") return [...base, "--container", "enterprise-keycloak"];
+
+  const artifact = assertTypedEvidenceArtifactArgument(backupFile, action, artifactRoot);
+  const restoreBase = [...base, "--backupFile", artifact.filePath, "--v1EvidenceReceipt", "true"];
+  if (action === "RESTORE_POSTGRES") {
+    const database = artifact.family === "09-pg-stexor" ? "stexor" : "keycloak";
+    return [
+      ...restoreBase,
+      "--container", "enterprise-postgres", "--database", database,
+      "--countAllUserTables", "true", "--minimumTables", "1",
+    ];
+  }
+  if (action === "RESTORE_MARIADB") {
+    return [...restoreBase, "--container", "mariadb", "--minSchemas", "1", "--image", process.env.MARIADB_IMAGE];
+  }
+  if (action === "RESTORE_MINIO") {
+    return [
+      ...restoreBase,
+      "--container", "enterprise-minio", "--image", process.env.MINIO_IMAGE,
+      "--utilityImage", process.env.NODE_IMAGE,
+    ];
+  }
+  return [...restoreBase, "--container", "enterprise-keycloak", "--minRealms", "1", "--image", process.env.NODE_IMAGE];
+}
+
+function initializeTypedEvidenceInvocation() {
+  const triggerKeys = typedEvidenceEnvironmentKeys.filter((key) => key.startsWith("PLATFORM_V1_"));
+  const presentTriggerKeys = triggerKeys.filter((key) => Object.hasOwn(process.env, key));
+  if (!presentTriggerKeys.length) return null;
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+    fail("Typed V1 evidence infra execution requires the reconciler-owned root process.");
+  }
+  if (!sameStringArray(Object.keys(process.env).sort(), typedEvidenceEnvironmentKeys)) {
+    fail("Typed V1 evidence infra execution received a non-closed environment.");
+  }
+  const action = String(process.env.PLATFORM_V1_TYPED_EVIDENCE_ACTION ?? "");
+  const operation = typedEvidenceActionToOperation[action];
+  const runId = String(process.env.PLATFORM_V1_EVIDENCE_RUN_ID ?? "");
+  const releaseRoot = String(process.env.PLATFORM_INFRA_ROOT ?? "");
+  const deploymentRoot = "/home/platform_infrastructure/platform-infrastructure";
+  const source = "/home/platform_infrastructure/src";
+  const secrets = `${deploymentRoot}/secrets`;
+  const state = `${deploymentRoot}/projects-portal/state`;
+  const artifactRoot = `/dev/shm/platform-v1-evidence-${runId}-transaction/artifact-staging`;
+  const equalBindings = {
+    BACKUP_SIGNING_KEYS_FILE: `${secrets}/backup_signing_keys.txt`,
+    DOCKER_HOST: "unix:///var/run/docker.sock",
+    HOME: "/nonexistent",
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+    PLATFORM_CLOSED_HOST_PATH_MAPPINGS: "1",
+    PLATFORM_DATA_CONTAINER_ROOT: deploymentRoot,
+    PLATFORM_DATA_HOST_ROOT: deploymentRoot,
+    PLATFORM_DATA_ROOT: deploymentRoot,
+    PLATFORM_INFRA_CONTAINER_ROOT: releaseRoot,
+    PLATFORM_INFRA_HOST_ROOT: releaseRoot,
+    PLATFORM_RELEASE_CONTAINER_ROOT: releaseRoot,
+    PLATFORM_RELEASE_HOST_ROOT: releaseRoot,
+    PLATFORM_SECRETS_CONTAINER_ROOT: secrets,
+    PLATFORM_SECRETS_HOST_ROOT: secrets,
+    PLATFORM_SECRETS_ROOT: secrets,
+    PLATFORM_STATE_CONTAINER_ROOT: state,
+    PLATFORM_STATE_HOST_ROOT: state,
+    PLATFORM_V1_EVIDENCE_ARTIFACT_ROOT: artifactRoot,
+    PLATFORM_V1_EVIDENCE_INFRA_OPERATION: operation,
+    PLATFORM_V1_EVIDENCE_NETWORK_MODE: "none",
+    PROJECT_SOURCE_HOST_ROOT: source,
+    PROJECT_SOURCE_ROOT: source,
+    PROJECT_STATE_ROOT: state,
+  };
+  if (!operation || operation !== command || !typedEvidenceRunIdPattern.test(runId)
+      || !typedEvidenceReleaseRootPattern.test(releaseRoot)
+      || !/^[a-f0-9]{64}$/.test(String(process.env.PLATFORM_V1_EVIDENCE_AUTHORITY_SHA256 ?? ""))
+      || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(process.env.POSTGRES_OPS_SCHEMA ?? ""))
+      || Object.entries(equalBindings).some(([key, value]) => process.env[key] !== value)) {
+    fail("Typed V1 evidence infra execution is not bound to the exact action, release, roots, and transaction.");
+  }
+  for (const key of ["MARIADB_IMAGE", "MINIO_IMAGE", "NODE_IMAGE", "POSTGRES_IMAGE", "POSTGRES_RESTORE_TEST_IMAGE"]) {
+    const image = String(process.env[key] ?? "");
+    if (!typedEvidenceImageIdPattern.test(image) || image === `sha256:${"0".repeat(64)}`) {
+      fail("Typed V1 evidence infra execution received an invalid digest-bound tool image.");
+    }
+  }
+  const admin = String(process.env.KC_BOOTSTRAP_ADMIN_USERNAME ?? "");
+  if (admin.includes("\0") || admin.includes("\n") || admin.length > 256
+      || (action === "BACKUP_KEYCLOAK" && !/^[A-Za-z0-9._@-]{1,256}$/.test(admin))) {
+    fail("Typed V1 evidence Keycloak administrator binding is invalid.");
+  }
+  const expectedCli = expectedTypedEvidenceCli(action, artifactRoot);
+  if (!sameStringArray(process.argv.slice(2), expectedCli)) {
+    fail("Typed V1 evidence infra execution received noncanonical CLI arguments.");
+  }
+  return Object.freeze({ action, operation, runId, releaseRoot, deploymentRoot, source, secrets, state, artifactRoot });
+}
+
+const typedEvidenceInvocation = initializeTypedEvidenceInvocation();
+
 
 
 
@@ -204,11 +394,244 @@ function parseCronTime(value, optionName) {
   return { hour, minute };
 }
 
+function typedEvidenceTransactionRoot() {
+  return typedEvidenceInvocation ? path.dirname(typedEvidenceInvocation.artifactRoot) : null;
+}
+
+function typedEvidencePathInside(root, candidate) {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(candidate);
+  const relative = path.relative(resolvedRoot, resolved);
+  return resolved === resolvedRoot || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function typedEvidenceDisposableName(action, value) {
+  const name = String(value ?? "");
+  if (action === "RESTORE_POSTGRES") {
+    return new RegExp(`^platform-postgres-restore-${process.pid}-[a-f0-9]{8}-[ab]$`).test(name);
+  }
+  if (action === "RESTORE_MARIADB") return /^platform-mariadb-restore-test-[0-9]{14}-[ab]$/.test(name);
+  if (action === "RESTORE_MINIO") return /^platform-minio-restore-test-[0-9]{14}$/.test(name);
+  return false;
+}
+
+function typedEvidenceMinioVolume(value) {
+  return /^minio_admin_restore_test_[0-9]{14}$/.test(String(value ?? ""));
+}
+
+function typedEvidenceDockerExecAllowed(action, args) {
+  if (args[0] !== "exec" || args.length < 3 || args[1] === "-i") return false;
+  const container = args[1];
+  const program = args[2];
+  if (action === "BACKUP_POSTGRES") {
+    if (container !== "enterprise-postgres") return false;
+    const database = String(argv.database);
+    const filePattern = new RegExp(`^/tmp/${database}-[0-9]{8}-[0-9]{6}\\.dump$`);
+    return (program === "pg_dump" && sameStringArray(args.slice(2, -1), [
+      "pg_dump", "-U", "postgres", "-d", database, "--format=custom", "--no-owner", "--no-acl",
+    ]) && /^--file=/.test(args.at(-1)) && filePattern.test(args.at(-1).slice("--file=".length)))
+      || (program === "rm" && sameStringArray(args.slice(2, 4), ["rm", "-f"]) && args.length === 5 && filePattern.test(args[4]));
+  }
+  if (action === "BACKUP_MARIADB") {
+    if (container !== "mariadb") return false;
+    if (program === "rm") return args.length === 5 && args[3] === "-f" && /^\/tmp\/mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz$/.test(args[4]);
+    return program === "sh" && args[3] === "-ec" && args.length === 5 && mariadbBackupProgramFromScript(args[4]) !== null;
+  }
+  if (action === "BACKUP_KEYCLOAK") {
+    if (container !== "enterprise-keycloak") return false;
+    if (program === "rm") return sameStringArray(args.slice(2), ["rm", "-f", "/tmp/platform-keycloak-config-backup.tar.gz"]);
+    if (program !== "sh" || args[3] !== "-ec" || args.length !== 5) return false;
+    return args[4] === keycloakBackupProgram()
+      || args[4] === keycloakBackupResidueAssertionProgram()
+      || args[4] === keycloakBackupCleanupProgram();
+  }
+  if (action === "RESTORE_POSTGRES" && typedEvidenceDisposableName(action, container)) {
+    if (program === "pg_isready") return sameStringArray(args.slice(2), ["pg_isready", "-U", "postgres", "-d", "postgres"]);
+    if (program === "pg_restore") {
+      return sameStringArray(args.slice(2), [
+        "pg_restore", "-U", "restore_runner", "-d", "platform_restore_test",
+        "--no-owner", "--no-acl", "--exit-on-error", "/restore/input.dump",
+      ]);
+    }
+    if (program === "pg_dump") {
+      return args.includes("--schema-only") && args.includes("--no-owner") && args.includes("--no-acl")
+        && args.includes("--quote-all-identifiers") && args.includes("--file=/tmp/");
+    }
+    if (program === "psql") {
+      return args[3] === "-U" && ["postgres", "restore_runner"].includes(args[4])
+        && args[5] === "-d" && ["postgres", "platform_restore_test"].includes(args[6])
+        && args.includes("ON_ERROR_STOP=1") && args.includes("-c") && args.length <= 14;
+    }
+    return program === "sh" && args[3] === "-ec" && args.length === 5;
+  }
+  if (action === "RESTORE_MARIADB" && typedEvidenceDisposableName(action, container)) {
+    return program === "sh" && args[3] === "-ec" && args.length === 5;
+  }
+  if (action === "RESTORE_MINIO" && typedEvidenceDisposableName(action, container)) {
+    return sameStringArray(args.slice(2), ["sh", "-ec", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null"]);
+  }
+  return false;
+}
+
+function typedEvidenceDockerCopyAllowed(action, args) {
+  if (args[0] !== "cp" || args.length !== 3) return false;
+  const [source, destination] = args.slice(1);
+  if (action === "BACKUP_POSTGRES") {
+    const database = String(argv.database);
+    const match = source.match(new RegExp(`^enterprise-postgres:(/tmp/${database}-[0-9]{8}-[0-9]{6}\\.dump)$`));
+    return Boolean(match) && destination.startsWith(`${typedEvidenceInvocation.deploymentRoot}/backups/postgres/.${path.basename(match[1])}.staging-${process.pid}-`)
+      && /^[a-f0-9]{24}$/.test(destination.slice(destination.lastIndexOf("-") + 1));
+  }
+  if (action === "BACKUP_MARIADB") {
+    const match = source.match(/^mariadb:(\/tmp\/mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz)$/);
+    return Boolean(match) && destination.startsWith(`${typedEvidenceInvocation.deploymentRoot}/backups/mariadb/.${path.basename(match[1])}.staging-${process.pid}-`)
+      && /^[a-f0-9]{24}$/.test(destination.slice(destination.lastIndexOf("-") + 1));
+  }
+  if (action === "BACKUP_MINIO") {
+    return source === "enterprise-minio:/data"
+      && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, destination)
+      && /\/platform-minio-data-[A-Za-z0-9_-]+\/minio-data$/.test(destination);
+  }
+  if (action === "BACKUP_KEYCLOAK") {
+    return source === "enterprise-keycloak:/tmp/platform-keycloak-config-backup.tar.gz"
+      && destination.startsWith(`${typedEvidenceInvocation.deploymentRoot}/backups/keycloak/.keycloak-config-`)
+      && destination.includes(`.tar.gz.staging-${process.pid}-`)
+      && /^[a-f0-9]{24}$/.test(destination.slice(destination.lastIndexOf("-") + 1));
+  }
+  if (action === "RESTORE_MARIADB") {
+    return source === argv.backupFile
+      && typedEvidenceDisposableName(action, destination.split(":", 1)[0])
+      && destination === `${destination.split(":", 1)[0]}:/tmp/${path.basename(argv.backupFile)}`;
+  }
+  return false;
+}
+
+function typedEvidenceDockerRemoveAllowed(action, args) {
+  if (args[0] !== "rm") return false;
+  if (action === "RESTORE_POSTGRES") return args.length === 3 && args[1] === "-f" && typedEvidenceDisposableName(action, args[2]);
+  if (action === "RESTORE_MARIADB") {
+    return args.length === 4 && args[1] === "-f" && args[2] === "-v" && typedEvidenceDisposableName(action, args[3]);
+  }
+  if (action === "RESTORE_MINIO") return args.length === 3 && args[1] === "-f" && typedEvidenceDisposableName(action, args[2]);
+  return false;
+}
+
+function typedEvidenceDockerVolumeAllowed(action, args) {
+  return action === "RESTORE_MINIO" && args[0] === "volume"
+    && ((args.length === 4 && args[1] === "rm" && args[2] === "-f" && typedEvidenceMinioVolume(args[3]))
+      || (args.length === 3 && args[1] === "create" && typedEvidenceMinioVolume(args[2])));
+}
+
+function typedEvidenceDockerInspectAllowed(action, args) {
+  return action === "RESTORE_KEYCLOAK" && sameStringArray(args, [
+    "inspect", "--format", "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", "enterprise-keycloak",
+  ]);
+}
+
+function typedEvidenceRunMounts(args) {
+  const mounts = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "-v" && typeof args[index + 1] === "string") mounts.push(args[index + 1]);
+  }
+  return mounts;
+}
+
+function typedEvidenceDockerRunAllowed(action, args) {
+  if (args[0] !== "run" || !args.includes("--network") || args[args.indexOf("--network") + 1] !== "none") return false;
+  const forbiddenFlags = ["--privileged", "--device", "--cap-add", "--pid", "--ipc", "--uts", "--userns", "--cgroupns"];
+  if (args.some((value) => forbiddenFlags.includes(value) || forbiddenFlags.some((flag) => value.startsWith(`${flag}=`)))) return false;
+  const securityOptions = args.flatMap((value, index) => value === "--security-opt" ? [args[index + 1]] : []);
+  if (securityOptions.some((value) => value !== "no-new-privileges:true")) return false;
+  const images = [process.env.NODE_IMAGE, process.env.POSTGRES_RESTORE_TEST_IMAGE, process.env.MARIADB_IMAGE, process.env.MINIO_IMAGE];
+  const imageIndexes = args.map((value, index) => images.includes(value) ? index : -1).filter((index) => index >= 0);
+  if (imageIndexes.length !== 1) return false;
+  const mounts = typedEvidenceRunMounts(args);
+  if (mounts.some((mount) => /docker\.sock|:\/host|:\/etc|:\/root/.test(mount))) return false;
+
+  if (action === "BACKUP_MINIO" || action === "BACKUP_SECRET_METADATA") {
+    if (!sameStringArray(args.slice(0, 4), ["run", "--rm", "--network", "none"]) || args[imageIndexes[0]] !== process.env.NODE_IMAGE) return false;
+    const outputFamily = action === "BACKUP_MINIO" ? "minio" : "secret-manager";
+    const tempPrefix = action === "BACKUP_MINIO" ? "platform-minio-data-" : "infra-secret-manager-metadata-";
+    return mounts.length === 2
+      && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, mounts[0].split(":/work:ro")[0])
+      && mounts[0].includes(`/${tempPrefix}`) && mounts[0].endsWith(":/work:ro")
+      && mounts[1] === `${typedEvidenceInvocation.deploymentRoot}/backups/${outputFamily}:/backup`
+      && sameStringArray(args.slice(imageIndexes[0] + 1, imageIndexes[0] + 3), ["sh", "-lc"])
+      && /^tar -czf \/backup\/'\.[A-Za-z0-9._-]+\.staging-[0-9]+-[a-f0-9]{24}' -C \/work \.$/.test(args.at(-1));
+  }
+
+  if (action === "RESTORE_POSTGRES") {
+    const nameIndex = args.indexOf("--name");
+    const mount = `${argv.backupFile}:/restore/input.dump:ro`;
+    return args[imageIndexes[0]] === process.env.POSTGRES_RESTORE_TEST_IMAGE
+      && nameIndex > 0 && typedEvidenceDisposableName(action, args[nameIndex + 1])
+      && mounts.length === 1 && mounts[0] === mount
+      && args.includes("--read-only") && args.includes("--cap-drop") && args.includes("no-new-privileges:true")
+      && args.filter((value) => value === "--tmpfs").length === 3;
+  }
+
+  if (action === "RESTORE_MARIADB") {
+    const nameIndex = args.indexOf("--name");
+    const passwordIndex = args.findIndex((value) => /^MARIADB_ROOT_PASSWORD=restore_[A-Za-z0-9_-]{24}$/.test(value));
+    return args[imageIndexes[0]] === process.env.MARIADB_IMAGE
+      && nameIndex > 0 && typedEvidenceDisposableName(action, args[nameIndex + 1])
+      && passwordIndex > 0 && args[passwordIndex - 1] === "-e" && mounts.length === 0
+      && args.filter((value) => value === "--tmpfs").length === 3;
+  }
+
+  if (action === "RESTORE_MINIO") {
+    const nameIndex = args.indexOf("--name");
+    if (nameIndex > 0) {
+      return args[imageIndexes[0]] === process.env.MINIO_IMAGE
+        && typedEvidenceDisposableName(action, args[nameIndex + 1]) && mounts.length === 1
+        && typedEvidenceMinioVolume(mounts[0].split(":", 1)[0]) && mounts[0].endsWith(":/data")
+        && args.includes("server") && args.includes("/data");
+    }
+    if (args[imageIndexes[0]] !== process.env.NODE_IMAGE) return false;
+    const volumesFromIndex = args.indexOf("--volumes-from");
+    const isProbe = args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "node"
+      && args.at(-2) === "-e" && args.at(-1) === minioTreeProbeSource();
+    if (volumesFromIndex > 0) return isProbe && args[volumesFromIndex + 1] === "enterprise-minio:ro" && mounts.length === 0;
+    if (isProbe) return mounts.length === 1 && typedEvidenceMinioVolume(mounts[0].split(":", 1)[0]) && mounts[0].endsWith(":/data:ro");
+    return mounts.length === 2 && typedEvidenceMinioVolume(mounts[0].split(":", 1)[0])
+      && mounts[0].endsWith(":/data") && mounts[1] === `${path.dirname(argv.backupFile)}:/backup:ro`
+      && args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "sh"
+      && args.at(-2) === "-ec" && args.at(-1) === `tar -xzf /backup/${shellQuote(path.basename(argv.backupFile))} -C /data && test -d /data/.minio.sys`;
+  }
+
+  if (action === "RESTORE_KEYCLOAK") {
+    return args[imageIndexes[0]] === process.env.NODE_IMAGE && mounts.length === 1
+      && mounts[0] === `${path.dirname(argv.backupFile)}:/backup:ro`
+      && args.includes("--read-only") && args.includes("--cap-drop") && args.includes("no-new-privileges:true")
+      && args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "node"
+      && args.at(-4) === "-e" && args.at(-3) === keycloakConfigProbeSource()
+      && args.at(-2) === path.basename(argv.backupFile) && args.at(-1) === "1";
+  }
+  return false;
+}
+
+function assertTypedEvidenceDockerInvocation(args, options) {
+  if (!typedEvidenceInvocation || !Array.isArray(args) || !args.length || args.length > 128
+      || args.some((item) => typeof item !== "string" || !item || item.includes("\0"))
+      || options.input !== undefined) {
+    fail("Raw Docker execution is disabled outside the closed typed V1 evidence infra invocation.");
+  }
+  const action = typedEvidenceInvocation.action;
+  const allowed = typedEvidenceDockerExecAllowed(action, args)
+    || typedEvidenceDockerCopyAllowed(action, args)
+    || typedEvidenceDockerRemoveAllowed(action, args)
+    || typedEvidenceDockerVolumeAllowed(action, args)
+    || typedEvidenceDockerInspectAllowed(action, args)
+    || typedEvidenceDockerRunAllowed(action, args);
+  if (!allowed) fail("Typed V1 evidence infra code requested a Docker operation outside its closed action contract.");
+}
+
 function run(bin, args = [], options = {}) {
   const childEnvironment = { ...process.env };
   for (const key of options.unsetEnv ?? []) delete childEnvironment[key];
   if (path.basename(String(bin)) === "docker") {
-    fail("Raw Docker execution from candidate infra code is disabled; use an admitted fixed broker action or an external host orchestrator.");
+    assertTypedEvidenceDockerInvocation(args, options);
+    bin = "/usr/bin/docker";
   }
   return runCommandSync(bin, args, {
     cwd: options.cwd ?? infraRoot,
@@ -708,6 +1131,9 @@ function backupSigningKeys() {
   if (keys.some((key) => key.secret.length < 48)) {
     fail("Every backup signing key must be at least 48 characters.");
   }
+  if (new Set(keys.map((key) => key.id)).size !== keys.length) {
+    fail("Backup signing key IDs must be unique.");
+  }
   return keys;
 }
 
@@ -763,15 +1189,12 @@ function verifyBackupArtifact(filePath) {
   if (sidecar.version !== 1 || sidecar.algorithm !== "HMAC-SHA256" || sidecar.artifact !== fileName || sidecar.sha256 !== hash) {
     fail(`Invalid backup signature metadata for ${filePath}.`);
   }
-  const keys = backupSigningKeys();
-  const orderedKeys = [
-    ...keys.filter((key) => key.id === sidecar.keyId),
-    ...keys.filter((key) => key.id !== sidecar.keyId),
-  ];
-  const valid = orderedKeys.some((key) => {
-    const expected = crypto.createHmac("sha256", key.secret).update(backupSignatureMessage(fileName, hash)).digest("base64url");
-    return timingSafeEqualBuffer(Buffer.from(sidecar.signature), Buffer.from(expected));
-  });
+  const key = backupSigningKeys().find((candidate) => candidate.id === sidecar.keyId);
+  const expected = key
+    ? crypto.createHmac("sha256", key.secret).update(backupSignatureMessage(fileName, hash)).digest("base64url")
+    : "";
+  const valid = Boolean(key) && typeof sidecar.signature === "string"
+    && timingSafeEqualBuffer(Buffer.from(sidecar.signature), Buffer.from(expected));
   if (!valid) {
     fail(`Backup signature verification failed for ${filePath}.`);
   }
@@ -1076,6 +1499,11 @@ function publishBackupArtifactWithEvidence({ stagingPath, hostPath, engine, sour
 
 function hostPathForContainerMount(filePath) {
   const resolved = path.resolve(filePath).replaceAll("\\", "/");
+  const transactionRoot = typedEvidenceTransactionRoot();
+  if (transactionRoot && typedEvidencePathInside(transactionRoot, resolved)) {
+    assertRootOwnedPrivateDirectory(transactionRoot, "typed V1 evidence transaction root");
+    return resolved;
+  }
   const mappings = [
     [process.env.PLATFORM_RELEASE_CONTAINER_ROOT || process.env.PLATFORM_INFRA_CONTAINER_ROOT || infraRoot, process.env.PLATFORM_RELEASE_HOST_ROOT || process.env.PLATFORM_INFRA_HOST_ROOT],
     [process.env.PLATFORM_DATA_CONTAINER_ROOT || dataRoot, process.env.PLATFORM_DATA_HOST_ROOT],
@@ -1105,8 +1533,11 @@ function dockerRun(args, options = {}) {
 }
 
 function makeOpsTempDir(prefix) {
-  const root = path.join(operationsTempRoot, "ops");
+  const transactionRoot = typedEvidenceTransactionRoot();
+  if (transactionRoot) assertRootOwnedPrivateDirectory(transactionRoot, "typed V1 evidence transaction root");
+  const root = path.join(transactionRoot ?? operationsTempRoot, "ops");
   fs.mkdirSync(root, { recursive: true });
+  if (transactionRoot) assertRootOwnedPrivateDirectory(root, "typed V1 evidence temporary operations root");
   return fs.mkdtempSync(path.join(root, prefix));
 }
 
@@ -2101,23 +2532,53 @@ async function executeTypedRestoreResource(resource, artifact, options = {}) {
       countAllUserTables: true,
       minimumTables: 1,
     });
-    return { resourceId: resource.id, status: "passed", testDatabase: result.testDatabase };
+    return {
+      resourceId: resource.id,
+      status: "passed",
+      testDatabase: result.testDatabase,
+      semanticComparator: result.semanticComparator,
+      firstRestoreComparatorSha256: result.firstRestoreComparatorSha256,
+      secondRestoreComparatorSha256: result.secondRestoreComparatorSha256,
+    };
   }
   if (resource.kind === "database" && resource.engine === "mariadb") {
     const result = await restoreTestMariadb({
       container: process.env.BACKUP_MARIADB_CONTAINER || "mariadb",
       backupFile,
+      database: resource.name,
       minSchemas: 1,
     });
-    return { resourceId: resource.id, status: "passed", restoredSchemas: result.restoredSchemas };
+    return {
+      resourceId: resource.id,
+      status: "passed",
+      restoredSchemas: result.restoredSchemas,
+      semanticComparator: result.semanticComparator,
+      firstRestoreComparatorSha256: result.firstRestoreComparatorSha256,
+      secondRestoreComparatorSha256: result.secondRestoreComparatorSha256,
+    };
   }
   if (resource.kind === "platform-state" && resource.externalId === "minio-data") {
     const result = await restoreTestMinio({ backupFile });
-    return { resourceId: resource.id, status: "passed", restoredEntries: result.restoredEntries };
+    return {
+      resourceId: resource.id,
+      status: "passed",
+      restoredEntries: result.restoredEntries,
+      semanticComparator: result.semanticComparator,
+      sourceBeforeComparatorSha256: result.sourceBeforeComparatorSha256,
+      restoredComparatorSha256: result.restoredComparatorSha256,
+      sourceAfterComparatorSha256: result.sourceAfterComparatorSha256,
+    };
   }
   if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
     const result = await restoreTestKeycloakConfig({ backupFile });
-    return { resourceId: resource.id, status: "passed", realmCount: result.realmCount };
+    return {
+      resourceId: resource.id,
+      status: "passed",
+      realmCount: result.realmCount,
+      semanticComparator: result.semanticComparator,
+      firstRestoreComparatorSha256: result.firstRestoreComparatorSha256,
+      secondRestoreComparatorSha256: result.secondRestoreComparatorSha256,
+    };
   }
   if (resource.kind === "platform-state" && resource.externalId === "control-center-state") {
     return { resourceId: resource.id, ...restoreTestControlCenterState({ backupFile }) };
@@ -2851,6 +3312,7 @@ function infraTestingHygiene() {
     "scripts/bounded-file-hash.test.mjs",
     "scripts/backup-artifact-publication.mjs",
     "scripts/backup-artifact-publication.test.mjs",
+    "scripts/database-restore-semantic-comparator.test.mjs",
     "scripts/command-safety.mjs",
     "scripts/restic-secret-transport.mjs",
     "scripts/restic-secret-transport.test.mjs",
@@ -2881,10 +3343,17 @@ function infraTestingHygiene() {
     "scripts/pinned-ssh-host-key.test.mjs",
     "scripts/v1-brownfield-install-receipt.mjs",
     "scripts/v1-brownfield-install-receipt.test.mjs",
+    "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
+    "scripts/v1-node-runtime-prerequisite.test.mjs",
     "scripts/deploy-v1-install-only.test.mjs",
+    "scripts/keycloak-passkey-reconcile.mjs",
+    "scripts/keycloak-passkey-reconcile.test.mjs",
+    "scripts/runtime-isolation-consumer.test.mjs",
     "scripts/v1-local-private-control-receipt.mjs",
     "scripts/v1-local-private-control.test.mjs",
     "scripts/v1-local-private-control.e2e.test.mjs",
+    "scripts/v1-local-private-evidence-producer.test.mjs",
+    "scripts/v1-local-private-reconcile.test.mjs",
     "scripts/deploy-v1-local-private.test.mjs",
     "scripts/platform-activation-transport.test.mjs",
     "scripts/edge-provider-evidence.mjs",
@@ -2915,6 +3384,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/database-restore-semantic-comparator.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
@@ -2922,6 +3392,10 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/postgres-restore-sandbox.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/runtime-isolation-consumer.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/keycloak-passkey-reconcile.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/v1-local-private-evidence-producer.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/v1-local-private-reconcile.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
@@ -2930,6 +3404,8 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/pinned-ssh-host-key.test.mjs"], { cwd: infraRoot });
   run(process.execPath, [
     "--test",
+    "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
+    "scripts/v1-node-runtime-prerequisite.test.mjs",
     "scripts/v1-brownfield-install-receipt.test.mjs",
     "scripts/deploy-v1-install-only.test.mjs",
     "scripts/v1-local-private-control.test.mjs",
@@ -2972,19 +3448,25 @@ async function projectRouterTests() {
   });
 }
 
-function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {}) {
+function canonicalVpsTopologyRender({ envFile, projectName, workloadLock, composeVariant } = {}) {
   const resolvedEnvFile = path.resolve(envFile ?? argv.envFile ?? argv["env-file"] ?? path.join(infraRoot, ".env.vps.example"));
   if (!fs.existsSync(resolvedEnvFile)) fail(`Compose env file not found: ${resolvedEnvFile}`);
   const envValues = parseEnv(resolvedEnvFile);
   const resolvedProjectName = String(projectName ?? argv.projectName ?? argv.project ?? process.env.COMPOSE_PROJECT_NAME ?? envValues.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
   const configuredWorkloadLock = workloadLock ?? argv.workloadLock ?? process.env.HOSTED_WORKLOAD_LOCK ?? envValues.HOSTED_WORKLOAD_LOCK ?? "";
   const configuredWorkloadMode = argv.workloadMode ?? process.env.HOSTED_WORKLOAD_MODE ?? envValues.HOSTED_WORKLOAD_MODE ?? "";
+  const configuredComposeVariant = composeVariant
+    ?? argv.composeVariant
+    ?? process.env.PLATFORM_COMPOSE_VARIANT
+    ?? envValues.PLATFORM_COMPOSE_VARIANT
+    ?? "VPS";
   const plan = canonicalVpsTopologyPlan({
     infraRoot,
     envFile: resolvedEnvFile,
     projectName: resolvedProjectName,
     workloadLock: configuredWorkloadLock,
     workloadMode: configuredWorkloadMode,
+    composeVariant: configuredComposeVariant,
   });
   if (plan.verification) {
     run(plan.verification.bin, plan.verification.args, { env: plan.verification.env });
@@ -3003,9 +3485,14 @@ function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {})
   return parseCanonicalVpsTopology(configText, plan, { workloadLockSha256: workloadLockSha256After });
 }
 
-function currentCandidateIdentity({ envFile, projectName, workloadLock, repository } = {}) {
+function currentCandidateIdentity({ envFile, projectName, workloadLock, composeVariant, repository } = {}) {
   const git = gitEvidence();
-  const { evidence: topology } = canonicalVpsTopologyRender({ envFile, projectName, workloadLock });
+  const { evidence: topology } = canonicalVpsTopologyRender({
+    envFile,
+    projectName,
+    workloadLock,
+    composeVariant,
+  });
   const repositoryIdentity = repository
     ?? argv.repository
     ?? argv.repo
@@ -10966,7 +11453,326 @@ async function restorePostgres() {
   }
 }
 
+const databaseRestoreComparatorVersion = "platform.database-restore-semantic-comparator/v1";
+
+function canonicalComparatorJson(value) {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalComparatorJson(entry)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalComparatorJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function comparatorSha256(value) {
+  return crypto.createHash("sha256").update(typeof value === "string" ? value : canonicalComparatorJson(value), "utf8").digest("hex");
+}
+
+function v1EvidenceReceiptEnabled() {
+  if (argv.v1EvidenceReceipt === undefined) return false;
+  if (argv.v1EvidenceReceipt !== "true") fail("--v1EvidenceReceipt accepts only the exact value true.");
+  return true;
+}
+
+function assertRootOwnedPrivateDirectory(directory, label) {
+  const metadata = fs.lstatSync(directory, { throwIfNoEntry: false });
+  if (!metadata?.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== 0 || (metadata.mode & 0o7777) !== 0o700) {
+    fail(`${label} must be one root-owned, non-symlink 0700 directory.`);
+  }
+  if (fs.realpathSync(directory) !== directory) fail(`${label} must not traverse symbolic links.`);
+}
+
+function assertV1TypedEvidenceCapability(expectedOperation) {
+  if (!v1EvidenceReceiptEnabled()
+      || !typedEvidenceInvocation
+      || typedEvidenceInvocation.operation !== expectedOperation
+      || process.env.PLATFORM_V1_EVIDENCE_INFRA_OPERATION !== expectedOperation
+      || command !== expectedOperation) {
+    fail("V1 evidence artifact access requires the exact root-bound typed action and infra-operation binding.");
+  }
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+    fail("V1 evidence artifact access requires the root evidence executor.");
+  }
+}
+
+function assertV1EvidenceArtifactFile(filePath, artifactRoot, label) {
+  const relative = path.relative(artifactRoot, filePath);
+  const components = relative.split(path.sep);
+  if (relative.startsWith("..") || path.isAbsolute(relative) || components.length !== 2
+      || !/^[0-9]{2}-[a-z0-9][a-z0-9-]*$/.test(components[0])
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(components[1])) {
+    fail(`${label} is not one direct artifact-staging family file.`);
+  }
+  assertRootOwnedPrivateDirectory(path.dirname(filePath), `${label} family directory`);
+  const metadata = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  if (!metadata?.isFile() || metadata.isSymbolicLink() || metadata.uid !== 0 || metadata.nlink !== 1
+      || (metadata.mode & 0o7777) !== 0o400) {
+    fail(`${label} must be one root-owned, non-symlink, single-link 0400 regular file.`);
+  }
+  const noFollow = fs.constants.O_NOFOLLOW;
+  if (!Number.isInteger(noFollow)) fail("This host does not provide O_NOFOLLOW for V1 evidence artifacts.");
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.uid !== 0
+        || opened.nlink !== 1 || (opened.mode & 0o7777) !== 0o400) {
+      fail(`${label} changed identity while opened with O_NOFOLLOW.`);
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function resolveRestoreTestArtifact(backupFileArg, expectedOperation) {
+  const requested = path.resolve(String(backupFileArg));
+  const ordinaryRoot = path.resolve(backupRootPath());
+  const ordinaryRelative = path.relative(ordinaryRoot, requested);
+  if (!ordinaryRelative.startsWith("..") && !path.isAbsolute(ordinaryRelative)) {
+    return resolveInside(ordinaryRoot, requested);
+  }
+
+  assertV1TypedEvidenceCapability(expectedOperation);
+  const artifactRoot = String(process.env.PLATFORM_V1_EVIDENCE_ARTIFACT_ROOT ?? "");
+  if (artifactRoot !== typedEvidenceInvocation.artifactRoot || path.normalize(artifactRoot) !== artifactRoot) {
+    fail("PLATFORM_V1_EVIDENCE_ARTIFACT_ROOT is outside the exact root-owned /dev/shm transaction shape.");
+  }
+  const transactionRoot = path.dirname(artifactRoot);
+  assertRootOwnedPrivateDirectory(transactionRoot, "V1 evidence transaction root");
+  assertRootOwnedPrivateDirectory(artifactRoot, "V1 evidence artifact root");
+  assertV1EvidenceArtifactFile(requested, artifactRoot, "V1 evidence backup artifact");
+  assertV1EvidenceArtifactFile(`${requested}.sha256`, artifactRoot, "V1 evidence checksum sidecar");
+  assertV1EvidenceArtifactFile(backupSignatureSidecarPath(requested), artifactRoot, "V1 evidence signature sidecar");
+  return requested;
+}
+
+function emitV1EvidenceReceipt(operation, artifactSha256, semanticComparator, counts = {}) {
+  if (!v1EvidenceReceiptEnabled()) return;
+  const receipt = {
+    schema: "platform.v1.restore-evidence-receipt/v1",
+    operation,
+    artifactSha256,
+    matched: semanticComparator?.matched === true,
+    scope: semanticComparator?.scope ?? null,
+    semanticComparator,
+    counts,
+  };
+  if (!/^[a-f0-9]{64}$/.test(artifactSha256) || receipt.matched !== true) fail("Refusing to emit an incomplete V1 restore evidence receipt.");
+  log(`V1_EVIDENCE_RECEIPT:${canonicalComparatorJson(receipt)}`);
+}
+
+function parseCanonicalFileDigest(outputText, label) {
+  const values = String(outputText ?? "").trim().split(/\s+/);
+  if (values.length !== 3 || !/^[a-f0-9]{64}$/.test(values[0]) || !/^\d+$/.test(values[1]) || !/^\d+$/.test(values[2])) {
+    fail(`${label} did not produce a closed SHA256/bytes/rows receipt.`);
+  }
+  const sizeBytes = Number(values[1]);
+  const rows = Number(values[2]);
+  if (!Number.isSafeInteger(sizeBytes) || !Number.isSafeInteger(rows)) fail(`${label} receipt exceeds the safe integer range.`);
+  return { sha256: values[0], sizeBytes, rows };
+}
+
+function postgresCanonicalFileDigest(container, database, user, sql, label) {
+  const script = [
+    "set -eu",
+    'work="$(mktemp)"',
+    'trap \'rm -f "$work"\' EXIT HUP INT TERM',
+    `psql -X -U ${shellQuote(user)} -d ${shellQuote(database)} -v ON_ERROR_STOP=1 -qAt -c ${shellQuote(sql)} > "$work"`,
+    'sha256sum "$work" | awk \'{print $1}\'',
+    'wc -c < "$work" | tr -d \' \'',
+    'wc -l < "$work" | tr -d \' \'',
+  ].join("\n");
+  return parseCanonicalFileDigest(dockerExecOutput(container, ["sh", "-ec", script]), label);
+}
+
+function postgresCanonicalSchemaDigest(container, database, user) {
+  const script = [
+    "set -eu",
+    'raw="$(mktemp)"',
+    'work="$(mktemp)"',
+    'trap \'rm -f "$raw" "$work"\' EXIT HUP INT TERM',
+    `pg_dump -U ${shellQuote(user)} -d ${shellQuote(database)} --schema-only --no-owner --no-acl --quote-all-identifiers --file="$raw"`,
+    "sed -e '/^\\\\restrict /d' -e '/^\\\\unrestrict /d' -e '/^-- Dumped /d' \"$raw\" > \"$work\"",
+    'sha256sum "$work" | awk \'{print $1}\'',
+    'wc -c < "$work" | tr -d \' \'',
+    'wc -l < "$work" | tr -d \' \'',
+  ].join("\n");
+  return parseCanonicalFileDigest(dockerExecOutput(container, ["sh", "-ec", script]), "PostgreSQL canonical structure");
+}
+
+function decodeHexIdentifier(value, label) {
+  const encoded = String(value ?? "");
+  if (!encoded || encoded.length % 2 !== 0 || !/^[a-f0-9]+$/i.test(encoded)) fail(`Invalid ${label} identifier encoding.`);
+  const decoded = Buffer.from(encoded, "hex").toString("utf8");
+  if (!decoded || Buffer.from(decoded, "utf8").toString("hex") !== encoded.toLowerCase()) fail(`Invalid ${label} UTF-8 identifier.`);
+  return decoded;
+}
+
+function postgresRelationIdentities(container, database, user, relkinds) {
+  const kindList = relkinds.map((kind) => sqlString(kind)).join(",");
+  const query = [
+    "select encode(convert_to(n.nspname,'UTF8'),'hex') || ':' || encode(convert_to(c.relname,'UTF8'),'hex')",
+    "from pg_catalog.pg_class c",
+    "join pg_catalog.pg_namespace n on n.oid = c.relnamespace",
+    `where c.relkind in (${kindList})`,
+    "and n.nspname not in ('pg_catalog','information_schema')",
+    "and n.nspname !~ '^pg_toast' and n.nspname !~ '^pg_temp_'",
+    'order by n.nspname collate "C", c.relname collate "C"',
+  ].join(" ");
+  const outputText = postgresOut(container, database, user, query);
+  return outputText.split(/\r?\n/).filter(Boolean).map((line) => {
+    const parts = line.split(":");
+    if (parts.length !== 2) fail("PostgreSQL catalog returned a malformed relation identity.");
+    return {
+      schemaHex: parts[0].toLowerCase(),
+      relationHex: parts[1].toLowerCase(),
+      schema: decodeHexIdentifier(parts[0], "PostgreSQL schema"),
+      relation: decodeHexIdentifier(parts[1], "PostgreSQL relation"),
+    };
+  });
+}
+
+function postgresSemanticFingerprint(container, database, user) {
+  const structure = postgresCanonicalSchemaDigest(container, database, user);
+  const relations = postgresRelationIdentities(container, database, user, ["r", "m"]).map((identity) => {
+    const qualified = `${sqlIdentifier(identity.schema)}.${sqlIdentifier(identity.relation)}`;
+    const sql = [
+      "set timezone = 'UTC'",
+      "set datestyle = 'ISO, YMD'",
+      "set intervalstyle = 'postgres'",
+      "set extra_float_digits = 3",
+      "set search_path = pg_catalog",
+      `copy (select to_jsonb(platform_row)::text from ${qualified} as platform_row order by to_jsonb(platform_row)::text collate \"C\") to stdout`,
+    ].join("; ");
+    const digest = postgresCanonicalFileDigest(container, database, user, sql, `PostgreSQL row data for ${identity.schema}.${identity.relation}`);
+    return { schemaHex: identity.schemaHex, relationHex: identity.relationHex, ...digest };
+  });
+  const sequences = postgresRelationIdentities(container, database, user, ["S"]).map((identity) => {
+    const qualified = `${sqlIdentifier(identity.schema)}.${sqlIdentifier(identity.relation)}`;
+    const state = postgresOut(container, database, user, `select last_value::text || ':' || is_called::text from ${qualified}`);
+    if (!/^-?\d+:(?:t|f)$/.test(state)) fail(`PostgreSQL sequence ${identity.schema}.${identity.relation} returned invalid state.`);
+    return { schemaHex: identity.schemaHex, relationHex: identity.relationHex, state };
+  });
+  const largeObjects = postgresCanonicalFileDigest(container, database, user, [
+    "copy (",
+    "select m.oid::text, coalesce(l.pageno, -1)::text, coalesce(encode(l.data, 'hex'), '')",
+    "from pg_catalog.pg_largeobject_metadata m",
+    "left join pg_catalog.pg_largeobject l on l.loid = m.oid",
+    "order by m.oid, l.pageno",
+    ") to stdout",
+  ].join(" "), "PostgreSQL large objects");
+  const components = {
+    structureSha256: structure.sha256,
+    rowDataSha256: comparatorSha256(relations),
+    sequencesSha256: comparatorSha256(sequences),
+    largeObjectsSha256: largeObjects.sha256,
+    schemaBytes: structure.sizeBytes,
+    schemaLines: structure.rows,
+    relationCount: relations.length,
+    rowCount: relations.reduce((total, relation) => total + relation.rows, 0),
+    sequenceCount: sequences.length,
+    largeObjectRows: largeObjects.rows,
+    largeObjectBytes: largeObjects.sizeBytes,
+  };
+  return { ...components, combinedSha256: comparatorSha256({ version: databaseRestoreComparatorVersion, engine: "postgres", ...components }) };
+}
+
+function semanticComparatorReceipt(engine, firstRestore, secondRestore) {
+  const componentNames = engine === "postgres"
+    ? ["structureSha256", "rowDataSha256", "sequencesSha256", "largeObjectsSha256"]
+    : ["schemaSetSha256", "structureSha256", "rowDataSha256"];
+  const components = Object.fromEntries(componentNames.map((name) => [name, {
+    firstRestore: firstRestore[name] ?? null,
+    secondRestore: secondRestore[name] ?? null,
+    matched: firstRestore[name] === secondRestore[name],
+  }]));
+  const matched = canonicalComparatorJson(firstRestore) === canonicalComparatorJson(secondRestore);
+  return {
+    version: databaseRestoreComparatorVersion,
+    engine,
+    algorithm: "sha256",
+    scope: "same-artifact-independent-double-restore",
+    matched,
+    firstRestoreSha256: firstRestore.combinedSha256,
+    secondRestoreSha256: secondRestore.combinedSha256,
+    firstRestore,
+    secondRestore,
+    components,
+  };
+}
+
+function evidencePostgresRestoreSandboxPlan({ image, containerName, backupMount, databaseName }) {
+  if (!typedEvidenceInvocation) {
+    return postgresRestoreSandboxPlan({ image, containerName, backupMount, databaseName });
+  }
+  if (typedEvidenceInvocation.action !== "RESTORE_POSTGRES" || image !== process.env.POSTGRES_RESTORE_TEST_IMAGE
+      || !typedEvidenceImageIdPattern.test(image)
+      || !typedEvidenceDisposableName("RESTORE_POSTGRES", containerName)
+      || backupMount !== `${argv.backupFile}:/restore/input.dump:ro`
+      || databaseName !== "platform_restore_test") {
+    fail("Typed PostgreSQL restore sandbox plan differs from the exact root-bound action.");
+  }
+  const role = "restore_runner";
+  return {
+    containerName,
+    database: databaseName,
+    role,
+    dockerRunArgs: [
+      "run", "-d", "--name", containerName,
+      "--network", "none",
+      "--read-only",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges:true",
+      "--pids-limit", "256",
+      "--memory", "1g",
+      "--cpus", "1",
+      "--user", "postgres",
+      "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,noexec,mode=1777,size=768m",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=128m",
+      "--tmpfs", "/var/run/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=16m",
+      "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+      "-e", "PGDATA=/var/lib/postgresql/data/pgdata",
+      "-v", backupMount,
+      image,
+    ],
+    bootstrapSql: [
+      `create role ${role} login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;`,
+      `create database ${databaseName} owner ${role};`,
+    ].join(" "),
+    restoreArgs: ["pg_restore", "-U", role, "-d", databaseName, "--no-owner", "--no-acl", "--exit-on-error", "/restore/input.dump"],
+  };
+}
+
+async function restorePostgresArtifactSandbox({ container, plan, minimumTables, countAllUserTables, schemaName, activeContainers }) {
+  log(`Starting isolated PostgreSQL restore sandbox '${container}'...`);
+  run("docker", plan.dockerRunArgs, { capture: true });
+  activeContainers.add(container);
+  let ready = false;
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    const probe = dockerExec(container, ["pg_isready", "-U", "postgres", "-d", "postgres"], { capture: true, allowFailure: true });
+    if (probe.status === 0) {
+      ready = true;
+      break;
+    }
+    await sleep(500);
+  }
+  if (!ready) fail("Isolated PostgreSQL restore sandbox did not become ready.");
+  dockerExec(container, ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", plan.bootstrapSql]);
+  dockerExec(container, plan.restoreArgs);
+  const tableQuery = countAllUserTables
+    ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
+    : `select count(*) from information_schema.tables where table_schema = ${sqlString(schemaName)};`;
+  const tables = Number(postgresOut(container, plan.database, plan.role, tableQuery));
+  if (!Number.isSafeInteger(tables) || tables < minimumTables) {
+    fail(`Restore test produced too few ${countAllUserTables ? "user" : schemaName} tables: ${tables}`);
+  }
+  return {
+    tables,
+    fingerprint: postgresSemanticFingerprint(container, plan.database, plan.role),
+  };
+}
+
 async function restoreTestPostgres(options = {}) {
+  v1EvidenceReceiptEnabled();
   const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
   if (!backupFileArg) {
     fail("Provide --backupFile <path>.");
@@ -10978,45 +11784,56 @@ async function restoreTestPostgres(options = {}) {
   const schemaName = requestedSchema ? sqlIdentifierName(requestedSchema, "PostgreSQL restore schema") : "";
   const countAllUserTables = !schemaName || options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
   const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 1, "--minimumTables", 1);
-  const backupFile = resolveInside(backupsRoot, path.resolve(backupFileArg));
+  const backupFile = resolveRestoreTestArtifact(backupFileArg, "restore-test-postgres");
   const startedAt = new Date();
   const { hash } = verifyBackupArtifact(backupFile);
   const image = options.image ?? argv.image ?? process.env.POSTGRES_RESTORE_TEST_IMAGE ?? process.env.POSTGRES_IMAGE ?? defaultPostgresRestoreImage;
-  const sandboxContainer = `platform-postgres-restore-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  const plan = postgresRestoreSandboxPlan({
+  const sandboxPrefix = `platform-postgres-restore-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+  const firstSandboxContainer = `${sandboxPrefix}-a`;
+  const secondSandboxContainer = `${sandboxPrefix}-b`;
+  const firstPlan = evidencePostgresRestoreSandboxPlan({
     image,
-    containerName: sandboxContainer,
+    containerName: firstSandboxContainer,
     backupMount: `${hostPathForContainerMount(backupFile)}:/restore/input.dump:ro`,
     databaseName: testDatabase,
   });
-  let sandboxStarted = false;
+  const secondPlan = evidencePostgresRestoreSandboxPlan({
+    image,
+    containerName: secondSandboxContainer,
+    backupMount: `${hostPathForContainerMount(backupFile)}:/restore/input.dump:ro`,
+    databaseName: testDatabase,
+  });
+  const activeContainers = new Set();
+  let semanticComparator = null;
+  let tables = 0;
   try {
-    log(`Starting isolated PostgreSQL restore sandbox '${sandboxContainer}'...`);
-    run("docker", plan.dockerRunArgs, { capture: true });
-    sandboxStarted = true;
-    let ready = false;
-    for (let attempt = 0; attempt < 90; attempt += 1) {
-      const probe = dockerExec(sandboxContainer, ["pg_isready", "-U", "postgres", "-d", "postgres"], { capture: true, allowFailure: true });
-      if (probe.status === 0) {
-        ready = true;
-        break;
-      }
-      await sleep(500);
-    }
-    if (!ready) fail("Isolated PostgreSQL restore sandbox did not become ready.");
-    dockerExec(sandboxContainer, ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", plan.bootstrapSql]);
-    dockerExec(sandboxContainer, plan.restoreArgs);
-    const tableQuery = countAllUserTables
-      ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
-      : `select count(*) from information_schema.tables where table_schema = ${sqlString(schemaName)};`;
-    const tables = Number(postgresOut(sandboxContainer, plan.database, plan.role, tableQuery));
-    if (tables < minimumTables) {
-      fail(`Restore test produced too few ${countAllUserTables ? "user" : schemaName} tables: ${tables}`);
+    const firstRestore = await restorePostgresArtifactSandbox({
+      container: firstSandboxContainer,
+      plan: firstPlan,
+      minimumTables,
+      countAllUserTables,
+      schemaName,
+      activeContainers,
+    });
+    run("docker", ["rm", "-f", firstSandboxContainer], { capture: true });
+    activeContainers.delete(firstSandboxContainer);
+    const secondRestore = await restorePostgresArtifactSandbox({
+      container: secondSandboxContainer,
+      plan: secondPlan,
+      minimumTables,
+      countAllUserTables,
+      schemaName,
+      activeContainers,
+    });
+    tables = secondRestore.tables;
+    semanticComparator = semanticComparatorReceipt("postgres", firstRestore.fingerprint, secondRestore.fingerprint);
+    if (!semanticComparator.matched) {
+      fail(`PostgreSQL independent restore mismatch: first=${semanticComparator.firstRestoreSha256} second=${semanticComparator.secondRestoreSha256}`);
     }
     recordBackupRestoreRun({
-      container: sandboxContainer,
+      container: secondSandboxContainer,
       database: sourceDatabase,
-      user: plan.role,
+      user: secondPlan.role,
       operation: "restore_test",
       status: "success",
       artifactPath: backupFile,
@@ -11027,21 +11844,35 @@ async function restoreTestPostgres(options = {}) {
         restoredSchema: countAllUserTables ? "all-user-schemas" : schemaName,
         testDatabase,
         sourceContainer,
-        isolation: "disposable-network-none",
+        isolation: "two-sequential-disposable-network-none-restores",
         liveSourceTouched: false,
+        semanticComparator,
       },
     });
     log(`Restore test passed with ${tables} ${countAllUserTables ? "user" : schemaName} tables.`);
-    return { backupFile, hash, tables, testDatabase, container: sandboxContainer, database: sourceDatabase, user: plan.role, liveSourceTouched: false };
+    emitV1EvidenceReceipt("restore-test-postgres", hash, semanticComparator, { restoredTables: tables });
+    return {
+      backupFile,
+      hash,
+      tables,
+      testDatabase,
+      container: secondSandboxContainer,
+      database: sourceDatabase,
+      user: secondPlan.role,
+      liveSourceTouched: false,
+      semanticComparator,
+      firstRestoreComparatorSha256: semanticComparator.firstRestoreSha256,
+      secondRestoreComparatorSha256: semanticComparator.secondRestoreSha256,
+    };
   } catch (error) {
     try {
-      recordBackupRestoreRun({ container: sandboxContainer, database: sourceDatabase, user: plan.role, operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase, sourceContainer, isolation: "disposable-network-none", liveSourceTouched: false } });
+      recordBackupRestoreRun({ container: secondSandboxContainer, database: sourceDatabase, user: secondPlan.role, operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase, sourceContainer, isolation: "two-sequential-disposable-network-none-restores", liveSourceTouched: false, semanticComparator } });
     } catch {
       // Preserve the original restore-test failure.
     }
     throw error;
   } finally {
-    if (sandboxStarted) run("docker", ["rm", "-f", sandboxContainer], { capture: true, allowFailure: true });
+    for (const container of activeContainers) run("docker", ["rm", "-f", container], { capture: true, allowFailure: true });
   }
 }
 
@@ -11066,6 +11897,25 @@ async function backupRestoreDrill() {
   log(`Backup/restore drill recorded restore_test success for ${path.basename(backup.hostPath)}.`);
 }
 
+function mariadbBackupProgram(containerPath, database = "") {
+  const databaseSelection = database
+    ? `DATABASES=${shellQuote(database)}`
+    : 'DATABASES="$(mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "select schema_name from information_schema.schemata where schema_name not in (\'information_schema\',\'mysql\',\'performance_schema\',\'sys\') order by schema_name")"';
+  return [
+    "test -s /run/secrets/mariadb_root_password",
+    'MARIADB_ROOT_PASSWORD="$(cat /run/secrets/mariadb_root_password)"',
+    databaseSelection,
+    'test -n "$DATABASES"',
+    `mariadb-dump --single-transaction --routines --events --triggers --databases $DATABASES -uroot -p"$MARIADB_ROOT_PASSWORD" | gzip -9 > ${shellQuote(containerPath)}`,
+  ].join(" && ");
+}
+
+function mariadbBackupProgramFromScript(script) {
+  const match = String(script ?? "").match(/ > '(\/tmp\/mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz)'$/);
+  if (!match) return null;
+  return script === mariadbBackupProgram(match[1]) ? match[1] : null;
+}
+
 async function backupMariadb(options = {}) {
   const container = options.container ?? argv.container ?? "mariadb";
   const requestedDatabase = options.database ?? argv.database ?? "";
@@ -11080,19 +11930,10 @@ async function backupMariadb(options = {}) {
 
   try {
     log(database ? `Creating MariaDB backup for exact database '${database}'...` : "Creating MariaDB full backup for all local PHP project databases...");
-    const databaseSelection = database
-      ? `DATABASES=${shellQuote(database)}`
-      : 'DATABASES="$(mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "select schema_name from information_schema.schemata where schema_name not in (\'information_schema\',\'mysql\',\'performance_schema\',\'sys\') order by schema_name")"';
     dockerExec(container, [
       "sh",
       "-ec",
-      [
-        "test -s /run/secrets/mariadb_root_password",
-        'MARIADB_ROOT_PASSWORD="$(cat /run/secrets/mariadb_root_password)"',
-        databaseSelection,
-        'test -n "$DATABASES"',
-        `mariadb-dump --single-transaction --routines --events --triggers --databases $DATABASES -uroot -p"$MARIADB_ROOT_PASSWORD" | gzip -9 > ${shellQuote(containerPath)}`,
-      ].join(" && "),
+      mariadbBackupProgram(containerPath, database),
     ]);
     run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
@@ -11161,51 +12002,230 @@ async function backupMariadb(options = {}) {
   }
 }
 
+function mariadbIdentifier(value) {
+  return `\`${String(value).replaceAll("`", "``")}\``;
+}
+
+function mariadbQueryOutput(container, sql) {
+  const script = [
+    "set -eu",
+    ': "${MARIADB_ROOT_PASSWORD:?missing disposable MariaDB root password}"',
+    `mariadb --batch --skip-column-names --raw -uroot -p"$MARIADB_ROOT_PASSWORD" -e ${shellQuote(sql)}`,
+  ].join("\n");
+  return dockerExecOutput(container, ["sh", "-ec", script]);
+}
+
+function mariadbUserSchemas(container) {
+  const sql = [
+    "select hex(schema_name)",
+    "from information_schema.schemata",
+    "where schema_name not in ('information_schema','mysql','performance_schema','sys')",
+    "order by binary schema_name",
+  ].join(" ");
+  return mariadbQueryOutput(container, sql).split(/\r?\n/).filter(Boolean).map((schemaHex) => ({
+    schemaHex: schemaHex.toLowerCase(),
+    schema: decodeHexIdentifier(schemaHex, "MariaDB schema"),
+  }));
+}
+
+function mariadbCanonicalFileDigest(container, sql, { label }) {
+  const script = [
+    "set -eu",
+    ': "${MARIADB_ROOT_PASSWORD:?missing disposable MariaDB root password}"',
+    'work="$(mktemp)"',
+    'trap \'rm -f "$work"\' EXIT HUP INT TERM',
+    `mariadb --batch --skip-column-names --raw -uroot -p"$MARIADB_ROOT_PASSWORD" -e ${shellQuote(sql)} > "$work"`,
+    'sha256sum "$work" | awk \'{print $1}\'',
+    'wc -c < "$work" | tr -d \' \'',
+    'wc -l < "$work" | tr -d \' \'',
+  ].join("\n");
+  return parseCanonicalFileDigest(dockerExecOutput(container, ["sh", "-ec", script]), label);
+}
+
+function mariadbCanonicalStructureDigest(container, schemas) {
+  if (!schemas.length) fail("MariaDB canonical structure requires at least one user schema.");
+  const databaseArgs = schemas.map((schema) => shellQuote(schema)).join(" ");
+  const script = [
+    "set -eu",
+    ': "${MARIADB_ROOT_PASSWORD:?missing disposable MariaDB root password}"',
+    'work="$(mktemp)"',
+    'trap \'rm -f "$work"\' EXIT HUP INT TERM',
+    `mariadb-dump --no-data --routines --events --triggers --single-transaction --skip-comments --skip-dump-date --skip-lock-tables -uroot -p"$MARIADB_ROOT_PASSWORD" --databases ${databaseArgs} > "$work"`,
+    'sha256sum "$work" | awk \'{print $1}\'',
+    'wc -c < "$work" | tr -d \' \'',
+    'wc -l < "$work" | tr -d \' \'',
+  ].join("\n");
+  return parseCanonicalFileDigest(dockerExecOutput(container, ["sh", "-ec", script]), "MariaDB canonical structure");
+}
+
+function mariadbRelationIdentities(container, schemas) {
+  const schemaList = schemas.map((schema) => sqlString(schema)).join(",");
+  const sql = [
+    "select concat(hex(table_schema), ':', hex(table_name))",
+    "from information_schema.tables",
+    `where table_schema in (${schemaList})`,
+    "and table_type in ('BASE TABLE','SEQUENCE')",
+    "order by binary table_schema, binary table_name",
+  ].join(" ");
+  return mariadbQueryOutput(container, sql).split(/\r?\n/).filter(Boolean).map((line) => {
+    const parts = line.split(":");
+    if (parts.length !== 2) fail("MariaDB catalog returned a malformed relation identity.");
+    return {
+      schemaHex: parts[0].toLowerCase(),
+      relationHex: parts[1].toLowerCase(),
+      schema: decodeHexIdentifier(parts[0], "MariaDB schema"),
+      relation: decodeHexIdentifier(parts[1], "MariaDB relation"),
+    };
+  });
+}
+
+function mariadbColumnNames(container, identity) {
+  const sql = [
+    "select hex(column_name)",
+    "from information_schema.columns",
+    `where table_schema = ${sqlString(identity.schema)} and table_name = ${sqlString(identity.relation)}`,
+    "order by ordinal_position",
+  ].join(" ");
+  const columns = mariadbQueryOutput(container, sql).split(/\r?\n/).filter(Boolean)
+    .map((columnHex) => decodeHexIdentifier(columnHex, "MariaDB column"));
+  if (!columns.length) fail(`MariaDB relation ${identity.schema}.${identity.relation} has no canonical columns.`);
+  return columns;
+}
+
+function mariadbSemanticFingerprint(container, schemaIdentities) {
+  const schemaNames = schemaIdentities.map((entry) => entry.schema);
+  const structure = mariadbCanonicalStructureDigest(container, schemaNames);
+  const relations = mariadbRelationIdentities(container, schemaNames).map((identity) => {
+    const columns = mariadbColumnNames(container, identity);
+    const encodedColumns = columns.map((column) => {
+      const identifier = mariadbIdentifier(column);
+      return `if(${identifier} is null,'N',concat('V',lpad(octet_length(${identifier}),20,'0'),':',hex(${identifier})))`;
+    });
+    const qualified = `${mariadbIdentifier(identity.schema)}.${mariadbIdentifier(identity.relation)}`;
+    const sql = [
+      "set time_zone = '+00:00'",
+      `select platform_row from (select concat_ws('|',${encodedColumns.join(",")}) as platform_row from ${qualified}) platform_rows order by binary platform_row`,
+    ].join("; ");
+    const digest = mariadbCanonicalFileDigest(container, sql, {
+      label: `MariaDB row data for ${identity.schema}.${identity.relation}`,
+    });
+    return { schemaHex: identity.schemaHex, relationHex: identity.relationHex, columnCount: columns.length, ...digest };
+  });
+  const components = {
+    schemaSetSha256: comparatorSha256(schemaIdentities.map((entry) => entry.schemaHex)),
+    structureSha256: structure.sha256,
+    rowDataSha256: comparatorSha256(relations),
+    schemaCount: schemaIdentities.length,
+    schemaBytes: structure.sizeBytes,
+    schemaLines: structure.rows,
+    relationCount: relations.length,
+    rowCount: relations.reduce((total, relation) => total + relation.rows, 0),
+  };
+  return { ...components, combinedSha256: comparatorSha256({ version: databaseRestoreComparatorVersion, engine: "mariadb", ...components }) };
+}
+
+async function restoreMariadbArtifactSandbox({
+  container,
+  image,
+  rootPassword,
+  backupFile,
+  containerPath,
+  minSchemas,
+  expectedDatabase,
+  activeContainers,
+}) {
+  log(`Starting disposable MariaDB restore-test container '${container}'...`);
+  run("docker", ["rm", "-f", "-v", container], { allowFailure: true, capture: true });
+  run("docker", [
+    "run", "-d", "--name", container, "--network", "none",
+    "--tmpfs", "/var/lib/mysql:rw,nosuid,nodev,noexec,size=2g,mode=0700",
+    "--tmpfs", "/run/mysqld:rw,nosuid,nodev,noexec,size=64m,mode=0755",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777",
+    "-e", `MARIADB_ROOT_PASSWORD=${rootPassword}`, image,
+  ], { capture: true });
+  activeContainers.add(container);
+
+  let healthy = false;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const probe = dockerExec(container, ["sh", "-ec", 'mariadb-admin ping -h 127.0.0.1 -uroot -p"$MARIADB_ROOT_PASSWORD" --silent'], { allowFailure: true, capture: true });
+    if (probe.status === 0) {
+      healthy = true;
+      break;
+    }
+    await sleep(1000);
+  }
+  if (!healthy) fail("Disposable MariaDB restore-test container did not become ready.");
+
+  run("docker", ["cp", backupFile, `${container}:${containerPath}`]);
+  dockerExec(container, ["sh", "-ec", `gzip -t ${shellQuote(containerPath)} && gzip -dc ${shellQuote(containerPath)} | mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"`]);
+  const schemas = mariadbUserSchemas(container);
+  if (schemas.length < minSchemas) fail(`MariaDB restore test produced too few user schemas: ${schemas.length}`);
+  if (expectedDatabase && (schemas.length !== 1 || schemas[0].schema !== expectedDatabase)) {
+    fail(`MariaDB restore test did not recreate only the expected database '${expectedDatabase}'.`);
+  }
+  const tableSql = "select count(*) from information_schema.tables where table_schema not in ('information_schema','mysql','performance_schema','sys')";
+  const tableCount = Number(mariadbQueryOutput(container, tableSql));
+  if (!Number.isSafeInteger(tableCount) || tableCount < 0) fail("MariaDB restore test returned an invalid table count.");
+  return {
+    schemaCount: schemas.length,
+    tableCount,
+    fingerprint: mariadbSemanticFingerprint(container, schemas),
+  };
+}
+
 async function restoreTestMariadb(options = {}) {
+  v1EvidenceReceiptEnabled();
   const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
   if (!backupFileArg) {
     fail("Provide --backupFile <path>.");
   }
   const sourceContainer = options.container ?? argv.container ?? "mariadb";
-  const backupFile = resolveInside(backupRootPath(), path.resolve(backupFileArg));
+  const backupFile = resolveRestoreTestArtifact(backupFileArg, "restore-test-mariadb");
   const fileName = path.basename(backupFile);
   const containerPath = `/tmp/${fileName}`;
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const drillContainer = options.drillContainer ?? argv.drillContainer ?? `platform-mariadb-restore-test-${suffix}`;
+  const firstDrillContainer = `${drillContainer}-a`;
+  const secondDrillContainer = `${drillContainer}-b`;
   const image = options.image ?? argv.image ?? output("docker", ["inspect", "--format={{.Config.Image}}", sourceContainer]);
-  const rootPassword = `restore_${crypto.randomBytes(18).toString("base64url")}`;
   const minSchemas = positiveInteger(options.minSchemas ?? argv.minSchemas ?? 3, "--minSchemas", 1);
+  const requestedDatabase = options.database ?? argv.database ?? "";
+  const expectedDatabase = requestedDatabase ? sqlIdentifierName(requestedDatabase, "MariaDB restore database") : "";
   const startedAt = new Date();
   const { hash } = verifyBackupArtifact(backupFile);
   let schemaCount = 0;
   let tableCount = 0;
+  let semanticComparator = null;
+  const activeContainers = new Set();
 
   try {
-    log(`Starting disposable MariaDB restore-test container '${drillContainer}'...`);
-    run("docker", ["rm", "-f", drillContainer], { allowFailure: true, capture: true });
-    run("docker", ["run", "-d", "--name", drillContainer, "--network", "none", "-e", `MARIADB_ROOT_PASSWORD=${rootPassword}`, image], { capture: true });
-
-    let healthy = false;
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const probe = dockerExec(drillContainer, ["sh", "-ec", 'mariadb-admin ping -h 127.0.0.1 -uroot -p"$MARIADB_ROOT_PASSWORD" --silent'], { allowFailure: true, capture: true });
-      if (probe.status === 0) {
-        healthy = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    if (!healthy) {
-      fail("Disposable MariaDB restore-test container did not become ready.");
-    }
-
-    run("docker", ["cp", backupFile, `${drillContainer}:${containerPath}`]);
-    dockerExec(drillContainer, ["sh", "-ec", `gzip -dc ${shellQuote(containerPath)} | mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"`]);
-    const schemaSql = "select count(*) from information_schema.schemata where schema_name not in ('information_schema','mysql','performance_schema','sys')";
-    const tableSql = "select count(*) from information_schema.tables where table_schema not in ('information_schema','mysql','performance_schema','sys')";
-    schemaCount = Number(dockerExecOutput(drillContainer, ["sh", "-ec", `mariadb -N -uroot -p"$MARIADB_ROOT_PASSWORD" -e ${shellQuote(schemaSql)}`]).trim());
-    tableCount = Number(dockerExecOutput(drillContainer, ["sh", "-ec", `mariadb -N -uroot -p"$MARIADB_ROOT_PASSWORD" -e ${shellQuote(tableSql)}`]).trim());
-    if (schemaCount < minSchemas) {
-      fail(`MariaDB restore test produced too few user schemas: ${schemaCount}`);
+    const firstRestore = await restoreMariadbArtifactSandbox({
+      container: firstDrillContainer,
+      image,
+      rootPassword: `restore_${crypto.randomBytes(18).toString("base64url")}`,
+      backupFile,
+      containerPath,
+      minSchemas,
+      expectedDatabase,
+      activeContainers,
+    });
+    run("docker", ["rm", "-f", "-v", firstDrillContainer], { capture: true });
+    activeContainers.delete(firstDrillContainer);
+    const secondRestore = await restoreMariadbArtifactSandbox({
+      container: secondDrillContainer,
+      image,
+      rootPassword: `restore_${crypto.randomBytes(18).toString("base64url")}`,
+      backupFile,
+      containerPath,
+      minSchemas,
+      expectedDatabase,
+      activeContainers,
+    });
+    schemaCount = secondRestore.schemaCount;
+    tableCount = secondRestore.tableCount;
+    semanticComparator = semanticComparatorReceipt("mariadb", firstRestore.fingerprint, secondRestore.fingerprint);
+    if (!semanticComparator.matched) {
+      fail(`MariaDB independent restore mismatch: first=${semanticComparator.firstRestoreSha256} second=${semanticComparator.secondRestoreSha256}`);
     }
     recordDatabaseBackupEvidence({
       engine: "mariadb",
@@ -11215,10 +12235,19 @@ async function restoreTestMariadb(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { restoredSchemas: schemaCount, restoredTables: tableCount, drillContainer },
+      metadata: { restoredSchemas: schemaCount, restoredTables: tableCount, drillContainers: [firstDrillContainer, secondDrillContainer], semanticComparator },
     });
     log(`MariaDB restore test passed with ${schemaCount} user schemas and ${tableCount} user tables.`);
-    return { backupFile, hash, restoredSchemas: schemaCount, restoredTables: tableCount };
+    emitV1EvidenceReceipt("restore-test-mariadb", hash, semanticComparator, { restoredSchemas: schemaCount, restoredTables: tableCount });
+    return {
+      backupFile,
+      hash,
+      restoredSchemas: schemaCount,
+      restoredTables: tableCount,
+      semanticComparator,
+      firstRestoreComparatorSha256: semanticComparator.firstRestoreSha256,
+      secondRestoreComparatorSha256: semanticComparator.secondRestoreSha256,
+    };
   } catch (error) {
     recordDatabaseBackupEvidence({
       engine: "mariadb",
@@ -11228,11 +12257,11 @@ async function restoreTestMariadb(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { error: String(error?.message ?? error), restoredSchemas: schemaCount, restoredTables: tableCount, drillContainer },
+      metadata: { error: String(error?.message ?? error), restoredSchemas: schemaCount, restoredTables: tableCount, drillContainers: [firstDrillContainer, secondDrillContainer], semanticComparator },
     });
     throw error;
   } finally {
-    run("docker", ["rm", "-f", drillContainer], { allowFailure: true, capture: true });
+    for (const container of activeContainers) run("docker", ["rm", "-f", "-v", container], { allowFailure: true, capture: true });
   }
 }
 
@@ -11279,6 +12308,7 @@ async function backupMinio(options = {}) {
     log("Creating MinIO data backup...");
     run("docker", ["cp", `${container}:/data`, hostWorkDir]);
     dockerRun([
+      "--network", "none",
       "-v",
       `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
       "-v",
@@ -11340,13 +12370,191 @@ async function backupMinio(options = {}) {
   }
 }
 
+const minioRestoreComparatorVersion = "platform.minio-restore-tree-comparator/v1";
+const minioVolatileExclusions = Object.freeze([
+  ".minio.sys/tmp/*",
+  ".minio.sys/buckets/.bloomcycle.bin/xl.meta",
+  ".minio.sys/buckets/.usage.json/xl.meta",
+]);
+
+function minioTreeProbeSource() {
+  return String.raw`
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const excludedPaths = [
+  ".minio.sys/tmp/*",
+  ".minio.sys/buckets/.bloomcycle.bin/xl.meta",
+  ".minio.sys/buckets/.usage.json/xl.meta",
+];
+function canonical(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+    && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+async function stableFileFingerprint(file, initial) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || !sameFileIdentity(initial, before)) throw new Error("tree file changed before hashing");
+    const hash = crypto.createHash("sha256");
+    for await (const chunk of fs.createReadStream(file, { fd: descriptor, autoClose: false })) hash.update(chunk);
+    const after = fs.fstatSync(descriptor);
+    const current = fs.lstatSync(file);
+    if (!sameFileIdentity(before, after) || !sameFileIdentity(after, current)) throw new Error("tree file changed while hashing");
+    return { sha256: hash.digest("hex"), sizeBytes: before.size };
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+function isExcluded(relative) {
+  return relative.startsWith(".minio.sys/tmp/")
+    || relative === ".minio.sys/buckets/.bloomcycle.bin/xl.meta"
+    || relative === ".minio.sys/buckets/.usage.json/xl.meta";
+}
+(async () => {
+  const root = "/data";
+  const pending = [root];
+  const entries = [];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const name of fs.readdirSync(directory).sort().reverse()) {
+      const absolute = path.join(directory, name);
+      const stat = fs.lstatSync(absolute);
+      const relative = path.relative(root, absolute).split(path.sep).join("/");
+      if (!relative || relative.startsWith("../")) throw new Error("tree entry escaped data root");
+      if (isExcluded(relative)) continue;
+      if (stat.isSymbolicLink()) throw new Error("tree contains a symbolic link");
+      if (stat.isDirectory()) {
+        entries.push({ path: relative, type: "directory", mode: stat.mode & 0o777, sizeBytes: 0, sha256: null });
+        pending.push(absolute);
+      } else if (stat.isFile()) {
+        const fingerprint = await stableFileFingerprint(absolute, stat);
+        entries.push({ path: relative, type: "file", mode: stat.mode & 0o777, ...fingerprint });
+      } else {
+        throw new Error("tree contains a non-regular entry");
+      }
+    }
+  }
+  entries.sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
+  const fileEntries = entries.filter((entry) => entry.type === "file");
+  process.stdout.write(JSON.stringify({
+    schema: "platform.minio-restore-tree-probe/v1",
+    treeSha256: crypto.createHash("sha256").update(canonical(entries)).digest("hex"),
+    entryCount: entries.length,
+    fileCount: fileEntries.length,
+    directoryCount: entries.length - fileEntries.length,
+    totalFileBytes: fileEntries.reduce((total, entry) => total + entry.sizeBytes, 0),
+    excludedPaths,
+  }) + "\n");
+})().catch((error) => { process.stderr.write(String(error && error.message || error) + "\n"); process.exitCode = 1; });
+`;
+}
+
+function minioMountedDataFingerprint(mountArgs, utilityImage) {
+  const result = dockerRun([
+    "--network", "none",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges:true",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
+    "--entrypoint", "node",
+    ...mountArgs,
+    utilityImage,
+    "-e", minioTreeProbeSource(),
+  ], { capture: true });
+  let payload;
+  try {
+    payload = JSON.parse(String(result.stdout ?? "").trim());
+  } catch (error) {
+    fail(`MinIO tree probe did not emit valid JSON: ${String(error?.message ?? error)}`);
+  }
+  if (payload?.schema !== "platform.minio-restore-tree-probe/v1"
+      || !/^[a-f0-9]{64}$/.test(String(payload.treeSha256 ?? ""))
+      || !["entryCount", "fileCount", "directoryCount", "totalFileBytes"].every((field) => Number.isSafeInteger(payload[field]) && payload[field] >= 0)
+      || payload.entryCount !== payload.fileCount + payload.directoryCount
+      || payload.entryCount < 1
+      || canonicalComparatorJson(payload.excludedPaths) !== canonicalComparatorJson(minioVolatileExclusions)) {
+    fail("MinIO tree probe emitted an invalid durable-tree fingerprint or exclusion set.");
+  }
+  const components = {
+    treeSha256: payload.treeSha256,
+    entryCount: payload.entryCount,
+    fileCount: payload.fileCount,
+    directoryCount: payload.directoryCount,
+    totalFileBytes: payload.totalFileBytes,
+    excludedPaths: [...minioVolatileExclusions],
+  };
+  return { ...components, combinedSha256: comparatorSha256({ version: minioRestoreComparatorVersion, ...components }) };
+}
+
+function minioVolumeFingerprint(volume, utilityImage) {
+  return minioMountedDataFingerprint(["-v", `${volume}:/data:ro`], utilityImage);
+}
+
+function minioLiveSourceFingerprint(container, utilityImage) {
+  return minioMountedDataFingerprint(["--volumes-from", `${container}:ro`], utilityImage);
+}
+
+function extractMinioArtifactVolume({ volume, backupDir, fileName, utilityImage, activeVolumes }) {
+  run("docker", ["volume", "rm", "-f", volume], { allowFailure: true, capture: true });
+  run("docker", ["volume", "create", volume], { capture: true });
+  activeVolumes.add(volume);
+  dockerRun([
+    "--network", "none",
+    "--entrypoint", "sh",
+    "-v", `${volume}:/data`,
+    "-v", `${hostPathForContainerMount(backupDir)}:/backup:ro`,
+    utilityImage,
+    "-ec",
+    `tar -xzf /backup/${shellQuote(fileName)} -C /data && test -d /data/.minio.sys`,
+  ]);
+  return minioVolumeFingerprint(volume, utilityImage);
+}
+
+function minioTreeComparatorReceipt(sourceBefore, restored, sourceAfter) {
+  const sourceStable = canonicalComparatorJson(sourceBefore) === canonicalComparatorJson(sourceAfter);
+  const restoredMatchesSource = canonicalComparatorJson(restored) === canonicalComparatorJson(sourceBefore);
+  return {
+    version: minioRestoreComparatorVersion,
+    engine: "minio",
+    algorithm: "sha256",
+    scope: "stable-live-source-before-after-to-isolated-restored-durable-tree",
+    volatileExclusions: [...minioVolatileExclusions],
+    matched: sourceStable && restoredMatchesSource,
+    sourceStable,
+    restoredMatchesSource,
+    sourceBeforeSha256: sourceBefore.combinedSha256,
+    restoredSha256: restored.combinedSha256,
+    sourceAfterSha256: sourceAfter.combinedSha256,
+    sourceBefore,
+    restored,
+    sourceAfter,
+    components: {
+      treeSha256: {
+        sourceBefore: sourceBefore.treeSha256,
+        restored: restored.treeSha256,
+        sourceAfter: sourceAfter.treeSha256,
+        sourceStable: sourceBefore.treeSha256 === sourceAfter.treeSha256,
+        restoredMatchesSource: restored.treeSha256 === sourceBefore.treeSha256,
+      },
+    },
+  };
+}
+
 async function restoreTestMinio(options = {}) {
+  v1EvidenceReceiptEnabled();
   const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
   if (!backupFileArg) {
     fail("Provide --backupFile <path>.");
   }
   const sourceContainer = options.container ?? argv.container ?? "enterprise-minio";
-  const backupFile = resolveInside(backupRootPath(), path.resolve(backupFileArg));
+  const backupFile = resolveRestoreTestArtifact(backupFileArg, "restore-test-minio");
   const fileName = path.basename(backupFile);
   const backupDir = path.dirname(backupFile);
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -11359,25 +12567,26 @@ async function restoreTestMinio(options = {}) {
   const startedAt = new Date();
   const { hash } = verifyBackupArtifact(backupFile);
   let restoredEntries = 0;
+  let semanticComparator = null;
+  const activeVolumes = new Set();
 
   try {
-    log(`Restoring MinIO backup into disposable volume '${drillVolume}'...`);
+    log(`Capturing the stable live MinIO durable tree and restoring into disposable volume '${drillVolume}'...`);
     run("docker", ["rm", "-f", drillContainer], { allowFailure: true, capture: true });
-    run("docker", ["volume", "rm", "-f", drillVolume], { allowFailure: true, capture: true });
-    run("docker", ["volume", "create", drillVolume], { capture: true });
-    dockerRun([
-      "--name",
-      `${drillContainer}-extract`,
-      "--entrypoint",
-      "sh",
-      "-v",
-      `${drillVolume}:/data`,
-      "-v",
-      `${hostPathForContainerMount(backupDir)}:/backup:ro`,
+    const sourceBefore = minioLiveSourceFingerprint(sourceContainer, utilityImage);
+    const restored = extractMinioArtifactVolume({
+      volume: drillVolume,
+      backupDir,
+      fileName,
       utilityImage,
-      "-ec",
-      `tar -xzf /backup/${shellQuote(fileName)} -C /data && test -d /data/.minio.sys`,
-    ]);
+      activeVolumes,
+    });
+    const sourceAfter = minioLiveSourceFingerprint(sourceContainer, utilityImage);
+    restoredEntries = restored.entryCount;
+    semanticComparator = minioTreeComparatorReceipt(sourceBefore, restored, sourceAfter);
+    if (!semanticComparator.matched) {
+      fail(`MinIO durable-tree restore mismatch or unstable live source: before=${semanticComparator.sourceBeforeSha256} restored=${semanticComparator.restoredSha256} after=${semanticComparator.sourceAfterSha256}`);
+    }
     run("docker", [
       "run",
       "-d",
@@ -11412,18 +12621,6 @@ async function restoreTestMinio(options = {}) {
     if (!healthy) {
       fail("Disposable MinIO restore-test container did not become healthy.");
     }
-    const countResult = dockerRun([
-      "-v",
-      `${drillVolume}:/data:ro`,
-      utilityImage,
-      "sh",
-      "-lc",
-      "find /data -mindepth 1 | wc -l",
-    ], { capture: true });
-    restoredEntries = Number(String(countResult.stdout ?? "").trim());
-    if (!Number.isFinite(restoredEntries) || restoredEntries < 1) {
-      fail("MinIO restore test did not restore any filesystem entries.");
-    }
     recordDatabaseBackupEvidence({
       engine: "minio",
       sourceContainer,
@@ -11432,10 +12629,23 @@ async function restoreTestMinio(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { restoredEntries, drillContainer, drillVolume },
+      metadata: { restoredEntries, drillContainer, drillVolume, semanticComparator, bootHealthy: true },
     });
     log(`MinIO restore test passed with ${restoredEntries} restored filesystem entries.`);
-    return { backupFile, hash, restoredEntries };
+    emitV1EvidenceReceipt("restore-test-minio", hash, semanticComparator, {
+      sourceDurableEntries: semanticComparator.sourceBefore.entryCount,
+      restoredDurableEntries: restoredEntries,
+      bootHealthy: true,
+    });
+    return {
+      backupFile,
+      hash,
+      restoredEntries,
+      semanticComparator,
+      sourceBeforeComparatorSha256: semanticComparator.sourceBeforeSha256,
+      restoredComparatorSha256: semanticComparator.restoredSha256,
+      sourceAfterComparatorSha256: semanticComparator.sourceAfterSha256,
+    };
   } catch (error) {
     recordDatabaseBackupEvidence({
       engine: "minio",
@@ -11445,12 +12655,12 @@ async function restoreTestMinio(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { error: String(error?.message ?? error), restoredEntries, drillContainer, drillVolume },
+      metadata: { error: String(error?.message ?? error), restoredEntries, drillContainer, drillVolume, semanticComparator },
     });
     throw error;
   } finally {
     run("docker", ["rm", "-f", drillContainer], { allowFailure: true, capture: true });
-    run("docker", ["volume", "rm", "-f", drillVolume], { allowFailure: true, capture: true });
+    for (const volume of activeVolumes) run("docker", ["volume", "rm", "-f", volume], { allowFailure: true, capture: true });
   }
 }
 
@@ -11463,6 +12673,55 @@ async function backupRestoreDrillMinio() {
   log(`MinIO backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
 }
 
+function keycloakBackupProgram() {
+  return `
+set -eu
+umask 077
+work="/tmp/platform-keycloak-config-backup"
+archive="/tmp/platform-keycloak-config-backup.tar.gz"
+kcadm_config="/tmp/platform-kcadm-backup.config"
+kcadm_log="/tmp/platform-kcadm-backup.log"
+default_kcadm_config="$HOME/.keycloak/kcadm.config"
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  rm -rf "$work" "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
+  if [ "$status" -ne 0 ]; then rm -f "$archive"; fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+rm -rf "$work"
+rm -f "$archive" "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
+mkdir -p "$work/realms" "$work/import" "$work/runtime"
+KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
+export KC_BOOTSTRAP_ADMIN_PASSWORD
+/opt/keycloak/bin/kcadm.sh config credentials --config "$kcadm_config" --server http://127.0.0.1:8080 --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >"$kcadm_log" 2>&1
+/opt/keycloak/bin/kcadm.sh get realms --config "$kcadm_config" --fields realm,enabled > "$work/realms.json"
+for realm in $(grep -o '"realm"[[:space:]]*:[[:space:]]*"[^"]*"' "$work/realms.json" | sed 's/.*"realm"[[:space:]]*:[[:space:]]*"//; s/".*//'); do
+  safe="$(printf '%s' "$realm" | tr -c 'A-Za-z0-9_.-' '_')"
+  /opt/keycloak/bin/kcadm.sh get "realms/$realm" --config "$kcadm_config" > "$work/realms/\${safe}-realm.json"
+  /opt/keycloak/bin/kcadm.sh get clients --config "$kcadm_config" -r "$realm" > "$work/realms/\${safe}-clients.json"
+  /opt/keycloak/bin/kcadm.sh get roles --config "$kcadm_config" -r "$realm" > "$work/realms/\${safe}-roles.json"
+done
+if [ -d /opt/keycloak/data/import ]; then
+  cp -R /opt/keycloak/data/import/. "$work/import/" 2>/dev/null || true
+fi
+env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime/kc-env-sanitized.txt" || true
+tar -czf "$archive" -C "$work" .
+`;
+}
+
+function keycloakBackupResidueAssertionProgram() {
+  return "test ! -e '/tmp/platform-keycloak-config-backup' && test ! -e '/tmp/platform-kcadm-backup.config' && test ! -e '/tmp/platform-kcadm-backup.log' && test ! -e '/tmp/platform-keycloak-config-backup.tar.gz' && test ! -e \"$HOME/.keycloak/kcadm.config\"";
+}
+
+function keycloakBackupCleanupProgram() {
+  return "rm -rf '/tmp/platform-keycloak-config-backup' '/tmp/platform-keycloak-config-backup.tar.gz' '/tmp/platform-kcadm-backup.config' '/tmp/platform-kcadm-backup.log' \"$HOME/.keycloak/kcadm.config\"";
+}
+
 async function backupKeycloakConfig(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-keycloak";
   const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "keycloak")));
@@ -11470,46 +12729,21 @@ async function backupKeycloakConfig(options = {}) {
   const fileName = `keycloak-config-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
   const stagingPath = backupArtifactStagingPath(hostPath);
-  const stagingFileName = path.basename(stagingPath);
   const containerWorkDir = "/tmp/platform-keycloak-config-backup";
-  const hostWorkParent = makeOpsTempDir("platform-keycloak-config-");
-  const hostWorkDir = path.join(hostWorkParent, "keycloak-config");
-  const backupScript = `
-set -eu
-work="${containerWorkDir}"
-rm -rf "$work"
-mkdir -p "$work/realms" "$work/import" "$work/runtime"
-KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
-export KC_BOOTSTRAP_ADMIN_PASSWORD
-/opt/keycloak/bin/kcadm.sh config credentials --server http://127.0.0.1:8080 --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >/tmp/platform-kcadm-backup.log 2>&1
-/opt/keycloak/bin/kcadm.sh get realms --fields realm,enabled > "$work/realms.json"
-for realm in $(grep -o '"realm"[[:space:]]*:[[:space:]]*"[^"]*"' "$work/realms.json" | sed 's/.*"realm"[[:space:]]*:[[:space:]]*"//; s/".*//'); do
-  safe="$(printf '%s' "$realm" | tr -c 'A-Za-z0-9_.-' '_')"
-  /opt/keycloak/bin/kcadm.sh get "realms/$realm" > "$work/realms/\${safe}-realm.json"
-  /opt/keycloak/bin/kcadm.sh get clients -r "$realm" > "$work/realms/\${safe}-clients.json" || true
-  /opt/keycloak/bin/kcadm.sh get roles -r "$realm" > "$work/realms/\${safe}-roles.json" || true
-done
-if [ -d /opt/keycloak/data/import ]; then
-  cp -R /opt/keycloak/data/import/. "$work/import/" 2>/dev/null || true
-fi
-env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime/kc-env-sanitized.txt" || true
-`;
+  const containerArchivePath = "/tmp/platform-keycloak-config-backup.tar.gz";
+  const containerKcadmConfigPath = "/tmp/platform-kcadm-backup.config";
+  const containerKcadmLogPath = "/tmp/platform-kcadm-backup.log";
+  const backupScript = keycloakBackupProgram();
 
   try {
     log("Creating Keycloak configuration backup...");
-    dockerExec(container, ["sh"], { input: backupScript });
-    run("docker", ["cp", `${container}:${containerWorkDir}`, hostWorkDir]);
-    dockerExec(container, ["rm", "-rf", containerWorkDir]);
-    dockerRun([
-      "-v",
-      `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
-      "-v",
-      `${hostPathForContainerMount(outputDir)}:/backup`,
-      configuredNodeImage(),
-      "sh",
-      "-lc",
-      `tar -czf /backup/${shellQuote(stagingFileName)} -C /work .`,
-    ]);
+    // The V1 reconciler executor deliberately transports argv only.  Keep the
+    // backup program inside the authority-bound exact release and pass it as
+    // one fixed shell argument instead of opening a generic stdin channel.
+    dockerExec(container, ["sh", "-ec", backupScript]);
+    run("docker", ["cp", `${container}:${containerArchivePath}`, stagingPath]);
+    dockerExec(container, ["rm", "-f", containerArchivePath]);
+    dockerExec(container, ["sh", "-ec", keycloakBackupResidueAssertionProgram()]);
 
     const { hash, signature } = publishBackupArtifactWithEvidence({
       stagingPath,
@@ -11536,7 +12770,7 @@ env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime
     return { hostPath, hash, signature, container };
   } catch (error) {
     try {
-      dockerExec(container, ["rm", "-rf", containerWorkDir], { allowFailure: true });
+      dockerExec(container, ["sh", "-ec", keycloakBackupCleanupProgram()], { allowFailure: true });
       recordDatabaseBackupEvidence({
         engine: "keycloak",
         sourceContainer: container,
@@ -11558,18 +12792,144 @@ env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime
       // Preserve the original backup failure.
     }
     throw error;
-  } finally {
-    fs.rmSync(hostWorkParent, { recursive: true, force: true });
   }
 }
 
+const keycloakConfigComparatorVersion = "platform.keycloak-config-restore-semantic-comparator/v1";
+
+function keycloakConfigProbeSource() {
+  return String.raw`
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+const archiveName = process.argv[1];
+const minimumRealms = Number(process.argv[2]);
+if (!/^[A-Za-z0-9._-]+$/.test(archiveName || "") || !Number.isSafeInteger(minimumRealms) || minimumRealms < 1) process.exit(64);
+const work = fs.mkdtempSync("/tmp/keycloak-config-restore-test-");
+function canonical(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
+function sha(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
+try {
+  execFileSync("tar", ["-xzf", "/backup/" + archiveName, "-C", work], { stdio: ["ignore", "pipe", "pipe"] });
+  const files = [];
+  function walk(directory) {
+    for (const name of fs.readdirSync(directory).sort()) {
+      const absolute = path.join(directory, name);
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink()) throw new Error("archive contains a symbolic link");
+      if (stat.isDirectory()) walk(absolute);
+      else if (stat.isFile()) files.push({ absolute, relative: path.relative(work, absolute).split(path.sep).join("/"), mode: stat.mode & 0o777 });
+      else throw new Error("archive contains a non-regular entry");
+    }
+  }
+  walk(work);
+  const jsonFiles = files.filter((entry) => entry.relative.endsWith(".json"));
+  if (!jsonFiles.length) throw new Error("archive has no JSON configuration");
+  const canonicalRecords = [];
+  const rawRecords = [];
+  let totalJsonBytes = 0;
+  let realmsDocument = null;
+  for (const entry of jsonFiles) {
+    const raw = fs.readFileSync(entry.absolute);
+    const parsed = JSON.parse(raw.toString("utf8"));
+    const canonicalText = canonical(parsed);
+    canonicalRecords.push({ path: entry.relative, sha256: sha(canonicalText) });
+    rawRecords.push({ path: entry.relative, sha256: sha(raw) });
+    totalJsonBytes += raw.length;
+    if (entry.relative === "realms.json") realmsDocument = parsed;
+  }
+  if (!Array.isArray(realmsDocument)) throw new Error("realms.json must be an array");
+  const realmCount = realmsDocument.filter((realm) => realm && typeof realm.realm === "string" && realm.realm.length > 0).length;
+  if (realmCount < minimumRealms) throw new Error("archive has too few realms");
+  const treeRecords = files.map((entry) => {
+    const raw = fs.readFileSync(entry.absolute);
+    return { path: entry.relative, mode: entry.mode, sizeBytes: raw.length, sha256: sha(raw) };
+  });
+  process.stdout.write(JSON.stringify({
+    schema: "platform.keycloak-config-restore-probe/v1",
+    realmCount,
+    jsonCount: jsonFiles.length,
+    fileCount: files.length,
+    totalJsonBytes,
+    canonicalContentSha256: sha(canonical(canonicalRecords)),
+    rawJsonSetSha256: sha(canonical(rawRecords)),
+    archiveTreeSha256: sha(canonical(treeRecords)),
+  }) + "\n");
+} finally {
+  fs.rmSync(work, { recursive: true, force: true });
+}
+`;
+}
+
+function keycloakConfigRestoreFingerprint({ backupDir, fileName, image, minRealms }) {
+  const result = dockerRun([
+    "--network", "none",
+    "--read-only",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges:true",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777",
+    "--entrypoint", "node",
+    "-v", `${hostPathForContainerMount(backupDir)}:/backup:ro`,
+    image,
+    "-e", keycloakConfigProbeSource(), fileName, String(minRealms),
+  ], { capture: true });
+  let payload;
+  try {
+    payload = JSON.parse(String(result.stdout ?? "").trim());
+  } catch (error) {
+    fail(`Keycloak restore probe did not emit valid JSON: ${String(error?.message ?? error)}`);
+  }
+  const hashFields = ["canonicalContentSha256", "rawJsonSetSha256", "archiveTreeSha256"];
+  if (payload?.schema !== "platform.keycloak-config-restore-probe/v1"
+      || hashFields.some((field) => !/^[a-f0-9]{64}$/.test(String(payload[field] ?? "")))
+      || !["realmCount", "jsonCount", "fileCount", "totalJsonBytes"].every((field) => Number.isSafeInteger(payload[field]) && payload[field] >= 0)
+      || payload.realmCount < minRealms || payload.jsonCount < 1 || payload.fileCount < payload.jsonCount) {
+    fail("Keycloak restore probe emitted an invalid semantic fingerprint.");
+  }
+  const components = {
+    canonicalContentSha256: payload.canonicalContentSha256,
+    rawJsonSetSha256: payload.rawJsonSetSha256,
+    archiveTreeSha256: payload.archiveTreeSha256,
+    realmCount: payload.realmCount,
+    jsonCount: payload.jsonCount,
+    fileCount: payload.fileCount,
+    totalJsonBytes: payload.totalJsonBytes,
+  };
+  return { ...components, combinedSha256: comparatorSha256({ version: keycloakConfigComparatorVersion, ...components }) };
+}
+
+function keycloakConfigComparatorReceipt(firstRestore, secondRestore) {
+  const componentNames = ["canonicalContentSha256", "rawJsonSetSha256", "archiveTreeSha256"];
+  return {
+    version: keycloakConfigComparatorVersion,
+    engine: "keycloak",
+    algorithm: "sha256",
+    scope: "same-artifact-independent-double-extract-and-parse",
+    matched: canonicalComparatorJson(firstRestore) === canonicalComparatorJson(secondRestore),
+    firstRestoreSha256: firstRestore.combinedSha256,
+    secondRestoreSha256: secondRestore.combinedSha256,
+    firstRestore,
+    secondRestore,
+    components: Object.fromEntries(componentNames.map((name) => [name, {
+      firstRestore: firstRestore[name],
+      secondRestore: secondRestore[name],
+      matched: firstRestore[name] === secondRestore[name],
+    }])),
+  };
+}
+
 async function restoreTestKeycloakConfig(options = {}) {
+  v1EvidenceReceiptEnabled();
   const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
   if (!backupFileArg) {
     fail("Provide --backupFile <path>.");
   }
   const sourceContainer = options.container ?? argv.container ?? "enterprise-keycloak";
-  const backupFile = resolveInside(backupRootPath(), path.resolve(backupFileArg));
+  const backupFile = resolveRestoreTestArtifact(backupFileArg, "restore-test-keycloak");
   const fileName = path.basename(backupFile);
   const backupDir = path.dirname(backupFile);
   const image = options.image ?? argv.image ?? configuredNodeImage();
@@ -11578,33 +12938,18 @@ async function restoreTestKeycloakConfig(options = {}) {
   const { hash } = verifyBackupArtifact(backupFile);
   let realmCount = 0;
   let jsonCount = 0;
+  let semanticComparator = null;
 
   try {
     log("Running Keycloak config restore dry-run...");
-    const result = dockerRun([
-      "--entrypoint",
-      "sh",
-      "-v",
-      `${hostPathForContainerMount(backupDir)}:/backup:ro`,
-      image,
-      "-ec",
-      [
-        "set -eu",
-        "work=/tmp/keycloak-config-restore-test",
-        "rm -rf \"$work\" && mkdir -p \"$work\"",
-        `tar -xzf /backup/${shellQuote(fileName)} -C "$work"`,
-        "test -s \"$work/realms.json\"",
-        "test -d \"$work/realms\"",
-        "realm_count=$(awk -F\\\" '/\"realm\"/ {count += 1} END {print count + 0}' \"$work/realms.json\")",
-        "json_count=$(find \"$work\" -name '*.json' -type f | wc -l)",
-        `test "$realm_count" -ge ${minRealms}`,
-        "find \"$work\" -name '*.json' -type f -exec sh -c 'test -s \"$1\"' sh {} \\;",
-        "printf '%s %s\\n' \"$realm_count\" \"$json_count\"",
-      ].join(" && "),
-    ], { capture: true });
-    const [realmText, jsonText] = String(result.stdout ?? "").trim().split(/\s+/);
-    realmCount = Number(realmText);
-    jsonCount = Number(jsonText);
+    const firstRestore = keycloakConfigRestoreFingerprint({ backupDir, fileName, image, minRealms });
+    const secondRestore = keycloakConfigRestoreFingerprint({ backupDir, fileName, image, minRealms });
+    realmCount = secondRestore.realmCount;
+    jsonCount = secondRestore.jsonCount;
+    semanticComparator = keycloakConfigComparatorReceipt(firstRestore, secondRestore);
+    if (!semanticComparator.matched) {
+      fail(`Keycloak independent restore mismatch: first=${semanticComparator.firstRestoreSha256} second=${semanticComparator.secondRestoreSha256}`);
+    }
     const status = output("docker", ["inspect", "--format", "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", sourceContainer]).trim();
     if (!/^running( healthy)?$/.test(status)) {
       fail(`Source Keycloak container is not healthy after restore dry-run: ${status}`);
@@ -11617,10 +12962,19 @@ async function restoreTestKeycloakConfig(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { realmCount, jsonCount, mode: "config-dry-run" },
+      metadata: { realmCount, jsonCount, mode: "double-isolated-config-extract-and-parse", semanticComparator },
     });
     log(`Keycloak config restore dry-run passed with ${realmCount} realm(s) and ${jsonCount} JSON file(s).`);
-    return { backupFile, hash, realmCount, jsonCount };
+    emitV1EvidenceReceipt("restore-test-keycloak", hash, semanticComparator, { realmCount, jsonCount });
+    return {
+      backupFile,
+      hash,
+      realmCount,
+      jsonCount,
+      semanticComparator,
+      firstRestoreComparatorSha256: semanticComparator.firstRestoreSha256,
+      secondRestoreComparatorSha256: semanticComparator.secondRestoreSha256,
+    };
   } catch (error) {
     recordDatabaseBackupEvidence({
       engine: "keycloak",
@@ -11630,7 +12984,7 @@ async function restoreTestKeycloakConfig(options = {}) {
       artifactPath: backupFile,
       artifactSha256: hash,
       startedAt,
-      metadata: { error: String(error?.message ?? error), realmCount, jsonCount },
+      metadata: { error: String(error?.message ?? error), realmCount, jsonCount, semanticComparator },
     });
     throw error;
   }
@@ -11679,6 +13033,7 @@ async function backupSecretManagerMetadata(options = {}) {
       "",
     ].join("\n"), "utf8");
     dockerRun([
+      "--network", "none",
       "-v",
       `${hostPathForContainerMount(workDir)}:/work:ro`,
       "-v",
@@ -11748,6 +13103,7 @@ async function restoreTestSecretManagerMetadata(options = {}) {
 
   try {
     dockerRun([
+      "--network", "none",
       "-v",
       `${hostPathForContainerMount(backupDir)}:/backup:ro`,
       configuredNodeImage(),

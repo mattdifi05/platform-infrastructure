@@ -20,16 +20,27 @@
   "eventsExpiration": 604800,
   "eventsListeners": ["jboss-logging"],
   "webAuthnPolicyRpEntityName": "Platform",
+  "webAuthnPolicyRpId": "auth.localhost.com",
+  "webAuthnPolicyExtraOrigins": [
+    "https://auth.localhost.com"
+  ],
   "webAuthnPolicyUserVerificationRequirement": "required",
   "webAuthnPolicyRequireResidentKey": "not specified",
   "webAuthnPolicyAuthenticatorAttachment": "not specified",
   "webAuthnPolicyAvoidSameAuthenticatorRegister": true,
   "webAuthnPolicyPasswordlessRpEntityName": "Platform",
+  "webAuthnPolicyPasswordlessRpId": "auth.localhost.com",
+  "webAuthnPolicyPasswordlessExtraOrigins": [
+    "https://auth.localhost.com"
+  ],
   "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
   "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
   "webAuthnPolicyPasswordlessAuthenticatorAttachment": "not specified",
   "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": true,
-  "browserFlow": "platform-passkey-browser",
+  "attributes": {
+    "acr.loa.map": "{\"urn:platform:loa:passkey\":1}"
+  },
+  "browserFlow": "browser",
   "authenticationFlows": [
     {
       "alias": "platform-passkey-browser",
@@ -39,12 +50,54 @@
       "builtIn": false,
       "authenticationExecutions": [
         {
-          "authenticator": "webauthn-authenticator-passwordless",
-          "requirement": "REQUIRED",
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
           "priority": 10,
+          "flowAlias": "platform-passkey-loa",
           "userSetupAllowed": false
         }
       ]
+    },
+    {
+      "alias": "platform-passkey-loa",
+      "description": "Reach passkey LoA 1 with a verified passwordless WebAuthn assertion.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorConfig": "platform-passkey-loa-1",
+          "authenticator": "conditional-level-of-authentication",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorConfig": "platform-passkey-amr-webauthn",
+          "authenticator": "webauthn-authenticator-passwordless",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "platform-passkey-loa-1",
+      "config": {
+        "loa-condition-level": "1",
+        "loa-max-age": "0"
+      }
+    },
+    {
+      "alias": "platform-passkey-amr-webauthn",
+      "config": {
+        "default.reference.value": "webauthn",
+        "default.reference.maxAge": "300"
+      }
     }
   ],
   "clients": [
@@ -71,10 +124,21 @@
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
+      "bearerOnly": false,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "authenticationFlowBindingOverrides": {},
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "basic",
+        "email"
+      ],
       "redirectUris": [
         "https://portal.localhost.com/auth/callback"
       ],
@@ -82,7 +146,10 @@
         "https://portal.localhost.com"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "backchannel.logout.url": "https://portal.localhost.com/auth/backchannel-logout",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.revoke.offline.tokens": "true"
       },
       "protocolMappers": [
         {
@@ -93,6 +160,20 @@
           "config": {
             "id.token.claim": "true",
             "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "platform-realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "user.attribute": "foo"
           }
         }
       ]

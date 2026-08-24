@@ -3,12 +3,8 @@ name: v1-local-private
 on:
   workflow_dispatch:
     inputs:
-      approved_candidate_sha:
-        description: Exact frozen V1 candidate commit to activate in LOCAL_PRIVATE mode
-        required: true
-        type: string
       approved_controller_sha:
-        description: Exact protected-main controller commit approved for LOCAL_PRIVATE activation
+        description: Exact protected-main controller commit approved for LOCAL_PRIVATE contract validation
         required: true
         type: string
 
@@ -18,10 +14,8 @@ permissions:
 jobs:
   activate-v1-local-private:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
-    environment:
-      name: production
     concurrency:
       group: infra-production-deploy
       cancel-in-progress: false
@@ -32,69 +26,31 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
-      - name: Verify frozen candidate approval and exact controller
+      - name: Verify exact protected-main controller checkout
         env:
-          APPROVED_CANDIDATE_SHA: ${{ inputs.approved_candidate_sha }}
           APPROVED_CONTROLLER_SHA: ${{ inputs.approved_controller_sha }}
         run: |
           set -eu
-          test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0
           test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"
           test "$GITHUB_REF" = refs/heads/main
           test "$(git rev-parse --verify 'HEAD^{commit}')" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
-      - name: Install pinned SSH identity
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
-          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
-          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+          git update-ref refs/remotes/github/main "$GITHUB_SHA"
+          test "$(git rev-parse --verify refs/remotes/github/main)" = "$GITHUB_SHA"
+      - name: Validate V1 cutover source contracts without local escrow authority
         run: |
           set -eu
-          umask 077
-          test -n "$DEPLOY_SSH_KEY"
-          test -n "$DEPLOY_SSH_HOST_KEY"
-          test -n "$DEPLOY_REMOTE"
-          test -n "$DEPLOY_SSH_PORT"
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          node ./scripts/pinned-ssh-host-key.mjs render \
-            --remote "$DEPLOY_REMOTE" \
-            --port "$DEPLOY_SSH_PORT" \
-            > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-          node ./scripts/pinned-ssh-host-key.mjs verify \
-            --remote "$DEPLOY_REMOTE" \
-            --port "$DEPLOY_SSH_PORT" \
-            --file ~/.ssh/known_hosts
-      - name: Activate the fixed V1 LOCAL_PRIVATE control plane
-        env:
-          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
-          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+          python3 -m py_compile \
+            scripts/v1-local-private-control.py \
+            scripts/v1-local-private-reconcile.py \
+            scripts/v1-local-private-evidence-producer.py
+          node --check scripts/v1-local-private-control-receipt.mjs
+          node --test --test-concurrency=1 \
+            scripts/v1-local-private-control.test.mjs \
+            scripts/v1-local-private-control.e2e.test.mjs \
+            scripts/v1-local-private-reconcile.test.mjs \
+            scripts/v1-local-private-evidence-producer.test.mjs
+      - name: Stop before cutover without the Mac-only recovery key
         run: |
-          set -eu
-          receipt="${RUNNER_TEMP}/v1-local-private-control-receipt.json"
-          sh ./scripts/deploy-v1-local-private.sh > "$receipt"
-          test -f ./scripts/v1-local-private-control.py
-          test ! -L ./scripts/v1-local-private-control.py
-          test -s ./scripts/v1-local-private-control.py
-          test -f ./systemd/platform-v1-local-private-control.service
-          test ! -L ./systemd/platform-v1-local-private-control.service
-          test -s ./systemd/platform-v1-local-private-control.service
-          controller_sha256="$(sha256sum ./scripts/v1-local-private-control.py | awk '{print $1}')"
-          unit_sha256="$(sha256sum ./systemd/platform-v1-local-private-control.service | awk '{print $1}')"
-          node ./scripts/v1-local-private-control-receipt.mjs verify \
-            --file "$receipt" \
-            --candidateCommit 832bf2baec47055342af7e7f73425444381b91e0 \
-            --candidateTree 91cee2380809cb0691b9ac47cafa2a673d434caa \
-            --sourceArchiveSha256 6eabff5f3fdbb4b129519d23a2dd9864f65477c5f0e1ecb58e1b8a9a79af3007 \
-            --controllerSha256 "$controller_sha256" \
-            --unitSha256 "$unit_sha256"
-      - name: Upload LOCAL_PRIVATE activation receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: v1-local-private-control-receipt-${{ github.run_id }}
-          path: ${{ runner.temp }}/v1-local-private-control-receipt.json
-          if-no-files-found: error
-          retention-days: 30
+          printf '%s\n' 'STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED: run the fixed V1 client on the authorized Mac.' >&2
+          exit 78

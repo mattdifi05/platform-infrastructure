@@ -10,6 +10,9 @@ import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 import {
   coreSemanticPolicyDescriptor,
   evaluateCurrentNoHostedExactAuthority,
+  LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
+  LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY,
+  localPrivateCoreSemanticPolicySha256,
   validateNoHostedCoreAuthority,
 } from "./no-hosted-core-policy.mjs";
 
@@ -24,6 +27,11 @@ const runtimeIsolationConsumer = source.slice(start, end);
 const composeVpsSource = fs.readFileSync(path.join(import.meta.dirname, "compose-vps.sh"), "utf8");
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const canonicalNoHostedLockPath = path.join(repositoryRoot, "config", "no-hosted-workloads.lock.json");
+const canonicalLocalPrivateNoHostedLockPath = path.join(
+  repositoryRoot,
+  "config",
+  "no-hosted-workloads.local-private.lock.json",
+);
 let fixtureRootDirectory = repositoryRoot;
 const protectedKinds = ["configs", "networks", "secrets", "services", "volumes"];
 const requiredCoreEnvironmentLines = [
@@ -143,6 +151,7 @@ function cleanEnvironment(overrides = {}) {
     "HOSTED_WORKLOAD_PREPARE_RESOLVED",
     "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE",
     "PLATFORM_TRUSTED_RELEASE_CONTEXT",
+    "PLATFORM_COMPOSE_VARIANT",
     "PLATFORM_RUNTIME_CANDIDATE_ID",
     "PLATFORM_RUNTIME_COMMIT",
     "PLATFORM_RUNTIME_DEPLOYMENT_ID",
@@ -212,6 +221,10 @@ function createConsumerSandbox() {
   copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
   copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
   const canonicalLock = copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
+  const localPrivateCanonicalLock = copyRepositoryFile(
+    root,
+    "config/no-hosted-workloads.local-private.lock.json",
+  );
   const inventory = structuredClone(expectedCoreInventory);
   const trustedEnvironmentBytes = [
     "HOSTED_WORKLOAD_LOCK=",
@@ -281,6 +294,7 @@ esac
     scripts,
     composeVps,
     canonicalLock,
+    localPrivateCanonicalLock,
     inventory,
     environmentFile,
     workloadLock,
@@ -1411,6 +1425,79 @@ test("VPS wrapper derives a core-only envelope only in explicit canonical no-hos
       /(?:^|\s)(?:build|create|down|exec|kill|pull|push|restart|rm|run|start|stop|up)(?:\s|$)/,
       "read-only semantic envelope reached a mutating Compose subcommand",
     );
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE Compose variant is explicit, no-hosted-only and appended after isolation", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const config = coreAuthorityConfig();
+    writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+
+    const standard = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(standard.status, 0, standard.stderr);
+    const standardArguments = fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8").trim();
+    assert.doesNotMatch(standardArguments, /compose\.local-private\.yaml/);
+
+    const localPrivateConfig = structuredClone(config);
+    localPrivateConfig.secrets.control_center_first_configuration_bootstrap_token = {};
+    localPrivateConfig.secrets.control_center_first_configuration_keycloak_client_secret = {};
+    writeDockerOutput(sandbox, `${JSON.stringify(localPrivateConfig)}\n`);
+    fs.writeFileSync(
+      path.join(sandbox.scripts, "no-hosted-core-policy.mjs"),
+      "process.exit(0);\n",
+    );
+    fs.appendFileSync(sandbox.environmentFile, "PLATFORM_COMPOSE_VARIANT=LOCAL_PRIVATE\n");
+    const localPrivate = runWrapper(sandbox, ["config", "--format", "json"], {
+      PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+    });
+    assert.equal(localPrivate.status, 0, localPrivate.stderr);
+    const localPrivateArguments = fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8").trim();
+    assert.match(
+      localPrivateArguments,
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json$/,
+    );
+    const localPrivateRuntimeIdentity = runWrapper(sandbox, ["config", "--format", "json"], {
+      PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+      PLATFORM_RUNTIME_CANDIDATE_ID: "1".repeat(64),
+      PLATFORM_RUNTIME_COMMIT: "2".repeat(40),
+      PLATFORM_RUNTIME_TREE: "3".repeat(40),
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: "local-private-deployment",
+      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: "4".repeat(64),
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "5".repeat(64),
+    });
+    assert.equal(localPrivateRuntimeIdentity.status, 0, localPrivateRuntimeIdentity.stderr);
+    assert.match(
+      fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8").trim(),
+      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup config --format json$/,
+    );
+
+    const localAppend = composeVpsSource.indexOf("compose+=(-f compose.local-private.yaml)");
+    const runtimeIdentityAppend = composeVpsSource.indexOf("compose+=(-f compose.runtime-identity.yaml)");
+    assert.ok(localAppend >= 0, "LOCAL_PRIVATE overlay append is missing");
+    assert.ok(runtimeIdentityAppend > localAppend, "runtime identity is not appended after LOCAL_PRIVATE");
+
+    for (const variant of ["", "local_private", "Local_Private", "VPS ", "PRODUCTION", "LOCAL_PRIVATE_V2"]) {
+      fs.rmSync(sandbox.dockerMarker, { force: true });
+      const rejected = runWrapper(sandbox, ["config", "--format", "json"], {
+        PLATFORM_COMPOSE_VARIANT: variant,
+      });
+      assert.notEqual(rejected.status, 0, `accepted invalid Compose variant ${JSON.stringify(variant)}`);
+      assert.equal(fs.existsSync(sandbox.dockerMarker), false, "invalid variant reached the renderer");
+      assert.match(rejected.stderr, /PLATFORM_COMPOSE_VARIANT/);
+    }
+
+    fs.rmSync(sandbox.dockerMarker, { force: true });
+    const hosted = runWrapper(sandbox, ["config", "--format", "json"], {
+      PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+      HOSTED_WORKLOAD_LOCK: sandbox.workloadLock,
+      HOSTED_WORKLOAD_MODE: "hosted",
+    });
+    assert.notEqual(hosted.status, 0, "LOCAL_PRIVATE accepted a Hosted runtime");
+    assert.equal(fs.existsSync(sandbox.dockerMarker), false, "Hosted LOCAL_PRIVATE reached the renderer");
+    assert.match(hosted.stderr, /LOCAL_PRIVATE requires the exact no-hosted runtime/);
   } finally {
     removeSandbox(sandbox);
   }
@@ -2666,6 +2753,320 @@ test("QA8 exact overlay golden preserves the four independently derived canonica
     );
   } finally {
     removeSandbox(sandbox);
+  }
+});
+
+function localPrivateQa8Fixture(sandbox) {
+  const environment = installQa8Environment(sandbox);
+  const config = qa8IndependentGolden(sandbox);
+  materializeQa8CanonicalSources(sandbox, config);
+  const dataRoot = path.join(sandbox.cleanupRoot, "local-private-data");
+  const stateDirectory = path.join(dataRoot, "project-state");
+  const certificatesDirectory = path.join(dataRoot, "certificates");
+  const secretsRoot = path.join(dataRoot, "secrets");
+  for (const directory of [dataRoot, stateDirectory, certificatesDirectory, secretsRoot]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+  }
+  const certificate = path.join(certificatesDirectory, "local-cert.pem");
+  const privateKey = path.join(certificatesDirectory, "local-key.pem");
+  const localCa = path.join(certificatesDirectory, "local-ca.pem");
+  const bootstrapToken = path.join(secretsRoot, "first-configuration-bootstrap-token.txt");
+  const keycloakClientSecret = path.join(secretsRoot, "first-configuration-keycloak-secret.txt");
+  for (const [filename, mode] of [
+    [certificate, 0o644],
+    [privateKey, 0o600],
+    [localCa, 0o644],
+    [bootstrapToken, 0o600],
+    [keycloakClientSecret, 0o600],
+  ]) {
+    fs.writeFileSync(filename, `local-private-${path.basename(filename)}\n`, { mode });
+    fs.chmodSync(filename, mode);
+  }
+  for (const [secretName, authority] of Object.entries(
+    LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
+  )) {
+    const releaseFile = config.secrets[secretName].file;
+    const externalFile = path.join(secretsRoot, authority.filename);
+    const fileMode = Number.parseInt(authority.mode, 8);
+    fs.writeFileSync(externalFile, `local-private-${secretName}\n`, { mode: fileMode });
+    fs.chmodSync(externalFile, fileMode);
+    config.secrets[secretName].file = externalFile;
+    fs.rmSync(releaseFile, { force: true });
+  }
+  const localLock = sandbox.localPrivateCanonicalLock;
+  Object.assign(environment, {});
+  for (const [key, value] of Object.entries({
+    PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+    PLATFORM_DATA_ROOT: dataRoot,
+    PLATFORM_STATE_DIR: stateDirectory,
+    PLATFORM_CERTS_DIR: certificatesDirectory,
+    PLATFORM_SECRETS_ROOT: secretsRoot,
+    CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: localCa,
+    CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE: bootstrapToken,
+    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: keycloakClientSecret,
+    HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: localLock,
+  })) environment.set(key, value);
+  for (const [secretName, variable] of Object.entries(
+    coreSemanticPolicyDescriptor.secretFileVariables,
+  )) {
+    environment.set(variable, path.join(sandbox.cleanupRoot, `ignored-${secretName}.txt`));
+  }
+
+  const additionalSecrets = {
+    control_center_first_configuration_bootstrap_token: bootstrapToken,
+    control_center_first_configuration_keycloak_client_secret: keycloakClientSecret,
+  };
+  for (const [secretName, filename] of Object.entries(additionalSecrets)) {
+    config.secrets[secretName] = {
+      file: filename,
+      name: `platform_infra_vps_${secretName}`,
+    };
+    config.services["control-center"].secrets.push({
+      source: secretName,
+      target: `/run/secrets/${secretName}`,
+    });
+  }
+
+  Object.assign(config.services["control-center"].environment, {
+    CONTROL_CENTER_ENV: "local_private",
+    CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "required",
+    CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE:
+      "/run/secrets/control_center_first_configuration_bootstrap_token",
+    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: "platform-first-configuration",
+    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:
+      "/run/secrets/control_center_first_configuration_keycloak_client_secret",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: "admin",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: "admin@example.com",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:
+      "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128",
+    CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:
+      "172.16.0.0/12,127.0.0.0/8,::1/128",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL:
+      "https://auth.fixture.invalid/realms/platform/account/",
+    CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT:
+      "https://auth.fixture.invalid/realms/platform/protocol/openid-connect/token",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL:
+      "https://auth.fixture.invalid/admin/realms/platform",
+    CONTROL_CENTER_MIN_PASSKEYS: "2",
+    NODE_EXTRA_CA_CERTS: "/run/platform/tls/control-center-local-ca.pem",
+  });
+  config.services["control-center"].extra_hosts = ["auth.fixture.invalid=host-gateway"];
+
+  const replaceMount = (serviceName, target, source) => {
+    const mount = config.services[serviceName].volumes.find((entry) => entry.target === target);
+    assert.ok(mount, `missing ${serviceName} ${target} mount`);
+    mount.source = source;
+  };
+  replaceMount("waf", "/etc/nginx/conf/server.crt", certificate);
+  replaceMount("waf", "/etc/nginx/conf/server.key", privateKey);
+  replaceMount("control-center", "/var/www/project-state", stateDirectory);
+  config.services["control-center"].volumes.push({
+    type: "bind",
+    source: localCa,
+    target: "/run/platform/tls/control-center-local-ca.pem",
+    read_only: true,
+    bind: {},
+  });
+  replaceMount("broker-auth-bootstrap", "/run/platform/hosted-workloads.lock.json", localLock);
+  replaceMount("project-router", "/var/www/project-state", stateDirectory);
+  replaceMount("project-router", "/run/platform/hosted-workloads.lock.json", localLock);
+  replaceMount("mariadb", "/etc/mysql/ssl", certificatesDirectory);
+  Object.assign(config.services["project-router"].environment, {
+    PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mode,
+    PROJECT_ROUTER_WORKLOAD_LOCK_SHA256:
+      crypto.createHash("sha256").update(fs.readFileSync(localLock)).digest("hex"),
+    PROJECT_HOST_SUFFIX: LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostSuffix,
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.allowedUpstreams,
+    NODE_PROJECT_HOSTS: "",
+    PROJECT_UPSTREAMS: "",
+    STATIC_PROJECT_UPSTREAMS: "",
+    NODE_PROJECT_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.nodeProjectUpstreams,
+    PHP_PROJECT_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.phpProjectUpstreams,
+  });
+  config.services.mariadb.networks = {
+    [LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mariadbCompatibilityAlias.network]: {
+      aliases: [LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mariadbCompatibilityAlias.alias],
+    },
+  };
+
+  return {
+    config,
+    environment,
+    lock: JSON.parse(fs.readFileSync(localLock, "utf8")),
+  };
+}
+
+test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets outside the release", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const { config, environment, lock } = localPrivateQa8Fixture(sandbox);
+    assert.equal(lock.coreSemanticPolicy.sha256, localPrivateCoreSemanticPolicySha256);
+    assert.equal(lock.protectedResourceNames.secrets.length, 23);
+    const overlay = fs.readFileSync(path.join(repositoryRoot, "compose.local-private.yaml"), "utf8");
+    for (const [secretName, authority] of Object.entries(
+      LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
+    )) {
+      assert.ok(
+        overlay.includes(
+          `  ${secretName}:\n    file: \${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/${authority.filename}\n`,
+        ),
+        `${secretName} is not externally bound by the LOCAL_PRIVATE overlay`,
+      );
+      assert.equal(
+        config.secrets[secretName].file,
+        path.join(environment.get("PLATFORM_SECRETS_ROOT"), authority.filename),
+      );
+      assert.equal(
+        fs.existsSync(path.join(sandbox.root, coreSemanticPolicyDescriptor.secretFiles[secretName])),
+        false,
+        `${secretName} remained in the immutable release`,
+      );
+    }
+    const violations = validateNoHostedCoreAuthority(
+      lock,
+      config,
+      sandbox.root,
+      environment,
+    );
+    assert.deepEqual(violations, [], `LOCAL_PRIVATE authority rejected: ${violations.join(",")}`);
+
+    const standardLock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(standardLock, config, sandbox.root, environment),
+      ["policy-binding"],
+    );
+    const standardEnvironment = new Map(environment);
+    standardEnvironment.delete("PLATFORM_COMPOSE_VARIANT");
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(lock, config, sandbox.root, standardEnvironment),
+      ["policy-binding"],
+    );
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE wrapper renders once against its exact lock and semantic environment", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const { config, environment } = localPrivateQa8Fixture(sandbox);
+    const environmentBytes = `${[...environment.entries()]
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n")}\n`;
+    fs.writeFileSync(sandbox.environmentFile, environmentBytes, { mode: 0o600 });
+    writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+    const result = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), config);
+    assert.match(
+      fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json/,
+    );
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE authority rejects setup, path, lock and raw-scheduler widening mutants", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const baseline = localPrivateQa8Fixture(sandbox);
+    const mutations = [
+      ["setup secret", (config) => {
+        delete config.secrets.control_center_first_configuration_bootstrap_token;
+      }],
+      ["first configuration mode", (config) => {
+        config.services["control-center"].environment.CONTROL_CENTER_FIRST_CONFIGURATION_MODE = "optional";
+      }],
+      ["identity host", (config) => {
+        config.services["control-center"].extra_hosts = ["attacker.invalid=host-gateway"];
+      }],
+      ["state mount", (config) => {
+        config.services["project-router"].volumes
+          .find((mount) => mount.target === "/var/www/project-state").source = "/tmp/attacker";
+      }],
+      ["runtime lock", (config) => {
+        config.services["broker-auth-bootstrap"].volumes
+          .find((mount) => mount.target === "/run/platform/hosted-workloads.lock.json").source =
+            sandbox.canonicalLock;
+      }],
+      ["project-router compatibility mode", (config) => {
+        config.services["project-router"].environment
+          .PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE = "false";
+      }],
+      ["project-router compatibility allowlist", (config) => {
+        config.services["project-router"].environment.PROJECT_ROUTER_ALLOWED_UPSTREAMS +=
+          ",attacker:8080";
+      }],
+      ["mariadb compatibility alias", (config) => {
+        config.services.mariadb.networks.platform_db_admin.aliases = ["attacker.local"];
+      }],
+      ["base secret path collision", (config) => {
+        config.secrets.control_center_database_url.file =
+          config.secrets.control_center_vault_keys.file;
+      }],
+      ["raw scheduler", (config) => {
+        config.services["backup-scheduler"].volumes.push({
+          type: "bind",
+          source: "/var/run/docker.sock",
+          target: "/var/run/docker.sock",
+        });
+      }],
+    ];
+    const accepted = [];
+    for (const [label, mutate] of mutations) {
+      const config = structuredClone(baseline.config);
+      mutate(config);
+      const violations = validateNoHostedCoreAuthority(
+        baseline.lock,
+        config,
+        sandbox.root,
+        baseline.environment,
+      );
+      if (violations.length === 0) accepted.push(label);
+    }
+    assert.deepEqual(accepted, [], `LOCAL_PRIVATE mutants escaped authority: ${accepted.join(",")}`);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE external base-secret authority rejects collision, missing and wrong-mode files", () => {
+  const scenarios = [
+    ["collision", ({ config }) => {
+      config.secrets.control_center_database_url.file =
+        config.secrets.control_center_vault_keys.file;
+    }, "secrets:local-private-file-path-collision"],
+    ["missing", ({ config }) => {
+      fs.rmSync(config.secrets.redis_password.file);
+    }, "secret:redis_password:local-private-external-authority"],
+    ["mode", ({ config }) => {
+      fs.chmodSync(config.secrets.smtp_password.file, 0o644);
+    }, "secret:smtp_password:local-private-external-authority"],
+  ];
+  for (const [label, mutate, expectedViolation] of scenarios) {
+    const sandbox = createConsumerSandbox();
+    try {
+      const fixture = localPrivateQa8Fixture(sandbox);
+      mutate(fixture);
+      const violations = validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        fixture.environment,
+      );
+      assert.ok(
+        violations.includes(expectedViolation),
+        `${label} did not produce ${expectedViolation}: ${violations.join(",")}`,
+      );
+    } finally {
+      removeSandbox(sandbox);
+    }
   }
 });
 

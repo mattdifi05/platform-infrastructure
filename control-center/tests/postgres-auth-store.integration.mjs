@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
 import { PostgresAuthStore } from "../auth/oidc.mjs";
+import { PostgresFirstConfigurationStore } from "../first-configuration/store.mjs";
 
 const { Pool } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -13,6 +14,7 @@ const adminPool = databaseUrl
   ? new Pool({ connectionString: withApplicationName(databaseUrl, "oidc-backchannel-admin") })
   : null;
 const stores = [];
+let runtimeDatabaseUrl = "";
 let hashCounter = 0;
 
 if (!databaseUrl) {
@@ -21,10 +23,18 @@ if (!databaseUrl) {
   throw new Error("TEST_DATABASE_DISPOSABLE=1 is required because this test recreates control_auth.");
 } else try {
   await adminPool.query("drop schema if exists control_auth cascade");
+  await adminPool.query("drop role if exists control_center_runtime");
+  await adminPool.query("create role control_center_runtime login password 'first-configuration-integration-runtime'");
+  runtimeDatabaseUrl = withCredentials(
+    databaseUrl,
+    "control_center_runtime",
+    "first-configuration-integration-runtime",
+  );
   for (const migration of [
     "../migrations/001_auth_sessions.sql",
     "../migrations/002_session_security.sql",
     "../migrations/003_oidc_provider_revocation.sql",
+    "../migrations/004_first_configuration.sql",
   ]) {
     await adminPool.query(readFileSync(new URL(migration, import.meta.url), "utf8"));
   }
@@ -126,13 +136,57 @@ if (!databaseUrl) {
   assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, false);
   await store.clearLoginThrottle(throttleHash);
   assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, true);
+
+  const firstConfigurationStore = new PostgresFirstConfigurationStore(
+    withApplicationName(runtimeDatabaseUrl, "first-configuration-runtime"),
+  );
+  stores.push(firstConfigurationStore);
+  const bootstrapTokenHash = nextHash();
+  await firstConfigurationStore.ready({
+    bootstrapTokenHash,
+    bootstrapTokenExpiresAt: new Date(Date.now() + 60_000),
+  });
+  const setupSessionHash = nextHash();
+  const setupPeerHash = nextHash();
+  const setupState = await firstConfigurationStore.consumeBootstrapToken({
+    bootstrapTokenHash,
+    sessionTokenHash: setupSessionHash,
+    csrfHash: nextHash(),
+    peerHash: setupPeerHash,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  assert.equal(setupState.state, "FIRST_CONFIGURATION_REQUIRED");
+  assert.notEqual(await firstConfigurationStore.getSession(setupSessionHash, setupPeerHash, 60), null);
+  const prepared = await firstConfigurationStore.recordAdministrator({
+    subject: "first-configuration-owner",
+    username: "matthew",
+    email: "matthew@example.test",
+  });
+  assert.equal(prepared.state, "PASSKEY_ENROLLMENT_REQUIRED");
+  await firstConfigurationStore.recordPasskeyCount({ subject: prepared.adminSubject, count: 2 });
+  const passkeysReady = await firstConfigurationStore.confirmPasskeyIndependence({ subject: prepared.adminSubject });
+  assert.equal(passkeysReady.state, "PASSKEYS_READY");
+  await firstConfigurationStore.recordCutover({ subject: prepared.adminSubject, count: 2 });
+  await firstConfigurationStore.recordPasskeyLogin({ subject: prepared.adminSubject });
+  await firstConfigurationStore.recordLogoutVerification({ subject: prepared.adminSubject });
+  await firstConfigurationStore.recordFinalizing({ subject: prepared.adminSubject });
+  const completedSetup = await firstConfigurationStore.recordComplete({ subject: prepared.adminSubject });
+  assert.equal(completedSetup.state, "FIRST_CONFIGURATION_COMPLETE");
+  assert.equal(
+    (await firstConfigurationStore.recordComplete({ subject: prepared.adminSubject })).completedAt.getTime(),
+    completedSetup.completedAt.getTime(),
+  );
   process.stdout.write("POSTGRES_AUTH_STORE_PROVIDER_REVOCATION_OK\n");
 } finally {
   await Promise.allSettled(stores.map((store) => store.close()));
   try {
     await adminPool.query("drop schema if exists control_auth cascade");
   } finally {
-    await adminPool.end();
+    try {
+      await adminPool.query("drop role if exists control_center_runtime");
+    } finally {
+      await adminPool.end();
+    }
   }
 }
 
@@ -234,9 +288,16 @@ async function waitForLock(applicationName) {
 }
 
 function authStore(applicationName) {
-  const store = new PostgresAuthStore(withApplicationName(databaseUrl, applicationName));
+  const store = new PostgresAuthStore(withApplicationName(runtimeDatabaseUrl || databaseUrl, applicationName));
   stores.push(store);
   return store;
+}
+
+function withCredentials(connectionString, username, password) {
+  const url = new URL(connectionString);
+  url.username = username;
+  url.password = password;
+  return url.toString();
 }
 
 function withApplicationName(connectionString, applicationName) {

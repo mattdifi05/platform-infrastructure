@@ -3,31 +3,41 @@ set -eu
 umask 077
 
 SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPOSITORY_ROOT=$(CDPATH= cd -- "$SCRIPT_ROOT/.." && pwd)
 REMOTE=${DEPLOY_REMOTE:-}
 SSH_PORT=${DEPLOY_SSH_PORT:-22}
 SSH_KEY_SOURCE=${DEPLOY_SSH_KEY_PATH:-${HOME:?HOME is required}/.ssh/deploy_key}
 KNOWN_HOSTS_SOURCE=${DEPLOY_SSH_KNOWN_HOSTS_PATH:-${HOME:?HOME is required}/.ssh/known_hosts}
-CANDIDATE_COMMIT=832bf2baec47055342af7e7f73425444381b91e0
-CANDIDATE_TREE=91cee2380809cb0691b9ac47cafa2a673d434caa
-SOURCE_ARCHIVE_SHA256=6eabff5f3fdbb4b129519d23a2dd9864f65477c5f0e1ecb58e1b8a9a79af3007
-REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-brownfield-install-consumer install'
+BRIDGE_SOURCE="$SCRIPT_ROOT/v1-brownfield-bootstrap-bridge.py"
+CONSUMER_SOURCE="$SCRIPT_ROOT/v1-brownfield-install-consumer.py"
+NODE_RUNTIME_SOURCE="$SCRIPT_ROOT/v1-node-runtime-prerequisite.py"
+UPLOAD_BRIDGE_REMOTE_COMMAND="/bin/sh -c 'umask 077; /usr/bin/install -d -m 0700 /home/platform_infrastructure/.v1-bootstrap-upload && /usr/bin/install -m 0500 /dev/stdin /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py'"
+BOOTSTRAP_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply'
+PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare'
+READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 SSH=/usr/bin/ssh
+GIT=/usr/bin/git
 SYSTEM_NAME=$(/usr/bin/uname -s)
-if [ "$SYSTEM_NAME" != Linux ]; then
-  SSH=${PLATFORM_V1_INSTALL_TEST_SSH:-$SSH}
-fi
+case "$SYSTEM_NAME" in
+  Darwin)
+    NODE=${HOME:?HOME is required}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node
+    SSH=${PLATFORM_V1_INSTALL_TEST_SSH:-$SSH}
+    GIT=${PLATFORM_V1_INSTALL_TEST_GIT:-$GIT}
+    NODE=${PLATFORM_V1_INSTALL_TEST_NODE:-$NODE}
+    ;;
+  Linux) NODE=/usr/bin/node ;;
+  *) echo "Unsupported local install client operating system." >&2; exit 78 ;;
+esac
 
-fail() {
-  echo "$1" >&2
-  exit "${2:-64}"
-}
+fail() { echo "$1" >&2; exit "${2:-64}"; }
 
 hash_file() {
-  trap - EXIT HUP INT TERM
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+  if [ -x /usr/bin/sha256sum ]; then
+    /usr/bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [ -x /usr/bin/shasum ]; then
+    /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
   else
-    shasum -a 256 "$1" | awk '{print $1}'
+    fail "No fixed SHA-256 implementation is available." 78
   fi
 }
 
@@ -38,32 +48,72 @@ require_input_file() {
     || fail "$label must be one readable, non-empty regular file and not a symlink."
 }
 
-[ "$#" -eq 0 ] || fail "deploy-v1-install-only.sh accepts no positional arguments."
+[ "$#" -eq 10 ] \
+  && [ "$1" = "--bootstrapReceiptFile" ] && [ -n "$2" ] \
+  && [ "$3" = "--controlArtifactReceiptFile" ] && [ -n "$4" ] \
+  && [ "$5" = "--nodeRuntimeReceiptFile" ] && [ -n "$6" ] \
+  && [ "$7" = "--prepareReceiptFile" ] && [ -n "$8" ] \
+  && [ "$9" = "--authorityFile" ] && [ -n "${10}" ] \
+  || fail "Usage: deploy-v1-install-only.sh --bootstrapReceiptFile FILE --controlArtifactReceiptFile FILE --nodeRuntimeReceiptFile FILE --prepareReceiptFile FILE --authorityFile FILE"
+BOOTSTRAP_RECEIPT_OUTPUT=$2
+CONTROL_ARTIFACT_RECEIPT_OUTPUT=$4
+NODE_RUNTIME_RECEIPT_OUTPUT=$6
+PREPARE_RECEIPT_OUTPUT=$8
+AUTHORITY_OUTPUT=${10}
+
 case "$REMOTE" in *@*) ;; *) fail "DEPLOY_REMOTE must be one canonical user@host endpoint." ;; esac
 REMOTE_USER=${REMOTE%@*}
 REMOTE_HOST=${REMOTE#*@}
 case "$REMOTE_USER" in ""|[!a-z_]*|*[!a-z0-9_-]*) fail "DEPLOY_REMOTE user is invalid." ;; esac
+[ "$REMOTE_USER" = platform_infrastructure ] || fail "The V1 bootstrap bridge requires the fixed platform_infrastructure account."
 case "$REMOTE_HOST" in ""|[!a-z0-9]*|*[!a-z0-9.-]*|*..*|*[-.]) fail "DEPLOY_REMOTE host is invalid." ;; esac
 case "$REMOTE" in *@*@*) fail "DEPLOY_REMOTE must contain exactly one separator." ;; esac
 case "$SSH_PORT" in ""|*[!0-9]*) fail "DEPLOY_SSH_PORT must be numeric." ;; esac
 [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || fail "DEPLOY_SSH_PORT is outside the accepted range."
 [ -x "$SSH" ] || fail "The fixed SSH client is unavailable." 78
-[ -f "$SCRIPT_ROOT/ssh-known-host-endpoint.sh" ] && [ ! -L "$SCRIPT_ROOT/ssh-known-host-endpoint.sh" ] \
-  || fail "The exact SSH endpoint verifier is unavailable." 78
-[ -f "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" ] && [ ! -L "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" ] \
-  || fail "The exact SSH host-key verifier is unavailable." 78
-[ -f "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" ] && [ ! -L "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" ] \
-  || fail "The exact V1 install receipt verifier is unavailable." 78
+[ -x "$GIT" ] || fail "The fixed Git client is unavailable." 78
+[ -x "$NODE" ] || fail "The fixed local Node.js runtime is unavailable." 78
+for dependency in ssh-known-host-endpoint.sh pinned-ssh-host-key.mjs v1-brownfield-install-receipt.mjs; do
+  [ -f "$SCRIPT_ROOT/$dependency" ] && [ ! -L "$SCRIPT_ROOT/$dependency" ] \
+    || fail "The exact V1 install dependency $dependency is unavailable." 78
+done
+require_input_file "V1 one-time bootstrap bridge" "$BRIDGE_SOURCE"
+require_input_file "V1 exact-main install consumer" "$CONSUMER_SOURCE"
+require_input_file "V1 exact-main Node runtime prerequisite" "$NODE_RUNTIME_SOURCE"
 require_input_file "SSH private key" "$SSH_KEY_SOURCE"
 require_input_file "SSH known-hosts input" "$KNOWN_HOSTS_SOURCE"
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/platform-v1-install-client.XXXXXX")
-cleanup() {
-  status=$?
-  trap - EXIT HUP INT TERM
-  rm -rf "$work"
-  exit "$status"
+"$NODE" --input-type=module - \
+  "$BOOTSTRAP_RECEIPT_OUTPUT" "$CONTROL_ARTIFACT_RECEIPT_OUTPUT" "$NODE_RUNTIME_RECEIPT_OUTPUT" \
+  "$PREPARE_RECEIPT_OUTPUT" "$AUTHORITY_OUTPUT" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+const targets = process.argv.slice(2);
+if (new Set(targets).size !== targets.length) throw new Error("V1 staging output paths must be distinct.");
+for (const target of targets) {
+  if (!path.isAbsolute(target) || path.normalize(target) !== target || /[\0\r\n]/.test(target)) throw new Error("V1 staging output path is not canonical absolute.");
+  const parent = path.dirname(target);
+  const metadata = fs.lstatSync(parent);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || fs.realpathSync.native(parent) !== parent || (metadata.mode & 0o022) !== 0) throw new Error("V1 staging output parent identity or permissions are unsafe.");
+  try { fs.lstatSync(target); throw new Error("V1 staging output already exists."); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
 }
+NODE
+
+REPOSITORY_TOP=$($GIT -C "$REPOSITORY_ROOT" rev-parse --show-toplevel) || fail "The install-only client cannot identify its repository root." 65
+[ "$REPOSITORY_TOP" = "$REPOSITORY_ROOT" ] || fail "The install-only client is not running from the selected repository root." 65
+CANDIDATE_COMMIT=$($GIT -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}') || fail "The install-only client cannot resolve the exact HEAD commit." 65
+CANDIDATE_TREE=$($GIT -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{tree}') || fail "The install-only client cannot resolve the exact HEAD tree." 65
+GITHUB_MAIN_COMMIT=$($GIT -C "$REPOSITORY_ROOT" rev-parse --verify refs/remotes/github/main) || fail "The install-only client requires refs/remotes/github/main." 65
+case "$CANDIDATE_COMMIT" in ????????????????????????????????????????) ;; *) fail "The selected HEAD commit is not one Git SHA-1 object ID." 65 ;; esac
+case "$CANDIDATE_TREE" in ????????????????????????????????????????) ;; *) fail "The selected HEAD tree is not one Git SHA-1 object ID." 65 ;; esac
+case "$CANDIDATE_COMMIT$CANDIDATE_TREE" in *[!0-9a-f]*) fail "The selected Git identity is not lowercase hexadecimal." 65 ;; esac
+[ "$CANDIDATE_COMMIT" = "$GITHUB_MAIN_COMMIT" ] || fail "The install-only client requires clean HEAD equal to refs/remotes/github/main." 65
+GIT_STATUS=$($GIT -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all) || fail "The install-only client cannot prove clean checkout state." 65
+[ -z "$GIT_STATUS" ] || fail "The install-only client requires a completely clean checkout." 65
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-v1-install-client.XXXXXX")
+cleanup() { status=$?; trap - EXIT HUP INT TERM; rm -rf "$work"; exit "$status"; }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -71,57 +121,178 @@ trap 'exit 143' TERM
 
 ssh_key="$work/ssh-key"
 known_hosts="$work/known-hosts"
-receipt="$work/install-receipt.json"
+bridge_snapshot="$work/v1-brownfield-bootstrap-bridge.py"
+consumer_snapshot="$work/v1-brownfield-install-consumer.py"
+source_archive="$work/exact-source-archive.tar"
+git_bundle="$work/exact-source.bundle"
+transport_checkpoint="$work/bootstrap-transport-checkpoint.json"
+bootstrap_frame="$work/bootstrap-frame.bin"
+bootstrap_envelope="$work/bootstrap-envelope.json"
+bootstrap_receipt="$work/bootstrap-receipt.json"
+control_artifact_receipt="$work/control-artifact-receipt.json"
+node_runtime_receipt="$work/node-runtime-prerequisite-receipt.json"
+prepare_receipt="$work/prepare-receipt.json"
+authority_first="$work/exact-release-authority.first.json"
+authority_second="$work/exact-release-authority.second.json"
+upload_response="$work/upload-response"
+
+( ulimit -f 1048576; exec "$GIT" -C "$REPOSITORY_ROOT" archive --format=tar HEAD ) > "$source_archive" \
+  || fail "The install-only client cannot materialize the exact clean source archive." 65
+[ -s "$source_archive" ] && [ ! -L "$source_archive" ] || fail "The exact source archive is missing." 65
+SOURCE_ARCHIVE_SHA256=$(hash_file "$source_archive")
+case "$SOURCE_ARCHIVE_SHA256" in ????????????????????????????????????????????????????????????????) ;; *) fail "The exact source archive digest is invalid." 65 ;; esac
+case "$SOURCE_ARCHIVE_SHA256" in *[!0-9a-f]*) fail "The exact source archive digest is not lowercase hexadecimal." 65 ;; esac
+( ulimit -f 2097152; exec "$GIT" -C "$REPOSITORY_ROOT" bundle create "$git_bundle" HEAD ) \
+  || fail "The install-only client cannot materialize the exact Git object bundle." 65
+[ -s "$git_bundle" ] && [ ! -L "$git_bundle" ] || fail "The exact Git object bundle is missing." 65
+$GIT -C "$REPOSITORY_ROOT" bundle verify "$git_bundle" >/dev/null \
+  || fail "The exact Git object bundle does not pass fixed Git verification." 65
+BUNDLE_HEADS=$($GIT -C "$REPOSITORY_ROOT" bundle list-heads "$git_bundle") \
+  || fail "The exact Git object bundle cannot expose its advertised head." 65
+[ "$BUNDLE_HEADS" = "$CANDIDATE_COMMIT HEAD" ] \
+  || fail "The exact Git object bundle advertises a ref outside the selected HEAD commit." 65
+
+bridge_before=$(hash_file "$BRIDGE_SOURCE")
+consumer_before=$(hash_file "$CONSUMER_SOURCE")
+cp "$BRIDGE_SOURCE" "$bridge_snapshot"
+cp "$CONSUMER_SOURCE" "$consumer_snapshot"
+chmod 500 "$bridge_snapshot" "$consumer_snapshot"
+[ "$(hash_file "$BRIDGE_SOURCE")" = "$bridge_before" ] && [ "$(hash_file "$bridge_snapshot")" = "$bridge_before" ] \
+  || fail "The V1 bootstrap bridge changed during stable capture." 65
+[ "$(hash_file "$CONSUMER_SOURCE")" = "$consumer_before" ] && [ "$(hash_file "$consumer_snapshot")" = "$consumer_before" ] \
+  || fail "The V1 exact-main consumer changed during stable capture." 65
+[ "$($GIT -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')" = "$CANDIDATE_COMMIT" ] \
+  && [ "$($GIT -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{tree}')" = "$CANDIDATE_TREE" ] \
+  && [ -z "$($GIT -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)" ] \
+  || fail "The clean exact-main checkout changed during transport capture." 65
+
+"$NODE" --input-type=module - \
+  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$git_bundle" "$source_archive" "$bootstrap_frame" \
+  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" <<'NODE'
+import crypto from "node:crypto";
+import fs from "node:fs";
+const [bridge, consumer, checkpoint, bundle, archive, frame, candidateCommit, candidateTree, sourceArchiveSha256] = process.argv.slice(2);
+const sha = (filename) => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+const checkpointValue = {
+  activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
+  bridgeSha256: sha(bridge), candidateCommit, candidateConsumerSha256: sha(consumer), candidateTree,
+  createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundle),
+  purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
+  sourceArchiveSha256, sourceArchiveSizeBytes: fs.statSync(archive).size, transportVerified: true,
+};
+fs.writeFileSync(checkpoint, `${stable(checkpointValue)}\n`, { flag: "wx", mode: 0o400 });
+const parts = { bridge, consumer, checkpoint, gitBundle: bundle, sourceArchive: archive };
+const manifest = {
+  bridgeSha256: sha(bridge), candidateCommit, candidateTree, checkpointSha256: sha(checkpoint),
+  consumerSha256: sha(consumer), gitBundleSha256: sha(bundle),
+  lengths: Object.fromEntries(Object.entries(parts).map(([name, filename]) => [name, fs.statSync(filename).size])),
+  schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256,
+};
+const manifestBytes = Buffer.from(stable(manifest));
+if (manifestBytes.length < 2 || manifestBytes.length > 16 * 1024) throw new Error("Bootstrap manifest size is invalid.");
+const output = fs.openSync(frame, "wx", 0o400);
+try {
+  fs.writeSync(output, Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")));
+  fs.writeSync(output, manifestBytes);
+  for (const name of ["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"]) {
+    const input = fs.openSync(parts[name], "r");
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      for (;;) { const count = fs.readSync(input, buffer); if (count === 0) break; fs.writeSync(output, buffer, 0, count); }
+    } finally { fs.closeSync(input); }
+  }
+  fs.fsyncSync(output);
+} finally { fs.closeSync(output); }
+NODE
+
 key_before=$(hash_file "$SSH_KEY_SOURCE")
 known_before=$(hash_file "$KNOWN_HOSTS_SOURCE")
 cp "$SSH_KEY_SOURCE" "$ssh_key"
 cp "$KNOWN_HOSTS_SOURCE" "$known_hosts"
 chmod 600 "$ssh_key" "$known_hosts"
-[ "$(hash_file "$SSH_KEY_SOURCE")" = "$key_before" ] \
-  && [ "$(hash_file "$ssh_key")" = "$key_before" ] \
-  || fail "SSH private key changed during stable capture." 65
-[ "$(hash_file "$KNOWN_HOSTS_SOURCE")" = "$known_before" ] \
-  && [ "$(hash_file "$known_hosts")" = "$known_before" ] \
-  || fail "SSH known-hosts input changed during stable capture." 65
+[ "$(hash_file "$SSH_KEY_SOURCE")" = "$key_before" ] && [ "$(hash_file "$ssh_key")" = "$key_before" ] || fail "SSH private key changed during stable capture." 65
+[ "$(hash_file "$KNOWN_HOSTS_SOURCE")" = "$known_before" ] && [ "$(hash_file "$known_hosts")" = "$known_before" ] || fail "SSH known-hosts input changed during stable capture." 65
 
 sh "$SCRIPT_ROOT/ssh-known-host-endpoint.sh" "$REMOTE_HOST" "$SSH_PORT" "$known_hosts"
-node "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" verify \
-  --remote "$REMOTE" \
-  --port "$SSH_PORT" \
-  --file "$known_hosts" >/dev/null || fail "Pinned SSH host trust validation failed." 65
+"$NODE" "$SCRIPT_ROOT/pinned-ssh-host-key.mjs" verify --remote "$REMOTE" --port "$SSH_PORT" --file "$known_hosts" >/dev/null \
+  || fail "Pinned SSH host trust validation failed." 65
 
-set -- \
-  -F /dev/null \
-  -i "$ssh_key" \
-  -p "$SSH_PORT" \
-  -o BatchMode=yes \
-  -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=yes \
-  -o "UserKnownHostsFile=$known_hosts" \
-  -o GlobalKnownHostsFile=/dev/null \
-  -o UpdateHostKeys=no \
-  -o PermitLocalCommand=no \
-  -o ClearAllForwardings=yes \
-  -o ExitOnForwardFailure=yes
+set -- -F /dev/null -i "$ssh_key" -p "$SSH_PORT" \
+  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$known_hosts" -o GlobalKnownHostsFile=/dev/null \
+  -o UpdateHostKeys=no -o PermitLocalCommand=no -o ClearAllForwardings=yes -o ExitOnForwardFailure=yes
 
-# No candidate path, archive, evidence claim, or activation command crosses
-# SSH. The root-owned consumer is the authority for those fixed local inputs.
-(
-  # POSIX file-size limits use 512-byte blocks. Bound the authenticated remote
-  # response before it can consume local disk; the validator applies the same
-  # exact 64 KiB ceiling to the completed regular file.
-  ulimit -f 128
-  exec "$SSH" "$@" -- "$REMOTE" "$REMOTE_COMMAND" < /dev/null
-) > "$receipt"
-[ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -s "$receipt" ] \
-  || fail "The root V1 install consumer returned no receipt." 65
-receipt_size=$(wc -c < "$receipt" | tr -d '[:space:]')
-case "$receipt_size" in ""|*[!0-9]*) fail "The V1 install receipt size is invalid." 65 ;; esac
-[ "$receipt_size" -le 65536 ] || fail "The V1 install receipt exceeds 64 KiB." 65
+# The second call is the only root bridge. It transports a closed exact frame,
+# stages control-plane bytes, and installs fixed control artifacts; it has no
+# workload, data, backup, restore, provider, or activation authority.
+( ulimit -f 4096; exec "$SSH" "$@" -- "$REMOTE" "$UPLOAD_BRIDGE_REMOTE_COMMAND" < "$bridge_snapshot" ) > "$upload_response" \
+  || fail "The authenticated V1 bridge upload failed." 65
+[ ! -s "$upload_response" ] || fail "The V1 bridge upload returned unexpected output." 65
+( ulimit -f 512; exec "$SSH" "$@" -- "$REMOTE" "$BOOTSTRAP_REMOTE_COMMAND" < "$bootstrap_frame" ) > "$bootstrap_envelope" \
+  || fail "The one-time V1 bootstrap bridge failed." 65
 
-node "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify \
-  --file "$receipt" \
-  --candidateCommit "$CANDIDATE_COMMIT" \
-  --candidateTree "$CANDIDATE_TREE" \
-  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" >/dev/null
-cat "$receipt"
+"$NODE" --input-type=module - \
+  "$bootstrap_envelope" "$bootstrap_receipt" "$control_artifact_receipt" "$node_runtime_receipt" <<'NODE'
+import crypto from "node:crypto";
+import fs from "node:fs";
+const [source, bootstrapTarget, controlTarget, nodeRuntimeTarget] = process.argv.slice(2);
+const bytes = fs.readFileSync(source);
+if (bytes.length < 2 || bytes.length > 256 * 1024 || bytes.includes(0) || bytes.includes(13)) throw new Error("Bootstrap envelope bounds/encoding are invalid.");
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+const envelope = JSON.parse(bytes.toString("utf8"));
+if (stable(envelope) + "\n" !== bytes.toString("utf8") || Object.keys(envelope).sort().join(",") !== "bootstrap,controlArtifacts,nodeRuntime,schema" || envelope.schema !== "platform.v1-brownfield-bootstrap-result/v1") throw new Error("Bootstrap envelope is not exact canonical V1 output.");
+const bootstrapBytes = Buffer.from(stable(envelope.bootstrap) + "\n");
+const controlBytes = Buffer.from(stable(envelope.controlArtifacts) + "\n");
+const nodeRuntimeBytes = Buffer.from(stable(envelope.nodeRuntime) + "\n");
+if (envelope.bootstrap.controlArtifactReceiptSha256 !== crypto.createHash("sha256").update(controlBytes).digest("hex")) throw new Error("Bootstrap/control receipt binding is invalid.");
+if (envelope.bootstrap.nodeRuntimeReceiptSha256 !== crypto.createHash("sha256").update(nodeRuntimeBytes).digest("hex")) throw new Error("Bootstrap/Node runtime receipt binding is invalid.");
+for (const [target, value] of [[bootstrapTarget, bootstrapBytes], [controlTarget, controlBytes], [nodeRuntimeTarget, nodeRuntimeBytes]]) {
+  fs.writeFileSync(target, value, { flag: "wx", mode: 0o400 });
+  const descriptor = fs.openSync(target, "r"); try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+}
+NODE
+
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-bootstrap \
+  --file "$bootstrap_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
+  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-control-artifacts \
+  --file "$control_artifact_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
+  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+
+# The one-time root bridge invokes the immutable exact-release Node helper and
+# binds its separate receipt into the bootstrap envelope.  No second broad
+# sudo invocation is admitted by this client.
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-node-runtime \
+  --file "$node_runtime_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
+  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+
+( ulimit -f 128; exec "$SSH" "$@" -- "$REMOTE" "$PREPARE_REMOTE_COMMAND" < /dev/null ) > "$prepare_receipt" \
+  || fail "The installed V1 reconciler prepare step failed." 65
+[ -s "$prepare_receipt" ] && [ "$(wc -c < "$prepare_receipt" | tr -d '[:space:]')" -le 65536 ] || fail "The installed V1 reconciler returned an invalid prepare receipt." 65
+
+for authority_capture in "$authority_first" "$authority_second"; do
+  ( ulimit -f 256; exec "$SSH" "$@" -- "$REMOTE" "$READ_AUTHORITY_REMOTE_COMMAND" < /dev/null ) > "$authority_capture" \
+    || fail "The root-owned exact release authority read failed." 65
+  [ -s "$authority_capture" ] && [ "$(wc -c < "$authority_capture" | tr -d '[:space:]')" -le 131072 ] || fail "The exact release authority size is invalid." 65
+done
+cmp -s "$authority_first" "$authority_second" || fail "The exact release authority changed between fixed reads." 65
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-authority --file "$authority_first" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-control-artifacts --file "$control_artifact_receipt" --authorityFile "$authority_first" >/dev/null
+"$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-prepare --file "$prepare_receipt" --authorityFile "$authority_first" >/dev/null
+
+"$NODE" --input-type=module - \
+  "$bootstrap_receipt" "$BOOTSTRAP_RECEIPT_OUTPUT" "$control_artifact_receipt" "$CONTROL_ARTIFACT_RECEIPT_OUTPUT" \
+  "$node_runtime_receipt" "$NODE_RUNTIME_RECEIPT_OUTPUT" \
+  "$prepare_receipt" "$PREPARE_RECEIPT_OUTPUT" "$authority_first" "$AUTHORITY_OUTPUT" <<'NODE'
+import fs from "node:fs";
+const pairs = process.argv.slice(2);
+for (let index = 0; index < pairs.length; index += 2) {
+  fs.copyFileSync(pairs[index], pairs[index + 1], fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(pairs[index + 1], 0o400);
+  const descriptor = fs.openSync(pairs[index + 1], "r"); try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+  const metadata = fs.lstatSync(pairs[index + 1]);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o400) throw new Error("Published V1 staging evidence identity is invalid.");
+}
+NODE
+cat "$bootstrap_receipt"

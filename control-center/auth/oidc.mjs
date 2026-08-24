@@ -266,7 +266,13 @@ class OidcPasskeyAuth {
       cookies: [sessionCookie(rawSessionToken, expiresAt), csrfCookie(rawCsrfToken, expiresAt)],
       role,
       subject: String(payload.sub),
+      sessionTokenHash: sha256(rawSessionToken),
     };
+  }
+
+  async discardLogin(login) {
+    const tokenHash = String(login?.sessionTokenHash || "");
+    if (/^[0-9a-f]{64}$/.test(tokenHash)) await this.store.revokeSession(tokenHash);
   }
 
   async authenticate(req) {
@@ -478,6 +484,7 @@ class TestDisabledAuth {
   async backchannelLogout() { throw new AuthRequestError("OIDC back-channel logout is unavailable.", 404); }
   async providerSecurityEvent() { throw new AuthRequestError("Provider security events are unavailable.", 404); }
   async close() {}
+  async discardLogin() {}
 }
 
 export class PostgresAuthStore {

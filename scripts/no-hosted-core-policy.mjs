@@ -5375,6 +5375,103 @@ export const coreSemanticPolicySha256 = crypto
   .update(CORE_SEMANTIC_POLICY_BYTES)
   .digest("hex");
 
+export const LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES = Object.freeze([
+  "control_center_first_configuration_bootstrap_token",
+  "control_center_first_configuration_keycloak_client_secret",
+]);
+
+export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
+  mode: "true",
+  hostSuffix: ".platform-infrastructure.com",
+  allowedUpstreams: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80",
+  nodeProjectUpstreams: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
+  phpProjectUpstreams: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80",
+  emptyMaps: Object.freeze([
+    "NODE_PROJECT_HOSTS",
+    "PROJECT_UPSTREAMS",
+    "STATIC_PROJECT_UPSTREAMS",
+  ]),
+  metadataMount: "/var/www/projects",
+  projectStateMount: "/var/www/project-state",
+  network: "platform_routing",
+  mariadbCompatibilityAlias: Object.freeze({
+    network: "platform_db_admin",
+    alias: "platform.local",
+  }),
+  routeOwnership: Object.freeze({
+    account: Object.freeze({ sourceSlug: "stexor", projectSlug: "account", type: "node" }),
+    anniversary: Object.freeze({ sourceSlug: "anniversary", projectSlug: "anniversary", type: "php" }),
+    fiplatform: Object.freeze({ sourceSlug: "fiplatform", projectSlug: "fiplatform", type: "php" }),
+    fireport: Object.freeze({ sourceSlug: "fiplatform", projectSlug: "fiplatform", type: "php" }),
+    matthewdifilippo: Object.freeze({ sourceSlug: "matthewdifilippo", projectSlug: "matthewdifilippo", type: "php" }),
+    opstudents: Object.freeze({ sourceSlug: "opstudents", projectSlug: "opstudents", type: "node" }),
+    stream: Object.freeze({ sourceSlug: "stream", projectSlug: "stream", type: "php" }),
+    ui: Object.freeze({ sourceSlug: "stexor", projectSlug: "ui", type: "node" }),
+    workcalendar: Object.freeze({ sourceSlug: "workcalendar", projectSlug: "workcalendar", type: "php" }),
+  }),
+  reservedPlatformSlugs: Object.freeze([
+    "admin",
+    "api",
+    "auth",
+    "docs",
+    "portal",
+    "projects",
+  ]),
+});
+
+export const LOCAL_PRIVATE_BASE_SECRET_AUTHORITY = Object.freeze(
+  Object.fromEntries(
+    Object.keys(CORE_SEMANTIC_POLICY.secretFiles).sort().map((name) => [
+      name,
+      Object.freeze({
+        filename: path.posix.basename(CORE_SEMANTIC_POLICY.secretFiles[name]),
+        mode: name === "alertmanager_webhook_token" ? "0640" : "0600",
+      }),
+    ]),
+  ),
+);
+
+export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
+  schema: CORE_SEMANTIC_POLICY_SCHEMA,
+  variant: "LOCAL_PRIVATE",
+  basePolicySha256: coreSemanticPolicySha256,
+  composeOverlay: "compose.local-private.yaml",
+  projectedAuthoritySha256: CORE_SEMANTIC_POLICY.currentAuthority.normalizedRenderSha256,
+  additionalSecrets: LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES,
+  baseSecrets: LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
+  externalAuthority: Object.freeze({
+    dataRootVariable: "PLATFORM_DATA_ROOT",
+    stateDirectoryVariable: "PLATFORM_STATE_DIR",
+    certificatesDirectoryVariable: "PLATFORM_CERTS_DIR",
+    secretsRootVariable: "PLATFORM_SECRETS_ROOT",
+    localCaVariable: "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE",
+    bootstrapTokenVariable: "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE",
+    keycloakClientSecretVariable:
+      "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE",
+  }),
+  controlCenter: Object.freeze({
+    environment: "local_private",
+    firstConfigurationMode: "required",
+    minimumPasskeysDefault: "2",
+    identityHostVariable: "AUTH_HOST",
+    identityEdgeVariable: "CONTROL_CENTER_IDENTITY_EDGE_IP",
+    localCaTarget: "/run/platform/tls/control-center-local-ca.pem",
+  }),
+  backupScheduler: Object.freeze({
+    executionMode: "BROKER_ONLY",
+    rawDockerSocket: "FORBIDDEN",
+    localPrivateActivationState: "READY_BUT_DISABLED",
+  }),
+  projectRouterCompatibility: LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY,
+});
+
+const LOCAL_PRIVATE_CORE_SEMANTIC_POLICY_BYTES =
+  `${JSON.stringify(localPrivateCoreSemanticPolicyDescriptor)}\n`;
+export const localPrivateCoreSemanticPolicySha256 = crypto
+  .createHash("sha256")
+  .update(LOCAL_PRIVATE_CORE_SEMANTIC_POLICY_BYTES)
+  .digest("hex");
+
 function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -6854,7 +6951,15 @@ function normalizeBoundAuthorityPaths(value, bindings) {
   return value;
 }
 
-function validateAndNormalizeTopLevel(config, lock, rootDirectory, environment, normalized, violations) {
+function validateAndNormalizeTopLevel(
+  config,
+  lock,
+  rootDirectory,
+  environment,
+  normalized,
+  violations,
+  prevalidatedSecretNames = new Set(),
+) {
   const expectedInventory = lock?.protectedResourceNames;
   for (const kind of ["configs", "networks", "secrets", "services", "volumes"]) {
     if (!plainObject(config[kind])
@@ -6915,14 +7020,15 @@ function validateAndNormalizeTopLevel(config, lock, rootDirectory, environment, 
     const expectedFile = typeof selected === "string" ? path.resolve(rootDirectory, selected) : "";
     const expectedName = `${lock.projectName}_${secretName}`;
     const fileMode = secretName === "alertmanager_webhook_token" ? 0o640 : 0o600;
+    const externalAuthorityPrevalidated = prevalidatedSecretNames.has(secretName);
     if (!exactKeys(definition, ["file", "name"])
         || definition.name !== expectedName
         || definition.file !== expectedFile
         || !pathWithinRoot(expectedFile, secretsRoot)
-        || !filesystemPathAuthority(expectedFile, secretsRoot, {
+        || (!externalAuthorityPrevalidated && !filesystemPathAuthority(expectedFile, secretsRoot, {
           expectedType: "file",
           fileMode,
-        })) {
+        }))) {
       violations.push(`secret:${secretName}:exact-authority`);
       continue;
     }
@@ -7198,11 +7304,538 @@ function validateAndNormalizeServices(config, rootDirectory, environment, normal
   normalized.services = rebound;
 }
 
-export function evaluateCurrentNoHostedExactAuthority(
+function exactAbsoluteEnvironmentPath(environment, variable) {
+  const selected = environment.get(variable);
+  return typeof selected === "string"
+    && selected.length > 0
+    && path.isAbsolute(selected)
+    && path.resolve(selected) === selected
+    ? selected
+    : null;
+}
+
+function validCidrList(value) {
+  if (typeof value !== "string" || value.length < 3 || value.length > 2048) return false;
+  const entries = value.split(",");
+  if (entries.length < 1 || new Set(entries).size !== entries.length) return false;
+  return entries.every((entry) => {
+    const match = /^([^/]+)\/([0-9]{1,3})$/.exec(entry);
+    if (!match) return false;
+    const family = isIP(match[1]);
+    const prefix = Number(match[2]);
+    return (family === 4 && prefix >= 0 && prefix <= 32)
+      || (family === 6 && prefix >= 0 && prefix <= 128);
+  });
+}
+
+function validLocalPrivateIdentityUrl(value, hostname, pathname) {
+  try {
+    const selected = new URL(value);
+    return selected.protocol === "https:"
+      && selected.hostname === hostname
+      && selected.port === ""
+      && selected.username === ""
+      && selected.password === ""
+      && selected.pathname === pathname
+      && selected.search === ""
+      && selected.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function exactServiceMount(service, target) {
+  if (!Array.isArray(service?.volumes)) return null;
+  const matches = service.volumes.filter((mount) => mount?.target === target);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function validateAndProjectLocalPrivateMount(
+  projectedConfig,
+  serviceName,
+  target,
+  selectedSource,
+  standardSource,
+  readOnly,
+  violations,
+  { remove = false } = {},
+) {
+  const service = projectedConfig.services?.[serviceName];
+  const mount = exactServiceMount(service, target);
+  if (!plainObject(mount)
+      || mount.type !== "bind"
+      || mount.source !== selectedSource
+      || (mount.read_only === true) !== readOnly) {
+    violations.push(`${serviceName}:local-private-mount-${target}`);
+  }
+  if (!Array.isArray(service?.volumes)) return;
+  if (remove) {
+    service.volumes = service.volumes.filter((candidate) => candidate?.target !== target);
+  } else if (mount) {
+    mount.source = standardSource;
+  }
+}
+
+function localPrivateExpectedEnvironment(environment) {
+  const domain = envOr(environment, "DOMAIN", "localhost.com");
+  const authHost = envOr(environment, "AUTH_HOST", `auth.${domain}`);
+  return {
+    authHost,
+    values: {
+      CONTROL_CENTER_ENV: "local_private",
+      CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "required",
+      CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE:
+        "/run/secrets/control_center_first_configuration_bootstrap_token",
+      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID",
+        "platform-first-configuration",
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:
+        "/run/secrets/control_center_first_configuration_keycloak_client_secret",
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME",
+        "admin",
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL",
+        envOr(environment, "PROJECTS_GATEWAY_EMAIL", "admin@example.com"),
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS",
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128",
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS",
+        "172.16.0.0/12,127.0.0.0/8,::1/128",
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL",
+        `https://${authHost}/realms/platform/account/`,
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT",
+        `https://${authHost}/realms/platform/protocol/openid-connect/token`,
+      ),
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL: envOr(
+        environment,
+        "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL",
+        `https://${authHost}/admin/realms/platform`,
+      ),
+      CONTROL_CENTER_MIN_PASSKEYS: envOr(environment, "CONTROL_CENTER_MIN_PASSKEYS", "2"),
+      NODE_EXTRA_CA_CERTS: "/run/platform/tls/control-center-local-ca.pem",
+    },
+  };
+}
+
+export function projectLocalPrivateNoHostedAuthority(
   lock,
   config,
   rootDirectory,
   environment = new Map(),
+) {
+  const violations = [];
+  if (!plainObject(config) || !plainObject(config.services)) {
+    return { projectedConfig: config, projectedLock: lock, violations: ["config-shape"] };
+  }
+  const root = path.resolve(rootDirectory);
+  const projectedConfig = structuredClone(config);
+  const projectedLock = structuredClone(lock);
+  const projectedEnvironment = new Map(environment);
+  const additionalSecretSet = new Set(LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES);
+  const baseSecretNames = Object.keys(CORE_SEMANTIC_POLICY.secretFiles).sort();
+  const localPrivateSecretNames = [...baseSecretNames, ...additionalSecretSet].sort();
+
+  for (const kind of ["configs", "networks", "secrets", "services", "volumes"]) {
+    if (!plainObject(config[kind])
+        || !Array.isArray(lock?.protectedResourceNames?.[kind])
+        || !sameJson(Object.keys(config[kind]).sort(), lock.protectedResourceNames[kind])) {
+      violations.push(`${kind}:local-private-exact-inventory`);
+    }
+  }
+  if (!sameJson(lock?.protectedResourceNames?.secrets, localPrivateSecretNames)) {
+    violations.push("secrets:local-private-lock-inventory");
+  }
+
+  const dataRoot = exactAbsoluteEnvironmentPath(environment, "PLATFORM_DATA_ROOT");
+  const stateDirectory = exactAbsoluteEnvironmentPath(environment, "PLATFORM_STATE_DIR");
+  const certificatesDirectory = exactAbsoluteEnvironmentPath(environment, "PLATFORM_CERTS_DIR");
+  const secretsRoot = exactAbsoluteEnvironmentPath(environment, "PLATFORM_SECRETS_ROOT");
+  const localCa = exactAbsoluteEnvironmentPath(
+    environment,
+    "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE",
+  );
+  const bootstrapToken = exactAbsoluteEnvironmentPath(
+    environment,
+    "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE",
+  );
+  const keycloakClientSecret = exactAbsoluteEnvironmentPath(
+    environment,
+    "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE",
+  );
+  const certificate = certificatesDirectory
+    ? path.join(certificatesDirectory, "local-cert.pem")
+    : null;
+  const privateKey = certificatesDirectory
+    ? path.join(certificatesDirectory, "local-key.pem")
+    : null;
+  const localLock = path.join(root, "config/no-hosted-workloads.local-private.lock.json");
+
+  const rootsValid = dataRoot !== null
+    && secretsRoot !== null
+    && !pathWithinRoot(dataRoot, root)
+    && !pathWithinRoot(root, dataRoot)
+    && pathWithinRoot(secretsRoot, dataRoot)
+    && filesystemPathAuthority(dataRoot, dataRoot, { expectedType: "directory" })
+    && filesystemPathAuthority(secretsRoot, dataRoot, { expectedType: "directory" });
+  if (!rootsValid) violations.push("local-private:external-root-authority");
+  if (stateDirectory === null
+      || dataRoot === null
+      || !pathWithinRoot(stateDirectory, dataRoot)
+      || !filesystemPathAuthority(stateDirectory, dataRoot, { expectedType: "directory" })) {
+    violations.push("local-private:state-directory-authority");
+  }
+  if (certificatesDirectory === null
+      || dataRoot === null
+      || !pathWithinRoot(certificatesDirectory, dataRoot)
+      || !filesystemPathAuthority(certificatesDirectory, dataRoot, { expectedType: "directory" })
+      || certificate === null
+      || privateKey === null
+      || !filesystemPathAuthority(certificate, certificatesDirectory, {
+        expectedType: "file",
+        fileMode: 0o644,
+      })
+      || !filesystemPathAuthority(privateKey, certificatesDirectory, {
+        expectedType: "file",
+        fileMode: 0o600,
+      })) {
+    violations.push("local-private:certificate-authority");
+  }
+  if (localCa === null
+      || certificatesDirectory === null
+      || !pathWithinRoot(localCa, certificatesDirectory)
+      || !filesystemPathAuthority(localCa, certificatesDirectory, {
+        expectedType: "file",
+        fileMode: 0o644,
+      })) {
+    violations.push("local-private:ca-authority");
+  }
+  for (const [name, selected] of [
+    ["bootstrap-token", bootstrapToken],
+    ["keycloak-client-secret", keycloakClientSecret],
+  ]) {
+    if (selected === null
+        || secretsRoot === null
+        || !pathWithinRoot(selected, secretsRoot)
+        || !filesystemPathAuthority(selected, secretsRoot, {
+          expectedType: "file",
+          fileMode: 0o600,
+        })) {
+      violations.push(`local-private:${name}-authority`);
+    }
+  }
+  const observedBaseSecretFiles = [];
+  for (const secretName of baseSecretNames) {
+    const definition = config.secrets?.[secretName];
+    const authority = LOCAL_PRIVATE_BASE_SECRET_AUTHORITY[secretName];
+    const selectedFile = secretsRoot === null || authority === undefined
+      ? null
+      : path.join(secretsRoot, authority.filename);
+    const fileMode = authority?.mode === "0640" ? 0o640 : 0o600;
+    if (!exactKeys(definition, ["file", "name"])
+        || selectedFile === null
+        || definition.file !== selectedFile
+        || definition.name !== `${lock.projectName}_${secretName}`
+        || !filesystemPathAuthority(selectedFile, secretsRoot, {
+          expectedType: "file",
+          fileMode,
+        })) {
+      violations.push(`secret:${secretName}:local-private-external-authority`);
+    }
+    if (typeof definition?.file === "string") observedBaseSecretFiles.push(definition.file);
+    if (plainObject(projectedConfig.secrets?.[secretName])) {
+      projectedConfig.secrets[secretName].file = path.resolve(
+        root,
+        CORE_SEMANTIC_POLICY.secretFiles[secretName],
+      );
+    }
+  }
+  if (observedBaseSecretFiles.length !== baseSecretNames.length
+      || !allUnique([
+        ...observedBaseSecretFiles,
+        bootstrapToken,
+        keycloakClientSecret,
+      ])) {
+    violations.push("secrets:local-private-file-path-collision");
+  }
+  for (const variable of Object.values(CORE_SEMANTIC_POLICY.secretFileVariables)) {
+    projectedEnvironment.delete(variable);
+  }
+  if ([stateDirectory, certificatesDirectory, secretsRoot].some((value) => value === null)
+      || new Set([stateDirectory, certificatesDirectory, secretsRoot]).size !== 3
+      || bootstrapToken === keycloakClientSecret) {
+    violations.push("local-private:path-collision");
+  }
+  if (!filesystemPathAuthority(localLock, root, { expectedType: "file", fileMode: 0o644 })
+      || environment.get("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE") !== localLock) {
+    violations.push("local-private:runtime-lock-authority");
+  }
+
+  const projectRouter = projectedConfig.services?.["project-router"];
+  const projectRouterEnvironment = projectRouter?.environment;
+  let localLockSha256 = null;
+  try {
+    localLockSha256 = crypto.createHash("sha256").update(fs.readFileSync(localLock)).digest("hex");
+  } catch {
+    // The runtime-lock authority violation above is the canonical failure.
+  }
+  const compatibilityEnvironment = {
+    PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mode,
+    PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: localLockSha256,
+    PROJECT_HOST_SUFFIX: LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostSuffix,
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.allowedUpstreams,
+    NODE_PROJECT_HOSTS: "",
+    PROJECT_UPSTREAMS: "",
+    STATIC_PROJECT_UPSTREAMS: "",
+    NODE_PROJECT_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.nodeProjectUpstreams,
+    PHP_PROJECT_UPSTREAMS:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.phpProjectUpstreams,
+  };
+  if (!plainObject(projectRouterEnvironment)
+      || Object.entries(compatibilityEnvironment).some(([key, value]) =>
+        projectRouterEnvironment[key] !== value)) {
+    violations.push("project-router:local-private-compatibility-authority");
+  } else {
+    for (const key of [
+      "PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE",
+      "PROJECT_ROUTER_WORKLOAD_LOCK_SHA256",
+      "NODE_PROJECT_HOSTS",
+      "PROJECT_UPSTREAMS",
+      "STATIC_PROJECT_UPSTREAMS",
+      "NODE_PROJECT_UPSTREAMS",
+      "PHP_PROJECT_UPSTREAMS",
+    ]) delete projectRouterEnvironment[key];
+    projectRouterEnvironment.PROJECT_HOST_SUFFIX =
+      envOr(environment, "PROJECT_HOST_SUFFIX", ".localhost.com");
+    projectRouterEnvironment.PROJECT_ROUTER_ALLOWED_UPSTREAMS =
+      envOr(environment, "PROJECT_ROUTER_ALLOWED_UPSTREAMS", "control-center:8080");
+  }
+
+  const mariadbNetworks = projectedConfig.services?.mariadb?.networks;
+  const compatibilityNetwork =
+    LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mariadbCompatibilityAlias.network;
+  const compatibilityAlias =
+    LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mariadbCompatibilityAlias.alias;
+  if (!plainObject(mariadbNetworks)
+      || !sameJson(Object.keys(mariadbNetworks), [compatibilityNetwork])
+      || !plainObject(mariadbNetworks[compatibilityNetwork])
+      || !sameJson(Object.keys(mariadbNetworks[compatibilityNetwork]), ["aliases"])
+      || !sameJson(mariadbNetworks[compatibilityNetwork].aliases, [compatibilityAlias])) {
+    violations.push("mariadb:local-private-compatibility-alias");
+  } else {
+    mariadbNetworks[compatibilityNetwork] = null;
+  }
+
+  for (const secretName of LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES) {
+    const definition = config.secrets?.[secretName];
+    const selectedFile = secretName.endsWith("bootstrap_token")
+      ? bootstrapToken
+      : keycloakClientSecret;
+    if (!exactKeys(definition, ["file", "name"])
+        || definition.file !== selectedFile
+        || definition.name !== `${lock.projectName}_${secretName}`) {
+      violations.push(`secret:${secretName}:local-private-authority`);
+    }
+    delete projectedConfig.secrets?.[secretName];
+  }
+
+  const controlCenter = projectedConfig.services?.["control-center"];
+  const expectedEnvironment = localPrivateExpectedEnvironment(environment);
+  const observedEnvironment = controlCenter?.environment;
+  if (!plainObject(observedEnvironment)) {
+    violations.push("control-center:local-private-environment-shape");
+  } else {
+    for (const [key, expected] of Object.entries(expectedEnvironment.values)) {
+      if (observedEnvironment[key] !== expected) {
+        violations.push(`control-center:local-private-environment-${key}`);
+      }
+    }
+    if (!validHostname(expectedEnvironment.authHost)
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID,
+        )
+        || !/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/.test(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME,
+        )
+        || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL,
+        )
+        || !validCidrList(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS,
+        )
+        || !validCidrList(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS,
+        )
+        || !validLocalPrivateIdentityUrl(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL,
+          expectedEnvironment.authHost,
+          "/realms/platform/account/",
+        )
+        || !validLocalPrivateIdentityUrl(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT,
+          expectedEnvironment.authHost,
+          "/realms/platform/protocol/openid-connect/token",
+        )
+        || !validLocalPrivateIdentityUrl(
+          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL,
+          expectedEnvironment.authHost,
+          "/admin/realms/platform",
+        )
+        || !/^(?:[2-9]|10)$/.test(expectedEnvironment.values.CONTROL_CENTER_MIN_PASSKEYS)) {
+      violations.push("control-center:local-private-environment-values");
+    }
+    for (const key of Object.keys(expectedEnvironment.values)) {
+      if (key === "CONTROL_CENTER_ENV") {
+        observedEnvironment[key] = envOr(environment, "CONTROL_CENTER_ENV", "local");
+      } else {
+        delete observedEnvironment[key];
+      }
+    }
+  }
+
+  const additionalGrants = new Set(LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES);
+  if (!Array.isArray(controlCenter?.secrets)) {
+    violations.push("control-center:local-private-secret-grants-shape");
+  } else {
+    for (const secretName of additionalGrants) {
+      const matches = controlCenter.secrets.filter((grant) => grant?.source === secretName);
+      if (matches.length !== 1
+          || !exactKeys(matches[0], ["source", "target"])
+          || matches[0].target !== `/run/secrets/${secretName}`) {
+        violations.push(`control-center:local-private-secret-grant-${secretName}`);
+      }
+    }
+    controlCenter.secrets = controlCenter.secrets
+      .filter((grant) => !additionalGrants.has(grant?.source));
+  }
+
+  const edgeIp = envOr(environment, "CONTROL_CENTER_IDENTITY_EDGE_IP", "host-gateway");
+  const expectedExtraHost = `${expectedEnvironment.authHost}=${edgeIp}`;
+  if (!Array.isArray(controlCenter?.extra_hosts)
+      || !sameJson(controlCenter.extra_hosts, [expectedExtraHost])
+      || (edgeIp !== "host-gateway" && isIP(edgeIp) === 0)) {
+    violations.push("control-center:local-private-extra-hosts");
+  }
+  if (plainObject(controlCenter)) delete controlCenter.extra_hosts;
+
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "waf",
+    "/etc/nginx/conf/server.crt",
+    certificate,
+    path.join(root, "traefik/certs/local-cert.pem"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "waf",
+    "/etc/nginx/conf/server.key",
+    privateKey,
+    path.join(root, "traefik/certs/local-key.pem"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "control-center",
+    "/var/www/project-state",
+    stateDirectory,
+    path.join(root, "projects-portal/state"),
+    false,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "control-center",
+    "/run/platform/tls/control-center-local-ca.pem",
+    localCa,
+    null,
+    true,
+    violations,
+    { remove: true },
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "broker-auth-bootstrap",
+    "/run/platform/hosted-workloads.lock.json",
+    localLock,
+    path.join(root, "config/no-hosted-workloads.lock.json"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "project-router",
+    "/var/www/project-state",
+    stateDirectory,
+    path.join(root, "projects-portal/state"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "project-router",
+    "/run/platform/hosted-workloads.lock.json",
+    localLock,
+    path.join(root, "config/no-hosted-workloads.lock.json"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
+    "mariadb",
+    "/etc/mysql/ssl",
+    certificatesDirectory,
+    path.join(root, "traefik/certs"),
+    true,
+    violations,
+  );
+
+  if (plainObject(projectedLock?.protectedResourceNames)) {
+    projectedLock.protectedResourceNames.secrets =
+      projectedLock.protectedResourceNames.secrets
+        .filter((name) => !additionalSecretSet.has(name));
+  }
+  if (plainObject(projectedLock)) {
+    projectedLock.coreSemanticPolicy = {
+      schema: CORE_SEMANTIC_POLICY_SCHEMA,
+      sha256: coreSemanticPolicySha256,
+    };
+  }
+  return {
+    projectedConfig,
+    projectedEnvironment,
+    projectedLock,
+    violations: [...new Set(violations)],
+  };
+}
+
+function evaluateCurrentNoHostedExactAuthorityInternal(
+  lock,
+  config,
+  rootDirectory,
+  environment = new Map(),
+  prevalidatedSecretNames = new Set(),
 ) {
   const violations = [];
   if (!plainObject(config) || !plainObject(config.services)) {
@@ -7217,6 +7850,7 @@ export function evaluateCurrentNoHostedExactAuthority(
     environment,
     normalized,
     violations,
+    prevalidatedSecretNames,
   );
   validateAndNormalizeServices(
     config,
@@ -7235,12 +7869,31 @@ export function evaluateCurrentNoHostedExactAuthority(
   return { normalizedSha256, violations: [...new Set(violations)] };
 }
 
+export function evaluateCurrentNoHostedExactAuthority(
+  lock,
+  config,
+  rootDirectory,
+  environment = new Map(),
+) {
+  return evaluateCurrentNoHostedExactAuthorityInternal(
+    lock,
+    config,
+    rootDirectory,
+    environment,
+  );
+}
+
 export function validateNoHostedCoreAuthority(lock, config, rootDirectory, environment = new Map()) {
   const binding = lock?.coreSemanticPolicy;
+  const variant = environment.get("PLATFORM_COMPOSE_VARIANT") || "VPS";
+  if (!new Set(["VPS", "LOCAL_PRIVATE"]).has(variant)) return ["compose-variant"];
+  const expectedPolicySha256 = variant === "LOCAL_PRIVATE"
+    ? localPrivateCoreSemanticPolicySha256
+    : coreSemanticPolicySha256;
   if (!plainObject(binding)
       || !sameJson(Object.keys(binding).sort(), ["schema", "sha256"])
       || binding.schema !== CORE_SEMANTIC_POLICY_SCHEMA
-      || binding.sha256 !== coreSemanticPolicySha256) {
+      || binding.sha256 !== expectedPolicySha256) {
     return ["policy-binding"];
   }
   const runtimeReport = evaluateRuntimeIsolation(config, {
@@ -7248,13 +7901,22 @@ export function validateNoHostedCoreAuthority(lock, config, rootDirectory, envir
     protectedResourceNames: lock.protectedResourceNames,
     protectedNetworkNames: lock.protectedResourceNames?.networks,
   });
-  const exactAuthority = evaluateCurrentNoHostedExactAuthority(
-    lock,
-    config,
+  const localPrivate = variant === "LOCAL_PRIVATE"
+    ? projectLocalPrivateNoHostedAuthority(lock, config, rootDirectory, environment)
+    : null;
+  const exactAuthority = evaluateCurrentNoHostedExactAuthorityInternal(
+    localPrivate?.projectedLock ?? lock,
+    localPrivate?.projectedConfig ?? config,
     rootDirectory,
-    environment,
+    localPrivate?.projectedEnvironment ?? environment,
+    variant === "LOCAL_PRIVATE"
+      ? new Set(Object.keys(CORE_SEMANTIC_POLICY.secretFiles))
+      : new Set(),
   );
-  const violations = exactAuthority.violations;
+  const violations = [
+    ...(localPrivate?.violations ?? []),
+    ...exactAuthority.violations,
+  ];
   if (runtimeReport.status !== "passed") violations.unshift("runtime-isolation");
   return [...new Set(violations)];
 }

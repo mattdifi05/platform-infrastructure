@@ -372,6 +372,145 @@ test("production routing ignores legacy discovery and environment maps", async (
   assert.match(response.body, /Project not found/);
 });
 
+test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved application route map", async (t) => {
+  const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
+  const projects = path.join(root, "projects");
+  const state = path.join(root, "state");
+  const lockFile = path.join(state, "hosted-workloads.lock.json");
+  mkdirSync(path.join(projects, "stexor", ".platform"), { recursive: true });
+  mkdirSync(path.join(projects, "opstudents"), { recursive: true });
+  mkdirSync(path.join(projects, "fiplatform", ".platform"), { recursive: true });
+  for (const slug of ["anniversary", "fiplatform", "matthewdifilippo", "stream", "workcalendar"]) {
+    mkdirSync(path.join(projects, slug, "public"), { recursive: true });
+    writeFileSync(path.join(projects, slug, "public", "index.php"), "<?php\n");
+  }
+  writeFileSync(path.join(projects, "stexor", "package.json"), "{}\n");
+  writeFileSync(path.join(projects, "stexor", ".platform", "project.json"), `${JSON.stringify({
+    type: "node",
+    projects: [
+      { slug: "account", name: "Stexor account", type: "node" },
+      { slug: "ui", name: "Stexor UI", type: "node" },
+    ],
+  })}\n`);
+  writeFileSync(path.join(projects, "opstudents", "package.json"), "{}\n");
+  writeFileSync(path.join(projects, "opstudents", "platform.project.json"), `${JSON.stringify({
+    type: "node",
+    host: "opstudents.platform-infrastructure.com",
+  })}\n`);
+  writeFileSync(path.join(projects, "fiplatform", ".platform", "project.json"), `${JSON.stringify({
+    type: "php",
+    projects: [{ slug: "fiplatform", name: "fiplatform", type: "php", aliases: ["fireport"] }],
+  })}\n`);
+  mkdirSync(state, { recursive: true });
+  writeFileSync(path.join(state, "projects.json"), "{\"projects\":{}}\n");
+  const zeroWorkloadLock = readFileSync(path.join(infraRoot, "config", "no-hosted-workloads.local-private.lock.json"));
+  writeFileSync(lockFile, zeroWorkloadLock, { mode: 0o600 });
+  chmodSync(lockFile, 0o600);
+
+  const routerPort = await freePort();
+  const child = spawn(process.execPath, [routerScript], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PROJECT_ROUTER_PORT: String(routerPort),
+      PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS: "100",
+      PROJECTS_ROOT: projects,
+      PROJECT_STATE_FILE: path.join(state, "projects.json"),
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: sha256(zeroWorkloadLock),
+      PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true",
+      CONTROL_CENTER_HOST: "portal.platform-infrastructure.com",
+      CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+      PROJECT_HOST_SUFFIX: ".platform-infrastructure.com",
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80",
+      NODE_PROJECT_HOSTS: "",
+      PROJECT_UPSTREAMS: "",
+      STATIC_PROJECT_UPSTREAMS: "",
+      NODE_PROJECT_UPSTREAMS: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
+      PHP_PROJECT_UPSTREAMS: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(root, { recursive: true, force: true });
+  });
+  await waitForHealth(routerPort);
+
+  for (const host of [
+    "account.platform-infrastructure.com",
+    "ui.platform-infrastructure.com",
+    "opstudents.platform-infrastructure.com",
+    "anniversary.platform-infrastructure.com",
+    "fiplatform.platform-infrastructure.com",
+    "fireport.platform-infrastructure.com",
+    "matthewdifilippo.platform-infrastructure.com",
+    "stream.platform-infrastructure.com",
+    "workcalendar.platform-infrastructure.com",
+  ]) {
+    const response = await httpGet(routerPort, host, "/");
+    assert.equal(response.statusCode, 502, `${host} did not select its closed preserved upstream: ${stderr}`);
+    assert.match(response.body, /upstream unavailable/);
+  }
+  const wildcardHost = await httpGet(
+    routerPort,
+    "account.platform-infrastructure.com.attacker.invalid",
+    "/",
+  );
+  assert.equal(wildcardHost.statusCode, 404, "LOCAL_PRIVATE accepted a non-canonical wildcard Host");
+  const unknown = await httpGet(routerPort, "unknown.platform-infrastructure.com", "/");
+  assert.equal(unknown.statusCode, 404);
+
+  const stexorMetadata = path.join(projects, "stexor", ".platform", "project.json");
+  writeFileSync(stexorMetadata, `${JSON.stringify({
+    type: "node",
+    projects: [{ slug: "ui", name: "Stexor UI", type: "node" }],
+  })}\n`);
+  utimesSync(stexorMetadata, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+  mkdirSync(path.join(projects, "sibling", ".platform"), { recursive: true });
+  writeFileSync(path.join(projects, "sibling", "package.json"), "{}\n");
+  writeFileSync(
+    path.join(projects, "sibling", ".platform", "project.json"),
+    `${JSON.stringify({
+      type: "node",
+      projects: [{ slug: "sibling", type: "node", aliases: ["account"] }],
+    })}\n`,
+  );
+  const stolenAccount = await httpGet(routerPort, "account.platform-infrastructure.com", "/");
+  assert.equal(stolenAccount.statusCode, 404, "sibling metadata alias claimed the account upstream");
+  for (const reserved of ["admin", "api", "auth", "docs", "projects"]) {
+    const response = await httpGet(routerPort, `${reserved}.platform-infrastructure.com`, "/");
+    assert.equal(response.statusCode, 404, `${reserved} escaped the LOCAL_PRIVATE reserved-host deny`);
+  }
+
+  const overlay = readFileSync(path.join(infraRoot, "compose.local-private.yaml"), "utf8");
+  assert.match(overlay, /PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE:\s+"true"/);
+  assert.match(overlay, /node-opstudents:3000/);
+  assert.match(overlay, /php-workcalendar:80/);
+  assert.match(overlay, /\/var\/www\/projects:ro/);
+  assert.match(overlay, /\/var\/www\/project-state:ro/);
+});
+
+test("LOCAL_PRIVATE keeps the project wildcard below portal, docs and identity routes", () => {
+  const runtimeOverlay = readFileSync(path.join(infraRoot, "compose.runtime.yaml"), "utf8");
+  const localPrivateOverlay = readFileSync(path.join(infraRoot, "compose.local-private.yaml"), "utf8");
+  const projectRoutes = readFileSync(path.join(infraRoot, "traefik", "dynamic", "project-routes.yml"), "utf8");
+  const vpsOverlay = readFileSync(path.join(infraRoot, "compose.vps.yaml"), "utf8");
+  assert.match(runtimeOverlay, /\.\/traefik\/dynamic\/project-routes\.yml:\/etc\/traefik\/dynamic\/project-routes\.yml:ro/);
+  assert.doesNotMatch(localPrivateOverlay, /^  traefik:\s*$/m, "LOCAL_PRIVATE must not replace the merged Traefik volume inventory");
+  assert.match(projectRoutes, /HostRegexp\(`\^\[a-z0-9-\]\+\\\.platform-infrastructure\\\.com\$`\)/);
+  const wildcardPriority = Number(/enterprise-projects:[\s\S]*?priority:\s*(\d+)/.exec(projectRoutes)?.[1]);
+  assert.equal(wildcardPriority, 50);
+  for (const router of ["enterprise-portal", "enterprise-docs", "enterprise-identity"]) {
+    const priority = Number(new RegExp(`${router}:[\\s\\S]*?priority:\\s*(\\d+)`).exec(vpsOverlay)?.[1]);
+    assert.ok(priority > wildcardPriority, `${router} no longer outranks the project wildcard`);
+  }
+});
+
 test("FG-042 production consumer rejects route-owner, sibling-upstream and wildcard substitutions", async (t) => {
   const substitutions = [
     ["route owner", { owner: "sibling-app" }],

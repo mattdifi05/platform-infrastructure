@@ -414,11 +414,12 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 ENV_SOURCE_FILE=$ENV_FILE
-open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 4
+open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 5
 ENV_LOCK_REFERENCE=${SNAPSHOT_REFERENCES[0]}
 ENV_MODE_REFERENCE=${SNAPSHOT_REFERENCES[1]}
-ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[2]}
-ENV_SEMANTIC_REFERENCE=${SNAPSHOT_REFERENCES[3]}
+ENV_VARIANT_REFERENCE=${SNAPSHOT_REFERENCES[2]}
+ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[3]}
+ENV_SEMANTIC_REFERENCE=${SNAPSHOT_REFERENCES[4]}
 ENV_SNAPSHOT_SHA256=$SNAPSHOT_SHA256
 ENV_SOURCE_IDENTITY=$SNAPSHOT_SOURCE_IDENTITY
 env_parent=$(CDPATH= cd -- "$(dirname -- "$ENV_SOURCE_FILE")" && pwd -P)
@@ -461,6 +462,7 @@ env_path_value() {
   case "$key" in
     HOSTED_WORKLOAD_LOCK) source=$ENV_LOCK_REFERENCE ;;
     HOSTED_WORKLOAD_MODE) source=$ENV_MODE_REFERENCE ;;
+    PLATFORM_COMPOSE_VARIANT) source=$ENV_VARIANT_REFERENCE ;;
     *) printf 'Unsupported environment lookup key: %s\n' "$key" >&2; return 1 ;;
   esac
   value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$source")
@@ -481,6 +483,21 @@ if [[ ${HOSTED_WORKLOAD_MODE+x} ]]; then
 else
   workload_mode=$(env_path_value HOSTED_WORKLOAD_MODE)
 fi
+environment_compose_variant=$(env_path_value PLATFORM_COMPOSE_VARIANT)
+environment_compose_variant=${environment_compose_variant:-VPS}
+if [[ ${PLATFORM_COMPOSE_VARIANT+x} \
+      && "$PLATFORM_COMPOSE_VARIANT" != "$environment_compose_variant" ]]; then
+  printf '%s\n' "Caller PLATFORM_COMPOSE_VARIANT must exactly match the descriptor-bound environment." >&2
+  exit 2
+fi
+compose_variant=$environment_compose_variant
+case "$compose_variant" in
+  VPS|LOCAL_PRIVATE) ;;
+  *)
+    printf 'PLATFORM_COMPOSE_VARIANT must be VPS or LOCAL_PRIVATE: %s\n' "$compose_variant" >&2
+    exit 2
+    ;;
+esac
 for argument in "$@"; do
   case "$argument" in
     -f|-f?*|--file|--file=*|--env-file|--env-file=*|-p|-p?*|--project-name|--project-name=*|--project-directory|--project-directory=*|--profile|--profile=*)
@@ -520,10 +537,15 @@ else
     exit 2
   }
 fi
+if [[ "$compose_variant" = LOCAL_PRIVATE
+      && ( -n "$workload_lock" || "$workload_mode" != no-hosted ) ]]; then
+  printf '%s\n' "PLATFORM_COMPOSE_VARIANT=LOCAL_PRIVATE requires the exact no-hosted runtime." >&2
+  exit 2
+fi
 
-if [[ "$PREPARE_RESOLVED" = 0 && -z "$workload_lock" && "$workload_mode" = no-hosted ]] \
-    && (( runtime_identity_count != 0 )); then
-  printf '%s\n' "No-hosted mode forbids any runtime identity tuple." >&2
+if [[ "$PREPARE_RESOLVED" = 0 && -z "$workload_lock" && "$workload_mode" = no-hosted
+      && "$compose_variant" != LOCAL_PRIVATE ]] && (( runtime_identity_count != 0 )); then
+  printf '%s\n' "Standard no-hosted VPS mode forbids any runtime identity tuple." >&2
   exit 1
 fi
 
@@ -814,11 +836,22 @@ if [[ -n "$workload_lock" ]]; then
     compose+=(--env-file "$HANDOFF_REFERENCE")
   done <<< "$workload_env_records"
 else
-  runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}")
+  if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
+    canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
+    canonical_no_hosted_lock_sha256=af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c
+    canonical_no_hosted_policy_sha256=de85089023558b7072a26300aa37f3adb00e50dd428020d6c5577b46cd9b4f8a
+    canonical_no_hosted_secret_count=23
+  else
+    canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.lock.json
+    canonical_no_hosted_lock_sha256=61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0
+    canonical_no_hosted_policy_sha256=a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a
+    canonical_no_hosted_secret_count=21
+  fi
+  runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$canonical_no_hosted_lock}")
   if [[ "$PREPARE_RESOLVED" = 1 ]]; then
     HOSTED_WORKLOAD_ALLOW_RESOLVED=1 sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$runtime_lock_source" verify
   else
-    no_workload_lock=$(canonical_existing_file "$ROOT_DIR/config/no-hosted-workloads.lock.json")
+    no_workload_lock=$(canonical_existing_file "$canonical_no_hosted_lock")
     [[ "$runtime_lock_source" = "$no_workload_lock" ]] || {
       printf '%s\n' "A non-empty HOSTED_WORKLOAD_LOCK is required for a hosted runtime lock source." >&2
       exit 1
@@ -829,11 +862,13 @@ else
     no_hosted_lock_semantic_reference=${SNAPSHOT_REFERENCES[2]}
     no_hosted_lock_sha256=$SNAPSHOT_SHA256
     no_hosted_lock_source_identity=$SNAPSHOT_SOURCE_IDENTITY
-    [[ "$no_hosted_lock_sha256" = 61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0 ]] || {
+    [[ "$no_hosted_lock_sha256" = "$canonical_no_hosted_lock_sha256" ]] || {
       printf '%s\n' "Canonical no-hosted lock raw digest mismatch." >&2
       exit 1
     }
-    jq -e '
+    jq -e \
+      --arg coreSemanticPolicySha256 "$canonical_no_hosted_policy_sha256" \
+      --argjson secretCount "$canonical_no_hosted_secret_count" '
       type == "object"
       and ((keys | sort) == ["brokerPolicySha256", "coreSemanticPolicy", "projectName", "protectedResourceNames", "routes", "state", "validatorVersion", "version", "workloads"])
       and .version == 4
@@ -845,7 +880,7 @@ else
       and (.coreSemanticPolicy | type == "object")
       and ((.coreSemanticPolicy | keys | sort) == ["schema", "sha256"])
       and .coreSemanticPolicy.schema == "platform-no-hosted-core-capability-policy/v2"
-      and .coreSemanticPolicy.sha256 == "a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a"
+      and .coreSemanticPolicy.sha256 == $coreSemanticPolicySha256
       and .projectName == "platform_infra_vps"
       and (.protectedResourceNames | type == "object")
       and ((.protectedResourceNames | keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
@@ -853,7 +888,7 @@ else
         | map(type == "array") | all)
       and (.protectedResourceNames.configs | length) == 1
       and (.protectedResourceNames.networks | length) == 9
-      and (.protectedResourceNames.secrets | length) == 21
+      and (.protectedResourceNames.secrets | length) == $secretCount
       and (.protectedResourceNames.services | length) == 20
       and (.protectedResourceNames.volumes | length) == 17
       and all(.protectedResourceNames[]; . == (unique | sort) and all(.[]; type == "string" and length > 0))
@@ -880,6 +915,10 @@ compose+=(
   -f compose.networks.yaml
   -f compose.runtime-isolation.yaml
 )
+
+if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
+  compose+=(-f compose.local-private.yaml)
+fi
 
 if [[ -n "$workload_lock" ]]; then
   while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
