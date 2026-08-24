@@ -1593,11 +1593,15 @@ def duration_nanoseconds(value: object, label: str) -> int:
         return value
     if not isinstance(value, str):
         stop(f"{label} duration is invalid.")
-    match = re.fullmatch(r"([0-9]+)(ns|us|ms|s|m|h)", value)
-    if match is None:
+    matches = list(re.finditer(r"([0-9]+)(ns|us|ms|s|m|h)", value))
+    if not matches or "".join(match.group(0) for match in matches) != value:
         stop(f"{label} duration is not canonical.")
     scale = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000, "m": 60_000_000_000, "h": 3_600_000_000_000}
-    return int(match.group(1)) * scale[match.group(2)]
+    rank = {"ns": 0, "us": 1, "ms": 2, "s": 3, "m": 4, "h": 5}
+    units = [match.group(2) for match in matches]
+    if any(rank[left] <= rank[right] for left, right in zip(units, units[1:])):
+        stop(f"{label} duration is not canonical.")
+    return sum(int(match.group(1)) * scale[match.group(2)] for match in matches)
 
 
 def normalized_health(value: object, label: str, *, inspect: bool = False) -> Optional[Dict[str, object]]:
@@ -1670,6 +1674,21 @@ def render_mounts(render: Dict[str, object], service: Dict[str, object], project
             else:
                 stop(f"{label} {kind} entry {index} is invalid.")
             definition = definitions.get(source_name) if isinstance(source_name, str) else None
+            if kind == "configs" and isinstance(definition, dict) and "content" in definition:
+                if (
+                    set(definition) != {"content", "name"}
+                    or not isinstance(definition.get("content"), str)
+                    or not definition["content"]
+                    or not isinstance(definition.get("name"), str)
+                    or not definition["name"]
+                    or (isinstance(item, dict) and set(item) - {"source", "target"})
+                    or service.get("read_only") is True
+                ):
+                    stop(f"{label} inline config is not one canonical writable-layer injection.")
+                # Docker Compose copies inline configs into the container after
+                # create; they are not Engine mounts. Their exact bytes remain
+                # bound by the canonical render used for forced recreation.
+                continue
             source = definition.get("file") if isinstance(definition, dict) else None
             if not isinstance(source, str) or not source.startswith("/") or os.path.normpath(source) != source:
                 stop(f"{label} {kind} source is not one absolute rendered file.")

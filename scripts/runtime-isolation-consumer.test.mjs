@@ -730,7 +730,7 @@ function pinnedComposeRendererOrSkip(t) {
       LC_ALL: "C",
       PATH: process.env.PATH,
     },
-    timeout: 10_000,
+    timeout: 30_000,
   });
   assert.equal(version.status, 0, version.stderr);
   assert.equal(version.stdout.trim(), "5.3.1");
@@ -3198,6 +3198,16 @@ function parseMaterializedEnvironment(bytes) {
   return environment;
 }
 
+function canonicalFixtureJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalFixtureJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalFixtureJson(value[key])}`
+    )).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function materializeArchiveRenderEnvironment({
   staging,
   release,
@@ -3249,7 +3259,7 @@ sys.stdout.buffer.write(data)
       V1_TEST_CONFIDENTIAL_BACKUP_PASSPHRASE: paths.confidentialPassphrase,
     },
     maxBuffer: 2 * 1024 * 1024,
-    timeout: 10_000,
+    timeout: 30_000,
   });
   assert.equal(
     execution.status,
@@ -3286,6 +3296,263 @@ sys.stdout.buffer.write(m["source_render_without_runtime_identity"](render, docu
     0,
     execution.stderr || "runtime identity projection failed",
   );
+  return JSON.parse(execution.stdout);
+}
+
+function validateArchiveRenderAuthoritySemantics({ reconciler, controller, render }) {
+  const program = String.raw`
+import json, os, runpy, sys
+m = runpy.run_path(os.environ["V1_TEST_RECONCILER"], run_name="v1_archive_authority_semantics")
+c = runpy.run_path(os.environ["V1_TEST_CONTROLLER"], run_name="v1_archive_controller_semantics")
+render = json.load(sys.stdin)
+result = {}
+for container_name in m["ACTIVE_MANAGED"]:
+  service_name = m["ACTIVE_SERVICE_BY_CONTAINER"][container_name]
+  reconciler_semantic = m["render_service_semantics"](
+    render, service_name, "sha256:" + "a" * 64, m["PROJECT_BY_NAME"][container_name]
+  )
+  controller_semantic = c["render_service_semantics"](
+    render, service_name, "sha256:" + "a" * 64, c["PROJECT_BY_NAME"][container_name]
+  )
+  if reconciler_semantic != controller_semantic:
+    raise AssertionError("reconciler/controller semantic mismatch for " + container_name)
+  result[container_name] = reconciler_semantic
+sys.stdout.write(json.dumps(result, sort_keys=True))
+`;
+  const execution = spawnSync("python3", ["-I", "-c", program], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      LANG: "C",
+      LC_ALL: "C",
+      V1_TEST_CONTROLLER: controller,
+      V1_TEST_RECONCILER: reconciler,
+    },
+    input: JSON.stringify(render),
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  assert.equal(
+    execution.status,
+    0,
+    execution.stderr || "render authority semantic validation failed",
+  );
+  return JSON.parse(execution.stdout);
+}
+
+function buildArchivePreAuthority({
+  reconciler,
+  release,
+  renderBytes,
+  environmentBytes,
+  runtimeIdentity,
+  commit,
+  tree,
+  archiveSha256,
+  archiveBytes,
+  compose,
+}) {
+  const program = String.raw`
+import base64, fcntl, hashlib, json, os, runpy, shutil, stat, sys, tempfile
+m = runpy.run_path(os.environ["V1_TEST_RECONCILER"], run_name="v1_archive_pre_authority")
+payload = json.load(sys.stdin)
+render_bytes = base64.b64decode(payload["renderBytes"])
+environment_bytes = base64.b64decode(payload["environmentBytes"])
+archive_bytes = base64.b64decode(payload["archiveBytes"])
+_, environment = m["parse_env"](environment_bytes, "simulated PRE environment")
+g = m["build_authority"].__globals__
+state = os.path.realpath(tempfile.mkdtemp(prefix="v1-pre-authority-"))
+release_owner = os.stat(os.path.join(
+  payload["release"], "config/no-hosted-workloads.local-private.lock.json"
+))
+g["OWNER_UID"] = release_owner.st_uid
+g["OWNER_GID"] = release_owner.st_gid
+os.chown(state, g["OWNER_UID"], g["OWNER_GID"])
+g["AUTHORITY"] = os.path.join(state, "exact-release-authority.json")
+g["AUTHORITY_ARCHIVE_DIR"] = os.path.join(state, "release-authorities")
+g["RENDER_ENV"] = os.path.join(state, "exact-compose.env")
+g["RENDER"] = os.path.join(state, "exact-compose-render.json")
+g["SOURCE_ARCHIVE"] = os.path.join(state, "exact-source-archive.tar")
+os.makedirs(g["AUTHORITY_ARCHIVE_DIR"], mode=0o700)
+for pathname, data, mode in (
+  (g["RENDER_ENV"], environment_bytes, 0o400),
+  (g["RENDER"], render_bytes, 0o444),
+  (g["SOURCE_ARCHIVE"], archive_bytes, 0o444),
+):
+  with open(pathname, "xb") as stream: stream.write(data)
+  os.chmod(pathname, mode)
+artifacts = os.path.join(state, "installed-artifacts")
+os.makedirs(artifacts, mode=0o700)
+for name, relative, mode in (
+  ("CONTROLLER", "scripts/v1-local-private-control.py", 0o500),
+  ("INSTALLER", "scripts/v1-brownfield-install-consumer.py", 0o500),
+  ("RECONCILER", "scripts/v1-local-private-reconcile.py", 0o500),
+  ("SUDOERS", "sudoers/platform-v1-local-private-control", 0o440),
+  ("UNIT", "systemd/platform-v1-local-private-control.service", 0o444),
+):
+  target = os.path.join(artifacts, name.lower())
+  shutil.copyfile(os.path.join(payload["release"], relative), target)
+  os.chmod(target, mode)
+  g[name] = target
+g["SECRET_DIR"] = environment["PLATFORM_SECRETS_ROOT"]
+g["DATABASE_SECRET"] = environment["CONTROL_CENTER_DATABASE_URL_SECRET_FILE"]
+g["BOOTSTRAP_SECRET"] = environment["CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE"]
+g["KEYCLOAK_CLIENT_SECRET"] = environment["CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE"]
+g["CONFIDENTIAL_BACKUP_PASSPHRASE"] = environment["V1_CONFIDENTIAL_BACKUP_PASSPHRASE_FILE"]
+g["release_root"] = lambda commit, archive_sha: payload["release"]
+docker = os.path.join(state, "docker-compose-adapter")
+with open(docker, "x", encoding="utf-8") as stream:
+  stream.write("#!/usr/bin/python3\nimport os,sys\n")
+  stream.write("args=sys.argv[1:]\n")
+  stream.write("sys.exit(64) if not args or args[0] != 'compose' else None\n")
+  stream.write("os.execv(" + repr(payload["compose"]) + ", [" + repr(payload["compose"]) + ", *args[1:]])\n")
+os.chmod(docker, 0o500)
+g["docker_binary"] = lambda: docker
+g["image_id_for"] = lambda reference: "sha256:" + hashlib.sha256(reference.encode()).hexdigest()
+authority = m["build_authority"](
+  payload["commit"], payload["tree"], payload["archiveSha256"], payload["release"],
+  environment_bytes, render_bytes, environment, payload["runtimeIdentity"],
+)
+authority_bytes = m["atomic_json"](g["AUTHORITY"], authority, 0o444)
+archived = m["preserve_json"](
+  os.path.join(g["AUTHORITY_ARCHIVE_DIR"], authority["documentId"] + ".json"),
+  authority,
+  "simulated archived exact release authority",
+)
+if archived != authority_bytes: raise AssertionError("authority archive bytes differ")
+reopened, reopened_bytes = m["read_authority"]()
+if reopened != authority or reopened_bytes != authority_bytes:
+  raise AssertionError("reopened authority differs")
+g["render_with_wrapper"] = lambda _release, _environment_sha: render_bytes
+targets = m["validate_authority_material"](reopened)
+simulated_producer = os.path.join(state, "simulated-pre-producer.py")
+with open(simulated_producer, "x", encoding="utf-8") as stream:
+  stream.write("""import json, os, socket, stat, sys
+run_id = "20990101T000000Z-deadbeef"
+expected_environment = {
+  "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin",
+  "PLATFORM_V1_EVIDENCE_EXECUTOR_FD": "4", "PLATFORM_V1_EVIDENCE_SHARED_LOCK_FD": "3",
+}
+if any(os.environ.get(key) != value for key, value in expected_environment.items()):
+  raise RuntimeError("simulated PRE producer environment is not closed")
+if any(key == "DOCKER_HOST" or any(marker in key for marker in ("PASSWORD", "SECRET", "TOKEN")) for key in os.environ):
+  raise RuntimeError("simulated PRE producer inherited a forbidden environment binding")
+if not stat.S_ISREG(os.fstat(3).st_mode) or not stat.S_ISSOCK(os.fstat(4).st_mode):
+  raise RuntimeError("simulated PRE producer did not inherit the lease and executor socket")
+endpoint = socket.socket(fileno=4)
+request = {"action":"RUNTIME_INVENTORY","id":1,"parameters":{"runId":run_id}}
+endpoint.sendall((json.dumps(request, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"))
+buffer = b""
+while b"\\n" not in buffer:
+  chunk = endpoint.recv(65536)
+  if not chunk: raise RuntimeError("simulated PRE executor closed before its response")
+  buffer += chunk
+response_frame = buffer.split(b"\\n", 1)[0]
+response = json.loads(response_frame)
+if response.get("id") != 1 or response.get("status") != 0:
+  raise RuntimeError("simulated PRE executor returned a non-PASS response")
+if response_frame + b"\\n" != (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"):
+  raise RuntimeError("simulated PRE executor response is not canonical")
+endpoint.close()
+receipt = {"mode":sys.argv[1],"runId":run_id,"status":"PASS"}
+sys.stdout.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\\n")
+""")
+os.chmod(simulated_producer, 0o400)
+executed = []
+def simulated_action(authority_value, action, parameters):
+  if authority_value is not reopened:
+    raise AssertionError("PRE executor did not receive the reopened exact authority")
+  executed.append({"action": action, "parameters": parameters})
+  return m["executor_success_output"]({"action": action, "runId": parameters["runId"], "status": "PASS"})
+real_action = g["execute_typed_evidence_action"]
+g["execute_typed_evidence_action"] = simulated_action
+real_popen = g["subprocess"].Popen
+expected_argv = [
+  reopened["evidenceProducer"]["executor"], *reopened["evidenceProducer"]["executorFlags"],
+  m["physical"](reopened["evidenceProducer"]["path"]), "pre",
+]
+popen_calls = []
+def simulated_popen(argv, *args, **kwargs):
+  expected_environment = {
+    "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin",
+    "PLATFORM_V1_EVIDENCE_EXECUTOR_FD": "4", "PLATFORM_V1_EVIDENCE_SHARED_LOCK_FD": "3",
+  }
+  if (
+    argv != expected_argv or args or kwargs.get("pass_fds") != (3, 4)
+    or kwargs.get("close_fds") is not True or kwargs.get("cwd") != "/"
+    or kwargs.get("env") != expected_environment
+  ):
+    raise AssertionError("PRE producer process contract differs from the reopened exact authority")
+  popen_calls.append(list(argv))
+  return real_popen([argv[0], *argv[1:-2], simulated_producer, argv[-1]], *args, **kwargs)
+g["subprocess"].Popen = simulated_popen
+lease = os.path.join(state, "shared-transaction-lease")
+lease_fd = os.open(lease, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+fcntl.flock(lease_fd, fcntl.LOCK_EX)
+if lease_fd != 3:
+  os.dup2(lease_fd, 3, inheritable=True)
+  os.close(lease_fd)
+else:
+  os.set_inheritable(3, True)
+reserved_fd = os.open("/dev/null", os.O_RDONLY)
+if reserved_fd != 4:
+  os.dup2(reserved_fd, 4, inheritable=False)
+  os.close(reserved_fd)
+g["SHARED_LOCK_FD"] = 3
+g["EXECUTOR_FD_RESERVED"] = True
+try:
+  pre_receipt = m["invoke_evidence_producer"](reopened, "pre")
+finally:
+  g["subprocess"].Popen = real_popen
+  g["execute_typed_evidence_action"] = real_action
+  os.close(3)
+try:
+  os.fstat(4)
+  fd4_closed = False
+except OSError:
+  fd4_closed = True
+pre_entered = (
+  pre_receipt == {"mode": "pre", "runId": "20990101T000000Z-deadbeef", "status": "PASS"}
+  and executed == [{"action": "RUNTIME_INVENTORY", "parameters": {"runId": "20990101T000000Z-deadbeef"}}]
+  and popen_calls == [expected_argv]
+  and g["EXECUTOR_FD_RESERVED"] is False
+  and fd4_closed
+  and len(targets) == len(m["ACTIVE_MANAGED"])
+)
+print(json.dumps({
+  "attachments": len(authority["legacyNetworkAttachments"]),
+  "backupTools": len(authority["backupToolImages"]),
+  "documentId": authority["documentId"],
+  "preExecutorActions": len(executed),
+  "preEntered": pre_entered,
+  "routes": len(authority["legacyRouteChecks"]),
+  "status": authority["status"],
+  "targets": len(targets),
+}, sort_keys=True))
+`;
+  const execution = spawnSync("python3", ["-I", "-c", program], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      LANG: "C",
+      LC_ALL: "C",
+      V1_TEST_RECONCILER: reconciler,
+    },
+    input: JSON.stringify({
+      archiveSha256,
+      archiveBytes: archiveBytes.toString("base64"),
+      commit,
+      compose,
+      environmentBytes: environmentBytes.toString("base64"),
+      release,
+      renderBytes: renderBytes.toString("base64"),
+      runtimeIdentity,
+      tree,
+    }),
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  assert.equal(execution.status, 0, execution.stderr || "PRE authority build failed");
   return JSON.parse(execution.stdout);
 }
 
@@ -3385,18 +3652,29 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     const opsSha256 = "f".repeat(64);
     const opsRepository = "127.0.0.1:5000/platform/ops";
     const opsImage = `${opsRepository}@sha256:${opsSha256}`;
+    const controlCenterImage = `127.0.0.1:5000/platform/control-center@sha256:${"b".repeat(64)}`;
+    const alertDispatcherImage = `127.0.0.1:5000/platform/alert-dispatcher@sha256:${"c".repeat(64)}`;
+    const projectRouterImage = `127.0.0.1:5000/platform/project-router@sha256:${"d".repeat(64)}`;
     const stagingEnvironment = [
       "ALERT_EMAIL_TO=qa@fixture.invalid",
       "COMPOSE_PROJECT_NAME=platform_infra_vps",
+      `CONTROL_CENTER_IMAGE=${controlCenterImage}`,
       "DOMAIN=fixture.invalid",
       "HOSTED_WORKLOAD_LOCK=/run/platform/hosted-workloads.lock.json",
       "HOSTED_WORKLOAD_MODE=hosted",
       "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=/tmp/not-the-release-lock.json",
       "MAILER_FROM=qa@fixture.invalid",
       "MAILER_REPLY_TO=qa@fixture.invalid",
+      "MARIADB_IMAGE=mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+      "MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+      "NODE_IMAGE=node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
+      `PLATFORM_ALERT_DISPATCHER_IMAGE=${alertDispatcherImage}`,
       `PLATFORM_OPS_IMAGE=${opsImage}`,
       "PLATFORM_COMPOSE_VARIANT=VPS",
+      "POSTGRES_IMAGE=postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
       "PROJECTS_GATEWAY_EMAIL=qa@fixture.invalid",
+      `PROJECT_ROUTER_IMAGE=${projectRouterImage}`,
+      `RESTIC_IMAGE=restic@sha256:${"a".repeat(64)}`,
       "SMTP_HOST=smtp.fixture.invalid",
       "SMTP_USER=qa",
       "",
@@ -3454,7 +3732,8 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
         0,
         `${label} real Compose render failed:\n${result.stdout}\n${result.stderr}`,
       );
-      return { bytes: Buffer.from(result.stdout), config: JSON.parse(result.stdout) };
+      const config = JSON.parse(result.stdout);
+      return { bytes: Buffer.from(`${canonicalFixtureJson(config)}\n`), config };
     };
 
     const sourceEnvironmentBytes = materializeArchiveRenderEnvironment({
@@ -3479,15 +3758,23 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     const lockBytes = fs.readFileSync(
       path.join(release, "config", "no-hosted-workloads.local-private.lock.json"),
     );
+    const runtimeCommit = "1".repeat(40);
+    const runtimeTree = "4".repeat(40);
+    const sourceRenderSha256 = crypto.createHash("sha256").update(source.bytes).digest("hex");
+    const workloadLockSha256 = crypto.createHash("sha256").update(lockBytes).digest("hex");
+    const runtimeCandidateId = crypto.createHash("sha256").update(JSON.stringify({
+      candidateCommit: runtimeCommit,
+      candidateTree: runtimeTree,
+      sourceRenderSha256,
+      workloadLockSha256,
+    })).digest("hex");
     const runtimeIdentity = {
-      PLATFORM_RUNTIME_CANDIDATE_ID: "2".repeat(64),
-      PLATFORM_RUNTIME_COMMIT: "3".repeat(40),
-      PLATFORM_RUNTIME_TREE: "4".repeat(40),
-      PLATFORM_RUNTIME_DEPLOYMENT_ID: `v1-local-private:${"5".repeat(64)}`,
-      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256:
-        crypto.createHash("sha256").update(source.bytes).digest("hex"),
-      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256:
-        crypto.createHash("sha256").update(lockBytes).digest("hex"),
+      PLATFORM_RUNTIME_CANDIDATE_ID: runtimeCandidateId,
+      PLATFORM_RUNTIME_COMMIT: runtimeCommit,
+      PLATFORM_RUNTIME_TREE: runtimeTree,
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: `v1-local-private:${runtimeCandidateId}`,
+      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: sourceRenderSha256,
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: workloadLockSha256,
     };
     const finalEnvironmentBytes = materializeArchiveRenderEnvironment({
       staging: paths.staging,
@@ -3515,6 +3802,38 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       source.config,
       "the exact reconciler did not recover the identity-free source render",
     );
+    assert.equal(
+      Object.keys(validateArchiveRenderAuthoritySemantics({
+        reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
+        controller: path.join(release, "scripts", "v1-local-private-control.py"),
+        render: final.config,
+      })).length,
+      17,
+      "the exact PRE authority path did not normalize every active rendered service",
+    );
+    const preAuthority = buildArchivePreAuthority({
+      reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
+      release,
+      renderBytes: final.bytes,
+      environmentBytes: finalEnvironmentBytes,
+      runtimeIdentity,
+      commit: runtimeCommit,
+      tree: runtimeTree,
+      archiveSha256,
+      archiveBytes,
+      compose,
+    });
+    assert.deepEqual(preAuthority, {
+      attachments: 30,
+      backupTools: 5,
+      documentId: preAuthority.documentId,
+      preExecutorActions: 1,
+      preEntered: true,
+      routes: 10,
+      status: "AUTHORIZED",
+      targets: 17,
+    });
+    assert.match(preAuthority.documentId, /^[0-9a-f]{64}$/);
     assert.deepEqual(
       validateNoHostedCoreAuthority(lock, source.config, release, sourceEnvironment),
       [],
