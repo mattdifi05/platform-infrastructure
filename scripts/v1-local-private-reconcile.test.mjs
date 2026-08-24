@@ -284,15 +284,17 @@ ops_sha256='c'*64
 ops_image=ops_repository+'@sha256:'+ops_sha256
 def materialize(lines):
  root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+ release=os.path.join(root,'release')
  pathname=os.path.join(root,'.env')
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
- rendered,values=m['materialize_environment'](root,ops_image)
+ rendered,values=m['materialize_environment'](root,release,ops_image)
  text=rendered.decode()
  provider_names=(
   'CONTROL_CENTER_LOCAL_CA_CERT_SOURCE',
   'DOCKER_ACTION_ACTIVATION_INBOX','DOCKER_ACTION_ACTIVE_RECEIPT_FILE',
   'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256','DOCKER_ACTION_COMBINED_RENDER_SHA256',
   'DOCKER_ACTION_RUNTIME_INTENT_FILE','DOCKER_ACTION_RUNTIME_INTENT_ID',
+  'HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE',
   'PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY','PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256',
   'PLATFORM_CERTS_DIR','PLATFORM_DATA_ROOT',
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
@@ -300,7 +302,7 @@ def materialize(lines):
   'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
- _,final_values=m['materialize_environment'](root,ops_image,runtime)
+ _,final_values=m['materialize_environment'](root,release,ops_image,runtime)
  return {
   'core':values.get('CORE_VALUE'),
   'lock':values.get('HOSTED_WORKLOAD_LOCK'),
@@ -310,6 +312,7 @@ def materialize(lines):
   'provider':{name:values.get(name) for name in provider_names},
   'providerLines':{name:text.count(name+'=') for name in provider_names},
   'providerStable':all(final_values.get(name)==values.get(name) for name in provider_names),
+  'release':release,
   'runtimeComplete':all(name in final_values for name in m['RUNTIME_IDENTITY_ENV']),
   'variant':values.get('PLATFORM_COMPOSE_VARIANT'),
   'variantLines':text.count('PLATFORM_COMPOSE_VARIANT='),
@@ -318,7 +321,7 @@ def rejected(lines,supplied):
  root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
  pathname=os.path.join(root,'.env')
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
- try: m['materialize_environment'](root,supplied); return False
+ try: m['materialize_environment'](root,os.path.join(root,'release'),supplied); return False
  except m['Stop']: return True
 print(json.dumps({
  'absent':materialize(['PLATFORM_OPS_IMAGE='+ops_image,'CORE_VALUE=kept']),
@@ -354,6 +357,13 @@ print(json.dumps({
   ops_repository+'@sha256:'+'0'*64),
 }))`);
   for (const descriptor of [value.absent, value.hosted]) {
+    const runtimeLock = path.join(
+      descriptor.release,
+      "config",
+      "no-hosted-workloads.local-private.lock.json",
+    );
+    assert.equal(path.isAbsolute(runtimeLock), true);
+    assert.equal(descriptor.provider.HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE, runtimeLock);
     assert.deepEqual(descriptor, {
       core: "kept",
       lock: "",
@@ -368,6 +378,7 @@ print(json.dumps({
         DOCKER_ACTION_COMBINED_RENDER_SHA256: "0".repeat(64),
         DOCKER_ACTION_RUNTIME_INTENT_FILE: "/srv/platform/trust/runtime-intent.json",
         DOCKER_ACTION_RUNTIME_INTENT_ID: "intent.v1-local-private-ready-but-disabled",
+        HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: runtimeLock,
         PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
         PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: "c".repeat(64),
         PLATFORM_CERTS_DIR: "/home/platform_infrastructure/platform-infrastructure/traefik/certs",
@@ -388,6 +399,7 @@ print(json.dumps({
         DOCKER_ACTION_COMBINED_RENDER_SHA256: 1,
         DOCKER_ACTION_RUNTIME_INTENT_FILE: 1,
         DOCKER_ACTION_RUNTIME_INTENT_ID: 1,
+        HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: 1,
         PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: 1,
         PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: 1,
         PLATFORM_CERTS_DIR: 1,
@@ -401,6 +413,7 @@ print(json.dumps({
         PROJECT_SOURCE_DIR: 1,
       },
       providerStable: true,
+      release: descriptor.release,
       runtimeComplete: true,
       variant: "LOCAL_PRIVATE",
       variantLines: 1,
@@ -813,13 +826,15 @@ required=[m['DATABASE_SECRET'],m['BOOTSTRAP_SECRET'],m['KEYCLOAK_CLIENT_SECRET']
  f"{m['SECRET_DIR']}/{name}.txt" for name in m['SECRET_MANAGER_NEW_REQUIRED']]
 original_materialize=g['materialize_environment']
 materialize_calls={'count':0}
-def real_materialize(repo,local_ops,runtime_identity=None):
+def real_materialize(repo,candidate_release,local_ops,runtime_identity=None):
  assert events[-1] in ('passphrase-pass','runtime-identity')
+ assert candidate_release==release
  assert all(os.path.isfile(m['physical'](item)) for item in required)
  assert all(os.stat(m['physical'](item),follow_symlinks=False).st_nlink==1 for item in required)
- data,values=original_materialize(repo,local_ops,runtime_identity)
+ data,values=original_materialize(repo,candidate_release,local_ops,runtime_identity)
  assert values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT']
  assert values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
+ assert values['HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE']==release+'/config/no-hosted-workloads.local-private.lock.json'
  materialize_calls['count']+=1
  events.append('materialize-source' if runtime_identity is None else 'materialize-final')
  return data,values
@@ -874,6 +889,7 @@ def pre_entry(value,operation):
  env=m['secure_file'](m['RENDER_ENV'],'PRE render environment',1024*1024,0o400)
  _,values=m['parse_env'](env,'PRE render environment')
  assert values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT'] and values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
+ assert values['HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE']==release+'/config/no-hosted-workloads.local-private.lock.json'
  events.append('pre-entered')
  return {'status':'PASS'}
 g['invoke_evidence_producer']=pre_entry

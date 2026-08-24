@@ -5777,6 +5777,10 @@ function bindTargetFileMode(target) {
     : [0o644, 0o444];
 }
 
+function repositoryBindAuthorityKey(serviceName, target, source) {
+  return canonicalJson([serviceName, target, source]);
+}
+
 function materializeBindRule(serviceName, rule, target, rootDirectory, environment) {
   if (rule.startsWith("root:")) {
     const resolved = path.resolve(rootDirectory, rule.slice("root:".length));
@@ -7152,6 +7156,7 @@ function validateAndNormalizeServices(
   normalized,
   violations,
   prevalidatedSiblingSource = null,
+  prevalidatedRepositoryBinds = new Set(),
 ) {
   const runtimeIdentity = runtimeIdentityProjection(environment);
   for (const [serviceName, service] of Object.entries(config.services ?? {})) {
@@ -7296,7 +7301,10 @@ function validateAndNormalizeServices(
       const source = mount?.source;
       if (mount?.type !== "bind" || typeof source !== "string") continue;
       if (source === rootDirectory || source.startsWith(`${rootDirectory}${path.sep}`)) {
-        if (!filesystemPathAuthority(source, rootDirectory, {
+        const prevalidated = prevalidatedRepositoryBinds.has(
+          repositoryBindAuthorityKey(serviceName, mount.target, source),
+        );
+        if (!prevalidated && !filesystemPathAuthority(source, rootDirectory, {
           expectedType: bindTargetType(mount.target),
           fileMode: bindTargetFileMode(mount.target),
         })) {
@@ -7375,18 +7383,20 @@ function validateAndProjectLocalPrivateMount(
 ) {
   const service = projectedConfig.services?.[serviceName];
   const mount = exactServiceMount(service, target);
-  if (!plainObject(mount)
-      || mount.type !== "bind"
-      || mount.source !== selectedSource
-      || (mount.read_only === true) !== readOnly) {
+  const valid = plainObject(mount)
+    && mount.type === "bind"
+    && mount.source === selectedSource
+    && (mount.read_only === true) === readOnly;
+  if (!valid) {
     violations.push(`${serviceName}:local-private-mount-${target}`);
   }
-  if (!Array.isArray(service?.volumes)) return;
+  if (!Array.isArray(service?.volumes)) return false;
   if (remove) {
     service.volumes = service.volumes.filter((candidate) => candidate?.target !== target);
   } else if (mount) {
     mount.source = standardSource;
   }
+  return valid;
 }
 
 function localPrivateExpectedEnvironment(environment) {
@@ -7461,6 +7471,7 @@ export function projectLocalPrivateNoHostedAuthority(
   const projectedConfig = structuredClone(config);
   const projectedLock = structuredClone(lock);
   const projectedEnvironment = new Map(environment);
+  const prevalidatedRepositoryBinds = new Set();
   const additionalSecretSet = new Set(LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES);
   const baseSecretNames = Object.keys(CORE_SEMANTIC_POLICY.secretFiles).sort();
   const localPrivateSecretNames = [...baseSecretNames, ...additionalSecretSet].sort();
@@ -7525,26 +7536,28 @@ export function projectLocalPrivateNoHostedAuthority(
     && filesystemPathAuthority(dataRoot, dataRoot, { expectedType: "directory" })
     && filesystemPathAuthority(secretsRoot, dataRoot, { expectedType: "directory" });
   if (!rootsValid) violations.push("local-private:external-root-authority");
-  if (stateDirectory === null
-      || dataRoot === null
-      || !pathWithinRoot(stateDirectory, dataRoot)
-      || !filesystemPathAuthority(stateDirectory, dataRoot, { expectedType: "directory" })) {
+  const stateDirectoryAuthorityValid = stateDirectory !== null
+    && dataRoot !== null
+    && pathWithinRoot(stateDirectory, dataRoot)
+    && filesystemPathAuthority(stateDirectory, dataRoot, { expectedType: "directory" });
+  if (!stateDirectoryAuthorityValid) {
     violations.push("local-private:state-directory-authority");
   }
-  if (certificatesDirectory === null
-      || dataRoot === null
-      || !pathWithinRoot(certificatesDirectory, dataRoot)
-      || !filesystemPathAuthority(certificatesDirectory, dataRoot, { expectedType: "directory" })
-      || certificate === null
-      || privateKey === null
-      || !filesystemPathAuthority(certificate, certificatesDirectory, {
-        expectedType: "file",
-        fileMode: 0o644,
-      })
-      || !filesystemPathAuthority(privateKey, certificatesDirectory, {
-        expectedType: "file",
-        fileMode: 0o600,
-      })) {
+  const certificateAuthorityValid = certificatesDirectory !== null
+    && dataRoot !== null
+    && pathWithinRoot(certificatesDirectory, dataRoot)
+    && filesystemPathAuthority(certificatesDirectory, dataRoot, { expectedType: "directory" })
+    && certificate !== null
+    && privateKey !== null
+    && filesystemPathAuthority(certificate, certificatesDirectory, {
+      expectedType: "file",
+      fileMode: 0o644,
+    })
+    && filesystemPathAuthority(privateKey, certificatesDirectory, {
+      expectedType: "file",
+      fileMode: 0o600,
+    });
+  if (!certificateAuthorityValid) {
     violations.push("local-private:certificate-authority");
   }
   if (localCa === null
@@ -7770,7 +7783,7 @@ export function projectLocalPrivateNoHostedAuthority(
   }
   if (plainObject(controlCenter)) delete controlCenter.extra_hosts;
 
-  validateAndProjectLocalPrivateMount(
+  const wafCertificateMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
     "waf",
     "/etc/nginx/conf/server.crt",
@@ -7779,7 +7792,14 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
-  validateAndProjectLocalPrivateMount(
+  if (certificateAuthorityValid && wafCertificateMountValid) {
+    prevalidatedRepositoryBinds.add(repositoryBindAuthorityKey(
+      "waf",
+      "/etc/nginx/conf/server.crt",
+      path.join(root, "traefik/certs/local-cert.pem"),
+    ));
+  }
+  const wafPrivateKeyMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
     "waf",
     "/etc/nginx/conf/server.key",
@@ -7788,7 +7808,14 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
-  validateAndProjectLocalPrivateMount(
+  if (certificateAuthorityValid && wafPrivateKeyMountValid) {
+    prevalidatedRepositoryBinds.add(repositoryBindAuthorityKey(
+      "waf",
+      "/etc/nginx/conf/server.key",
+      path.join(root, "traefik/certs/local-key.pem"),
+    ));
+  }
+  const controlCenterStateMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
     "control-center",
     "/var/www/project-state",
@@ -7797,6 +7824,13 @@ export function projectLocalPrivateNoHostedAuthority(
     false,
     violations,
   );
+  if (stateDirectoryAuthorityValid && controlCenterStateMountValid) {
+    prevalidatedRepositoryBinds.add(repositoryBindAuthorityKey(
+      "control-center",
+      "/var/www/project-state",
+      path.join(root, "projects-portal/state"),
+    ));
+  }
   validateAndProjectLocalPrivateMount(
     projectedConfig,
     "control-center",
@@ -7816,7 +7850,7 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
-  validateAndProjectLocalPrivateMount(
+  const projectRouterStateMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
     "project-router",
     "/var/www/project-state",
@@ -7825,6 +7859,13 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
+  if (stateDirectoryAuthorityValid && projectRouterStateMountValid) {
+    prevalidatedRepositoryBinds.add(repositoryBindAuthorityKey(
+      "project-router",
+      "/var/www/project-state",
+      path.join(root, "projects-portal/state"),
+    ));
+  }
   validateAndProjectLocalPrivateMount(
     projectedConfig,
     "project-router",
@@ -7834,7 +7875,7 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
-  validateAndProjectLocalPrivateMount(
+  const mariadbCertificatesMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
     "mariadb",
     "/etc/mysql/ssl",
@@ -7843,6 +7884,13 @@ export function projectLocalPrivateNoHostedAuthority(
     true,
     violations,
   );
+  if (certificateAuthorityValid && mariadbCertificatesMountValid) {
+    prevalidatedRepositoryBinds.add(repositoryBindAuthorityKey(
+      "mariadb",
+      "/etc/mysql/ssl",
+      path.join(root, "traefik/certs"),
+    ));
+  }
 
   if (plainObject(projectedLock?.protectedResourceNames)) {
     projectedLock.protectedResourceNames.secrets =
@@ -7857,6 +7905,7 @@ export function projectLocalPrivateNoHostedAuthority(
   }
   return {
     prevalidatedSiblingSource: sourceAuthorityValid ? fixedSiblingSource : null,
+    prevalidatedRepositoryBinds,
     projectedConfig,
     projectedEnvironment,
     projectedLock,
@@ -7871,6 +7920,7 @@ function evaluateCurrentNoHostedExactAuthorityInternal(
   environment = new Map(),
   prevalidatedSecretNames = new Set(),
   prevalidatedSiblingSource = null,
+  prevalidatedRepositoryBinds = new Set(),
 ) {
   const violations = [];
   if (!plainObject(config) || !plainObject(config.services)) {
@@ -7894,6 +7944,7 @@ function evaluateCurrentNoHostedExactAuthorityInternal(
     normalized,
     violations,
     prevalidatedSiblingSource,
+    prevalidatedRepositoryBinds,
   );
   const normalizedSha256 = crypto
     .createHash("sha256")
@@ -7949,6 +8000,7 @@ export function validateNoHostedCoreAuthority(lock, config, rootDirectory, envir
       ? new Set(Object.keys(CORE_SEMANTIC_POLICY.secretFiles))
       : new Set(),
     localPrivate?.prevalidatedSiblingSource ?? null,
+    localPrivate?.prevalidatedRepositoryBinds ?? new Set(),
   );
   const violations = [
     ...(localPrivate?.violations ?? []),
