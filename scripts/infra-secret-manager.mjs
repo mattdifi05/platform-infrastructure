@@ -127,6 +127,14 @@ function secretOwner(value, fallback = "vault") {
 
 function vaultSpec(name, previousRecord = {}, overrides = {}) {
   const normalized = validateSecretName(name);
+  // app_db_password was a managed platform secret before it moved into the
+  // application vault.  Brownfield installations can still have a group-only
+  // reader, so keep its historical 0640 materialization without making it a
+  // required core secret again.  Other vault records retain the private 0600
+  // default.
+  const legacyFileMode = normalized === "app_db_password" && Object.keys(previousRecord).length
+    ? 0o640
+    : undefined;
   return {
     name: normalized,
     kind: "opaque",
@@ -136,6 +144,7 @@ function vaultSpec(name, previousRecord = {}, overrides = {}) {
     rotationDays: positiveInteger(overrides.rotationDays ?? overrides["rotation-days"] ?? previousRecord.rotationDays, 90, "rotationDays"),
     materializeTo: `secrets/${normalized}.txt`,
     vault: true,
+    ...(legacyFileMode ? { fileMode: legacyFileMode } : {}),
   };
 }
 
@@ -686,16 +695,21 @@ const commands = {
 };
 
 try {
+  if (booleanFlag(argv.readOnly) && command !== "status" && command !== "kms-status") {
+    fail("--readOnly is admitted only for status and kms-status.");
+  }
   if (!commands[command]) {
     help();
     fail(`Unknown command: ${command}`);
   }
   await commands[command]();
 } catch (error) {
-  try {
-    audit(command, { status: "failed", error: String(error?.message ?? error) });
-  } catch {
-    // Preserve the original failure.
+  if (!(booleanFlag(argv.readOnly) && (command === "status" || command === "kms-status"))) {
+    try {
+      audit(command, { status: "failed", error: String(error?.message ?? error) });
+    } catch {
+      // Preserve the original failure.
+    }
   }
   process.stderr.write(`${error.message ?? error}\n`);
   process.exitCode = 1;

@@ -16,6 +16,7 @@ import base64
 import binascii
 import fcntl
 import copy
+import grp
 import hashlib
 import http.client
 import ipaddress
@@ -24,6 +25,7 @@ import os
 import re
 import secrets
 import select
+import shutil
 import socket
 import ssl
 import stat
@@ -61,10 +63,18 @@ KEYCLOAK_CLIENT_SECRET = f"{SECRET_DIR}/control_center_first_configuration_keycl
 CONFIDENTIAL_BACKUP_PASSPHRASE = f"{STATE_DIR}/confidential-backup-passphrase"
 RESTIC_PASSWORD = f"{SECRET_DIR}/restic_password.txt"
 RCLONE_CONFIG = f"{SECRET_DIR}/rclone/rclone.conf"
+SECRET_MANAGER_STORE = f"{SECRET_DIR}/infra-secret-manager-store.json"
+SECRET_MANAGER_MASTER_KEY = f"{SECRET_DIR}/infra-secret-manager-master.key"
+SECRET_MANAGER_AUDIT_LOG = f"{SECRET_DIR}/infra-secret-manager-audit.log"
+SECRET_PREP_STAGE = "/run/platform-v1-local-private-secret-prep"
 PROJECT_SOURCE_ROOT = "/home/platform_infrastructure/src"
 PROJECT_STATE_ROOT = f"{DEPLOYMENT_REPO}/projects-portal/state"
+PROJECTS_PORTAL_ROOT = f"{DEPLOYMENT_REPO}/projects-portal"
+TRAEFIK_ROOT = f"{DEPLOYMENT_REPO}/traefik"
 CERTIFICATES_ROOT = f"{DEPLOYMENT_REPO}/traefik/certs"
 LOCAL_CA_CERTIFICATE = f"{CERTIFICATES_ROOT}/ca.pem"
+LOCAL_CERTIFICATE = f"{CERTIFICATES_ROOT}/local-cert.pem"
+LOCAL_PRIVATE_KEY = f"{CERTIFICATES_ROOT}/local-key.pem"
 BACKUP_SIGNING_KEYS = f"{SECRET_DIR}/backup_signing_keys.txt"
 ROLLBACK_SPEC_DIR = f"{STATE_DIR}/rollback-specs"
 ABORT_RECORD = f"{STATE_DIR}/reconciliation-abort-record.json"
@@ -86,6 +96,7 @@ DOCKER = "/usr/bin/docker"
 GIT = "/usr/bin/git"
 NODE = "/usr/bin/node"
 SYSTEMCTL = "/usr/bin/systemctl"
+OPENSSL = "/usr/bin/openssl"
 SUPERVISOR_UNIT = "platform-v1-local-private-control.service"
 
 TEST_ROOT_ENV = "PLATFORM_V1_RECONCILE_TEST_ROOT"
@@ -95,6 +106,46 @@ TEST_GIT_ENV = "PLATFORM_V1_RECONCILE_TEST_GIT"
 TEST_NODE_ENV = "PLATFORM_V1_RECONCILE_TEST_NODE"
 TEST_CURL_ENV = "PLATFORM_V1_RECONCILE_TEST_CURL"
 TEST_SYSTEMCTL_ENV = "PLATFORM_V1_RECONCILE_TEST_SYSTEMCTL"
+TEST_OPENSSL_ENV = "PLATFORM_V1_RECONCILE_TEST_OPENSSL"
+
+SECRET_MANAGER_NEW_REQUIRED = (
+    "control_center_vault_keys",
+    "docker_action_backup_catalog",
+    "docker_action_backup_job_execute",
+    "docker_action_backup_offsite_sync",
+    "docker_action_backup_prune_apply",
+    "docker_action_backup_prune_plan",
+    "docker_action_evidence_runtime_snapshot",
+    "docker_action_restore_drill_full",
+    "docker_action_runtime_intent_trust_key",
+)
+SECRET_MANAGER_EXISTING_PLATFORM = (
+    "alertmanager_webhook_token",
+    "backup_signing_keys",
+    "grafana_admin_password",
+    "keycloak_admin_password",
+    "keycloak_db_password",
+    "mariadb_root_password",
+    "minio_root_password",
+    "nats_password",
+    "phpmyadmin_control_password",
+    "postgres_superuser_password",
+    "projects_gateway_signing_keys",
+    "redis_password",
+    "smtp_password",
+)
+SECRET_MANAGER_EXISTING_VAULT = (
+    "app_db_password",
+    "cloudflare_turnstile_secret_key",
+    "database_url",
+    "github_token",
+    "hash_pepper_keys",
+    "nats_url",
+    "session_secret",
+    "session_signing_keys",
+)
+SECRET_MANAGER_EXISTING = tuple(sorted(SECRET_MANAGER_EXISTING_PLATFORM + SECRET_MANAGER_EXISTING_VAULT))
+SECRET_MANAGER_COMPLETE = tuple(sorted(SECRET_MANAGER_EXISTING + SECRET_MANAGER_NEW_REQUIRED))
 
 AUTHORITY_SCHEMA = "platform.v1-local-private-exact-release-authority/v1"
 RECONCILIATION_SCHEMA = "platform.v1-local-private-reconciliation/v1"
@@ -532,6 +583,712 @@ def atomic_secret_bytes(logical: str, data: bytes, replace: bool = True) -> None
             os.unlink(temporary)
 
 
+def privileged_identity() -> Tuple[int, int]:
+    return (OWNER_UID, OWNER_GID) if TEST_ROOT is not None else (0, 0)
+
+
+def alert_runtime_gid() -> int:
+    if TEST_ROOT is not None:
+        return SECRET_GID
+    try:
+        return grp.getgrnam("nogroup").gr_gid
+    except KeyError:
+        stop("LOCAL_PRIVATE alert runtime group is unavailable.")
+
+
+def read_external_regular(
+    pathname: str,
+    label: str,
+    maximum: int,
+    expected_uid: int,
+    expected_gid: int,
+    allowed_modes: Iterable[int],
+) -> Tuple[bytes, Tuple[int, int, int, int, int, int], int]:
+    no_symlink_chain(pathname, label)
+    try:
+        path_info = os.lstat(pathname)
+    except OSError as error:
+        stop(f"{label} is unavailable: {error}.")
+    allowed = set(allowed_modes)
+    if (
+        not stat.S_ISREG(path_info.st_mode)
+        or stat.S_ISLNK(path_info.st_mode)
+        or path_info.st_nlink != 1
+        or path_info.st_size < 1
+        or path_info.st_size > maximum
+    ):
+        stop(f"{label} is not one bounded nonempty regular file.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(pathname, flags)
+    except OSError as error:
+        stop(f"cannot open {label}: {error}.")
+    try:
+        before = os.fstat(fd)
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_uid,
+            before.st_gid,
+        )
+        mode = stat.S_IMODE(before.st_mode)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != expected_uid
+            or before.st_gid != expected_gid
+            or mode not in allowed
+            or (path_info.st_dev, path_info.st_ino, path_info.st_size) != identity[:3]
+        ):
+            stop(f"{label} ownership, identity or mode is invalid.")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                stop(f"{label} exceeded its byte boundary.")
+        after = os.fstat(fd)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_uid,
+            after.st_gid,
+        ) != identity:
+            stop(f"{label} changed while it was read.")
+        return b"".join(chunks), identity, mode
+    finally:
+        os.close(fd)
+
+
+def external_directory_authority(logical: str, label: str, allowed_modes: Iterable[int]) -> None:
+    pathname = physical(logical)
+    no_symlink_chain(pathname, label)
+    before = os.lstat(pathname)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(pathname, flags)
+    try:
+        opened = os.fstat(fd)
+        mode = stat.S_IMODE(opened.st_mode)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_uid != SECRET_UID
+            or opened.st_gid != SECRET_GID
+            or mode not in set(allowed_modes)
+            or (mode & 0o500) != 0o500
+            or mode & 0o7000
+        ):
+            stop(f"{label} owner, type or mode is outside the LOCAL_PRIVATE path cohort.")
+        target_mode = mode & ~0o022
+        if target_mode != mode:
+            os.fchmod(fd, target_mode)
+            os.fsync(fd)
+        current = os.lstat(pathname)
+        final = os.fstat(fd)
+        if (
+            (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or final.st_uid != SECRET_UID
+            or final.st_gid != SECRET_GID
+            or stat.S_IMODE(final.st_mode) != target_mode
+            or target_mode & 0o022
+        ):
+            stop(f"{label} changed or remained writable during path preparation.")
+    finally:
+        os.close(fd)
+
+
+def narrow_external_file_mode(
+    logical: str,
+    label: str,
+    maximum: int,
+    expected_uid: int,
+    expected_gid: int,
+    allowed_modes: Iterable[int],
+    target_mode: int,
+) -> bytes:
+    pathname = physical(logical)
+    data, identity, mode = read_external_regular(
+        pathname, label, maximum, expected_uid, expected_gid, allowed_modes
+    )
+    if mode != target_mode:
+        fd = os.open(pathname, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            current = os.fstat(fd)
+            if (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_uid,
+                current.st_gid,
+            ) != identity:
+                stop(f"{label} changed before its bounded mode reconciliation.")
+            os.fchmod(fd, target_mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    final_data, final_identity, final_mode = read_external_regular(
+        pathname, label, maximum, expected_uid, expected_gid, (target_mode,)
+    )
+    if final_data != data or final_identity != identity or final_mode != target_mode:
+        stop(f"{label} bytes or identity changed during mode reconciliation.")
+    return final_data
+
+
+def validate_local_certificate_authority() -> None:
+    descriptors = []
+    try:
+        for logical, label, mode in (
+            (LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE TLS private key", 0o600),
+            (LOCAL_CERTIFICATE, "LOCAL_PRIVATE TLS certificate", 0o644),
+            (LOCAL_CA_CERTIFICATE, "LOCAL_PRIVATE TLS certificate authority", 0o644),
+        ):
+            pathname = physical(logical)
+            read_external_regular(pathname, label, 1024 * 1024, SECRET_UID, SECRET_GID, (mode,))
+            descriptors.append(os.open(
+                pathname,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            ))
+        key_fd, certificate_fd, authority_fd = descriptors
+        os.lseek(key_fd, 0, os.SEEK_SET)
+        key_public = run(
+            [openssl_binary(), "pkey", "-in", f"/dev/fd/{key_fd}", "-pubout"],
+            "LOCAL_PRIVATE TLS key public identity",
+            timeout=30,
+            max_output=1024 * 1024,
+            sensitive=True,
+            pass_fds=tuple(descriptors),
+        )
+        os.lseek(certificate_fd, 0, os.SEEK_SET)
+        certificate_public = run(
+            [openssl_binary(), "x509", "-in", f"/dev/fd/{certificate_fd}", "-pubkey", "-noout"],
+            "LOCAL_PRIVATE TLS certificate public identity",
+            timeout=30,
+            max_output=1024 * 1024,
+            sensitive=True,
+            pass_fds=tuple(descriptors),
+        )
+        if not key_public or key_public != certificate_public:
+            stop("LOCAL_PRIVATE TLS certificate and private key do not match.")
+        os.lseek(certificate_fd, 0, os.SEEK_SET)
+        os.lseek(authority_fd, 0, os.SEEK_SET)
+        run(
+            [
+                openssl_binary(), "verify", "-CAfile", f"/dev/fd/{authority_fd}",
+                f"/dev/fd/{certificate_fd}",
+            ],
+            "LOCAL_PRIVATE TLS certificate chain",
+            timeout=30,
+            max_output=1024 * 1024,
+            sensitive=True,
+            pass_fds=tuple(descriptors),
+        )
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+
+
+def prepare_external_path_authority() -> None:
+    configure_secret_anchor()
+    directory_modes = (0o700, 0o750, 0o755, 0o770, 0o775)
+    for logical, label in (
+        (os.path.dirname(DEPLOYMENT_REPO), "LOCAL_PRIVATE deployment home"),
+        (PROJECT_SOURCE_ROOT, "LOCAL_PRIVATE project source root"),
+        (PROJECTS_PORTAL_ROOT, "LOCAL_PRIVATE projects portal root"),
+        (PROJECT_STATE_ROOT, "LOCAL_PRIVATE project state root"),
+        (TRAEFIK_ROOT, "LOCAL_PRIVATE Traefik root"),
+        (CERTIFICATES_ROOT, "LOCAL_PRIVATE certificate root"),
+    ):
+        external_directory_authority(logical, label, directory_modes)
+    narrow_external_file_mode(
+        LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE TLS private key", 1024 * 1024,
+        SECRET_UID, SECRET_GID, (0o600, 0o644), 0o600,
+    )
+    read_external_regular(
+        physical(LOCAL_CERTIFICATE), "LOCAL_PRIVATE TLS certificate", 1024 * 1024,
+        SECRET_UID, SECRET_GID, (0o644,),
+    )
+    read_external_regular(
+        physical(LOCAL_CA_CERTIFICATE), "LOCAL_PRIVATE TLS certificate authority", 1024 * 1024,
+        SECRET_UID, SECRET_GID, (0o644,),
+    )
+    narrow_external_file_mode(
+        f"{SECRET_DIR}/alertmanager_webhook_token.txt", "Alertmanager webhook token", 4096,
+        SECRET_UID, alert_runtime_gid(), (0o600, 0o640), 0o640,
+    )
+    validate_local_certificate_authority()
+
+
+def manager_secret_metadata(name: str) -> Tuple[int, int, Tuple[int, ...]]:
+    if name not in SECRET_MANAGER_COMPLETE:
+        stop("secret manager metadata request escaped the closed V1 cohort.")
+    if name == "alertmanager_webhook_token":
+        return SECRET_UID, alert_runtime_gid(), (0o640,)
+    if name == "app_db_password":
+        return SECRET_UID, SECRET_GID, (0o640,)
+    if name == "github_token":
+        uid, gid = privileged_identity()
+        return uid, gid, (0o600,)
+    return SECRET_UID, SECRET_GID, (0o600,)
+
+
+def manager_store_names(data: bytes, label: str) -> Tuple[Dict[str, object], Tuple[str, ...]]:
+    value = parse_json(data, label)
+    records = value.get("secrets")
+    if value.get("manager") != "infra-secret-manager" or value.get("version") != 1 or not isinstance(records, dict):
+        stop(f"{label} has an invalid encrypted-store envelope.")
+    names = tuple(sorted(records))
+    if any(NAME_RE.fullmatch(name) is None for name in names):
+        stop(f"{label} contains a secret name outside the closed syntax.")
+    return value, names
+
+
+def validate_setup_secret_bytes(logical: str, data: bytes) -> None:
+    label = {
+        DATABASE_SECRET: "Control Center database URL",
+        BOOTSTRAP_SECRET: "First Configuration bootstrap token",
+        KEYCLOAK_CLIENT_SECRET: "First Configuration Keycloak client secret",
+    }.get(logical)
+    if label is None or not data.endswith(b"\n") or data.count(b"\n") != 1 or b"\r" in data or b"\x00" in data:
+        stop("setup secret bytes differ from the closed V1 encoding.")
+    try:
+        value = data[:-1].decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        stop(f"{label} is not ASCII.")
+    if logical == DATABASE_SECRET:
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme not in ("postgres", "postgresql")
+            or parsed.username != "control_center_runtime"
+            or parsed.hostname != "postgres"
+            or parsed.port != 5432
+            or parsed.path != "/control_center"
+            or not parsed.password
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", urllib.parse.unquote(parsed.password))
+        ):
+            stop("Control Center database URL has the wrong bounded runtime identity.")
+        return
+    minimum = 43 if logical == BOOTSTRAP_SECRET else 32
+    if len(value) < minimum or len(value) > 1024 or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        stop(f"{label} has invalid content.")
+
+
+def generate_setup_secret_bytes(logical: str) -> bytes:
+    if logical == DATABASE_SECRET:
+        password = secrets.token_urlsafe(36)
+        encoded = urllib.parse.quote(password, safe="")
+        data = f"postgresql://control_center_runtime:{encoded}@postgres:5432/control_center\n".encode("ascii")
+    elif logical in (BOOTSTRAP_SECRET, KEYCLOAK_CLIENT_SECRET):
+        data = (secrets.token_urlsafe(32) + "\n").encode("ascii")
+    else:
+        stop("setup secret generation escaped the closed V1 set.")
+    validate_setup_secret_bytes(logical, data)
+    return data
+
+
+def fsync_directory_path(pathname: str) -> None:
+    fd = os.open(pathname, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_new_private_file(pathname: str, data: bytes, uid: int, gid: int, mode: int) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(pathname, flags, mode)
+    try:
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def remove_stale_secret_publish_temporary(destination: str, uid: int, gid: int, mode: int) -> None:
+    temporary = os.path.join(os.path.dirname(destination), f".v1-prep-{os.path.basename(destination)}")
+    if not os.path.lexists(temporary):
+        return
+    info = os.lstat(temporary)
+    destination_info = os.lstat(destination) if os.path.lexists(destination) else None
+    linked_destination = destination_info is not None and (
+        info.st_dev, info.st_ino
+    ) == (
+        destination_info.st_dev, destination_info.st_ino
+    )
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or info.st_gid != gid
+        or stat.S_IMODE(info.st_mode) != mode
+        or info.st_nlink not in (1, 2)
+        or (info.st_nlink == 2) != linked_destination
+    ):
+        stop("stale LOCAL_PRIVATE secret publication temporary is ambiguous.")
+    os.unlink(temporary)
+    fsync_directory_path(os.path.dirname(destination))
+
+
+def publish_secret_leaf(logical: str, data: bytes) -> bool:
+    pathname = physical(logical)
+    parent = physical(SECRET_DIR)
+    if os.path.dirname(pathname) != parent or logical not in {
+        DATABASE_SECRET,
+        BOOTSTRAP_SECRET,
+        KEYCLOAK_CLIENT_SECRET,
+        *(f"{SECRET_DIR}/{name}.txt" for name in SECRET_MANAGER_NEW_REQUIRED),
+    }:
+        stop("secret publication escaped the closed V1 prerequisite leaf set.")
+    remove_stale_secret_publish_temporary(pathname, SECRET_UID, SECRET_GID, 0o600)
+    if os.path.lexists(pathname):
+        observed, _, _ = read_external_regular(
+            pathname, f"existing prerequisite secret {os.path.basename(pathname)}", 4096,
+            SECRET_UID, SECRET_GID, (0o600,),
+        )
+        if observed != data:
+            stop("existing prerequisite secret differs from its staged transaction value.")
+        return False
+    temporary = os.path.join(parent, f".v1-prep-{os.path.basename(pathname)}")
+    try:
+        write_new_private_file(temporary, data, SECRET_UID, SECRET_GID, 0o600)
+        try:
+            os.link(temporary, pathname, follow_symlinks=False)
+        except FileExistsError:
+            stop("prerequisite secret appeared during atomic publication.")
+        os.unlink(temporary)
+        fsync_directory_path(parent)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+    observed, _, _ = read_external_regular(
+        pathname, f"published prerequisite secret {os.path.basename(pathname)}", 4096,
+        SECRET_UID, SECRET_GID, (0o600,),
+    )
+    if observed != data:
+        stop("published prerequisite secret bytes changed.")
+    return True
+
+
+def replace_manager_store(data: bytes) -> None:
+    pathname = physical(SECRET_MANAGER_STORE)
+    parent = physical(SECRET_DIR)
+    uid, gid = privileged_identity()
+    temporary = os.path.join(parent, ".v1-prep-infra-secret-manager-store.json")
+    if os.path.lexists(temporary):
+        info = os.lstat(temporary)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != uid
+            or info.st_gid != gid
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            stop("stale secret-manager store temporary is ambiguous.")
+        os.unlink(temporary)
+        fsync_directory_path(parent)
+    try:
+        write_new_private_file(temporary, data, uid, gid, 0o600)
+        os.replace(temporary, pathname)
+        fsync_directory_path(parent)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+
+def remove_secret_stage() -> None:
+    pathname = physical(SECRET_PREP_STAGE)
+    if not os.path.lexists(pathname):
+        return
+    uid, gid = privileged_identity()
+    info = os.lstat(pathname)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or info.st_gid != gid
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        stop("stale LOCAL_PRIVATE secret stage is not one private root-owned directory.")
+    for root, directories, files in os.walk(pathname, topdown=True, followlinks=False):
+        for entry in [*directories, *files]:
+            child = os.path.join(root, entry)
+            child_info = os.lstat(child)
+            if stat.S_ISLNK(child_info.st_mode) or child_info.st_uid != uid or child_info.st_gid != gid:
+                stop("stale LOCAL_PRIVATE secret stage contains a foreign entry.")
+            if stat.S_ISREG(child_info.st_mode) and child_info.st_nlink != 1:
+                stop("stale LOCAL_PRIVATE secret stage contains a linked file.")
+    shutil.rmtree(pathname)
+
+
+def create_secret_stage() -> str:
+    remove_secret_stage()
+    pathname = physical(SECRET_PREP_STAGE)
+    parent = os.path.dirname(pathname)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.mkdir(pathname, 0o700)
+    uid, gid = privileged_identity()
+    os.chown(pathname, uid, gid)
+    os.chmod(pathname, 0o700)
+    return pathname
+
+
+def run_candidate_secret_manager(release: str, command: str, root: str, audit_log: str) -> None:
+    manager = release_file(release, "scripts/infra-secret-manager.mjs")
+    empty_environment = os.path.join(physical(SECRET_PREP_STAGE), "empty.env")
+    arguments = [
+        node_binary(), manager, command,
+        "--secretsDir", root,
+        "--store", os.path.join(root, "infra-secret-manager-store.json"),
+        "--masterKey", os.path.join(root, "infra-secret-manager-master.key"),
+        "--auditLog", audit_log,
+        "--envFile", empty_environment,
+    ]
+    run(
+        arguments,
+        f"candidate secret manager {command}",
+        timeout=180,
+        max_output=1024 * 1024,
+        sensitive=True,
+    )
+
+
+def prepare_live_prerequisite_cohort(release: str) -> Dict[str, object]:
+    prepare_external_path_authority()
+    privileged_uid, privileged_gid = privileged_identity()
+    store_path = physical(SECRET_MANAGER_STORE)
+    master_path = physical(SECRET_MANAGER_MASTER_KEY)
+    audit_path = physical(SECRET_MANAGER_AUDIT_LOG)
+    old_store, old_store_identity, _ = read_external_regular(
+        store_path, "live secret-manager encrypted store", MAX_JSON,
+        privileged_uid, privileged_gid, (0o600,),
+    )
+    old_store_object, old_names = manager_store_names(old_store, "live secret-manager encrypted store")
+    if old_names == SECRET_MANAGER_EXISTING:
+        store_state = "LEGACY_COMPLETE"
+    elif old_names == SECRET_MANAGER_COMPLETE:
+        store_state = "V1_COMPLETE"
+    else:
+        stop("live secret-manager record set is neither the exact 21-record preimage nor the exact V1 completion.")
+    old_master, old_master_identity, _ = read_external_regular(
+        master_path, "live secret-manager master key", 4096,
+        privileged_uid, privileged_gid, (0o600,),
+    )
+    # PRE metadata backup copies this file.  It is not used as the audit sink
+    # for simulated/live verification below, so preparation remains byte-read-
+    # only with respect to historical audit evidence.
+    read_external_regular(
+        audit_path, "live secret-manager audit log", 64 * 1024 * 1024,
+        privileged_uid, privileged_gid, (0o600, 0o640, 0o644),
+    )
+
+    existing_snapshots: Dict[str, Tuple[bytes, Tuple[int, int, int, int, int, int], int]] = {}
+    for name in old_names:
+        uid, gid, modes = manager_secret_metadata(name)
+        existing_snapshots[name] = read_external_regular(
+            physical(f"{SECRET_DIR}/{name}.txt"), f"live materialized secret {name}", 4096,
+            uid, gid, modes,
+        )
+
+    setup_order = (DATABASE_SECRET, BOOTSTRAP_SECRET, KEYCLOAK_CLIENT_SECRET)
+    manager_order = tuple(f"{SECRET_DIR}/{name}.txt" for name in SECRET_MANAGER_NEW_REQUIRED)
+    publication_order = setup_order + manager_order
+    presence = [os.path.lexists(physical(logical)) for logical in publication_order]
+    prefix_length = 0
+    while prefix_length < len(presence) and presence[prefix_length]:
+        prefix_length += 1
+    if any(presence[prefix_length:]):
+        stop("prerequisite secret leaves are not one exact forward-resumable prefix.")
+    if store_state == "V1_COMPLETE" and prefix_length != len(publication_order):
+        stop("completed V1 secret-manager store does not have every prerequisite leaf.")
+
+    setup_bytes: Dict[str, bytes] = {}
+    for index, logical in enumerate(setup_order):
+        if index < prefix_length:
+            data, _, _ = read_external_regular(
+                physical(logical), f"existing setup secret {os.path.basename(logical)}", 4096,
+                SECRET_UID, SECRET_GID, (0o600,),
+            )
+            validate_setup_secret_bytes(logical, data)
+            setup_bytes[logical] = data
+        else:
+            setup_bytes[logical] = generate_setup_secret_bytes(logical)
+
+    stage = create_secret_stage()
+    manager_stage = os.path.join(stage, "manager")
+    os.mkdir(manager_stage, 0o700)
+    os.chown(manager_stage, privileged_uid, privileged_gid)
+    empty_environment = os.path.join(stage, "empty.env")
+    write_new_private_file(empty_environment, b"\n", privileged_uid, privileged_gid, 0o600)
+    target_store = old_store
+    staged_manager_bytes: Dict[str, bytes] = {}
+    try:
+        if store_state == "LEGACY_COMPLETE":
+            write_new_private_file(
+                os.path.join(manager_stage, "infra-secret-manager-store.json"),
+                old_store, privileged_uid, privileged_gid, 0o600,
+            )
+            write_new_private_file(
+                os.path.join(manager_stage, "infra-secret-manager-master.key"),
+                old_master, privileged_uid, privileged_gid, 0o600,
+            )
+            for offset, name in enumerate(SECRET_MANAGER_NEW_REQUIRED, start=len(setup_order)):
+                if offset >= prefix_length:
+                    continue
+                logical = f"{SECRET_DIR}/{name}.txt"
+                data, _, _ = read_external_regular(
+                    physical(logical), f"resumable prerequisite secret {name}", 4096,
+                    SECRET_UID, SECRET_GID, (0o600,),
+                )
+                write_new_private_file(
+                    os.path.join(manager_stage, f"{name}.txt"),
+                    data, privileged_uid, privileged_gid, 0o600,
+                )
+            stage_audit = os.path.join(stage, "candidate-manager-audit.log")
+            run_candidate_secret_manager(release, "init", manager_stage, stage_audit)
+            run_candidate_secret_manager(release, "verify", manager_stage, stage_audit)
+            staged_master, _, _ = read_external_regular(
+                os.path.join(manager_stage, "infra-secret-manager-master.key"),
+                "staged secret-manager master key", 4096,
+                privileged_uid, privileged_gid, (0o600,),
+            )
+            if staged_master != old_master:
+                stop("candidate secret-manager staging changed the existing master key.")
+            target_store, _, _ = read_external_regular(
+                os.path.join(manager_stage, "infra-secret-manager-store.json"),
+                "staged secret-manager encrypted store", MAX_JSON,
+                privileged_uid, privileged_gid, (0o600,),
+            )
+            target_store_object, target_names = manager_store_names(
+                target_store, "staged secret-manager encrypted store"
+            )
+            if target_names != SECRET_MANAGER_COMPLETE:
+                stop("candidate secret-manager staged delta is not exactly the nine V1 records.")
+            old_kms_record = old_store_object.get("kms")
+            target_kms_record = target_store_object.get("kms")
+            if not isinstance(old_kms_record, dict) or not isinstance(target_kms_record, dict):
+                stop("candidate secret-manager KMS metadata is not one object.")
+            old_kms = {key: value for key, value in old_kms_record.items() if key != "updatedAt"}
+            target_kms = {key: value for key, value in target_kms_record.items() if key != "updatedAt"}
+            if old_kms != target_kms:
+                stop("candidate secret-manager staging changed KMS identity.")
+            for name in SECRET_MANAGER_EXISTING:
+                old_record = old_store_object["secrets"].get(name)
+                target_record = target_store_object["secrets"].get(name)
+                if not isinstance(old_record, dict) or not isinstance(target_record, dict):
+                    stop("candidate secret-manager staging lost one preexisting record.")
+                if target_record.get("updatedAt") != old_record.get("updatedAt"):
+                    stop("candidate secret-manager staging changed preexisting record time identity.")
+                expected_mode = 0o640 if name in ("alertmanager_webhook_token", "app_db_password") else 0o600
+                staged_data, _, _ = read_external_regular(
+                    os.path.join(manager_stage, f"{name}.txt"), f"staged materialized secret {name}", 4096,
+                    privileged_uid, privileged_gid, (expected_mode,),
+                )
+                if staged_data != existing_snapshots[name][0]:
+                    stop("candidate secret-manager staging changed preexisting raw secret bytes.")
+            for name in SECRET_MANAGER_NEW_REQUIRED:
+                staged_data, _, _ = read_external_regular(
+                    os.path.join(manager_stage, f"{name}.txt"), f"staged new secret {name}", 4096,
+                    privileged_uid, privileged_gid, (0o600,),
+                )
+                staged_manager_bytes[f"{SECRET_DIR}/{name}.txt"] = staged_data
+        else:
+            for name in SECRET_MANAGER_NEW_REQUIRED:
+                logical = f"{SECRET_DIR}/{name}.txt"
+                staged_manager_bytes[logical] = existing_snapshots[name][0]
+
+        target_leaf_bytes = {**setup_bytes, **staged_manager_bytes}
+        if set(target_leaf_bytes) != set(publication_order):
+            stop("staged prerequisite leaf set differs from the closed V1 cohort.")
+        for index, logical in enumerate(publication_order, start=1):
+            publish_secret_leaf(logical, target_leaf_bytes[logical])
+            test_fault(f"prerequisite-leaf-{index}")
+
+        current_store, current_store_identity, _ = read_external_regular(
+            store_path, "live secret-manager encrypted store at commit", MAX_JSON,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        current_master, current_master_identity, _ = read_external_regular(
+            master_path, "live secret-manager master key at commit", 4096,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        if (
+            current_store != old_store
+            or current_store_identity != old_store_identity
+            or current_master != old_master
+            or current_master_identity != old_master_identity
+        ):
+            stop("secret-manager store or master changed before the atomic commit boundary.")
+        for name, expected in existing_snapshots.items():
+            uid, gid, modes = manager_secret_metadata(name)
+            observed = read_external_regular(
+                physical(f"{SECRET_DIR}/{name}.txt"), f"precommit materialized secret {name}", 4096,
+                uid, gid, modes,
+            )
+            if observed != expected:
+                stop("one preexisting secret changed before the store commit.")
+
+        if store_state == "LEGACY_COMPLETE":
+            replace_manager_store(target_store)
+            test_fault("prerequisite-store-committed")
+
+        live_verify_audit = os.path.join(stage, "live-verify-audit.log")
+        run_candidate_secret_manager(release, "verify", physical(SECRET_DIR), live_verify_audit)
+        final_store, _, _ = read_external_regular(
+            store_path, "final live secret-manager encrypted store", MAX_JSON,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        _, final_names = manager_store_names(final_store, "final live secret-manager encrypted store")
+        if final_store != target_store or final_names != SECRET_MANAGER_COMPLETE:
+            stop("final live secret-manager store differs from the staged V1 completion.")
+        final_master, _, _ = read_external_regular(
+            master_path, "final live secret-manager master key", 4096,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        if final_master != old_master:
+            stop("final live secret-manager master key changed.")
+        for name in SECRET_MANAGER_COMPLETE:
+            uid, gid, modes = manager_secret_metadata(name)
+            final = read_external_regular(
+                physical(f"{SECRET_DIR}/{name}.txt"), f"final materialized secret {name}", 4096,
+                uid, gid, modes,
+            )
+            expected_data = existing_snapshots[name][0] if name in existing_snapshots else staged_manager_bytes[f"{SECRET_DIR}/{name}.txt"]
+            if final[0] != expected_data:
+                stop("final materialized secret bytes differ from the transaction cohort.")
+        for logical in setup_order:
+            final, _, _ = read_external_regular(
+                physical(logical), f"final setup secret {os.path.basename(logical)}", 4096,
+                SECRET_UID, SECRET_GID, (0o600,),
+            )
+            validate_setup_secret_bytes(logical, final)
+            if final != setup_bytes[logical]:
+                stop("final setup secret bytes differ from the transaction cohort.")
+        return {
+            "managerRecords": len(SECRET_MANAGER_COMPLETE),
+            "publishedPrerequisiteLeaves": len(publication_order) - prefix_length,
+            "resumedPrerequisiteLeaves": prefix_length,
+            "status": "PASS",
+            "storeState": "V1_COMPLETE",
+        }
+    finally:
+        remove_secret_stage()
+
+
 def secure_file(logical: str, label: str, maximum: int = MAX_JSON, mode: Optional[int] = None) -> bytes:
     pathname = physical(logical)
     no_symlink_chain(pathname, label)
@@ -706,6 +1463,10 @@ def curl_binary() -> str:
 
 def systemctl_binary() -> str:
     return os.environ.get(TEST_SYSTEMCTL_ENV, SYSTEMCTL) if TEST_ROOT else SYSTEMCTL
+
+
+def openssl_binary() -> str:
+    return os.environ.get(TEST_OPENSSL_ENV, OPENSSL) if TEST_ROOT else OPENSSL
 
 
 def require_maintenance_ready() -> None:
@@ -1314,6 +2075,8 @@ def materialize_environment(
         "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256": ops_sha256,
         "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY": ops_repository,
         "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256": ops_sha256,
+        "PHP_PROJECTS_DIR": PROJECT_SOURCE_ROOT,
+        "PROJECT_SOURCE_DIR": PROJECT_SOURCE_ROOT,
         "PLATFORM_SECRETS_ROOT": SECRET_DIR,
         "PLATFORM_STATE_DIR": PROJECT_STATE_ROOT,
         "CONTROL_CENTER_DATABASE_URL_SECRET_FILE": DATABASE_SECRET,
@@ -1934,6 +2697,18 @@ def validate_pre_mutation_checkpoint(
         ):
             stop("pre-mutation evidence bundle schema/status/run binding differs.")
 
+    for document_key, rows_key, label in (
+        ("logicalBackupEvidenceSha256", "artifacts", "logical artifacts"),
+        ("offHostBackupEvidenceSha256", "proofs", "off-host proofs"),
+        ("restoreEvidenceSha256", "results", "restore results"),
+    ):
+        rows = documents[document_key][rows_key]
+        if not isinstance(rows, list) or len(rows) != len(EVIDENCE_LOGICAL_KEYS):
+            stop(f"pre-mutation evidence does not contain the fourteen ordered {label}.")
+        logical_keys = [row.get("logicalKey") if isinstance(row, dict) else None for row in rows]
+        if logical_keys != list(EVIDENCE_LOGICAL_KEYS):
+            stop(f"pre-mutation evidence {label} do not have the exact ordered logical keys.")
+
     if (
         logical["capturedAtUnixSeconds"] != captured or logical["backupCompletedUnixSeconds"] != captured
         or documents["secretsBackupEvidenceSha256"]["capturedAtUnixSeconds"] != captured
@@ -1944,6 +2719,21 @@ def validate_pre_mutation_checkpoint(
         completed = documents[key]["completedAtUnixSeconds"]
         if isinstance(completed, bool) or not isinstance(completed, int) or completed < captured or completed > evidence_generated:
             stop("pre-mutation evidence completion boundary is invalid.")
+    validate_backup_evidence_bundle(
+        authority,
+        {
+            key: documents[key]
+            for key in (
+                "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256",
+                "restoreEvidenceSha256", "secretsBackupEvidenceSha256",
+            )
+        },
+        None,
+        None,
+        captured,
+        generated,
+        "PRE",
+    )
     runtime = documents["runtimeInventorySha256"]
     expected_recovery = {
         "exportSha256": checkpoint["schedulerRecoveryImageExportSha256"],
@@ -2020,7 +2810,7 @@ def require_evidence_sha(value: object, label: str) -> str:
 
 def require_evidence_timestamp(value: object, label: str, began_at: int, now: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < began_at or value > now:
-        stop(f"{label} is outside the post-maintenance evidence interval.")
+        stop(f"{label} is outside the bounded evidence interval.")
     return value
 
 
@@ -2176,26 +2966,30 @@ def validate_evidence_restore_receipt(receipt: object, operation: str, artifact_
     return value
 
 
-def validate_post_backup_bundle(
+def validate_backup_evidence_bundle(
     authority: Dict[str, object],
     documents: Dict[str, Dict[str, object]],
-    reconciliation_sha256: str,
-    transaction_id: str,
+    reconciliation_sha256: Optional[str],
+    transaction_id: Optional[str],
     began_at: int,
     now: int,
+    evidence_phase: str,
 ) -> None:
-    """Validate the four exact-release POST documents before checkpointing.
+    """Validate the four exact-release PRE or POST backup documents.
 
     This deliberately reconstructs every cross-document digest and identity
     needed by the controller seal.  Canonical JSON alone is not backup proof:
     a substituted candidate, a false remote readback or a non-isolated restore
-    must leave the transaction APPLIED and therefore still abortable.
+    must not cross the PRE mutation boundary or the POST commit boundary.
     """
+    if evidence_phase not in ("PRE", "POST"):
+        stop("backup evidence phase is outside the closed V1 set.")
+    evidence_label = "pre-mutation" if evidence_phase == "PRE" else "post-maintenance"
     if set(documents) != {
         "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256",
         "restoreEvidenceSha256", "secretsBackupEvidenceSha256",
     }:
-        stop("post-maintenance backup evidence bundle cardinality differs from the closed V1 set.")
+        stop(f"{evidence_label} backup evidence bundle cardinality differs from the closed V1 set.")
     logical = documents["logicalBackupEvidenceSha256"]
     offhost = documents["offHostBackupEvidenceSha256"]
     restore = documents["restoreEvidenceSha256"]
@@ -2238,29 +3032,29 @@ def validate_post_backup_bundle(
     reference = {key: logical.get(key) for key in common_keys}
     generated_values = set()
     for index, (document, extra, schema) in enumerate(zip(ordered_documents, extra_keys, schemas)):
-        exact_keys(document, common_keys | extra, f"closed post-maintenance backup evidence {index}")
+        exact_keys(document, common_keys | extra, f"closed {evidence_label} backup evidence {index}")
         if (
             document["schema"] != schema or document["status"] != "PASS"
             or {key: document[key] for key in common_keys} != reference
         ):
-            stop("post-maintenance backup evidence common binding/schema/status is inconsistent.")
+            stop(f"{evidence_label} backup evidence common binding/schema/status is inconsistent.")
         generated_values.add(require_evidence_timestamp(
-            document["generatedAtUnixSeconds"], f"post-maintenance backup evidence {index} generation", began_at, now
+            document["generatedAtUnixSeconds"], f"{evidence_label} backup evidence {index} generation", began_at, now
         ))
         for timestamp_name in ("capturedAtUnixSeconds", "completedAtUnixSeconds", "backupCompletedUnixSeconds"):
             if timestamp_name in document:
                 require_evidence_timestamp(
-                    document[timestamp_name], f"post-maintenance backup evidence {index} {timestamp_name}", began_at, now
+                    document[timestamp_name], f"{evidence_label} backup evidence {index} {timestamp_name}", began_at, now
                 )
     if len(generated_values) != 1:
-        stop("post-maintenance backup evidence documents were not generated as one bundle.")
+        stop(f"{evidence_label} backup evidence documents were not generated as one bundle.")
     generated = next(iter(generated_values))
     if any(
         document.get(timestamp_name, began_at) > generated
         for document in ordered_documents
         for timestamp_name in ("capturedAtUnixSeconds", "completedAtUnixSeconds", "backupCompletedUnixSeconds")
     ):
-        stop("post-maintenance backup evidence completion occurs after bundle generation.")
+        stop(f"{evidence_label} backup evidence completion occurs after bundle generation.")
 
     authority_bytes = canonical_bytes(authority)
     backup_tool_images = authority.get("backupToolImages")
@@ -2282,22 +3076,31 @@ def validate_post_backup_bundle(
         "backupToolImages": backup_tool_images,
         "candidateCommit": authority.get("candidateCommit"),
         "candidateTree": authority.get("candidateTree"),
-        "evidencePhase": "POST",
+        "evidencePhase": evidence_phase,
         "reconciliationSha256": reconciliation_sha256,
         "sourceArchiveSha256": authority.get("sourceArchiveSha256"),
         "transactionId": transaction_id,
     }
     if any(reference[key] != value for key, value in expected_common.items()):
-        stop("post-maintenance backup evidence candidate/authority/reconciliation binding is invalid.")
+        stop(f"{evidence_label} backup evidence candidate/authority/reconciliation binding is invalid.")
     if (
         not isinstance(authority.get("documentId"), str) or SHA256_RE.fullmatch(authority["documentId"]) is None
-        or not isinstance(reconciliation_sha256, str) or SHA256_RE.fullmatch(reconciliation_sha256) is None
-        or not isinstance(transaction_id, str) or SHA256_RE.fullmatch(transaction_id) is None
         or not isinstance(reference["runId"], str) or RUN_ID_RE.fullmatch(reference["runId"]) is None
     ):
-        stop("post-maintenance backup evidence has a non-canonical run/authority/transaction identity.")
-    for key in ("artifactSetSha256", "authoritySha256", "backupSetSha256", "reconciliationSha256", "sourceArchiveSha256"):
-        require_evidence_sha(reference[key], f"post-maintenance common {key}")
+        stop(f"{evidence_label} backup evidence has a non-canonical run/authority identity.")
+    if evidence_phase == "POST":
+        if (
+            not isinstance(reconciliation_sha256, str) or SHA256_RE.fullmatch(reconciliation_sha256) is None
+            or not isinstance(transaction_id, str) or SHA256_RE.fullmatch(transaction_id) is None
+        ):
+            stop("post-maintenance backup evidence has a non-canonical reconciliation/transaction identity.")
+    elif reconciliation_sha256 is not None or transaction_id is not None:
+        stop("pre-mutation backup evidence unexpectedly claims a reconciliation transaction.")
+    digest_keys = ["artifactSetSha256", "authoritySha256", "backupSetSha256", "sourceArchiveSha256"]
+    if evidence_phase == "POST":
+        digest_keys.append("reconciliationSha256")
+    for key in digest_keys:
+        require_evidence_sha(reference[key], f"{evidence_label} common {key}")
 
     artifact_keys = {
         "artifact", "artifactIndex", "checksumSidecarPath", "checksumVerified", "freshLocalRestoreVerified",
@@ -2504,6 +3307,19 @@ def validate_post_backup_bundle(
     if len(summaries) != 1:
         stop("backup evidence source-summary cross-binding differs.")
     require_evidence_sha(next(iter(summaries)), "backup evidence source summary")
+
+
+def validate_post_backup_bundle(
+    authority: Dict[str, object],
+    documents: Dict[str, Dict[str, object]],
+    reconciliation_sha256: str,
+    transaction_id: str,
+    began_at: int,
+    now: int,
+) -> None:
+    validate_backup_evidence_bundle(
+        authority, documents, reconciliation_sha256, transaction_id, began_at, now, "POST"
+    )
 
 
 def validate_post_checkpoint_evidence(
@@ -2875,10 +3691,23 @@ def executor_infra_environment(authority: Dict[str, object], action: str, run_id
     if render_binding != {"path": RENDER_ENV, "sha256": digest(env_bytes)}:
         stop("typed evidence render environment differs from release authority.")
     _, rendered = parse_env(env_bytes, "typed evidence exact render environment")
+    render_bytes = secure_file(RENDER, "typed evidence exact Compose render", MAX_JSON, 0o444)
+    if authority.get("renderSha256") != digest(render_bytes):
+        stop("typed evidence exact Compose render differs from release authority.")
+    compose_render = parse_json(render_bytes, "typed evidence exact Compose render", True)
+    services = compose_render.get("services") if isinstance(compose_render, dict) else None
+    keycloak = services.get("keycloak") if isinstance(services, dict) else None
+    keycloak_environment = keycloak.get("environment") if isinstance(keycloak, dict) else None
+    keycloak_admin = (
+        keycloak_environment.get("KC_BOOTSTRAP_ADMIN_USERNAME")
+        if isinstance(keycloak_environment, dict) else None
+    )
+    if not isinstance(keycloak_admin, str) or re.fullmatch(r"[A-Za-z0-9._@-]{1,256}", keycloak_admin) is None:
+        stop("typed evidence exact Compose render has no valid Keycloak administrator binding.")
     selected = {
         "BACKUP_SIGNING_KEYS_FILE": physical(BACKUP_SIGNING_KEYS),
         "HOME": "/nonexistent",
-        "KC_BOOTSTRAP_ADMIN_USERNAME": rendered.get("KC_BOOTSTRAP_ADMIN_USERNAME", ""),
+        "KC_BOOTSTRAP_ADMIN_USERNAME": keycloak_admin,
         "LANG": "C",
         "LC_ALL": "C",
         "MARIADB_IMAGE": tools["mariadbRestore"]["imageId"],
@@ -3781,11 +4610,20 @@ def prepare() -> Dict[str, object]:
     release_path = physical(release)
     if not os.path.isdir(release_path) or os.path.islink(release_path):
         stop("commit/archive-derived frozen release root is not materialized.")
+    installed_reconciler = secure_file(RECONCILER, "installed V1 reconciler", 2 * 1024 * 1024)
+    release_reconciler = secure_file(
+        f"{release}/scripts/v1-local-private-reconcile.py",
+        "exact-release V1 reconciler",
+        2 * 1024 * 1024,
+    )
+    if installed_reconciler != release_reconciler:
+        stop("installed V1 reconciler differs from the immutable exact release before prerequisite preparation.")
     local_images = build_and_publish_local_images(repo_root, release, commit)
     local_ops_image = local_images["PLATFORM_OPS_IMAGE"]
     # Never create the recovery key until the immutable exact-release public
     # certificate has been parsed and fingerprinted successfully.
     recovery_escrow_certificate_binding(release)
+    prepare_live_prerequisite_cohort(release)
     provision_confidential_backup_passphrase()
     source_env_bytes, _ = materialize_environment(repo_root, local_ops_image)
     ensure_directory(STATE_DIR, 0o700)

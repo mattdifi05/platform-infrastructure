@@ -2942,6 +2942,8 @@ function localPrivateQa8Fixture(sandbox) {
   const config = qa8IndependentGolden(sandbox);
   materializeQa8CanonicalSources(sandbox, config);
   const dataRoot = path.join(sandbox.cleanupRoot, "local-private-data");
+  const sourceDirectory = path.join(path.dirname(dataRoot), "src");
+  const previousSourceDirectory = path.join(sandbox.cleanupRoot, "compose-source");
   const stateDirectory = path.join(dataRoot, "project-state");
   const certificatesDirectory = path.join(dataRoot, "certificates");
   const secretsRoot = path.join(dataRoot, "secrets");
@@ -2978,6 +2980,7 @@ function localPrivateQa8Fixture(sandbox) {
   const localLock = sandbox.localPrivateCanonicalLock;
   Object.assign(environment, {});
   for (const [key, value] of Object.entries({
+    PHP_PROJECTS_DIR: sourceDirectory,
     PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
     PLATFORM_DATA_ROOT: dataRoot,
     PLATFORM_STATE_DIR: stateDirectory,
@@ -2987,7 +2990,18 @@ function localPrivateQa8Fixture(sandbox) {
     CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE: bootstrapToken,
     CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: keycloakClientSecret,
     HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: localLock,
+    PROJECT_SOURCE_DIR: sourceDirectory,
   })) environment.set(key, value);
+  let replacedSourceMounts = 0;
+  for (const service of Object.values(config.services)) {
+    for (const mount of service.volumes ?? []) {
+      if (mount?.type === "bind" && mount.source === previousSourceDirectory) {
+        mount.source = sourceDirectory;
+        replacedSourceMounts += 1;
+      }
+    }
+  }
+  assert.equal(replacedSourceMounts, 2, "LOCAL_PRIVATE source projection fixture drifted");
   for (const [secretName, variable] of Object.entries(
     coreSemanticPolicyDescriptor.secretFileVariables,
   )) {
@@ -3079,6 +3093,7 @@ function localPrivateQa8Fixture(sandbox) {
     config,
     environment,
     lock: JSON.parse(fs.readFileSync(localLock, "utf8")),
+    sourceDirectory,
   };
 }
 
@@ -3153,6 +3168,62 @@ test("LOCAL_PRIVATE wrapper renders once against its exact lock and semantic env
   }
 });
 
+test("LOCAL_PRIVATE source authority is the fixed filesystem-authoritative sibling of PLATFORM_DATA_ROOT", () => {
+  const scenarios = [
+    ["PHP source drift", ({ environment, sandbox }) => {
+      environment.set("PHP_PROJECTS_DIR", path.join(sandbox.cleanupRoot, "compose-source"));
+    }],
+    ["project source drift", ({ environment, sandbox }) => {
+      environment.set("PROJECT_SOURCE_DIR", path.join(sandbox.cleanupRoot, "compose-source"));
+    }],
+    ["alternative sibling", ({ config, environment, sandbox, sourceDirectory }) => {
+      const alternative = path.join(sandbox.cleanupRoot, "compose-source");
+      environment.set("PHP_PROJECTS_DIR", alternative);
+      environment.set("PROJECT_SOURCE_DIR", alternative);
+      for (const service of Object.values(config.services)) {
+        for (const mount of service.volumes ?? []) {
+          if (mount?.type === "bind" && mount.source === sourceDirectory) {
+            mount.source = alternative;
+          }
+        }
+      }
+    }],
+    ["relative source", ({ environment }) => {
+      environment.set("PHP_PROJECTS_DIR", "../src");
+      environment.set("PROJECT_SOURCE_DIR", "../src");
+    }],
+    ["missing project source", ({ environment }) => {
+      environment.delete("PROJECT_SOURCE_DIR");
+    }],
+    ["group-writable source", ({ sourceDirectory }) => {
+      fs.chmodSync(sourceDirectory, 0o770);
+    }],
+    ["symlink source", ({ sandbox, sourceDirectory }) => {
+      fs.rmSync(sourceDirectory, { recursive: true });
+      fs.symlinkSync(path.join(sandbox.cleanupRoot, "compose-source"), sourceDirectory);
+    }],
+  ];
+  for (const [label, mutate] of scenarios) {
+    const sandbox = createConsumerSandbox();
+    try {
+      const fixture = localPrivateQa8Fixture(sandbox);
+      mutate({ ...fixture, sandbox });
+      const violations = validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        fixture.environment,
+      );
+      assert.ok(
+        violations.includes("local-private:project-source-authority"),
+        `${label} escaped the fixed source authority: ${violations.join(",")}`,
+      );
+    } finally {
+      removeSandbox(sandbox);
+    }
+  }
+});
+
 test("LOCAL_PRIVATE authority rejects setup, path, lock and raw-scheduler widening mutants", () => {
   const sandbox = createConsumerSandbox();
   try {
@@ -3170,6 +3241,11 @@ test("LOCAL_PRIVATE authority rejects setup, path, lock and raw-scheduler wideni
       ["state mount", (config) => {
         config.services["project-router"].volumes
           .find((mount) => mount.target === "/var/www/project-state").source = "/tmp/attacker";
+      }],
+      ["project source mount", (config) => {
+        config.services["project-router"].volumes
+          .find((mount) => mount.target === "/var/www/projects").source =
+            path.join(sandbox.cleanupRoot, "compose-source");
       }],
       ["runtime lock", (config) => {
         config.services["broker-auth-bootstrap"].volumes

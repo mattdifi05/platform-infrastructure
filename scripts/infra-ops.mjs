@@ -23,7 +23,7 @@ import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
 import { evaluateFunctionalHealth, validateFunctionalHealthProbes } from "./functional-health.mjs";
 import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
 import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
-import { sha256FileBounded } from "./bounded-file-hash.mjs";
+import { openSha256FileBounded, sha256FileBounded } from "./bounded-file-hash.mjs";
 import { publishBackupArtifact } from "./backup-artifact-publication.mjs";
 import { runCommandSync } from "./command-safety.mjs";
 import { resticPassthroughEnvironmentKeys, resticSecretTransport } from "./restic-secret-transport.mjs";
@@ -201,6 +201,16 @@ const typedEvidenceActionToOperation = Object.freeze({
   RESTORE_MINIO: "restore-test-minio",
   RESTORE_KEYCLOAK: "restore-test-keycloak",
 });
+const typedEvidenceApplicationSlugs = Object.freeze([
+  "anniversary",
+  "fiplatform",
+  "matthewdifilippo",
+  "opstudents",
+  "public",
+  "stexor",
+  "stream",
+  "workcalendar",
+]);
 const typedEvidenceRunIdPattern = /^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$/;
 const typedEvidenceImageIdPattern = /^sha256:[a-f0-9]{64}$/;
 const typedEvidenceReleaseRootPattern = /^\/srv\/platform-infrastructure\/releases\/[a-f0-9]{40}-[a-f0-9]{64}$/;
@@ -420,6 +430,18 @@ function typedEvidenceMinioVolume(value) {
   return /^minio_admin_restore_test_[0-9]{14}$/.test(String(value ?? ""));
 }
 
+function typedEvidencePostgresReadableArtifactPath() {
+  if (!typedEvidenceInvocation || typedEvidenceInvocation.action !== "RESTORE_POSTGRES") {
+    fail("Typed PostgreSQL readable artifact path requires the exact restore action.");
+  }
+  const source = path.resolve(String(argv.backupFile ?? ""));
+  const name = path.basename(source);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+    fail("Typed PostgreSQL restore artifact name is invalid.");
+  }
+  return path.join(typedEvidenceTransactionRoot(), "postgres-restore-readable", `${name}.readonly`);
+}
+
 function typedEvidenceDockerExecAllowed(action, args) {
   if (args[0] !== "exec" || args.length < 3 || args[1] === "-i") return false;
   const container = args[1];
@@ -440,7 +462,6 @@ function typedEvidenceDockerExecAllowed(action, args) {
   }
   if (action === "BACKUP_KEYCLOAK") {
     if (container !== "enterprise-keycloak") return false;
-    if (program === "rm") return sameStringArray(args.slice(2), ["rm", "-f", "/tmp/platform-keycloak-config-backup.tar.gz"]);
     if (program !== "sh" || args[3] !== "-ec" || args.length !== 5) return false;
     return args[4] === keycloakBackupProgram()
       || args[4] === keycloakBackupResidueAssertionProgram()
@@ -494,10 +515,10 @@ function typedEvidenceDockerCopyAllowed(action, args) {
       && /\/platform-minio-data-[A-Za-z0-9_-]+\/minio-data$/.test(destination);
   }
   if (action === "BACKUP_KEYCLOAK") {
-    return source === "enterprise-keycloak:/tmp/platform-keycloak-config-backup.tar.gz"
-      && destination.startsWith(`${typedEvidenceInvocation.deploymentRoot}/backups/keycloak/.keycloak-config-`)
-      && destination.includes(`.tar.gz.staging-${process.pid}-`)
-      && /^[a-f0-9]{24}$/.test(destination.slice(destination.lastIndexOf("-") + 1));
+    const relative = path.relative(`${typedEvidenceTransactionRoot()}/ops`, path.resolve(destination)).replaceAll("\\", "/");
+    return source === "enterprise-keycloak:/tmp/platform-keycloak-config-backup"
+      && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, destination)
+      && /^platform-keycloak-config-[A-Za-z0-9_-]+\/keycloak-config$/.test(relative);
   }
   if (action === "RESTORE_MARIADB") {
     return source === argv.backupFile
@@ -549,21 +570,41 @@ function typedEvidenceDockerRunAllowed(action, args) {
   const mounts = typedEvidenceRunMounts(args);
   if (mounts.some((mount) => /docker\.sock|:\/host|:\/etc|:\/root/.test(mount))) return false;
 
-  if (action === "BACKUP_MINIO" || action === "BACKUP_SECRET_METADATA") {
+  if (action === "BACKUP_MINIO" || action === "BACKUP_KEYCLOAK" || action === "BACKUP_SECRET_METADATA") {
     if (!sameStringArray(args.slice(0, 4), ["run", "--rm", "--network", "none"]) || args[imageIndexes[0]] !== process.env.NODE_IMAGE) return false;
-    const outputFamily = action === "BACKUP_MINIO" ? "minio" : "secret-manager";
-    const tempPrefix = action === "BACKUP_MINIO" ? "platform-minio-data-" : "infra-secret-manager-metadata-";
+    const outputFamily = action === "BACKUP_MINIO" ? "minio" : action === "BACKUP_KEYCLOAK" ? "keycloak" : "secret-manager";
+    const tempPrefix = action === "BACKUP_MINIO"
+      ? "platform-minio-data-"
+      : action === "BACKUP_KEYCLOAK"
+        ? "platform-keycloak-config-"
+        : "infra-secret-manager-metadata-";
+    const workMountSuffix = ":/work:ro";
+    const workPath = mounts[0]?.endsWith(workMountSuffix) ? mounts[0].slice(0, -workMountSuffix.length) : "";
+    const workRelative = path.relative(`${typedEvidenceTransactionRoot()}/ops`, path.resolve(workPath)).replaceAll("\\", "/");
+    const expectedWorkPath = action === "BACKUP_MINIO"
+      ? /^platform-minio-data-[A-Za-z0-9_-]+\/minio-data$/
+      : action === "BACKUP_KEYCLOAK"
+        ? /^platform-keycloak-config-[A-Za-z0-9_-]+\/keycloak-config$/
+        : /^infra-secret-manager-metadata-[A-Za-z0-9_-]+$/;
+    const stagingStem = action === "BACKUP_MINIO"
+      ? "minio-data"
+      : action === "BACKUP_KEYCLOAK"
+        ? "keycloak-config"
+        : "secret-manager-metadata";
+    const archiveCommand = String(args.at(-1) ?? "");
+    const archiveCommandMatch = archiveCommand.match(/^tar -czf \/backup\/'([^']+)' -C \/work \.$/);
+    const archiveNamePattern = new RegExp(`^\\.${stagingStem}-[0-9]{8}-[0-9]{6}\\.tar\\.gz\\.staging-${process.pid}-[a-f0-9]{24}$`);
     return mounts.length === 2
-      && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, mounts[0].split(":/work:ro")[0])
-      && mounts[0].includes(`/${tempPrefix}`) && mounts[0].endsWith(":/work:ro")
+      && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, workPath)
+      && workRelative.startsWith(tempPrefix) && expectedWorkPath.test(workRelative)
       && mounts[1] === `${typedEvidenceInvocation.deploymentRoot}/backups/${outputFamily}:/backup`
       && sameStringArray(args.slice(imageIndexes[0] + 1, imageIndexes[0] + 3), ["sh", "-lc"])
-      && /^tar -czf \/backup\/'\.[A-Za-z0-9._-]+\.staging-[0-9]+-[a-f0-9]{24}' -C \/work \.$/.test(args.at(-1));
+      && archiveCommandMatch !== null && archiveNamePattern.test(archiveCommandMatch[1]);
   }
 
   if (action === "RESTORE_POSTGRES") {
     const nameIndex = args.indexOf("--name");
-    const mount = `${argv.backupFile}:/restore/input.dump:ro`;
+    const mount = `${typedEvidencePostgresReadableArtifactPath()}:/restore/input.dump:ro`;
     return args[imageIndexes[0]] === process.env.POSTGRES_RESTORE_TEST_IMAGE
       && nameIndex > 0 && typedEvidenceDisposableName(action, args[nameIndex + 1])
       && mounts.length === 1 && mounts[0] === mount
@@ -742,6 +783,9 @@ function writeBackupFreshnessMetrics(records = backupRestoreRunRecords()) {
 }
 
 function recordBackupRestoreRun({ container, database, databaseName = database, user, operation, status, artifactPath = null, artifactSha256 = null, startedAt, metadata = {} }) {
+  if (booleanFlag(argv.skipEvidence)) {
+    return null;
+  }
   const finishedAt = new Date();
   const started = startedAt instanceof Date ? startedAt : finishedAt;
   const durationMs = Math.max(0, finishedAt.getTime() - started.getTime());
@@ -1415,6 +1459,9 @@ function writeBackupExecutionReport({
   startedAt,
   metadata = {},
 }) {
+  if (booleanFlag(argv.skipEvidence)) {
+    return null;
+  }
   const finishedAt = new Date();
   const started = startedAt instanceof Date ? startedAt : finishedAt;
   const artifactExists = artifactPath ? fs.existsSync(artifactPath) : false;
@@ -1537,9 +1584,19 @@ function makeOpsTempDir(prefix) {
   const transactionRoot = typedEvidenceTransactionRoot();
   if (transactionRoot) assertRootOwnedPrivateDirectory(transactionRoot, "typed V1 evidence transaction root");
   const root = path.join(transactionRoot ?? operationsTempRoot, "ops");
-  fs.mkdirSync(root, { recursive: true });
-  if (transactionRoot) assertRootOwnedPrivateDirectory(root, "typed V1 evidence temporary operations root");
-  return fs.mkdtempSync(path.join(root, prefix));
+  if (transactionRoot) {
+    try {
+      fs.mkdirSync(root, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    assertRootOwnedPrivateDirectory(root, "typed V1 evidence temporary operations root");
+  } else {
+    fs.mkdirSync(root, { recursive: true });
+  }
+  const temporary = fs.mkdtempSync(path.join(root, prefix));
+  if (transactionRoot) assertRootOwnedPrivateDirectory(temporary, "typed V1 evidence temporary operation directory");
+  return temporary;
 }
 
 function dockerStatsSnapshot(label) {
@@ -2187,6 +2244,18 @@ function applicationSourceDirectories(options = {}) {
       };
     })
     .filter((entry) => !requestedSlug || entry.slug === requestedSlug || safeApplicationBackupSlug(entry.name) === requestedSlug);
+  if (typedEvidenceInvocation?.action === "BACKUP_APPLICATIONS") {
+    const names = entries.map((entry) => entry.name).sort();
+    const slugs = entries.map((entry) => entry.slug);
+    if (requestedSlug
+        || !sameStringArray(names, typedEvidenceApplicationSlugs)
+        || entries.some((entry) => entry.name !== entry.slug)
+        || new Set(slugs).size !== slugs.length) {
+      fail("Typed V1 application backup source set differs from the exact closed eight applications.");
+    }
+    const byName = new Map(entries.map((entry) => [entry.name, entry]));
+    return typedEvidenceApplicationSlugs.map((slug) => byName.get(slug));
+  }
   if (!entries.length) {
     fail(requestedSlug ? `Application source not found for ${requestedSlug} under ${sourceRoot}` : `No application source directories found under ${sourceRoot}`);
   }
@@ -2196,12 +2265,13 @@ function applicationSourceDirectories(options = {}) {
 async function backupApplications(options = {}) {
   const startedAt = new Date();
   const timestamp = backupTimestamp();
+  const applications = applicationSourceDirectories(options);
   const outputRoot = ensureBackupOutputDir(path.join(backupsRoot, "applications"));
   const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
   const artifacts = [];
   const publications = [];
   try {
-    for (const application of applicationSourceDirectories(options)) {
+    for (const application of applications) {
       const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
       const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
       const hostPath = path.join(outputDir, fileName);
@@ -2252,24 +2322,26 @@ async function backupApplications(options = {}) {
         buildOutputExcluded: true,
       },
     };
-    const stamp = reportTimestamp();
-    const baseName = `applications-backup-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
-    const jsonPath = writeJsonReport("backups", baseName, payload);
-    const markdownPath = writeMarkdownReport("backups", baseName, [
-      "# Platform Applications Backup Report",
-      "",
-      `Status: ${payload.status}`,
-      `Started at: ${payload.startedAt}`,
-      `Finished at: ${payload.finishedAt}`,
-      `Application count: ${payload.metadata.applicationCount}`,
-      `Secrets excluded: ${payload.metadata.secretsExcluded ? "yes" : "no"}`,
-      "",
-      "| Application | Artifact | Size bytes |",
-      "| --- | --- | --- |",
-      ...artifacts.map((artifact) => `| ${artifact.application} | ${artifact.artifactPath} | ${artifact.artifactSizeBytes} |`),
-    ]);
+    if (!booleanFlag(argv.skipEvidence)) {
+      const stamp = reportTimestamp();
+      const baseName = `applications-backup-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
+      const jsonPath = writeJsonReport("backups", baseName, payload);
+      const markdownPath = writeMarkdownReport("backups", baseName, [
+        "# Platform Applications Backup Report",
+        "",
+        `Status: ${payload.status}`,
+        `Started at: ${payload.startedAt}`,
+        `Finished at: ${payload.finishedAt}`,
+        `Application count: ${payload.metadata.applicationCount}`,
+        `Secrets excluded: ${payload.metadata.secretsExcluded ? "yes" : "no"}`,
+        "",
+        "| Application | Artifact | Size bytes |",
+        "| --- | --- | --- |",
+        ...artifacts.map((artifact) => `| ${artifact.application} | ${artifact.artifactPath} | ${artifact.artifactSizeBytes} |`),
+      ]);
+      log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
+    }
     for (const publication of publications) publication.assertCurrent();
-    log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
     log(`Application source backups written under ${outputRoot}`);
     return payload;
   } finally {
@@ -11549,6 +11621,107 @@ function resolveRestoreTestArtifact(backupFileArg, expectedOperation) {
   return requested;
 }
 
+function createTypedPostgresReadableArtifact(backupFile, expectedSha256) {
+  if (!typedEvidenceInvocation || typedEvidenceInvocation.action !== "RESTORE_POSTGRES"
+      || !/^[a-f0-9]{64}$/.test(String(expectedSha256 ?? ""))) {
+    fail("Typed PostgreSQL readable artifact requires the exact restore action and verified digest.");
+  }
+  assertV1EvidenceArtifactFile(backupFile, typedEvidenceInvocation.artifactRoot, "V1 evidence PostgreSQL source artifact");
+  const source = openSha256FileBounded(backupFile);
+  let destinationDescriptor;
+  let readableDirectory;
+  let readablePath;
+  try {
+    if (source.sha256 !== expectedSha256) {
+      fail("Typed PostgreSQL source artifact digest changed before readable staging.");
+    }
+    readablePath = typedEvidencePostgresReadableArtifactPath();
+    readableDirectory = path.dirname(readablePath);
+    fs.mkdirSync(readableDirectory, { mode: 0o700 });
+    assertRootOwnedPrivateDirectory(readableDirectory, "Typed PostgreSQL readable artifact directory");
+    destinationDescriptor = fs.openSync(
+      readablePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o400,
+    );
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let position = 0;
+    while (position < source.sizeBytes) {
+      const bytesRead = fs.readSync(
+        source.descriptor,
+        buffer,
+        0,
+        Math.min(buffer.length, source.sizeBytes - position),
+        position,
+      );
+      if (bytesRead === 0) fail("Typed PostgreSQL source artifact was truncated while staged.");
+      let written = 0;
+      while (written < bytesRead) {
+        written += fs.writeSync(destinationDescriptor, buffer, written, bytesRead - written);
+      }
+      position += bytesRead;
+    }
+    fs.fsyncSync(destinationDescriptor);
+    fs.fchmodSync(destinationDescriptor, 0o444);
+    fs.fsyncSync(destinationDescriptor);
+    fs.closeSync(destinationDescriptor);
+    destinationDescriptor = undefined;
+    source.assertUnchanged();
+    source.assertPathIdentity(backupFile);
+    assertV1EvidenceArtifactFile(backupFile, typedEvidenceInvocation.artifactRoot, "V1 evidence PostgreSQL source artifact");
+    const readableMetadata = fs.lstatSync(readablePath, { throwIfNoEntry: false });
+    if (!readableMetadata?.isFile() || readableMetadata.isSymbolicLink() || readableMetadata.uid !== 0
+        || readableMetadata.nlink !== 1 || (readableMetadata.mode & 0o7777) !== 0o444
+        || sha256File(readablePath) !== expectedSha256) {
+      fail("Typed PostgreSQL readable artifact is not one root-owned single-link 0444 digest-identical copy.");
+    }
+    const readableIdentity = {
+      dev: readableMetadata.dev,
+      ino: readableMetadata.ino,
+      size: readableMetadata.size,
+      mtimeMs: readableMetadata.mtimeMs,
+      ctimeMs: readableMetadata.ctimeMs,
+    };
+    return {
+      path: readablePath,
+      assertSourceCurrent() {
+        source.assertUnchanged();
+        source.assertPathIdentity(backupFile);
+        assertV1EvidenceArtifactFile(backupFile, typedEvidenceInvocation.artifactRoot, "V1 evidence PostgreSQL source artifact");
+        if (source.rehash().sha256 !== expectedSha256) {
+          fail("Typed PostgreSQL source artifact digest changed during isolated restores.");
+        }
+      },
+      cleanup() {
+        let cleanupError = null;
+        try {
+          const current = fs.lstatSync(readablePath, { throwIfNoEntry: false });
+          if (!current?.isFile() || current.isSymbolicLink() || current.uid !== 0 || current.nlink !== 1
+              || (current.mode & 0o7777) !== 0o444
+              || current.dev !== readableIdentity.dev || current.ino !== readableIdentity.ino
+              || current.size !== readableIdentity.size || current.mtimeMs !== readableIdentity.mtimeMs
+              || current.ctimeMs !== readableIdentity.ctimeMs) {
+            fail("Typed PostgreSQL readable artifact identity changed before cleanup.");
+          }
+          fs.unlinkSync(readablePath);
+          fs.rmdirSync(readableDirectory);
+        } catch (error) {
+          cleanupError = error;
+        } finally {
+          source.close();
+        }
+        if (cleanupError) throw cleanupError;
+      },
+    };
+  } catch (error) {
+    if (destinationDescriptor !== undefined) fs.closeSync(destinationDescriptor);
+    if (readablePath) fs.rmSync(readablePath, { force: true });
+    if (readableDirectory) fs.rmSync(readableDirectory, { recursive: true, force: true });
+    source.close();
+    throw error;
+  }
+}
+
 function emitV1EvidenceReceipt(operation, artifactSha256, semanticComparator, counts = {}) {
   if (!v1EvidenceReceiptEnabled()) return;
   const receipt = {
@@ -11711,7 +11884,7 @@ function evidencePostgresRestoreSandboxPlan({ image, containerName, backupMount,
   if (typedEvidenceInvocation.action !== "RESTORE_POSTGRES" || image !== process.env.POSTGRES_RESTORE_TEST_IMAGE
       || !typedEvidenceImageIdPattern.test(image)
       || !typedEvidenceDisposableName("RESTORE_POSTGRES", containerName)
-      || backupMount !== `${argv.backupFile}:/restore/input.dump:ro`
+      || backupMount !== `${typedEvidencePostgresReadableArtifactPath()}:/restore/input.dump:ro`
       || databaseName !== "platform_restore_test") {
     fail("Typed PostgreSQL restore sandbox plan differs from the exact root-bound action.");
   }
@@ -11795,22 +11968,27 @@ async function restoreTestPostgres(options = {}) {
   const sandboxPrefix = `platform-postgres-restore-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
   const firstSandboxContainer = `${sandboxPrefix}-a`;
   const secondSandboxContainer = `${sandboxPrefix}-b`;
-  const firstPlan = evidencePostgresRestoreSandboxPlan({
-    image,
-    containerName: firstSandboxContainer,
-    backupMount: `${hostPathForContainerMount(backupFile)}:/restore/input.dump:ro`,
-    databaseName: testDatabase,
-  });
-  const secondPlan = evidencePostgresRestoreSandboxPlan({
-    image,
-    containerName: secondSandboxContainer,
-    backupMount: `${hostPathForContainerMount(backupFile)}:/restore/input.dump:ro`,
-    databaseName: testDatabase,
-  });
+  const readableArtifact = typedEvidenceInvocation
+    ? createTypedPostgresReadableArtifact(backupFile, hash)
+    : { path: backupFile, assertSourceCurrent() {}, cleanup() {} };
+  let firstPlan = null;
+  let secondPlan = null;
   const activeContainers = new Set();
   let semanticComparator = null;
   let tables = 0;
   try {
+    firstPlan = evidencePostgresRestoreSandboxPlan({
+      image,
+      containerName: firstSandboxContainer,
+      backupMount: `${hostPathForContainerMount(readableArtifact.path)}:/restore/input.dump:ro`,
+      databaseName: testDatabase,
+    });
+    secondPlan = evidencePostgresRestoreSandboxPlan({
+      image,
+      containerName: secondSandboxContainer,
+      backupMount: `${hostPathForContainerMount(readableArtifact.path)}:/restore/input.dump:ro`,
+      databaseName: testDatabase,
+    });
     const firstRestore = await restorePostgresArtifactSandbox({
       container: firstSandboxContainer,
       plan: firstPlan,
@@ -11870,13 +12048,25 @@ async function restoreTestPostgres(options = {}) {
     };
   } catch (error) {
     try {
-      recordBackupRestoreRun({ container: secondSandboxContainer, database: sourceDatabase, user: secondPlan.role, operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase, sourceContainer, isolation: "two-sequential-disposable-network-none-restores", liveSourceTouched: false, semanticComparator } });
+      recordBackupRestoreRun({ container: secondSandboxContainer, database: sourceDatabase, user: secondPlan?.role ?? "restore_runner", operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase, sourceContainer, isolation: "two-sequential-disposable-network-none-restores", liveSourceTouched: false, semanticComparator } });
     } catch {
       // Preserve the original restore-test failure.
     }
     throw error;
   } finally {
     for (const container of activeContainers) run("docker", ["rm", "-f", container], { capture: true, allowFailure: true });
+    let artifactError = null;
+    try {
+      readableArtifact.assertSourceCurrent();
+    } catch (error) {
+      artifactError = error;
+    }
+    try {
+      readableArtifact.cleanup();
+    } catch (error) {
+      artifactError ??= error;
+    }
+    if (artifactError) throw artifactError;
   }
 }
 
@@ -12682,15 +12872,14 @@ function keycloakBackupProgram() {
 set -eu
 umask 077
 work="/tmp/platform-keycloak-config-backup"
-archive="/tmp/platform-keycloak-config-backup.tar.gz"
 kcadm_config="/tmp/platform-kcadm-backup.config"
 kcadm_log="/tmp/platform-kcadm-backup.log"
 default_kcadm_config="$HOME/.keycloak/kcadm.config"
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
-  rm -rf "$work" "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
-  if [ "$status" -ne 0 ]; then rm -f "$archive"; fi
+  rm -f "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
+  if [ "$status" -ne 0 ]; then rm -rf "$work"; fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -12698,7 +12887,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 rm -rf "$work"
-rm -f "$archive" "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
+rm -f "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
 mkdir -p "$work/realms" "$work/import" "$work/runtime"
 KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
 export KC_BOOTSTRAP_ADMIN_PASSWORD
@@ -12714,7 +12903,6 @@ if [ -d /opt/keycloak/data/import ]; then
   cp -R /opt/keycloak/data/import/. "$work/import/" 2>/dev/null || true
 fi
 env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime/kc-env-sanitized.txt" || true
-tar -czf "$archive" -C "$work" .
 `;
 }
 
@@ -12733,10 +12921,10 @@ async function backupKeycloakConfig(options = {}) {
   const fileName = `keycloak-config-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
   const stagingPath = backupArtifactStagingPath(hostPath);
+  const stagingFileName = path.basename(stagingPath);
   const containerWorkDir = "/tmp/platform-keycloak-config-backup";
-  const containerArchivePath = "/tmp/platform-keycloak-config-backup.tar.gz";
-  const containerKcadmConfigPath = "/tmp/platform-kcadm-backup.config";
-  const containerKcadmLogPath = "/tmp/platform-kcadm-backup.log";
+  const hostWorkParent = makeOpsTempDir("platform-keycloak-config-");
+  const hostWorkDir = path.join(hostWorkParent, "keycloak-config");
   const backupScript = keycloakBackupProgram();
 
   try {
@@ -12745,9 +12933,21 @@ async function backupKeycloakConfig(options = {}) {
     // backup program inside the authority-bound exact release and pass it as
     // one fixed shell argument instead of opening a generic stdin channel.
     dockerExec(container, ["sh", "-ec", backupScript]);
-    run("docker", ["cp", `${container}:${containerArchivePath}`, stagingPath]);
-    dockerExec(container, ["rm", "-f", containerArchivePath]);
+    run("docker", ["cp", `${container}:${containerWorkDir}`, hostWorkDir]);
+    assertRootOwnedPrivateDirectory(hostWorkDir, "Keycloak configuration backup staging directory");
+    dockerExec(container, ["sh", "-ec", keycloakBackupCleanupProgram()]);
     dockerExec(container, ["sh", "-ec", keycloakBackupResidueAssertionProgram()]);
+    dockerRun([
+      "--network", "none",
+      "-v",
+      `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
+      "-v",
+      `${hostPathForContainerMount(outputDir)}:/backup`,
+      configuredNodeImage(),
+      "sh",
+      "-lc",
+      `tar -czf /backup/${shellQuote(stagingFileName)} -C /work .`,
+    ]);
 
     const { hash, signature } = publishBackupArtifactWithEvidence({
       stagingPath,
@@ -12796,6 +12996,9 @@ async function backupKeycloakConfig(options = {}) {
       // Preserve the original backup failure.
     }
     throw error;
+  } finally {
+    fs.rmSync(stagingPath, { force: true });
+    fs.rmSync(hostWorkParent, { recursive: true, force: true });
   }
 }
 
@@ -13026,8 +13229,12 @@ async function backupSecretManagerMetadata(options = {}) {
         fs.copyFileSync(filePath, path.join(workDir, name));
       }
     }
-    const status = runSecretManager(["status"], { capture: true });
-    const kmsStatus = runSecretManager(["kms-status"], { capture: true });
+    // Typed PRE execution runs infra-ops from the immutable release while the
+    // live encrypted store remains under PLATFORM_SECRETS_ROOT.  Bind the
+    // manager explicitly so it cannot fall back to <release>/secrets.
+    const managerRootArgs = ["--secretsDir", secretsRoot, "--readOnly", "true"];
+    const status = runSecretManager(["status", ...managerRootArgs], { capture: true });
+    const kmsStatus = runSecretManager(["kms-status", ...managerRootArgs], { capture: true });
     fs.writeFileSync(path.join(workDir, "status.txt"), String(status.stdout ?? ""), "utf8");
     fs.writeFileSync(path.join(workDir, "kms-status.txt"), String(kmsStatus.stdout ?? ""), "utf8");
     fs.writeFileSync(path.join(workDir, "README.txt"), [

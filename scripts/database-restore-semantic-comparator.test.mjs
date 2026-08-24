@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -40,6 +41,31 @@ test("PostgreSQL restore test binds two full deterministic independent restores 
   assert.match(restore, /if \(!semanticComparator\.matched\)[\s\S]*independent restore mismatch/);
   assert.match(restore, /metadata:[\s\S]*semanticComparator/);
   assert.match(restore, /firstRestoreComparatorSha256:[\s\S]*secondRestoreComparatorSha256:/);
+});
+
+test("typed PostgreSQL restore stages one digest-identical 0444 copy and preserves the canonical 0400 artifact", () => {
+  const staging = body("function createTypedPostgresReadableArtifact", "function emitV1EvidenceReceipt");
+  assert.match(staging, /assertV1EvidenceArtifactFile\(backupFile[\s\S]*source artifact/);
+  assert.match(staging, /openSha256FileBounded\(backupFile\)/);
+  assert.match(staging, /fs\.mkdirSync\(readableDirectory, \{ mode: 0o700 \}\)/);
+  assert.match(staging, /O_EXCL \| fs\.constants\.O_NOFOLLOW/);
+  assert.match(staging, /fs\.fchmodSync\(destinationDescriptor, 0o444\)/);
+  assert.match(staging, /readableMetadata\.uid !== 0[\s\S]*readableMetadata\.nlink !== 1[\s\S]*0o444/);
+  assert.match(staging, /sha256File\(readablePath\) !== expectedSha256/);
+  assert.match(staging, /source\.rehash\(\)\.sha256 !== expectedSha256/);
+  assert.match(staging, /fs\.unlinkSync\(readablePath\)[\s\S]*fs\.rmdirSync\(readableDirectory\)/);
+  assert.doesNotMatch(staging, /fchmodSync\(source\.descriptor/);
+
+  const admission = body("function typedEvidencePostgresReadableArtifactPath", "function typedEvidenceDockerExecAllowed");
+  assert.match(admission, /typedEvidenceTransactionRoot\(\)[\s\S]*postgres-restore-readable/);
+  const dockerAdmission = body("function typedEvidenceDockerRunAllowed", "function assertTypedEvidenceDockerInvocation");
+  assert.match(dockerAdmission, /typedEvidencePostgresReadableArtifactPath\(\)[\s\S]*:\/restore\/input\.dump:ro/);
+
+  const restore = body("async function restoreTestPostgres", "async function backupRestoreDrill");
+  assert.match(restore, /createTypedPostgresReadableArtifact\(backupFile, hash\)/);
+  assert.equal((restore.match(/hostPathForContainerMount\(readableArtifact\.path\)/g) ?? []).length, 2);
+  assert.match(restore, /readableArtifact\.assertSourceCurrent\(\)[\s\S]*readableArtifact\.cleanup\(\)/);
+  assert.doesNotMatch(restore, /hostPathForContainerMount\(backupFile\).*input\.dump/);
 });
 
 test("PostgreSQL canonical structure removes only volatile dump envelope lines", () => {
@@ -186,19 +212,136 @@ test("MinIO compares one isolated durable tree to a stable live source with only
   assert.match(comparator, /sourceBeforeSha256[\s\S]*restoredSha256[\s\S]*sourceAfterSha256/);
 });
 
-test("Keycloak backup confines kcadm state and removes work, config, and log residue", () => {
+test("typed operation staging stays private under ordinary umask and rejects existing mode or symlink mutants", () => {
+  const implementation = body("function makeOpsTempDir", "function dockerStatsSnapshot");
+  assert.match(implementation, /fs\.mkdirSync\(root, \{ mode: 0o700 \}\)/);
+  assert.match(implementation, /error\?\.code !== "EEXIST"/);
+  assert.match(implementation, /assertRootOwnedPrivateDirectory\(root/);
+  assert.match(implementation, /assertRootOwnedPrivateDirectory\(temporary/);
+
+  const transactionRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "typed-v1-ops-")));
+  fs.chmodSync(transactionRoot, 0o700);
+  const assertCallerOwnedPrivateDirectory = (directory) => {
+    const metadata = fs.lstatSync(directory, { throwIfNoEntry: false });
+    if (!metadata?.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.geteuid()
+        || (metadata.mode & 0o7777) !== 0o700 || fs.realpathSync(directory) !== directory) {
+      throw new Error("not one caller-owned private directory");
+    }
+  };
+  const makeTemp = new Function(
+    "fs",
+    "path",
+    "typedEvidenceTransactionRoot",
+    "operationsTempRoot",
+    "assertRootOwnedPrivateDirectory",
+    `${implementation}\nreturn makeOpsTempDir;`,
+  )(fs, path, () => transactionRoot, transactionRoot, assertCallerOwnedPrivateDirectory);
+  const previousUmask = process.umask(0o022);
+  try {
+    const first = makeTemp("platform-minio-data-");
+    assert.equal(fs.lstatSync(path.join(transactionRoot, "ops")).mode & 0o7777, 0o700);
+    assert.equal(fs.lstatSync(first).mode & 0o7777, 0o700);
+
+    fs.chmodSync(path.join(transactionRoot, "ops"), 0o755);
+    assert.throws(() => makeTemp("infra-secret-manager-metadata-"), /caller-owned private/);
+
+    fs.rmSync(path.join(transactionRoot, "ops"), { recursive: true, force: true });
+    const redirected = fs.mkdtempSync(path.join(os.tmpdir(), "typed-v1-ops-target-"));
+    fs.chmodSync(redirected, 0o700);
+    fs.symlinkSync(redirected, path.join(transactionRoot, "ops"));
+    assert.throws(() => makeTemp("platform-keycloak-config-"), /caller-owned private/);
+    fs.rmSync(redirected, { recursive: true, force: true });
+  } finally {
+    process.umask(previousUmask);
+    fs.rmSync(transactionRoot, { recursive: true, force: true });
+  }
+
+  assert.match(body("async function backupMinio", "const minioRestoreComparatorVersion"), /makeOpsTempDir\("platform-minio-data-"\)/);
+  assert.match(body("async function backupSecretManagerMetadata", "async function restoreTestSecretManagerMetadata"), /makeOpsTempDir\("infra-secret-manager-metadata-"\)/);
+  assert.match(body("async function backupKeycloakConfig", "const keycloakConfigComparatorVersion"), /makeOpsTempDir\("platform-keycloak-config-"\)/);
+});
+
+test("closed backup Docker admission binds each private work path, output family, image, and staging name", () => {
+  const transactionRoot = "/dev/shm/platform-v1-evidence-20260824T120000Z-deadbeef-transaction";
+  const deploymentRoot = `/srv/platform-infrastructure/releases/${"a".repeat(40)}-${"b".repeat(64)}`;
+  const image = `sha256:${"c".repeat(64)}`;
+  const processFacade = { pid: 4321, env: { NODE_IMAGE: image } };
+  const invocation = { deploymentRoot };
+  const inside = (root, candidate) => {
+    const relative = path.relative(path.resolve(root), path.resolve(candidate));
+    return path.resolve(candidate) === path.resolve(root) || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+  const mounts = (args) => args.flatMap((value, index) => value === "-v" ? [args[index + 1]] : []);
+  const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
+  const runAdmission = new Function(
+    "path",
+    "process",
+    "typedEvidenceInvocation",
+    "typedEvidenceTransactionRoot",
+    "typedEvidencePathInside",
+    "typedEvidenceRunMounts",
+    "sameStringArray",
+    `${body("function typedEvidenceDockerRunAllowed", "function assertTypedEvidenceDockerInvocation")}\nreturn typedEvidenceDockerRunAllowed;`,
+  )(path, processFacade, invocation, () => transactionRoot, inside, mounts, same);
+
+  const cases = [
+    ["BACKUP_MINIO", "platform-minio-data-Abc123/minio-data", "minio", "minio-data"],
+    ["BACKUP_KEYCLOAK", "platform-keycloak-config-Abc123/keycloak-config", "keycloak", "keycloak-config"],
+    ["BACKUP_SECRET_METADATA", "infra-secret-manager-metadata-Abc123", "secret-manager", "secret-manager-metadata"],
+  ];
+  for (const [action, workRelative, outputFamily, stagingStem] of cases) {
+    const command = `tar -czf /backup/'.${stagingStem}-20260824-120000.tar.gz.staging-4321-${"d".repeat(24)}' -C /work .`;
+    const args = [
+      "run", "--rm", "--network", "none",
+      "-v", `${transactionRoot}/ops/${workRelative}:/work:ro`,
+      "-v", `${deploymentRoot}/backups/${outputFamily}:/backup`,
+      image, "sh", "-lc", command,
+    ];
+    assert.equal(runAdmission(action, args), true, `${action} exact command`);
+    assert.equal(runAdmission(action, args.map((value) => value.replace(`${transactionRoot}/ops/`, `${transactionRoot}/ops/nested/`))), false, `${action} nested work path`);
+    assert.equal(runAdmission(action, args.map((value) => value === command ? command.replace(`.${stagingStem}-`, ".wrong-") : value)), false, `${action} wrong staging family`);
+    assert.equal(runAdmission(action, args.map((value) => value === image ? `sha256:${"e".repeat(64)}` : value)), false, `${action} wrong image`);
+  }
+
+  const copyAdmission = new Function(
+    "path",
+    "typedEvidenceInvocation",
+    "typedEvidenceTransactionRoot",
+    "typedEvidencePathInside",
+    "argv",
+    `${body("function typedEvidenceDockerCopyAllowed", "function typedEvidenceDockerRemoveAllowed")}\nreturn typedEvidenceDockerCopyAllowed;`,
+  )(path, invocation, () => transactionRoot, inside, {});
+  const destination = `${transactionRoot}/ops/platform-keycloak-config-Abc123/keycloak-config`;
+  assert.equal(copyAdmission("BACKUP_KEYCLOAK", ["cp", "enterprise-keycloak:/tmp/platform-keycloak-config-backup", destination]), true);
+  assert.equal(copyAdmission("BACKUP_KEYCLOAK", ["cp", "enterprise-keycloak:/tmp/platform-keycloak-config-backup.tar.gz", destination]), false);
+  assert.equal(copyAdmission("BACKUP_KEYCLOAK", ["cp", "enterprise-keycloak:/tmp/platform-keycloak-config-backup", `${transactionRoot}/ops/nested/platform-keycloak-config-Abc123/keycloak-config`]), false);
+});
+
+test("Keycloak exports with kcadm, copies into the private transaction, packages with pinned Node, and removes residue", () => {
   const backup = body("async function backupKeycloakConfig", "const keycloakConfigComparatorVersion");
-  const program = body("function keycloakBackupProgram", "async function backupKeycloakConfig");
+  const program = body("function keycloakBackupProgram", "function keycloakBackupResidueAssertionProgram");
+  const residue = body("function keycloakBackupResidueAssertionProgram", "function keycloakBackupCleanupProgram");
   assert.equal((program.match(/\/opt\/keycloak\/bin\/kcadm\.sh/g) ?? []).length, (program.match(/--config "\$kcadm_config"/g) ?? []).length);
   assert.doesNotMatch(program, /kcadm\.sh[^\n]*\|\| true/);
   assert.match(program, /trap cleanup EXIT/);
-  assert.match(program, /rm -rf "\$work" "\$kcadm_config" "\$kcadm_log"/);
   assert.match(program, /default_kcadm_config="\$HOME\/\.keycloak\/kcadm\.config"/);
-  assert.match(program, /rm -rf "\$work"[\s\S]*"\$default_kcadm_config"/);
-  assert.match(program, /if \[ "\$status" -ne 0 \]; then rm -f "\$archive"; fi/);
-  assert.match(program, /keycloakBackupResidueAssertionProgram[\s\S]*test ! -e[\s\S]*\.keycloak\/kcadm\.config/);
+  assert.match(program, /rm -f "\$kcadm_config" "\$kcadm_log" "\$default_kcadm_config"/);
+  assert.match(program, /if \[ "\$status" -ne 0 \]; then rm -rf "\$work"; fi/);
+  assert.doesNotMatch(program, /\btar\b|\bgzip\b|archive=/);
+  assert.match(residue, /test ! -e[\s\S]*\.keycloak\/kcadm\.config/);
+  assert.match(backup, /dockerExec\(container, \["sh", "-ec", backupScript\]\)/);
+  assert.match(backup, /run\("docker", \["cp", `\$\{container\}:\$\{containerWorkDir\}`, hostWorkDir\]\)/);
+  assert.match(backup, /assertRootOwnedPrivateDirectory\(hostWorkDir/);
   assert.match(backup, /keycloakBackupResidueAssertionProgram\(\)/);
   assert.match(backup, /keycloakBackupCleanupProgram\(\)/);
+  assert.match(backup, /dockerRun\(\[[\s\S]*"--network", "none"[\s\S]*configuredNodeImage\(\)[\s\S]*tar -czf/);
+  assert.match(backup, /fs\.rmSync\(stagingPath, \{ force: true \}\)[\s\S]*fs\.rmSync\(hostWorkParent, \{ recursive: true, force: true \}\)/);
+
+  const admission = body("function typedEvidenceDockerExecAllowed", "function assertTypedEvidenceDockerInvocation");
+  assert.doesNotMatch(admission, /program === "rm"[^\n]*platform-keycloak-config-backup\.tar\.gz/);
+  assert.match(admission, /source === "enterprise-keycloak:\/tmp\/platform-keycloak-config-backup"[\s\S]*typedEvidenceTransactionRoot\(\)[\s\S]*platform-keycloak-config/);
+  assert.match(admission, /action === "BACKUP_MINIO" \|\| action === "BACKUP_KEYCLOAK" \|\| action === "BACKUP_SECRET_METADATA"/);
+  assert.match(admission, /action === "BACKUP_KEYCLOAK"[\s\S]*"keycloak"[\s\S]*"platform-keycloak-config-"/);
 });
 
 test("Keycloak parses every JSON file and compares canonical content across two isolated extracts", () => {
