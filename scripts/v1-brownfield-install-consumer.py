@@ -1256,7 +1256,7 @@ def begin_artifact_transaction(pins: Pins) -> Dict[str, object]:
 
 def validate_staged_control_configuration(sources: Dict[str, Snapshot]) -> None:
     staged_sudoers = f"{ARTIFACT_TRANSACTION}/validate-sudoers.tmp"
-    staged_unit = f"{ARTIFACT_TRANSACTION}/validate-unit.tmp"
+    staged_unit = f"{ARTIFACT_TRANSACTION}/validate-unit.service"
     atomic_replace_bytes(
         staged_sudoers,
         sources["sudoers"].data,
