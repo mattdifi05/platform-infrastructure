@@ -86,7 +86,7 @@ jobs:
             "$POSTGRES_TEST_IMAGE" >/dev/null
           ready=false
           for _ in $(seq 1 60); do
-            if docker exec "$container" pg_isready --username postgres --dbname "$database" >/dev/null 2>&1; then
+            if docker exec "$container" pg_isready --host 127.0.0.1 --username postgres --dbname "$database" >/dev/null 2>&1; then
               ready=true
               break
             fi
