@@ -1047,6 +1047,16 @@ function runCoreStackNoHostedScenario(config, { materializeSources = false } = {
   fs.mkdirSync(fakeBin);
   fs.mkdirSync(stateDirectory, { recursive: true });
   const gate = copyRepositoryFile(root, "scripts/core-stack-activation-gate.sh");
+  if (process.platform === "linux") {
+    const source = fs.readFileSync(gate, "utf8");
+    const systemProbe = "SYSTEM_NAME=$(/usr/bin/uname -s)";
+    assert.equal(
+      source.split(systemProbe).length - 1,
+      1,
+      "core activation fixture must contain one exact OS test boundary",
+    );
+    fs.writeFileSync(gate, source.replace(systemProbe, "SYSTEM_NAME=Darwin"), { mode: 0o755 });
+  }
   const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
   copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
   copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
