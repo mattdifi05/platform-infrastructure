@@ -4158,11 +4158,17 @@ def runtime_identity_labels(document: Dict[str, str]) -> Dict[str, str]:
     }
 
 
-def source_render_without_runtime_identity(render: Dict[str, object]) -> bytes:
+def source_render_without_runtime_identity(
+    render: Dict[str, object], document: Dict[str, str]
+) -> bytes:
     value = parse_json(canonical_bytes(render), "final render identity projection", True)
     services = value.get("services") if isinstance(value, dict) else None
     if not isinstance(services, dict):
         stop("final render identity projection has no services object.")
+    expected_labels = runtime_identity_labels(document)
+    if value.get("x-platform-runtime-labels") != expected_labels:
+        stop("final render identity projection lacks exact top-level runtime identity labels.")
+    value.pop("x-platform-runtime-labels")
     runtime_labels = set(RUNTIME_IDENTITY_LABEL_BY_ENV.values())
     for service in services.values():
         if not isinstance(service, dict):
@@ -4204,7 +4210,7 @@ def validate_runtime_identity_document(
     )
     if document["workloadLockSha256"] != digest(workload_lock):
         stop("runtime identity workload-lock digest differs from the exact release.")
-    projected_source = source_render_without_runtime_identity(render)
+    projected_source = source_render_without_runtime_identity(render, document)
     if document["sourceRenderSha256"] != digest(projected_source):
         stop("runtime identity source-render digest differs from the identity-free projection.")
     seed = {

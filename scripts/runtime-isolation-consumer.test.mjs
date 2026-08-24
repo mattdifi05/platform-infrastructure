@@ -3259,6 +3259,36 @@ sys.stdout.buffer.write(data)
   return execution.stdout;
 }
 
+function projectArchiveRuntimeIdentity({ reconciler, render, runtimeIdentity }) {
+  const program = String.raw`
+import json, os, runpy, sys
+m = runpy.run_path(os.environ["V1_TEST_RECONCILER"], run_name="v1_archive_identity_projection")
+render = json.load(sys.stdin)
+runtime = json.loads(os.environ["V1_TEST_RUNTIME_IDENTITY"])
+document = m["runtime_identity_document"](runtime)
+sys.stdout.buffer.write(m["source_render_without_runtime_identity"](render, document))
+`;
+  const execution = spawnSync("python3", ["-I", "-c", program], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      LANG: "C",
+      LC_ALL: "C",
+      V1_TEST_RECONCILER: reconciler,
+      V1_TEST_RUNTIME_IDENTITY: JSON.stringify(runtimeIdentity),
+    },
+    input: JSON.stringify(render),
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  assert.equal(
+    execution.status,
+    0,
+    execution.stderr || "runtime identity projection failed",
+  );
+  return JSON.parse(execution.stdout);
+}
+
 test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and exact policy", { timeout: 60_000 }, (t) => {
   const compose = pinnedComposeRendererOrSkip(t);
   if (compose === null) return;
@@ -3476,6 +3506,15 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     const lock = JSON.parse(lockBytes);
     assert.equal(Object.keys(source.config.services).length, 20);
     assert.equal(Object.keys(final.config.services).length, 20);
+    assert.deepEqual(
+      projectArchiveRuntimeIdentity({
+        reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
+        render: final.config,
+        runtimeIdentity,
+      }),
+      source.config,
+      "the exact reconciler did not recover the identity-free source render",
+    );
     assert.deepEqual(
       validateNoHostedCoreAuthority(lock, source.config, release, sourceEnvironment),
       [],
