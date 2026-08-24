@@ -30,7 +30,12 @@ assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH private 
 assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH known-hosts input" "\$KNOWN_HOSTS_SOURCE"/);
 assert.match(sources["scripts/deploy-vps.sh"], /key_before=.*[\s\S]*cp "\$SSH_KEY_SOURCE" "\$ssh_key"[\s\S]*hash_file "\$SSH_KEY_SOURCE"/);
 assert.match(sources["scripts/deploy-v1-local-private.sh"], /pinned-ssh-host-key\.mjs" verify/);
-assert.match(sources[".github/workflows/v1-local-private.yml"], /DEPLOY_SSH_HOST_KEY[\s\S]*pinned-ssh-host-key\.mjs render[\s\S]*pinned-ssh-host-key\.mjs verify/);
+assert.doesNotMatch(
+  sources[".github/workflows/v1-local-private.yml"],
+  /DEPLOY_SSH_HOST_KEY|pinned-ssh-host-key|\/usr\/bin\/ssh|deploy-v1-local-private\.sh/,
+  "the hosted LOCAL_PRIVATE workflow must stop before every SSH/deploy boundary",
+);
+assert.match(sources[".github/workflows/v1-local-private.yml"], /STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED/);
 assert.match(sources["scripts/deploy-v1-local-private.sh"], /pinned-ssh-host-key\.mjs" verify[\s\S]*exec "\$SSH" "\$@" -- "\$REMOTE" "\$REMOTE_COMMAND" < \/dev\/null/);
 assert.match(sources["scripts/deploy-v1-local-private.sh"], /REMOTE_COMMAND='\/usr\/bin\/sudo -n -- \/usr\/local\/libexec\/platform-v1-local-private-control activate'/);
 assert.match(sources["scripts/deploy-v1-local-private.sh"], /require_input_file "SSH private key" "\$SSH_KEY_SOURCE"/);

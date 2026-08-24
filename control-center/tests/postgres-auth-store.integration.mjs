@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
-import { PostgresAuthStore } from "../auth/oidc.mjs";
+import { PostgresAuthStore, providerScopeAdvisoryLockKey } from "../auth/oidc.mjs";
 import { PostgresFirstConfigurationStore } from "../first-configuration/store.mjs";
 
 const { Pool } = pg;
@@ -202,7 +202,7 @@ async function exerciseConcurrentCreateBeforeRevocation(readStore, scopeType) {
   const createStore = authStore(`oidc-race-create-first-${scopeType}`);
   const revocationStore = authStore(`oidc-race-revoke-second-${scopeType}`);
   const scopeValue = scopeType === "sid" ? raceSid : raceSubject;
-  const scopeKey = `${issuer}\0${scopeType}\0${scopeValue}`;
+  const scopeKey = providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue);
   const blocker = await adminPool.connect();
   let createPromise;
   let revocationPromise;
@@ -242,7 +242,7 @@ async function exerciseConcurrentRevocationBeforeCreate(readStore, scopeType) {
   const createStore = authStore(`oidc-race-create-second-${scopeType}`);
   const revocationStore = authStore(`oidc-race-revoke-first-${scopeType}`);
   const scopeValue = scopeType === "sid" ? raceSid : raceSubject;
-  const scopeKey = `${issuer}\0${scopeType}\0${scopeValue}`;
+  const scopeKey = providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue);
   const blocker = await adminPool.connect();
   let createPromise;
   let revocationPromise;

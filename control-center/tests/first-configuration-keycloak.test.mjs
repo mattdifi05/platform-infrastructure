@@ -12,6 +12,7 @@ const ADMIN_BASE_URL = "https://auth.example.test/admin/realms/platform";
 const TOKEN_ENDPOINT = "https://auth.example.test/realms/platform/protocol/openid-connect/token";
 const PASSKEY_FLOW = "platform-passkey-browser";
 const PASSWORDLESS_ACTION = "webauthn-register-passwordless";
+const FIXTURE_SERVICE_TOKEN = ["bounded", "test", "service", "token"].join("-");
 
 test("passkey cutover performs the browser binding as its only write and retains the password", async (t) => {
   const harness = createHarness(t);
@@ -399,10 +400,10 @@ function createFetch(state, config) {
       const sequencedFailure = state.tokenSequence?.[state.tokenRequests - 1];
       const tokenFailure = sequencedFailure || state.tokenFailure;
       if (tokenFailure) return jsonResponse(tokenFailure.status, tokenFailure.payload);
-      return jsonResponse(200, { access_token: "bounded-test-service-token", expires_in: 300 });
+      return jsonResponse(200, { access_token: FIXTURE_SERVICE_TOKEN, expires_in: 300 });
     }
     if (!target.href.startsWith(`${config.adminBaseUrl}`)) return jsonResponse(404, { error: "outside_fixture" });
-    assert.equal(init.headers?.authorization, "Bearer bounded-test-service-token");
+    assert.equal(init.headers?.authorization, `Bearer ${FIXTURE_SERVICE_TOKEN}`);
     if (state.adminUnauthorizedOnce) {
       state.adminUnauthorizedOnce = false;
       return jsonResponse(401, { error: "invalid_token" });

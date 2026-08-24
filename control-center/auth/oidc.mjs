@@ -524,7 +524,10 @@ export class PostgresAuthStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      const lockKeys = [`${item.issuer}\0subject\0${item.subject}`, ...(item.sessionId ? [`${item.issuer}\0sid\0${item.sessionId}`] : [])].sort();
+      const lockKeys = [
+        providerScopeAdvisoryLockKey(item.issuer, "subject", item.subject),
+        ...(item.sessionId ? [providerScopeAdvisoryLockKey(item.issuer, "sid", item.sessionId)] : []),
+      ].sort();
       for (const key of lockKeys) await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
       const revoked = await client.query(
         `select 1 from control_auth.provider_revocations
@@ -569,7 +572,10 @@ export class PostgresAuthStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`${issuer}\0${scopeType}\0${scopeValue}`]);
+      await client.query(
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue)],
+      );
       await client.query("delete from control_auth.provider_event_tokens where expires_at <= now()");
       await client.query("delete from control_auth.provider_revocations where expires_at <= now()");
       const receipt = await client.query(
@@ -732,6 +738,11 @@ export class AuthRequestError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+export function providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue) {
+  // PostgreSQL text rejects NUL; JSON preserves tuple boundaries without embedding one.
+  return JSON.stringify([String(issuer), String(scopeType), String(scopeValue)]);
 }
 
 function readDatabaseUrl(filename) {
