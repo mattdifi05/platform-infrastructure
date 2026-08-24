@@ -6,6 +6,7 @@ ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 PREPARE_RESOLVED=${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}
 TRUSTED_RELEASE_CONTEXT=${PLATFORM_TRUSTED_RELEASE_CONTEXT:-}
+V1_LOCAL_PRIVATE_RENDER=${PLATFORM_V1_LOCAL_PRIVATE_RENDER:-0}
 CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
 REQUEST_MODE=invalid
 
@@ -65,6 +66,24 @@ case "$PREPARE_RESOLVED" in
     ;;
   *)
     printf '%s\n' "HOSTED_WORKLOAD_PREPARE_RESOLVED must be 0 or 1." >&2
+    exit 2
+    ;;
+esac
+
+case "$V1_LOCAL_PRIVATE_RENDER" in
+  0) ;;
+  1)
+    [[ "$REQUEST_MODE" = compose-config ]] || {
+      printf '%s\n' "The V1 LOCAL_PRIVATE render authority is limited to the exact config render." >&2
+      exit 2
+    }
+    [[ "$PREPARE_RESOLVED" = 0 && -z "$TRUSTED_RELEASE_CONTEXT" ]] || {
+      printf '%s\n' "The V1 LOCAL_PRIVATE render authority cannot be combined with another render authority." >&2
+      exit 2
+    }
+    ;;
+  *)
+    printf '%s\n' "PLATFORM_V1_LOCAL_PRIVATE_RENDER must be 0 or 1." >&2
     exit 2
     ;;
 esac
@@ -133,6 +152,8 @@ TRUSTED_RELEASE_CONTEXT_SHA256=
 TRUSTED_RELEASE_CONTEXT_SOURCE_IDENTITY=
 PREPARE_ENVIRONMENT_AUTHORITY_PATHS=()
 PREPARE_ENVIRONMENT_AUTHORITY_IDENTITIES=()
+V1_LOCAL_PRIVATE_AUTHORITY_PATHS=()
+V1_LOCAL_PRIVATE_AUTHORITY_IDENTITIES=()
 
 cleanup_handoff() {
   local item
@@ -393,6 +414,115 @@ revalidate_prepare_release_state_environment() {
   done
 }
 
+record_secure_v1_local_private_directory() {
+  local candidate=$1 label=$2 expected_uid=$3
+  local canonical identity _device _inode uid mode
+  [[ -d "$candidate" && ! -L "$candidate" ]] || {
+    printf '%s must be one canonical directory.\n' "$label" >&2
+    return 1
+  }
+  canonical=$(CDPATH= cd -- "$candidate" && pwd -P) || return 1
+  [[ "$canonical" = "$candidate" ]] || {
+    printf '%s must not traverse symbolic or non-canonical ancestors.\n' "$label" >&2
+    return 1
+  }
+  identity=$(fd_identity "$candidate")
+  IFS='|' read -r _device _inode uid mode <<< "$identity"
+  [[ "$uid" = "$expected_uid" ]] && (( (mode & 18) == 0 )) || {
+    printf '%s must be authority-owned and not group/world writable.\n' "$label" >&2
+    return 1
+  }
+  V1_LOCAL_PRIVATE_AUTHORITY_PATHS+=("$candidate")
+  V1_LOCAL_PRIVATE_AUTHORITY_IDENTITIES+=("$identity")
+}
+
+validate_v1_local_private_render_environment() {
+  local environment_source=$1
+  local infrastructure_root release_store release_id state_store state_root expected_environment expected_uid
+  local release_identity _release_device _release_inode release_uid release_mode
+  local descriptor_lock descriptor_mode descriptor_variant index
+  V1_LOCAL_PRIVATE_AUTHORITY_PATHS=()
+  V1_LOCAL_PRIVATE_AUTHORITY_IDENTITIES=()
+  if [[ "$HOST_OS" = Linux ]]; then
+    infrastructure_root=/srv/platform-infrastructure
+    state_store=/var/lib/platform-infrastructure/v1
+    expected_uid=0
+    record_secure_v1_local_private_directory /srv "Platform service root" "$expected_uid" || return 1
+    record_secure_v1_local_private_directory /var "Platform state root" "$expected_uid" || return 1
+    record_secure_v1_local_private_directory /var/lib "Platform state library" "$expected_uid" || return 1
+    record_secure_v1_local_private_directory /var/lib/platform-infrastructure "Platform private state root" "$expected_uid" || return 1
+  elif [[ "$HOST_OS" = Darwin
+      && -n "${HOSTED_TEST_INFRASTRUCTURE_ROOT:-}"
+      && "$HOSTED_TEST_INFRASTRUCTURE_ROOT" = /* ]]; then
+    # The production paths above are not writable on macOS. This seam is
+    # ignored on Linux and exercises the same closed path/owner/mode contract.
+    infrastructure_root=$HOSTED_TEST_INFRASTRUCTURE_ROOT
+    state_store=$infrastructure_root/v1
+    expected_uid=$(id -u)
+  else
+    printf '%s\n' "V1 LOCAL_PRIVATE render authority is available only on the target Linux host." >&2
+    return 1
+  fi
+  [[ "$infrastructure_root" != *[!A-Za-z0-9_./-]*
+      && "$infrastructure_root" != *//*
+      && "$infrastructure_root" != */../*
+      && "$infrastructure_root" != */..
+      && "$infrastructure_root" != */./*
+      && "$infrastructure_root" != */. ]] || {
+    printf '%s\n' "V1 LOCAL_PRIVATE infrastructure root is not canonical." >&2
+    return 1
+  }
+  release_store=$infrastructure_root/releases
+  release_id=$(basename -- "$ROOT_DIR")
+  state_root=$state_store/local-private
+  expected_environment=$state_root/exact-compose.env
+  [[ "$ROOT_DIR" = "$release_store/$release_id"
+      && "$release_id" =~ ^([a-f0-9]{40}|[a-f0-9]{64})-[a-f0-9]{64}$
+      && "$environment_source" = "$expected_environment" ]] || {
+    printf '%s\n' "V1 LOCAL_PRIVATE render is not bound to its exact content-addressed release and environment." >&2
+    return 1
+  }
+  record_secure_v1_local_private_directory "$infrastructure_root" "Platform infrastructure root" "$expected_uid" || return 1
+  record_secure_v1_local_private_directory "$release_store" "Immutable release store" "$expected_uid" || return 1
+  record_secure_v1_local_private_directory "$ROOT_DIR" "Immutable V1 release root" "$expected_uid" || return 1
+  record_secure_v1_local_private_directory "$state_store" "V1 state store" "$expected_uid" || return 1
+  record_secure_v1_local_private_directory "$state_root" "V1 LOCAL_PRIVATE state root" "$expected_uid" || return 1
+  release_identity=$(fd_identity "$ROOT_DIR")
+  IFS='|' read -r _release_device _release_inode release_uid release_mode <<< "$release_identity"
+  [[ "$release_uid" = "$expected_uid" && "$release_mode" = 365 ]] || {
+    printf '%s\n' "V1 LOCAL_PRIVATE release root must be authority-owned with exact mode 0555." >&2
+    return 1
+  }
+  [[ "$env_uid" = "$expected_uid" && "$env_mode" = 256 ]] || {
+    printf '%s\n' "V1 LOCAL_PRIVATE render environment must be authority-owned with exact mode 0400." >&2
+    return 1
+  }
+  descriptor_lock=$(awk -F= '$1 == "HOSTED_WORKLOAD_LOCK" { sub(/^[^=]*=/, ""); print; exit }' "$V1_ENV_LOCK_REFERENCE")
+  descriptor_mode=$(awk -F= '$1 == "HOSTED_WORKLOAD_MODE" { sub(/^[^=]*=/, ""); print; exit }' "$V1_ENV_MODE_REFERENCE")
+  descriptor_variant=$(awk -F= '$1 == "PLATFORM_COMPOSE_VARIANT" { sub(/^[^=]*=/, ""); print; exit }' "$V1_ENV_VARIANT_REFERENCE")
+  [[ -z "$descriptor_lock" && "$descriptor_mode" = no-hosted && "$descriptor_variant" = LOCAL_PRIVATE ]] || {
+    printf '%s\n' "V1 LOCAL_PRIVATE render environment does not bind the exact no-hosted variant." >&2
+    return 1
+  }
+  for (( index=0; index<${#V1_LOCAL_PRIVATE_AUTHORITY_PATHS[@]}; index+=1 )); do
+    [[ "${V1_LOCAL_PRIVATE_AUTHORITY_IDENTITIES[$index]}" = "$(fd_identity "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}")" ]] || return 1
+  done
+}
+
+revalidate_v1_local_private_render_environment() {
+  local index
+  ((${#V1_LOCAL_PRIVATE_AUTHORITY_PATHS[@]} > 0)) || return 0
+  for (( index=0; index<${#V1_LOCAL_PRIVATE_AUTHORITY_PATHS[@]}; index+=1 )); do
+    [[ -d "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}"
+        && ! -L "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}"
+        && "$(CDPATH= cd -- "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}" && pwd -P)" = "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}"
+        && "$(fd_identity "${V1_LOCAL_PRIVATE_AUTHORITY_PATHS[$index]}")" = "${V1_LOCAL_PRIVATE_AUTHORITY_IDENTITIES[$index]}" ]] || {
+      printf '%s\n' "V1 LOCAL_PRIVATE render directory authority changed during render." >&2
+      return 1
+    }
+  done
+}
+
 # This wrapper is deliberately read-only. Production mutation is admitted only
 # by deploy-vps-remote.sh after the release, host, origin and network gates.
 case "${1:-}" in
@@ -414,12 +544,19 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 ENV_SOURCE_FILE=$ENV_FILE
-open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 5
+environment_reader_count=5
+[[ "$V1_LOCAL_PRIVATE_RENDER" = 0 ]] || environment_reader_count=8
+open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" "$environment_reader_count"
 ENV_LOCK_REFERENCE=${SNAPSHOT_REFERENCES[0]}
 ENV_MODE_REFERENCE=${SNAPSHOT_REFERENCES[1]}
 ENV_VARIANT_REFERENCE=${SNAPSHOT_REFERENCES[2]}
 ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[3]}
 ENV_SEMANTIC_REFERENCE=${SNAPSHOT_REFERENCES[4]}
+if [[ "$V1_LOCAL_PRIVATE_RENDER" = 1 ]]; then
+  V1_ENV_LOCK_REFERENCE=${SNAPSHOT_REFERENCES[5]}
+  V1_ENV_MODE_REFERENCE=${SNAPSHOT_REFERENCES[6]}
+  V1_ENV_VARIANT_REFERENCE=${SNAPSHOT_REFERENCES[7]}
+fi
 ENV_SNAPSHOT_SHA256=$SNAPSHOT_SHA256
 ENV_SOURCE_IDENTITY=$SNAPSHOT_SOURCE_IDENTITY
 env_parent=$(CDPATH= cd -- "$(dirname -- "$ENV_SOURCE_FILE")" && pwd -P)
@@ -431,7 +568,9 @@ IFS='|' read -r _env_device _env_inode env_uid env_mode <<< "$ENV_SOURCE_IDENTIT
   printf '%s\n' "Core environment must be one canonical non-linked regular file." >&2
   exit 1
 }
-if [[ "$env_canonical_source" = "$ROOT_DIR/.env" ]]; then
+if [[ "$V1_LOCAL_PRIVATE_RENDER" = 1 ]]; then
+  validate_v1_local_private_render_environment "$env_canonical_source" || exit 1
+elif [[ "$env_canonical_source" = "$ROOT_DIR/.env" ]]; then
   [[ "$env_uid" = "$(id -u)"
       && ( "$env_mode" = 256 || "$env_mode" = 384 ) ]] || {
     printf '%s\n' "Default core environment must be deployment-owned and mode 0400 or 0600." >&2
@@ -1076,6 +1215,7 @@ open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment revalidation" 0
 }
 revalidate_trusted_release_context || exit 1
 revalidate_prepare_release_state_environment || exit 1
+revalidate_v1_local_private_render_environment || exit 1
 
 if [[ "$PREPARE_RESOLVED" = 0 ]]; then
   if [[ -n "$workload_lock" ]]; then

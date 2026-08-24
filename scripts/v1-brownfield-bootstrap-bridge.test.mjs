@@ -12,6 +12,13 @@ const consumer = path.join(import.meta.dirname, "v1-brownfield-install-consumer.
 const nodeHelper = path.join(import.meta.dirname, "v1-node-runtime-prerequisite.py");
 const sudoers = path.join(import.meta.dirname, "..", "sudoers", "platform-v1-local-private-control");
 const python = "/usr/bin/python3";
+const artifactPaths = [
+  "/usr/local/libexec/platform-v1-brownfield-install-consumer",
+  "/usr/local/libexec/platform-v1-local-private-control",
+  "/usr/local/libexec/platform-v1-local-private-reconcile",
+  "/etc/systemd/system/platform-v1-local-private-control.service",
+  "/etc/sudoers.d/platform-v1-local-private-control",
+];
 
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object"
@@ -32,6 +39,42 @@ function git(cwd, args) {
   });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
+}
+
+function buildTransport(seed, root, label) {
+  const commit = git(seed, ["rev-parse", "HEAD"]);
+  const tree = git(seed, ["rev-parse", "HEAD^{tree}"]);
+  const archive = path.join(root, `source-${label}.tar`);
+  const bundle = path.join(root, `source-${label}.bundle`);
+  let result = spawnSync("/usr/bin/git", ["archive", "--format=tar", `--output=${archive}`, "HEAD"], { cwd: seed, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync("/usr/bin/git", ["bundle", "create", bundle, "HEAD"], { cwd: seed, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const archiveBytes = fs.readFileSync(archive);
+  const bundleBytes = fs.readFileSync(bundle);
+  const bridgeBytes = fs.readFileSync(bridge);
+  const consumerBytes = fs.readFileSync(path.join(seed, "scripts", "v1-brownfield-install-consumer.py"));
+  const checkpoint = {
+    activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
+    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateConsumerSha256: sha(consumerBytes),
+    candidateTree: tree, createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundleBytes),
+    purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
+    sourceArchiveSha256: sha(archiveBytes), sourceArchiveSizeBytes: archiveBytes.length, transportVerified: true,
+  };
+  const checkpointBytes = Buffer.from(`${stable(checkpoint)}\n`);
+  const parts = { bridge: bridgeBytes, consumer: consumerBytes, checkpoint: checkpointBytes, gitBundle: bundleBytes, sourceArchive: archiveBytes };
+  const manifest = {
+    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateTree: tree,
+    checkpointSha256: sha(checkpointBytes), consumerSha256: sha(consumerBytes), gitBundleSha256: sha(bundleBytes),
+    lengths: Object.fromEntries(Object.entries(parts).map(([name, bytes]) => [name, bytes.length])),
+    schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256: sha(archiveBytes),
+  };
+  const manifestBytes = Buffer.from(stable(manifest));
+  const frame = Buffer.concat([
+    Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")), manifestBytes,
+    ...["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"].map((name) => parts[name]),
+  ]);
+  return { archiveBytes, checkpointBytes, commit, consumerBytes, frame, manifest, tree };
 }
 
 function createFixture(t) {
@@ -58,47 +101,17 @@ function createFixture(t) {
   git(seed, ["config", "user.email", "fixture@example.invalid"]);
   write(path.join(seed, ".gitignore"), ".env\n", 0o644);
   write(path.join(seed, "README.md"), "transport-only bootstrap fixture\n", 0o644);
+  write(path.join(seed, "scripts", "v1-brownfield-bootstrap-bridge.py"), fs.readFileSync(bridge), 0o644);
   write(path.join(seed, "scripts", "v1-brownfield-install-consumer.py"), fs.readFileSync(consumer), 0o755);
   write(path.join(seed, "scripts", "v1-node-runtime-prerequisite.py"), fs.readFileSync(nodeHelper), 0o755);
-  write(path.join(seed, "scripts", "v1-local-private-control.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o755);
-  write(path.join(seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o755);
+  write(path.join(seed, "scripts", "v1-local-private-control.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o644);
+  write(path.join(seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o644);
   write(path.join(seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
   write(path.join(seed, "sudoers", "platform-v1-local-private-control"), fs.readFileSync(sudoers), 0o644);
   git(seed, ["add", "."]);
   git(seed, ["commit", "--quiet", "-m", "fixture"]);
-  const commit = git(seed, ["rev-parse", "HEAD"]);
-  const tree = git(seed, ["rev-parse", "HEAD^{tree}"]);
-
-  const archive = path.join(root, "source.tar");
-  const bundle = path.join(root, "source.bundle");
-  let result = spawnSync("/usr/bin/git", ["archive", "--format=tar", `--output=${archive}`, "HEAD"], { cwd: seed, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  result = spawnSync("/usr/bin/git", ["bundle", "create", bundle, "HEAD"], { cwd: seed, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  const archiveBytes = fs.readFileSync(archive);
-  const bundleBytes = fs.readFileSync(bundle);
+  const transport = buildTransport(seed, root, "a");
   const bridgeBytes = fs.readFileSync(bridge);
-  const consumerBytes = fs.readFileSync(consumer);
-  const checkpoint = {
-    activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
-    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateConsumerSha256: sha(consumerBytes),
-    candidateTree: tree, createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundleBytes),
-    purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
-    sourceArchiveSha256: sha(archiveBytes), sourceArchiveSizeBytes: archiveBytes.length, transportVerified: true,
-  };
-  const checkpointBytes = Buffer.from(`${stable(checkpoint)}\n`);
-  const parts = { bridge: bridgeBytes, consumer: consumerBytes, checkpoint: checkpointBytes, gitBundle: bundleBytes, sourceArchive: archiveBytes };
-  const manifest = {
-    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateTree: tree,
-    checkpointSha256: sha(checkpointBytes), consumerSha256: sha(consumerBytes), gitBundleSha256: sha(bundleBytes),
-    lengths: Object.fromEntries(Object.entries(parts).map(([name, bytes]) => [name, bytes.length])),
-    schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256: sha(archiveBytes),
-  };
-  const manifestBytes = Buffer.from(stable(manifest));
-  const frame = Buffer.concat([
-    Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")), manifestBytes,
-    ...["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"].map((name) => parts[name]),
-  ]);
 
   const legacyConsumer = Buffer.from("test-only historical installed consumer\n");
   const legacyV1Sudoers = Buffer.from([
@@ -136,7 +149,7 @@ function createFixture(t) {
   write(nodeRuntime, `#!${process.execPath}\nprocess.stdout.write("v22.22.1\\n");\n`, 0o700);
 
   return {
-    broadGrant, commit, consumerBytes, frame, legacyConsumer, legacyV1Sudoers, liveEnvironment, root, tree,
+    ...transport, bridgeBytes, broadGrant, legacyConsumer, legacyV1Sudoers, liveEnvironment, root, seed,
     environment: {
       ...process.env,
       PLATFORM_V1_BOOTSTRAP_TEST_ROOT: root,
@@ -150,6 +163,21 @@ function createFixture(t) {
       PLATFORM_V1_NODE_RUNTIME_TEST_NODE: nodeRuntime,
     },
   };
+}
+
+function advanceCandidate(candidate) {
+  write(path.join(candidate.seed, "README.md"), "transport-only bootstrap fixture candidate B\n", 0o644);
+  write(
+    path.join(candidate.seed, "scripts", "v1-brownfield-install-consumer.py"),
+    Buffer.concat([fs.readFileSync(consumer), Buffer.from("\n# exact candidate B installer bytes\n")]),
+    0o755,
+  );
+  write(path.join(candidate.seed, "scripts", "v1-local-private-control.py"), "#!/usr/bin/python3 -I\n# candidate B controller\nraise SystemExit(0)\n", 0o644);
+  write(path.join(candidate.seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\n# candidate B reconciler\nraise SystemExit(0)\n", 0o644);
+  write(path.join(candidate.seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture candidate B\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
+  git(candidate.seed, ["add", "."]);
+  git(candidate.seed, ["commit", "--quiet", "-m", "candidate B"]);
+  return { ...candidate, ...buildTransport(candidate.seed, candidate.root, "b") };
 }
 
 function execute(candidate) {
@@ -192,8 +220,10 @@ test("stages exact transport bytes, stable-copies .env, installs control artifac
   );
 
   const stagingEnvironment = fixed(candidate.root, `/home/platform_infrastructure/.v1-release-staging/${candidate.commit}/.env`);
+  const stagingRoot = path.dirname(stagingEnvironment);
   assert.deepEqual(fs.readFileSync(stagingEnvironment), candidate.liveEnvironment);
   assert.equal(fs.statSync(stagingEnvironment).mode & 0o777, 0o600);
+  assert.equal(git(stagingRoot, ["rev-parse", "--verify", "refs/remotes/github/main^{commit}"]), candidate.commit);
   assert.deepEqual(fs.readFileSync(livePath), candidate.liveEnvironment);
   const liveAfter = fs.statSync(livePath);
   assert.equal(liveAfter.ino, liveBefore.ino);
@@ -218,6 +248,124 @@ test("stages exact transport bytes, stable-copies .env, installs control artifac
   assert.equal(secondEnvelope.bootstrap.stagingMutation, false);
   assert.deepEqual(fs.readFileSync(livePath), candidate.liveEnvironment);
   assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+});
+
+test("an exact prior chain authorizes candidate B and its idempotent retry", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const envelopeA = JSON.parse(installedA.stdout);
+  assert.equal(envelopeA.bootstrap.checkpointBeforeSha256, null);
+  assert.equal(envelopeA.bootstrap.sourceArchiveBeforeSha256, null);
+  const candidateB = advanceCandidate(candidateA);
+  assert.notEqual(candidateB.commit, candidateA.commit);
+  assert.notEqual(sha(candidateB.consumerBytes), sha(candidateA.consumerBytes));
+
+  const installedB = execute(candidateB);
+  assert.equal(installedB.status, 0, installedB.stderr);
+  const envelopeB = JSON.parse(installedB.stdout);
+  assert.equal(envelopeB.bootstrap.candidateCommit, candidateB.commit);
+  assert.equal(envelopeB.bootstrap.candidateTree, candidateB.tree);
+  assert.equal(envelopeB.bootstrap.dataMutation, false);
+  assert.equal(envelopeB.bootstrap.dockerMutation, false);
+  assert.equal(envelopeB.controlArtifacts.status, "CONTROL_ARTIFACTS_INSTALLED");
+  assert.equal(envelopeB.controlArtifacts.hostControlMutation, true);
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidateB.root, artifactPaths[0])),
+    candidateB.consumerBytes,
+  );
+  for (const artifact of envelopeB.controlArtifacts.artifacts) {
+    const pathname = fixed(candidateB.root, artifact.path);
+    assert.equal(sha(fs.readFileSync(pathname)), artifact.sha256);
+    assert.equal((fs.statSync(pathname).mode & 0o777).toString(8).padStart(4, "0"), artifact.mode);
+  }
+  const stagingB = fixed(candidateB.root, `/home/platform_infrastructure/.v1-release-staging/${candidateB.commit}`);
+  assert.equal(git(stagingB, ["rev-parse", "--verify", "refs/remotes/github/main^{commit}"]), candidateB.commit);
+
+  const retryB = execute(candidateB);
+  assert.equal(retryB.status, 0, retryB.stderr);
+  const retryEnvelope = JSON.parse(retryB.stdout);
+  assert.equal(retryEnvelope.controlArtifacts.status, "ALREADY_INSTALLED");
+  assert.equal(retryEnvelope.controlArtifacts.hostControlMutation, false);
+  assert.equal(retryEnvelope.bootstrap.dataMutation, false);
+  assert.equal(retryEnvelope.bootstrap.dockerMutation, false);
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, "/etc/sudoers.d/platform_infrastructure")), candidateB.broadGrant);
+});
+
+test("rejects a self-consistent receipt/live tamper that differs from the frozen prior release", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const candidateB = advanceCandidate(candidateA);
+  const controllerPath = fixed(candidateA.root, artifactPaths[1]);
+  const tamperedController = Buffer.concat([fs.readFileSync(controllerPath), Buffer.from("# tampered current controller\n")]);
+  fs.chmodSync(controllerPath, 0o700);
+  write(controllerPath, tamperedController, 0o555);
+
+  const controlPath = fixed(candidateA.root, "/var/lib/platform-infrastructure/v1/bootstrap-control-artifact-receipt.json");
+  const control = JSON.parse(fs.readFileSync(controlPath, "utf8"));
+  control.artifacts[1].sha256 = sha(tamperedController);
+  const controlBytes = Buffer.from(`${stable(control)}\n`);
+  fs.chmodSync(controlPath, 0o600);
+  write(controlPath, controlBytes, 0o400);
+  const bridgeReceiptPath = fixed(candidateA.root, "/var/lib/platform-infrastructure/v1/bootstrap-bridge-receipt.json");
+  const prior = JSON.parse(fs.readFileSync(bridgeReceiptPath, "utf8"));
+  prior.controlArtifactReceiptSha256 = sha(controlBytes);
+  delete prior.documentId;
+  prior.documentId = sha(Buffer.from(stable(prior)));
+  fs.chmodSync(bridgeReceiptPath, 0o600);
+  write(bridgeReceiptPath, Buffer.from(`${stable(prior)}\n`), 0o400);
+
+  const rejected = execute(candidateB);
+  assert.equal(rejected.status, 78, rejected.stderr);
+  assert.match(rejected.stderr, /current\/frozen V1 control artifact differs/);
+  assert.deepEqual(fs.readFileSync(controllerPath), tamperedController);
+  assert.equal(
+    fs.existsSync(fixed(candidateB.root, `/srv/platform-infrastructure/releases/${candidateB.commit}-${candidateB.manifest.sourceArchiveSha256}`)),
+    false,
+  );
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, "/etc/sudoers.d/platform_infrastructure")), candidateB.broadGrant);
+});
+
+test("does not repair a missing github/main ref in an existing staging checkout", (t) => {
+  const candidate = createFixture(t);
+  const installed = execute(candidate);
+  assert.equal(installed.status, 0, installed.stderr);
+  const staging = fixed(candidate.root, `/home/platform_infrastructure/.v1-release-staging/${candidate.commit}`);
+  git(staging, ["update-ref", "-d", "refs/remotes/github/main"]);
+  const rejected = execute(candidate);
+  assert.equal(rejected.status, 78, rejected.stderr);
+  assert.match(rejected.stderr, /staging github\/main ref/);
+  assert.equal(git(staging, ["for-each-ref", "--format=%(refname)", "refs/remotes/github/main"]), "");
+});
+
+test("candidate B crash rolls every control artifact back to candidate A before a clean retry", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const preimages = new Map(artifactPaths.map((logical) => [logical, fs.readFileSync(fixed(candidateA.root, logical))]));
+  const candidateB = advanceCandidate(candidateA);
+  const cleanFrame = Buffer.from(candidateB.frame);
+  candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "12";
+  const crashed = execute(candidateB);
+  assert.equal(crashed.status, 87, crashed.stderr);
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, artifactPaths[0])), candidateB.consumerBytes);
+
+  delete candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
+  candidateB.frame = Buffer.from(cleanFrame);
+  candidateB.frame[candidateB.frame.length - 1] ^= 0xff;
+  const recoveredThenRejected = execute(candidateB);
+  assert.equal(recoveredThenRejected.status, 65, recoveredThenRejected.stderr);
+  assert.match(recoveredThenRejected.stderr, /sourceArchive body digest/);
+  for (const [logical, bytes] of preimages) assert.deepEqual(fs.readFileSync(fixed(candidateB.root, logical)), bytes, logical);
+  assert.equal(fs.existsSync(fixed(candidateB.root, "/var/lib/platform-infrastructure/v1/bootstrap-transaction")), false);
+
+  candidateB.frame = cleanFrame;
+  const retried = execute(candidateB);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(JSON.parse(retried.stdout).bootstrap.candidateCommit, candidateB.commit);
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, artifactPaths[0])), candidateB.consumerBytes);
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, "/etc/sudoers.d/platform_infrastructure")), candidateB.broadGrant);
 });
 
 test("rejects a transport checkpoint that claims backup authority before mutation", (t) => {

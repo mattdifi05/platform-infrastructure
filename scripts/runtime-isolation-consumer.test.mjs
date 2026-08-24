@@ -150,8 +150,10 @@ function cleanEnvironment(overrides = {}) {
     "HOSTED_WORKLOAD_MODE",
     "HOSTED_WORKLOAD_PREPARE_RESOLVED",
     "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE",
+    "HOSTED_TEST_INFRASTRUCTURE_ROOT",
     "PLATFORM_TRUSTED_RELEASE_CONTEXT",
     "PLATFORM_COMPOSE_VARIANT",
+    "PLATFORM_V1_LOCAL_PRIVATE_RENDER",
     "PLATFORM_RUNTIME_CANDIDATE_ID",
     "PLATFORM_RUNTIME_COMMIT",
     "PLATFORM_RUNTIME_DEPLOYMENT_ID",
@@ -202,11 +204,17 @@ function copyRepositoryImportClosure(root, entryRelativePath, visited = new Set(
   }
 }
 
-function createConsumerSandbox() {
+function createConsumerSandbox({
+  v1LocalPrivateAuthority = false,
+  v1ReleaseId = `${"1".repeat(40)}-${"2".repeat(64)}`,
+} = {}) {
   const cleanupRoot =
     fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "runtime-consumer-qa6-")));
-  const root = path.join(cleanupRoot, "platform-infrastructure");
-  fs.mkdirSync(root);
+  const v1InfrastructureRoot = path.join(cleanupRoot, "v1-authority");
+  const root = v1LocalPrivateAuthority
+    ? path.join(v1InfrastructureRoot, "releases", v1ReleaseId)
+    : path.join(cleanupRoot, "platform-infrastructure");
+  fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(path.join(cleanupRoot, "src"));
   fs.mkdirSync(path.join(cleanupRoot, "applications", "example-app"), { recursive: true });
   fixtureRootDirectory = root;
@@ -217,6 +225,12 @@ function createConsumerSandbox() {
   fs.mkdirSync(configDirectory, { recursive: true });
   fs.mkdirSync(fakeBin, { recursive: true });
   const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
+  if (v1LocalPrivateAuthority && process.platform === "linux") {
+    const wrapperSource = fs.readFileSync(composeVps, "utf8");
+    const hostProbe = "HOST_OS=$(trusted_host_os)";
+    assert.equal(wrapperSource.split(hostProbe).length - 1, 1, "V1 fixture requires one exact host OS probe");
+    fs.writeFileSync(composeVps, wrapperSource.replace(hostProbe, "HOST_OS=Darwin"));
+  }
   fs.chmodSync(composeVps, 0o755);
   copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
   copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
@@ -229,13 +243,18 @@ function createConsumerSandbox() {
   const trustedEnvironmentBytes = [
     "HOSTED_WORKLOAD_LOCK=",
     "HOSTED_WORKLOAD_MODE=no-hosted",
+    ...(v1LocalPrivateAuthority ? ["PLATFORM_COMPOSE_VARIANT=LOCAL_PRIVATE"] : []),
     "CORE_VALUE=trusted",
     "DOMAIN=fixture.invalid",
     ...requiredCoreEnvironmentLines,
     "",
   ].join("\n");
-  const environmentFile = path.join(root, ".env");
-  fs.writeFileSync(environmentFile, trustedEnvironmentBytes, { mode: 0o600 });
+  const environmentFile = v1LocalPrivateAuthority
+    ? path.join(v1InfrastructureRoot, "v1", "local-private", "exact-compose.env")
+    : path.join(root, ".env");
+  fs.mkdirSync(path.dirname(environmentFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(environmentFile, trustedEnvironmentBytes, { mode: v1LocalPrivateAuthority ? 0o400 : 0o600 });
+  fs.chmodSync(environmentFile, v1LocalPrivateAuthority ? 0o400 : 0o600);
   fs.writeFileSync(path.join(root, ".env.vps.example"), trustedEnvironmentBytes, { mode: 0o600 });
   const workloadLock = path.join(root, "hosted.lock.json");
   fs.writeFileSync(workloadLock, "{}\n", { mode: 0o600 });
@@ -245,6 +264,11 @@ function createConsumerSandbox() {
   const dockerArgumentsCapture = path.join(root, "docker-args.txt");
   const dockerEnvironmentCapture = path.join(root, "docker-env.txt");
   const dockerProcessEnvironmentCapture = path.join(root, "docker-process-env.txt");
+  if (v1LocalPrivateAuthority) {
+    for (const pathname of [dockerOutputFile, dockerMarker, dockerArgumentsCapture, dockerEnvironmentCapture, dockerProcessEnvironmentCapture]) {
+      fs.writeFileSync(pathname, pathname === dockerMarker ? "not-called\n" : "", { mode: 0o600 });
+    }
+  }
   writeExecutable(path.join(fakeBin, "docker"), `#!/bin/sh
 set -eu
 sandbox_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -287,7 +311,13 @@ esac
     HOSTED_WORKLOAD_MODE: "no-hosted",
     HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: "",
     QA6_ACTIVATION_BUNDLE_FILE: activationBundleFile,
+    ...(v1LocalPrivateAuthority ? {
+      HOSTED_TEST_INFRASTRUCTURE_ROOT: v1InfrastructureRoot,
+      PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+      PLATFORM_V1_LOCAL_PRIVATE_RENDER: "1",
+    } : {}),
   });
+  if (v1LocalPrivateAuthority) fs.chmodSync(root, 0o555);
   return {
     cleanupRoot,
     root,
@@ -305,6 +335,8 @@ esac
     dockerEnvironmentCapture,
     dockerProcessEnvironmentCapture,
     environment,
+    v1InfrastructureRoot,
+    v1LocalPrivateAuthority,
   };
 }
 
@@ -320,6 +352,7 @@ function addInfraConsumer(sandbox) {
 }
 
 function removeSandbox(sandbox) {
+  if (sandbox.v1LocalPrivateAuthority && fs.existsSync(sandbox.root)) fs.chmodSync(sandbox.root, 0o700);
   fs.rmSync(sandbox.cleanupRoot ?? sandbox.root, { recursive: true, force: true });
 }
 
@@ -1510,6 +1543,144 @@ test("LOCAL_PRIVATE Compose variant is explicit, no-hosted-only and appended aft
     assert.match(hosted.stderr, /LOCAL_PRIVATE requires the exact no-hosted runtime/);
   } finally {
     removeSandbox(sandbox);
+  }
+});
+
+test("V1 LOCAL_PRIVATE admits only its root-owned exact render environment and content-addressed release", () => {
+  assert.match(composeVpsSource, /infrastructure_root=\/srv\/platform-infrastructure/);
+  assert.match(composeVpsSource, /state_store=\/var\/lib\/platform-infrastructure\/v1/);
+  assert.match(composeVpsSource, /release_mode" = 365/);
+  assert.match(composeVpsSource, /env_mode" = 256/);
+  const sandbox = createConsumerSandbox({ v1LocalPrivateAuthority: true });
+  const invalidRelease = createConsumerSandbox({
+    v1LocalPrivateAuthority: true,
+    v1ReleaseId: "not-content-addressed",
+  });
+  const sentinel = "not-called\n";
+  const resetMarker = (fixture) => fs.writeFileSync(fixture.dockerMarker, sentinel);
+  const assertStoppedBeforeDocker = (fixture, result, label) => {
+    assert.notEqual(result.status, 0, `${label} unexpectedly passed`);
+    assert.equal(fs.readFileSync(fixture.dockerMarker, "utf8"), sentinel, `${label} reached Docker`);
+  };
+  const installLocalPrivateRender = (fixture) => {
+    fs.chmodSync(fixture.root, 0o700);
+    fixtureRootDirectory = fixture.root;
+    try {
+      const config = coreAuthorityConfig();
+      config.secrets.control_center_first_configuration_bootstrap_token = {};
+      config.secrets.control_center_first_configuration_keycloak_client_secret = {};
+      writeDockerOutput(fixture, `${JSON.stringify(config)}\n`);
+      fs.writeFileSync(path.join(fixture.scripts, "no-hosted-core-policy.mjs"), "process.exit(0);\n");
+      return config;
+    } finally {
+      fs.chmodSync(fixture.root, 0o555);
+    }
+  };
+  try {
+    const config = installLocalPrivateRender(sandbox);
+    assert.match(fs.readFileSync(sandbox.environmentFile, "utf8"), /^PLATFORM_COMPOSE_VARIANT=LOCAL_PRIVATE$/m);
+    resetMarker(sandbox);
+    const accepted = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.deepEqual(JSON.parse(accepted.stdout), config);
+    assert.equal(fs.readFileSync(sandbox.dockerMarker, "utf8"), "", "authorized V1 render did not reach Docker");
+    assert.match(
+      fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json/,
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(sandbox.dockerProcessEnvironmentCapture, "utf8"),
+      /PLATFORM_V1_LOCAL_PRIVATE_RENDER|HOSTED_WORKLOAD_PREPARE_RESOLVED|PLATFORM_TRUSTED_RELEASE_CONTEXT/,
+    );
+
+    const identityFreeEnvironment = fs.readFileSync(sandbox.environmentFile, "utf8");
+    const runtimeIdentity = {
+      PLATFORM_RUNTIME_CANDIDATE_ID: "3".repeat(64),
+      PLATFORM_RUNTIME_COMMIT: "4".repeat(40),
+      PLATFORM_RUNTIME_TREE: "5".repeat(40),
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: `v1-local-private:${"6".repeat(64)}`,
+      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: "7".repeat(64),
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "8".repeat(64),
+    };
+    fs.chmodSync(sandbox.environmentFile, 0o600);
+    fs.writeFileSync(
+      sandbox.environmentFile,
+      `${identityFreeEnvironment}${Object.entries(runtimeIdentity).map(([name, value]) => `${name}=${value}\n`).join("")}`,
+    );
+    fs.chmodSync(sandbox.environmentFile, 0o400);
+    Object.assign(sandbox.environment, runtimeIdentity);
+    resetMarker(sandbox);
+    const runtimeRender = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(runtimeRender.status, 0, runtimeRender.stderr);
+    assert.match(
+      fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
+      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup config --format json/,
+    );
+    for (const [name, value] of Object.entries(runtimeIdentity)) {
+      assert.match(fs.readFileSync(sandbox.dockerEnvironmentCapture, "utf8"), new RegExp(`^${name}=${value}$`, "m"));
+      delete sandbox.environment[name];
+    }
+    fs.chmodSync(sandbox.environmentFile, 0o600);
+    fs.writeFileSync(sandbox.environmentFile, identityFreeEnvironment);
+    fs.chmodSync(sandbox.environmentFile, 0o400);
+
+    resetMarker(sandbox);
+    const mixedAuthority = runWrapper(sandbox, ["config", "--format", "json"], {
+      HOSTED_WORKLOAD_PREPARE_RESOLVED: "1",
+    });
+    assertStoppedBeforeDocker(sandbox, mixedAuthority, "mixed V1 and Hosted prepare authority");
+
+    resetMarker(sandbox);
+    const authority = sandbox.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER;
+    delete sandbox.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER;
+    const unbound = runWrapper(sandbox, ["config", "--format", "json"]);
+    sandbox.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER = authority;
+    assertStoppedBeforeDocker(sandbox, unbound, "missing V1 authority mode");
+
+    resetMarker(sandbox);
+    fs.chmodSync(sandbox.environmentFile, 0o600);
+    const writableEnvironment = runWrapper(sandbox, ["config", "--format", "json"]);
+    fs.chmodSync(sandbox.environmentFile, 0o400);
+    assertStoppedBeforeDocker(sandbox, writableEnvironment, "mode-0600 V1 environment");
+
+    resetMarker(sandbox);
+    const hardLink = path.join(path.dirname(sandbox.environmentFile), "exact-compose.link");
+    fs.linkSync(sandbox.environmentFile, hardLink);
+    const linkedEnvironment = runWrapper(sandbox, ["config", "--format", "json"]);
+    fs.unlinkSync(hardLink);
+    assertStoppedBeforeDocker(sandbox, linkedEnvironment, "hard-linked V1 environment");
+
+    resetMarker(sandbox);
+    const retainedEnvironment = `${sandbox.environmentFile}.retained`;
+    fs.renameSync(sandbox.environmentFile, retainedEnvironment);
+    fs.symlinkSync(retainedEnvironment, sandbox.environmentFile);
+    const symlinkEnvironment = runWrapper(sandbox, ["config", "--format", "json"]);
+    fs.unlinkSync(sandbox.environmentFile);
+    fs.renameSync(retainedEnvironment, sandbox.environmentFile);
+    assertStoppedBeforeDocker(sandbox, symlinkEnvironment, "symlinked V1 environment");
+
+    resetMarker(sandbox);
+    const alternateEnvironment = path.join(path.dirname(sandbox.environmentFile), "alternate.env");
+    fs.copyFileSync(sandbox.environmentFile, alternateEnvironment);
+    fs.chmodSync(alternateEnvironment, 0o400);
+    const wrongPath = runWrapper(sandbox, ["config", "--format", "json"], {
+      COMPOSE_ENV_FILE: alternateEnvironment,
+    });
+    assertStoppedBeforeDocker(sandbox, wrongPath, "wrong V1 environment path");
+
+    resetMarker(sandbox);
+    fs.chmodSync(sandbox.root, 0o755);
+    const mutableRelease = runWrapper(sandbox, ["config", "--format", "json"]);
+    fs.chmodSync(sandbox.root, 0o555);
+    assertStoppedBeforeDocker(sandbox, mutableRelease, "mutable V1 release root");
+
+    installLocalPrivateRender(invalidRelease);
+    resetMarker(invalidRelease);
+    const unboundRelease = runWrapper(invalidRelease, ["config", "--format", "json"]);
+    assertStoppedBeforeDocker(invalidRelease, unboundRelease, "non-content-addressed V1 release");
+  } finally {
+    removeSandbox(sandbox);
+    removeSandbox(invalidRelease);
   }
 });
 

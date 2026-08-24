@@ -3197,11 +3197,20 @@ def render_with_wrapper(release: str, environment_sha: str) -> bytes:
     wrapper = release_file(release, "scripts/compose-vps.sh")
     if not os.path.isfile(wrapper) or os.path.islink(wrapper):
         stop("fixed release Compose wrapper is missing or not a regular file.")
+    environment_bytes = secure_file(RENDER_ENV, "exact render environment", 1024 * 1024, 0o400)
+    if digest(environment_bytes) != environment_sha:
+        stop("exact render environment differs before Compose rendered.")
+    _, environment_values = parse_env(environment_bytes, "exact render environment")
+    present_runtime_identity = {name for name in RUNTIME_IDENTITY_ENV if name in environment_values}
+    if present_runtime_identity and present_runtime_identity != set(RUNTIME_IDENTITY_ENV):
+        stop("exact render environment carries a partial runtime identity tuple.")
     environment = {
         "COMPOSE_ENV_FILE": physical(RENDER_ENV),
         "COMPOSE_PROJECT_NAME": "platform_infra_vps",
         "PLATFORM_COMPOSE_VARIANT": "LOCAL_PRIVATE",
+        "PLATFORM_V1_LOCAL_PRIVATE_RENDER": "1",
     }
+    environment.update({name: environment_values[name] for name in RUNTIME_IDENTITY_ENV if name in present_runtime_identity})
     output = run([wrapper, "config", "--format", "json"], "release Compose render", cwd=physical(release), environment=environment, timeout=180)
     render = parse_json(output, "release Compose render")
     canonical_render = canonical_bytes(render)

@@ -56,6 +56,74 @@ print(json.dumps({
   assert.match(source, /"composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit"/);
 });
 
+test("release renders use only the dedicated V1 LOCAL_PRIVATE authority and recheck the exact environment", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['render_with_wrapper'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+release=m['release_root']('1'*40,'2'*64)
+wrapper=m['physical'](f'{release}/scripts/compose-vps.sh')
+environment_path=m['physical'](m['RENDER_ENV'])
+os.makedirs(os.path.dirname(wrapper),mode=0o700,exist_ok=True)
+os.makedirs(os.path.dirname(environment_path),mode=0o700,exist_ok=True)
+open(wrapper,'wb').write(b'#!/bin/sh\\n'); os.chmod(wrapper,0o555)
+environment_bytes=b'HOSTED_WORKLOAD_LOCK=\\nHOSTED_WORKLOAD_MODE=no-hosted\\nPLATFORM_COMPOSE_VARIANT=LOCAL_PRIVATE\\n'
+open(environment_path,'wb').write(environment_bytes); os.chmod(environment_path,0o400)
+calls=[]
+def fixed_run(command,label,**kwargs):
+ calls.append({'command':command,'cwd':kwargs.get('cwd'),'environment':kwargs.get('environment'),'timeout':kwargs.get('timeout')})
+ return b'{"name":"platform_infra_vps"}\\n'
+g['run']=fixed_run
+render=m['render_with_wrapper'](release,m['digest'](environment_bytes))
+runtime_identity={
+ 'PLATFORM_RUNTIME_CANDIDATE_ID':'3'*64,
+ 'PLATFORM_RUNTIME_COMMIT':'4'*40,
+ 'PLATFORM_RUNTIME_TREE':'5'*40,
+ 'PLATFORM_RUNTIME_DEPLOYMENT_ID':'v1-local-private:'+'6'*64,
+ 'PLATFORM_RUNTIME_SOURCE_RENDER_SHA256':'7'*64,
+ 'PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256':'8'*64,
+}
+runtime_bytes=environment_bytes+b''.join(f'{name}={runtime_identity[name]}\\n'.encode() for name in m['RUNTIME_IDENTITY_ENV'])
+os.chmod(environment_path,0o600); open(environment_path,'wb').write(runtime_bytes); os.chmod(environment_path,0o400)
+runtime_render=m['render_with_wrapper'](release,m['digest'](runtime_bytes))
+partial_bytes=environment_bytes+f'PLATFORM_RUNTIME_CANDIDATE_ID={runtime_identity["PLATFORM_RUNTIME_CANDIDATE_ID"]}\\n'.encode()
+os.chmod(environment_path,0o600); open(environment_path,'wb').write(partial_bytes); os.chmod(environment_path,0o400)
+partial_rejected=False
+try: m['render_with_wrapper'](release,m['digest'](partial_bytes))
+except m['Stop']: partial_rejected=True
+os.chmod(environment_path,0o600); open(environment_path,'wb').write(runtime_bytes); os.chmod(environment_path,0o400)
+def swapped_run(command,label,**kwargs):
+ os.chmod(environment_path,0o600)
+ open(environment_path,'wb').write(runtime_bytes+b'TAMPERED=1\\n')
+ os.chmod(environment_path,0o400)
+ return b'{"name":"platform_infra_vps"}\\n'
+g['run']=swapped_run
+swap_rejected=False
+try: m['render_with_wrapper'](release,m['digest'](runtime_bytes))
+except m['Stop']: swap_rejected=True
+print(json.dumps({'call':calls[0],'render':json.loads(render),'runtimeCall':calls[1],
+ 'runtimeIdentity':runtime_identity,'runtimeRender':json.loads(runtime_render),
+ 'partialRejected':partial_rejected,'swapRejected':swap_rejected}))`);
+  assert.deepEqual(value.render, { name: "platform_infra_vps" });
+  assert.deepEqual(value.runtimeRender, { name: "platform_infra_vps" });
+  assert.equal(value.partialRejected, true);
+  assert.equal(value.swapRejected, true);
+  assert.deepEqual(value.call.command.slice(-3), ["config", "--format", "json"]);
+  assert.equal(value.call.timeout, 180);
+  assert.deepEqual(value.call.environment, {
+    COMPOSE_ENV_FILE: value.call.environment.COMPOSE_ENV_FILE,
+    COMPOSE_PROJECT_NAME: "platform_infra_vps",
+    PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
+    PLATFORM_V1_LOCAL_PRIVATE_RENDER: "1",
+  });
+  assert.doesNotMatch(JSON.stringify(value.call.environment), /HOSTED_WORKLOAD_PREPARE_RESOLVED|PLATFORM_TRUSTED_RELEASE_CONTEXT/);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(value.runtimeCall.environment).filter(([name]) => name.startsWith("PLATFORM_RUNTIME_"))),
+    value.runtimeIdentity,
+  );
+  assert.equal(value.runtimeCall.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER, "1");
+});
+
 test("runtime identity is two-pass, non-circular and every excluded container is explicitly LEGACY_UNMANAGED", () => {
   const value = jsonPython(`
 import copy,os,tempfile
