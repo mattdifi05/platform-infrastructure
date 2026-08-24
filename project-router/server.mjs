@@ -26,6 +26,9 @@ const workloadLockMode = explicitWorkloadLockMode(process.env.PROJECT_ROUTER_WOR
 const workloadLockSha256 = String(process.env.PROJECT_ROUTER_WORKLOAD_LOCK_SHA256 || "").toLowerCase();
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
 const testLegacyDiscoveryAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY === "true";
+const localPrivateCompatibilityRequested = explicitLocalPrivateCompatibilityMode(
+  process.env.PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE,
+);
 const upstreamTimeoutMs = boundedEnvironmentInteger("PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS", 30_000, 50, 30_000);
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
 const controlCenterUpstream = validateUpstream(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080", "control-center");
@@ -33,11 +36,12 @@ const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const hostSuffix = process.env.PROJECT_HOST_SUFFIX || ".localhost.com";
-const nodeHosts = parsePairs(testLegacyDiscoveryAllowed ? process.env.NODE_PROJECT_HOSTS || "" : "");
-const projectUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.PROJECT_UPSTREAMS || "" : "");
-const phpProjectUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.PHP_PROJECT_UPSTREAMS || "" : "");
-const nodeUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.NODE_PROJECT_UPSTREAMS || "" : "");
-const staticUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.STATIC_PROJECT_UPSTREAMS || "" : "");
+const legacyDiscoveryRequested = testLegacyDiscoveryAllowed || localPrivateCompatibilityRequested;
+const nodeHosts = parsePairs(legacyDiscoveryRequested ? process.env.NODE_PROJECT_HOSTS || "" : "");
+const projectUpstreams = parsePairs(legacyDiscoveryRequested ? process.env.PROJECT_UPSTREAMS || "" : "");
+const phpProjectUpstreams = parsePairs(legacyDiscoveryRequested ? process.env.PHP_PROJECT_UPSTREAMS || "" : "");
+const nodeUpstreams = parsePairs(legacyDiscoveryRequested ? process.env.NODE_PROJECT_UPSTREAMS || "" : "");
+const staticUpstreams = parsePairs(legacyDiscoveryRequested ? process.env.STATIC_PROJECT_UPSTREAMS || "" : "");
 const projectConfigNames = [".platform/project.json", "platform.project.json"];
 const projectMetadataReader = createProjectMetadataReader({
   maxBytes: boundedEnvironmentInteger("PROJECT_METADATA_MAX_BYTES", 256 * 1024, 2, 1024 * 1024),
@@ -49,12 +53,67 @@ const projectMetadataReader = createProjectMetadataReader({
   parseTimeoutMs: boundedEnvironmentInteger("PROJECT_METADATA_PARSE_TIMEOUT_MS", 500, 1, 5000),
   maxCacheEntries: boundedEnvironmentInteger("PROJECT_METADATA_CACHE_ENTRIES", 256, 1, 4096),
 });
+const localPrivateCompatibilityContract = Object.freeze({
+  hostSuffix: ".platform-infrastructure.com",
+  nodeUpstreams: Object.freeze([
+    ["account", "http://node-account:3000"],
+    ["opstudents", "http://node-opstudents:3000"],
+    ["ui", "http://node-ui:3000"],
+  ]),
+  phpUpstreams: Object.freeze([
+    ["anniversary", "http://php-anniversary:80"],
+    ["fiplatform", "http://php-fiplatform:80"],
+    ["fireport", "http://php-fiplatform:80"],
+    ["matthewdifilippo", "http://php-matthewdifilippo:80"],
+    ["stream", "http://php-stream:80"],
+    ["workcalendar", "http://php-workcalendar:80"],
+  ]),
+  allowedUpstreams: Object.freeze([
+    "control-center:8080",
+    "node-account:3000",
+    "node-opstudents:3000",
+    "node-ui:3000",
+    "php-anniversary:80",
+    "php-fiplatform:80",
+    "php-matthewdifilippo:80",
+    "php-stream:80",
+    "php-workcalendar:80",
+  ]),
+  routeOwnership: Object.freeze([
+    Object.freeze(["account", "stexor", "account", "node"]),
+    Object.freeze(["anniversary", "anniversary", "anniversary", "php"]),
+    Object.freeze(["fiplatform", "fiplatform", "fiplatform", "php"]),
+    Object.freeze(["fireport", "fiplatform", "fiplatform", "php"]),
+    Object.freeze(["matthewdifilippo", "matthewdifilippo", "matthewdifilippo", "php"]),
+    Object.freeze(["opstudents", "opstudents", "opstudents", "node"]),
+    Object.freeze(["stream", "stream", "stream", "php"]),
+    Object.freeze(["ui", "stexor", "ui", "node"]),
+    Object.freeze(["workcalendar", "workcalendar", "workcalendar", "php"]),
+  ]),
+  reservedPlatformSlugs: Object.freeze([
+    "admin",
+    "api",
+    "auth",
+    "docs",
+    "portal",
+    "projects",
+  ]),
+});
+const localPrivateRouteOwnership = new Map(
+  localPrivateCompatibilityContract.routeOwnership.map(
+    ([routeSlug, sourceSlug, projectSlug, type]) => [
+      routeSlug,
+      Object.freeze({ sourceSlug, projectSlug, type }),
+    ],
+  ),
+);
 let workloadRouteCache = {
   key: "",
   byHost: new Map(),
   allowed: new Set(),
   trustedEpoch: "",
   projectMetadata: new Map(),
+  localPrivateCompatibilityAllowed: false,
 };
 
 const server = createServer(async (req, res) => {
@@ -83,13 +142,19 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (!testLegacyDiscoveryAllowed) {
+    if (!testLegacyDiscoveryAllowed && !workloadRoutes.localPrivateCompatibilityAllowed) {
       disabled(res, "Project not found", host);
       return;
     }
 
     const projects = await discoverProjects(workloadRoutes);
-    const slug = slugFromHost(host);
+    const slug = workloadRoutes.localPrivateCompatibilityAllowed
+      ? localPrivateRouteSlugFromHost(host)
+      : slugFromHost(host);
+    if (!slug) {
+      disabled(res, "Project not found", host);
+      return;
+    }
     const project = projects.find((item) => item.slug === slug)
       || projects.find((item) => item.aliases?.includes(slug) || normalizeHost(item.host) === host);
     if (!project) {
@@ -177,9 +242,11 @@ function proxy(clientReq, clientRes, upstream) {
 }
 
 function dedicatedUpstreamFor(project, workloadRoutes) {
-  const mapped = project.upstream
-    || mappedProjectValue(projectUpstreams, project)
+  const compatibilityMapped = mappedProjectValue(projectUpstreams, project)
     || mappedProjectValue(upstreamMapForType(project.type), project);
+  const mapped = workloadRoutes.localPrivateCompatibilityAllowed
+    ? compatibilityMapped
+    : project.upstream || compatibilityMapped;
   if (!mapped) return null;
   try {
     const expanded = expandProjectValue(mapped, project);
@@ -223,6 +290,54 @@ function parseAllowedUpstreams(value) {
   return allowed;
 }
 
+function validateLocalPrivateCompatibility(lock) {
+  const expectedLockKeys = [
+    "brokerPolicySha256", "coreSemanticPolicy", "projectName", "protectedResourceNames",
+    "routes", "state", "validatorVersion", "version", "workloads",
+  ];
+  const protectedResources = lock?.protectedResourceNames;
+  if (workloadLockMode !== "required"
+      || !/^[a-f0-9]{64}$/.test(workloadLockSha256)
+      || JSON.stringify(Object.keys(lock || {}).sort()) !== JSON.stringify(expectedLockKeys)
+      || lock.version !== 4
+      || lock.validatorVersion !== "hosted-contract-v4"
+      || lock.state !== "verified"
+      || lock.projectName !== "platform_infra_vps"
+      || lock.brokerPolicySha256 !== "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      || JSON.stringify(lock.routes) !== "[]"
+      || JSON.stringify(lock.workloads) !== "[]"
+      || JSON.stringify(Object.keys(lock.coreSemanticPolicy || {}).sort()) !== JSON.stringify(["schema", "sha256"])
+      || lock.coreSemanticPolicy.schema !== "platform-no-hosted-core-capability-policy/v2"
+      || !/^[a-f0-9]{64}$/.test(String(lock.coreSemanticPolicy.sha256 || ""))
+      || JSON.stringify(Object.keys(protectedResources || {}).sort()) !== JSON.stringify(["configs", "networks", "secrets", "services", "volumes"])
+      || Object.values(protectedResources).some((names) => !Array.isArray(names)
+        || JSON.stringify(names) !== JSON.stringify([...new Set(names)].sort())
+        || names.some((name) => typeof name !== "string" || name.length === 0))) {
+    throw new Error("LOCAL_PRIVATE compatibility requires the exact pinned zero-workload lock.");
+  }
+
+  const exactPairs = (map) => [...map.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const fixedRouteSlugs = [...new Set([
+    ...localPrivateCompatibilityContract.nodeUpstreams.map(([slug]) => slug),
+    ...localPrivateCompatibilityContract.phpUpstreams.map(([slug]) => slug),
+  ])].sort();
+  if (hostSuffix !== localPrivateCompatibilityContract.hostSuffix
+      || nodeHosts.size !== 0
+      || projectUpstreams.size !== 0
+      || staticUpstreams.size !== 0
+      || JSON.stringify(exactPairs(nodeUpstreams)) !== JSON.stringify(localPrivateCompatibilityContract.nodeUpstreams)
+      || JSON.stringify(exactPairs(phpProjectUpstreams)) !== JSON.stringify(localPrivateCompatibilityContract.phpUpstreams)
+      || JSON.stringify([...allowedUpstreams].sort()) !== JSON.stringify(localPrivateCompatibilityContract.allowedUpstreams)
+      || JSON.stringify([...localPrivateRouteOwnership.keys()].sort()) !== JSON.stringify(fixedRouteSlugs)
+      || localPrivateCompatibilityContract.reservedPlatformSlugs.some((slug) =>
+        localPrivateRouteOwnership.has(slug))
+      || controlCenterUpstream.hostname !== "control-center"
+      || Number(controlCenterUpstream.port || 80) !== 8080) {
+    throw new Error("LOCAL_PRIVATE compatibility route authority differs from the closed V1 map.");
+  }
+  return true;
+}
+
 function validateUpstream(value, label, additionalAllowed = new Set()) {
   let upstream;
   try {
@@ -257,6 +372,9 @@ function workloadRoutesFromLock() {
   }
   const lock = JSON.parse(bytes.toString("utf8"));
   const parsed = parseHostedRouteLock(lock);
+  const localPrivateCompatibilityAllowed = localPrivateCompatibilityRequested
+    ? validateLocalPrivateCompatibility(lock)
+    : false;
   const verified = lock.workloads.length > 0
     ? validateVerifiedWorkloadLock(lock)
     : { trustedEpoch: key, projectMetadata: new Map() };
@@ -307,6 +425,7 @@ function workloadRoutesFromLock() {
     allowed,
     trustedEpoch: verified.trustedEpoch,
     projectMetadata: verified.projectMetadata,
+    localPrivateCompatibilityAllowed,
   };
   return workloadRouteCache;
 }
@@ -329,6 +448,7 @@ function emptyWorkloadRoutes() {
     allowed: new Set(),
     trustedEpoch: "",
     projectMetadata: new Map(),
+    localPrivateCompatibilityAllowed: false,
   };
 }
 
@@ -460,6 +580,10 @@ async function discoverProjects(workloadRoutes = emptyWorkloadRoutes()) {
           fallbackUpstream: configuredUpstream,
         });
         if (!project || seen.has(project.slug)) continue;
+        if (!localPrivateProjectOwnershipAllowed(project, workloadRoutes)) {
+          console.error("rejected LOCAL_PRIVATE project metadata ownership");
+          continue;
+        }
         projects.push(project);
         seen.add(project.slug);
       }
@@ -467,7 +591,7 @@ async function discoverProjects(workloadRoutes = emptyWorkloadRoutes()) {
     }
     if (!isPhp && !isNode && !isStatic) continue;
     const type = configuredType || inferredProjectType({ isPhp, isNode, isStatic });
-    projects.push({
+    const project = {
       name: entry.name,
       slug,
       type,
@@ -475,10 +599,34 @@ async function discoverProjects(workloadRoutes = emptyWorkloadRoutes()) {
       path: projectPath,
       aliases: [],
       upstream: configuredUpstream,
-    });
+      parentSlug: slug,
+    };
+    if (!localPrivateProjectOwnershipAllowed(project, workloadRoutes)) {
+      console.error("rejected LOCAL_PRIVATE project metadata ownership");
+      continue;
+    }
+    projects.push(project);
     seen.add(slug);
   }
   return projects;
+}
+
+function localPrivateProjectOwnershipAllowed(project, workloadRoutes) {
+  if (!workloadRoutes.localPrivateCompatibilityAllowed) return true;
+  const routeSlugs = projectSlugs(project);
+  const parentSlug = slugify(project.parentSlug);
+  if (routeSlugs.length === 0
+      || normalizeHost(project.host) !== `${project.slug}${localPrivateCompatibilityContract.hostSuffix}`) {
+    return false;
+  }
+  return routeSlugs.every((routeSlug) => {
+    if (localPrivateCompatibilityContract.reservedPlatformSlugs.includes(routeSlug)) return false;
+    const owner = localPrivateRouteOwnership.get(routeSlug);
+    return owner !== undefined
+      && owner.sourceSlug === parentSlug
+      && owner.projectSlug === project.slug
+      && owner.type === project.type;
+  });
 }
 
 function configuredProjectEntries(config) {
@@ -536,7 +684,7 @@ async function readProjectConfig(projectPath, workloadRoutes) {
         trustedEpoch: workloadRoutes.trustedEpoch,
       });
     }
-    if (workloadLockMode === "required") {
+    if (workloadLockMode === "required" && !workloadRoutes.localPrivateCompatibilityAllowed) {
       throw new ProjectMetadataError("Project metadata is absent from the verified workload lock.", "PROJECT_METADATA_UNSIGNED");
     }
     return projectMetadataReader.read(configPath);
@@ -566,6 +714,15 @@ function explicitWorkloadLockMode(value) {
     throw new Error("PROJECT_ROUTER_WORKLOAD_LOCK_MODE must be explicitly set to required or optional.");
   }
   return mode;
+}
+
+function explicitLocalPrivateCompatibilityMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "") return false;
+  if (mode !== "true") {
+    throw new Error("PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE must be omitted or true.");
+  }
+  return true;
 }
 
 function stringValue(value) {
@@ -658,6 +815,14 @@ function slugFromHost(host) {
     if (normalizeHost(mappedHost) === host) return slug;
   }
   return slugify(host.endsWith(hostSuffix) ? host.slice(0, -hostSuffix.length) : host.split(".")[0] || "");
+}
+
+function localPrivateRouteSlugFromHost(host) {
+  const suffix = localPrivateCompatibilityContract.hostSuffix;
+  if (!host.endsWith(suffix)) return "";
+  const slug = host.slice(0, -suffix.length);
+  if (!slug || slug.includes(".") || !localPrivateRouteOwnership.has(slug)) return "";
+  return slug;
 }
 
 function normalizeHost(host) {

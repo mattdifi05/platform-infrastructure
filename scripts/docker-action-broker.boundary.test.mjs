@@ -19,8 +19,9 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
 
-test("the canonical Compose file order is derived from compose-vps.sh", () => {
-  const files = canonicalComposeFiles(read("scripts/compose-vps.sh"));
+test("the standard and LOCAL_PRIVATE canonical Compose orders are derived from compose-vps.sh", () => {
+  const wrapper = read("scripts/compose-vps.sh");
+  const files = canonicalComposeFiles(wrapper);
 
   assert.ok(files.length > 1, "compose-vps.sh must provide a non-empty ordered overlay set");
   assert.equal(files[0], "compose.yaml");
@@ -29,6 +30,11 @@ test("the canonical Compose file order is derived from compose-vps.sh", () => {
   for (const file of files) {
     assert.ok(fs.statSync(path.join(root, file)).isFile(), `canonical Compose overlay is missing: ${file}`);
   }
+  assert.ok(fs.statSync(path.join(root, "compose.local-private.yaml")).isFile());
+  const localPrivateAppend = wrapper.indexOf("compose+=(-f compose.local-private.yaml)");
+  const runtimeIdentityAppend = wrapper.indexOf("compose+=(-f compose.runtime-identity.yaml)");
+  assert.ok(localPrivateAppend > wrapper.indexOf("-f compose.runtime-isolation.yaml"));
+  assert.ok(runtimeIdentityAppend > localPrivateAppend, "runtime identity must be last for LOCAL_PRIVATE");
 });
 
 test("unit support: the fail-closed parser handles short, long, override, reset and named host aliases", () => {

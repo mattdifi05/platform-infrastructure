@@ -1,0 +1,139 @@
+# V1 LOCAL_PRIVATE filesystem/setup overlay. Load after every canonical
+# runtime overlay so immutable release sources stay read-only while mutable
+# state, TLS material and one-time bootstrap secrets remain deployment-owned.
+# Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR and the three
+# setup file sources below must be absolute paths outside the release tree.
+# The current immutable backup scheduler is broker-only. This overlay does not
+# grant it docker.sock; LOCAL_PRIVATE reconciliation keeps it READY_BUT_DISABLED
+# until the separately admitted broker/provider material is available.
+services:
+  waf:
+    volumes: !override
+      - ./waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
+      - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}/local-cert.pem:/etc/nginx/conf/server.crt:ro
+      - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}/local-key.pem:/etc/nginx/conf/server.key:ro
+
+  php-apache:
+    volumes: !override
+      - ${PHP_SOURCE_DIR:-./php-runtime-root}:/var/www/html
+      - .:/var/www/infra-docs:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
+      - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available
+      - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
+
+  control-center:
+    environment:
+      CONTROL_CENTER_ENV: local_private
+      CONTROL_CENTER_FIRST_CONFIGURATION_MODE: required
+      CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE: /run/secrets/control_center_first_configuration_bootstrap_token
+      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: ${CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID:-platform-first-configuration}
+      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: /run/secrets/control_center_first_configuration_keycloak_client_secret
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME:-admin}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL:-${PROJECTS_GATEWAY_EMAIL:-admin@example.com}}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128}
+      CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12,127.0.0.0/8,::1/128}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/account/}
+      CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT: ${CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/admin/realms/platform}
+      CONTROL_CENTER_MIN_PASSKEYS: ${CONTROL_CENTER_MIN_PASSKEYS:-2}
+      NODE_EXTRA_CA_CERTS: /run/platform/tls/control-center-local-ca.pem
+    volumes: !override
+      - .:/var/www/infra-docs:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
+      - ${CONTROL_CENTER_LOCAL_CA_CERT_SOURCE:?set CONTROL_CENTER_LOCAL_CA_CERT_SOURCE}:/run/platform/tls/control-center-local-ca.pem:ro
+    secrets:
+      - control_center_first_configuration_bootstrap_token
+      - control_center_first_configuration_keycloak_client_secret
+    extra_hosts:
+      - "${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}:${CONTROL_CENTER_IDENTITY_EDGE_IP:-host-gateway}"
+
+  project-router:
+    environment:
+      PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c
+      PROJECT_HOST_SUFFIX: .platform-infrastructure.com
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
+      NODE_PROJECT_HOSTS: ""
+      PROJECT_UPSTREAMS: ""
+      STATIC_PROJECT_UPSTREAMS: ""
+      NODE_PROJECT_UPSTREAMS: account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000
+      PHP_PROJECT_UPSTREAMS: anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state:ro
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:?set exact LOCAL_PRIVATE runtime lock}:/run/platform/hosted-workloads.lock.json:ro
+
+  mariadb:
+    networks: !override
+      platform_db_admin:
+        aliases:
+          - platform.local
+    volumes: !override
+      - enterprise_mariadb_data:/var/lib/mysql
+      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      - ./mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/mysql/ssl:ro
+
+  phpmyadmin:
+    volumes: !override
+      - ./phpmyadmin/apache-forwarded-proto.conf:/etc/apache2/conf-enabled/forwarded-proto.conf:ro
+      - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
+      - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/phpmyadmin/certs:ro
+
+  node-exporter:
+    volumes: !override
+      - /:/host:ro
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
+
+secrets:
+  alertmanager_webhook_token:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/alertmanager_webhook_token.txt
+  control_center_database_url:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/control_center_database_url.txt
+  control_center_first_configuration_bootstrap_token:
+    file: ${CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE:?set CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE}
+  control_center_first_configuration_keycloak_client_secret:
+    file: ${CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:?set CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE}
+  control_center_vault_keys:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/control_center_vault_keys.txt
+  docker_action_backup_catalog:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_backup_catalog.txt
+  docker_action_backup_job_execute:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_backup_job_execute.txt
+  docker_action_backup_offsite_sync:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_backup_offsite_sync.txt
+  docker_action_backup_prune_apply:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_backup_prune_apply.txt
+  docker_action_backup_prune_plan:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_backup_prune_plan.txt
+  docker_action_evidence_runtime_snapshot:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_evidence_runtime_snapshot.txt
+  docker_action_restore_drill_full:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_restore_drill_full.txt
+  docker_action_runtime_intent_trust_key:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/docker_action_runtime_intent_trust_key.txt
+  grafana_admin_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/grafana_admin_password.txt
+  keycloak_admin_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/keycloak_admin_password.txt
+  keycloak_db_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/keycloak_db_password.txt
+  mariadb_root_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/mariadb_root_password.txt
+  minio_root_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/minio_root_password.txt
+  nats_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/nats_password.txt
+  postgres_superuser_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/postgres_superuser_password.txt
+  projects_gateway_signing_keys:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/projects_gateway_signing_keys.txt
+  redis_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/redis_password.txt
+  smtp_password:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/smtp_password.txt

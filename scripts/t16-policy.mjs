@@ -167,38 +167,49 @@ record(
     && !/platform-activation-broker|decode_field|candidate_release_root|--extractedRoot|--archive|git checkout|PLATFORM_BRANCH_B64/.test(deployVpsRemote),
   "remote compatibility sink accepts only empty stdin and invokes the fixed root install-only consumer",
 );
-const v1InstallSinks = v1InstallWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/gm) ?? [];
+const v1InstallSinks = v1InstallWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh \\\n+\s+--controlArtifactReceiptFile "\$control_receipt" \\\n+\s+--prepareReceiptFile "\$prepare_receipt" \\\n+\s+--authorityFile "\$authority" > "\$receipt"\s*$/gm) ?? [];
+const v1InstallUploads = v1InstallWorkflow.match(/uses:\s*actions\/upload-artifact@[a-f0-9]{40}/g) ?? [];
 record(
   "v1-install-only-workflow-boundary",
-  v1InstallSinks.length === 1
+  v1InstallSinks.length === 0
+    && v1InstallUploads.length === 0
     && includes(v1InstallWorkflow, "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true")
     && includes(v1InstallWorkflow, "group: infra-production-deploy")
-    && includes(v1InstallWorkflow, "name: production")
-    && includes(v1InstallWorkflow, 'test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    && !includes(v1InstallWorkflow, "name: production")
+    && includes(v1InstallWorkflow, 'test "$APPROVED_CANDIDATE_SHA" = "$GITHUB_SHA"')
     && includes(v1InstallWorkflow, 'test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
-    && includes(v1InstallWorkflow, "node ./scripts/v1-brownfield-install-receipt.mjs verify")
-    && !/\bdocker\b|platform-activation-broker|release-admission|dast-zap|sigstore|promoter|activation-request/i.test(v1InstallWorkflow),
-  "manual protected-main install-only uses one fixed client, shared production serialization and no activation or Docker path",
+    && includes(v1InstallWorkflow, 'git update-ref refs/remotes/github/main "$GITHUB_SHA"')
+    && includes(v1InstallWorkflow, "python3 -m py_compile")
+    && includes(v1InstallWorkflow, "node --test --test-concurrency=1")
+    && includes(v1InstallWorkflow, "scripts/v1-brownfield-bootstrap-bridge.py")
+    && includes(v1InstallWorkflow, "scripts/v1-brownfield-bootstrap-bridge.test.mjs")
+    && includes(v1InstallWorkflow, "scripts/v1-node-runtime-prerequisite.py")
+    && includes(v1InstallWorkflow, "scripts/v1-node-runtime-prerequisite.test.mjs")
+    && includes(v1InstallWorkflow, "scripts/v1-local-private-evidence-producer.test.mjs")
+    && includes(v1InstallWorkflow, "STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED")
+    && includes(v1InstallWorkflow, "exit 78")
+    && !/deploy-v1-install-only|python3\s+(?:\.\/)?scripts\/v1-node-runtime-prerequisite\.py|DEPLOY_|\/usr\/bin\/ssh|\bdocker\b|platform-activation-broker|release-admission|dast-zap|sigstore|promoter|activation-request|operator-recovery-private|recovery[_-]private[_-]key|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|\.platform-infrastructure-recovery|openssl[\s\S]{0,160}\bcms\b[\s\S]{0,160}\bdecrypt\b/i.test(v1InstallWorkflow),
+  "manual protected-main workflow validates V1 contracts then stops before remote authority without the Mac escrow key",
 );
-const v1LocalPrivateSinks = v1LocalPrivateWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-local-private\.sh > "\$receipt"\s*$/gm) ?? [];
+const v1LocalPrivateSinks = v1LocalPrivateWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-local-private\.sh \\\n\s+--authorityFile "\$authority" > "\$receipt"\s*$/gm) ?? [];
 const v1LocalPrivateUploads = v1LocalPrivateWorkflow.match(/uses:\s*actions\/upload-artifact@[a-f0-9]{40}/g) ?? [];
 record(
   "v1-local-private-workflow-boundary",
-  v1LocalPrivateSinks.length === 1
-    && v1LocalPrivateUploads.length === 1
+  v1LocalPrivateSinks.length === 0
+    && v1LocalPrivateUploads.length === 0
     && includes(v1LocalPrivateWorkflow, "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true")
     && includes(v1LocalPrivateWorkflow, "group: infra-production-deploy")
-    && includes(v1LocalPrivateWorkflow, "name: production")
-    && includes(v1LocalPrivateWorkflow, 'test "$APPROVED_CANDIDATE_SHA" = 832bf2baec47055342af7e7f73425444381b91e0')
+    && !includes(v1LocalPrivateWorkflow, "name: production")
     && includes(v1LocalPrivateWorkflow, 'test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
-    && includes(v1LocalPrivateWorkflow, "node ./scripts/v1-local-private-control-receipt.mjs verify")
-    && includes(v1LocalPrivateWorkflow, 'controller_sha256="$(sha256sum ./scripts/v1-local-private-control.py')
-    && includes(v1LocalPrivateWorkflow, 'unit_sha256="$(sha256sum ./systemd/platform-v1-local-private-control.service')
-    && includes(v1LocalPrivateWorkflow, '--controllerSha256 "$controller_sha256"')
-    && includes(v1LocalPrivateWorkflow, '--unitSha256 "$unit_sha256"')
-    && includes(v1LocalPrivateWorkflow, "path: ${{ runner.temp }}/v1-local-private-control-receipt.json")
-    && !/platform-activation-broker|deploy-vps\.sh|release-admission|dast-zap|sigstore|promoter|activation-request|docker-action/i.test(v1LocalPrivateWorkflow),
-  "manual protected-main LOCAL_PRIVATE activation uses one fixed client, shared production serialization and one receipt artifact",
+    && includes(v1LocalPrivateWorkflow, 'git update-ref refs/remotes/github/main "$GITHUB_SHA"')
+    && includes(v1LocalPrivateWorkflow, "python3 -m py_compile")
+    && includes(v1LocalPrivateWorkflow, "node --test --test-concurrency=1")
+    && includes(v1LocalPrivateWorkflow, "scripts/v1-local-private-reconcile.test.mjs")
+    && includes(v1LocalPrivateWorkflow, "scripts/v1-local-private-evidence-producer.test.mjs")
+    && includes(v1LocalPrivateWorkflow, "STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED")
+    && includes(v1LocalPrivateWorkflow, "exit 78")
+    && !/deploy-v1-local-private|DEPLOY_|\/usr\/bin\/ssh|\bdocker\b|platform-activation-broker|deploy-vps\.sh|release-admission|dast-zap|sigstore|promoter|activation-request|docker-action|operator-recovery-private|recovery[_-]private[_-]key|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|\.platform-infrastructure-recovery|openssl[\s\S]{0,160}\bcms\b[\s\S]{0,160}\bdecrypt\b/i.test(v1LocalPrivateWorkflow),
+  "manual protected-main LOCAL_PRIVATE workflow validates V1 contracts then stops before cutover without the Mac escrow key",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");

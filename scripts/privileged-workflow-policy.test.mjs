@@ -47,6 +47,18 @@ assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
 assert.deepEqual(v1InstallOnlyWorkflowMismatches(installOnly), []);
 assert.deepEqual(v1LocalPrivateWorkflowMismatches(localPrivate), []);
+const qualityStart = deployment.indexOf("\n  quality:");
+const controlCenterInstall = deployment.indexOf("working-directory: control-center", qualityStart);
+const testingHygiene = deployment.indexOf("node ./scripts/infra-ops.mjs testing-hygiene", qualityStart);
+const composeStart = deployment.indexOf("\n  compose:", qualityStart);
+assert.ok(
+  qualityStart >= 0
+    && qualityStart < controlCenterInstall
+    && controlCenterInstall < testingHygiene
+    && testingHygiene < composeStart
+    && deployment.indexOf("node ./scripts/infra-ops.mjs testing-hygiene", testingHygiene + 1) < 0,
+  "enterprise quality must install Control Center dependencies before exactly one complete testing-hygiene invocation",
+);
 assert.match(runEvidence, /install -m 0600 \.env\.vps\.example \.env/);
 assert.match(runEvidence, /test -z "\$\(git status --porcelain=v1 --untracked-files=all\)"/);
 assert.match(runEvidence, /--envFile \.env(?:\s|\\)/);
@@ -121,19 +133,33 @@ assert.match(
   /permissions/,
 );
 assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace("sh ./scripts/deploy-v1-install-only.sh", "docker run attacker")).join(" "),
-  /fixed install-only sink|Docker boundary/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(`${installOnly}\n          sh ./scripts/deploy-v1-install-only.sh > "$receipt"\n`).join(" "),
-  /exactly one fixed install-only sink/,
+  v1InstallOnlyWorkflowMismatches(installOnly.replace("          python3 -m py_compile \\", "          sh ./scripts/deploy-v1-install-only.sh\n          python3 -m py_compile \\")).join(" "),
+  /remote or deployment authority|bytes differ/,
 );
 assert.match(
   v1InstallOnlyWorkflowMismatches(installOnly.replace(
-    "      - name: Materialize frozen V1 release without activation",
-    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Materialize frozen V1 release without activation",
+    "          python3 -m py_compile \\",
+    "          python3 scripts/v1-node-runtime-prerequisite.py install\n          python3 -m py_compile \\",
   )).join(" "),
-  /frozen candidate-specific controller/,
+  /remote or deployment authority|bytes differ/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(`${installOnly}\n          sh ./scripts/deploy-v1-install-only.sh \\\n+            --controlArtifactReceiptFile "$control_receipt" \\\n+            --prepareReceiptFile "$prepare_receipt" \\\n+            --authorityFile "$authority" > "$receipt"\n`).join(" "),
+  /remote or deployment authority|bytes differ/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace(
+    "      - name: Validate V1 source and receipt contracts without deployment authority",
+    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Validate V1 source and receipt contracts without deployment authority",
+  )).join(" "),
+  /remote or deployment authority|exact-main controller/,
+);
+assert.match(
+  v1InstallOnlyWorkflowMismatches(installOnly.replace(
+    "      - name: Validate V1 source and receipt contracts without deployment authority",
+    "      - name: Hidden recovery key\n        run: openssl cms -decrypt -inkey operator-recovery-private.pem\n      - name: Validate V1 source and receipt contracts without deployment authority",
+  )).join(" "),
+  /recovery private key|bytes differ/,
 );
 assert.match(
   v1LocalPrivateWorkflowMismatches(localPrivate.replace("github.ref_protected == true", "true")).join(" "),
@@ -148,27 +174,37 @@ assert.match(
   /permissions/,
 );
 assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("sh ./scripts/deploy-v1-local-private.sh", "sh ./scripts/deploy-vps.sh")).join(" "),
-  /fixed activation sink|provider activation boundary/,
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("          python3 -m py_compile \\", "          sh ./scripts/deploy-v1-local-private.sh\\n          python3 -m py_compile \\")).join(" "),
+  /remote or cutover authority|bytes differ/,
 );
 assert.match(
-  v1LocalPrivateWorkflowMismatches(`${localPrivate}\n          sh ./scripts/deploy-v1-local-private.sh > "$receipt"\n`).join(" "),
-  /exactly one fixed activation sink/,
+  v1LocalPrivateWorkflowMismatches(`${localPrivate}\n          sh ./scripts/deploy-v1-local-private.sh \\\n            --authorityFile "$authority" > "$receipt"\n`).join(" "),
+  /remote or cutover authority|bytes differ/,
 );
 assert.match(
   v1LocalPrivateWorkflowMismatches(localPrivate.replace(
-    "      - name: Activate the fixed V1 LOCAL_PRIVATE control plane",
-    "      - name: Hidden provider path\n        run: platform-activation-broker activate\n      - name: Activate the fixed V1 LOCAL_PRIVATE control plane",
+    "      - name: Validate V1 cutover source contracts without local escrow authority",
+    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Validate V1 cutover source contracts without local escrow authority",
   )).join(" "),
-  /provider activation boundary/,
+  /remote or cutover authority|bytes differ/,
 );
 assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("if-no-files-found: error", "if-no-files-found: ignore")).join(" "),
-  /receipt artifact/,
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
+    "      - name: Validate V1 cutover source contracts without local escrow authority",
+    "      - name: Hidden recovery secret\n        env:\n          RECOVERY_PRIVATE_KEY: ${{ secrets.RECOVERY_PRIVATE_KEY }}\n        run: true\n      - name: Validate V1 cutover source contracts without local escrow authority",
+  )).join(" "),
+  /recovery private key|remote or cutover authority|bytes differ/,
 );
 assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace('--unitSha256 "$unit_sha256"', '--unitSha256 "attacker-selected"')).join(" "),
-  /revalidate the exact root receipt/,
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
+    "    timeout-minutes: 30",
+    ["    environment:", "      name: production", "    timeout-minutes: 30"].join("\n"),
+  )).join(" "),
+  /must not acquire the production environment|bytes differ/,
+);
+assert.match(
+  v1LocalPrivateWorkflowMismatches(localPrivate.replace("STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED", "STOP 78 BYPASSED")).join(" "),
+  /terminate exactly once|bytes differ/,
 );
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
@@ -287,6 +323,8 @@ const expectedBrownfieldOfflineStep = [
   "            scripts/v1-provider-gates.test.mjs \\",
   "            scripts/v1-phase-a-authorization.test.mjs \\",
   "            scripts/v1-brownfield-bootstrap.test.mjs \\",
+  "            scripts/v1-brownfield-bootstrap-bridge.test.mjs \\",
+  "            scripts/v1-node-runtime-prerequisite.test.mjs \\",
   "            scripts/v1-brownfield-admission.test.mjs \\",
   "            scripts/v1-brownfield-install-consumer.test.mjs \\",
   "            scripts/v1-install-package.test.mjs \\",
@@ -299,6 +337,8 @@ const expectedBrownfieldOfflineStep = [
   "            scripts/v1-brownfield-control-plane-gate.test.mjs \\",
   "            scripts/v1-local-private-control.test.mjs \\",
   "            scripts/v1-local-private-control.e2e.test.mjs \\",
+  "            scripts/v1-local-private-evidence-producer.test.mjs \\",
+  "            scripts/v1-local-private-reconcile.test.mjs \\",
   "            scripts/deploy-v1-local-private.test.mjs \\",
   "            scripts/hosted-workload-preservation-guard.test.mjs",
 ].join("\n");
@@ -317,8 +357,12 @@ assert.equal(
 );
 for (const command of [
   "scripts/v1-brownfield-application-data-cutover.test.mjs",
+  "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
+  "scripts/v1-node-runtime-prerequisite.test.mjs",
   "scripts/v1-local-private-control.test.mjs",
   "scripts/v1-local-private-control.e2e.test.mjs",
+  "scripts/v1-local-private-evidence-producer.test.mjs",
+  "scripts/v1-local-private-reconcile.test.mjs",
   "scripts/deploy-v1-local-private.test.mjs",
 ]) {
   assert.equal(
@@ -410,6 +454,33 @@ assert.match(
   /return \["tests", "state", "status"\]\.flatMap\(\(directory\) =>/,
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
+for (const firstConfigurationTest of [
+  "control-center/tests/first-configuration.test.mjs",
+  "control-center/tests/first-configuration-keycloak.test.mjs",
+]) {
+  assert.equal(fs.existsSync(firstConfigurationTest), true, `${firstConfigurationTest} must remain in the enumerated Control Center suite`);
+}
+for (const v1Test of [
+  "scripts/keycloak-passkey-reconcile.test.mjs",
+  "scripts/v1-local-private-evidence-producer.test.mjs",
+  "scripts/v1-local-private-reconcile.test.mjs",
+]) {
+  assert.match(
+    infraOps,
+    new RegExp(`run\\(process\\.execPath, \\["--test", "${v1Test.replaceAll(".", "\\.")}"\\]`),
+    `${v1Test} must be wired into testing-hygiene`,
+  );
+}
+assert.match(
+  infraOps,
+  /"--test",\s*\n\s*"scripts\/v1-brownfield-bootstrap-bridge\.test\.mjs",/,
+  "the real bootstrap transport fixture must be wired into testing-hygiene",
+);
+assert.match(
+  infraOps,
+  /"scripts\/v1-brownfield-bootstrap-bridge\.test\.mjs",\s*\n\s*"scripts\/v1-node-runtime-prerequisite\.test\.mjs",/,
+  "the fixed Node runtime prerequisite fixture must be wired after the bootstrap transport fixture",
+);
 
-const total = fixtures.length * 3 + 1 + 67;
+const total = fixtures.length * 3 + 1 + 78;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);

@@ -12,9 +12,13 @@ import addFormatsModule from "../vendor/json-schema/node_modules/ajv-formats/dis
 
 import {
   CANONICAL_COMPOSE_FILE_ORDER,
+  CANONICAL_COMPOSE_FILE_ORDERS,
   CURRENT_CONTRACTS,
+  LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER,
+  LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP,
   PRODUCTION_PROJECT_NAME,
   PROTECTED_RESOURCE_MAP,
+  PROTECTED_RESOURCE_MAPS,
   QUEUE_OWNERSHIP,
   RUNTIME_IDENTITY_SCHEMA,
   RUNTIME_SERVICES,
@@ -141,6 +145,29 @@ test("RI01 canonical bridge freezes staging and final namespaces and exact resou
     "compose.runtime-isolation.yaml",
     "compose.runtime-identity.yaml",
   ]);
+  assert.deepEqual(LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER, [
+    "compose.yaml",
+    "compose.secrets.yaml",
+    "compose.waf.yaml",
+    "compose.vps.yaml",
+    "compose.vps-waf.yaml",
+    "compose.backup-scheduler.yaml",
+    "compose.runtime.yaml",
+    "compose.networks.yaml",
+    "compose.runtime-isolation.yaml",
+    "compose.local-private.yaml",
+    "compose.runtime-identity.yaml",
+  ]);
+  assert.deepEqual(CANONICAL_COMPOSE_FILE_ORDERS, {
+    VPS: CANONICAL_COMPOSE_FILE_ORDER,
+    LOCAL_PRIVATE: LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER,
+  });
+  assert.ok(Object.values(CANONICAL_COMPOSE_FILE_ORDERS)
+    .every((fileOrder) => fileOrder.at(-1) === "compose.runtime-identity.yaml"));
+  assert.deepEqual(PROTECTED_RESOURCE_MAPS, {
+    VPS: PROTECTED_RESOURCE_MAP,
+    LOCAL_PRIVATE: LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP,
+  });
   assert.deepEqual(
     RUNTIME_SERVICES.map(({ service, containerName }) => [service, containerName]),
     [
@@ -217,6 +244,30 @@ test("RI03 a fully bound synthetic bridge validates structurally but never grant
   assert.doesNotMatch(JSON.stringify(result), /"(?:executionAuthorized|mutationAuthority|dataRollbackAuthorized)":true/);
 });
 
+test("RI03a LOCAL_PRIVATE is a separately hashed canonical order with runtime identity last", () => {
+  const document = mutateAndReseal((value) => {
+    value.productionBoundary.compose.fileOrder = [...LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER];
+    value.productionBoundary.compose.fileOrderSha256 = sha256Canonical(
+      value.productionBoundary.compose.fileOrder,
+    );
+    value.productionBoundary.compose.resourceMap = structuredClone(
+      LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP,
+    );
+    value.productionBoundary.compose.resourceMapSha256 = sha256Canonical(
+      value.productionBoundary.compose.resourceMap,
+    );
+  });
+  const result = verifyV1BrownfieldRuntimeIdentity(document);
+
+  assert.equal(result.structuralBindingsValidated, true);
+  assert.equal(document.productionBoundary.compose.fileOrder.at(-2), "compose.local-private.yaml");
+  assert.equal(document.productionBoundary.compose.fileOrder.at(-1), "compose.runtime-identity.yaml");
+  assert.notEqual(
+    document.productionBoundary.compose.fileOrderSha256,
+    sha256Canonical(CANONICAL_COMPOSE_FILE_ORDER),
+  );
+});
+
 test("RI04 staging namespace is permanently NON_EXECUTABLE and cannot masquerade as final", () => {
   for (const [mutate, pattern] of [
     [(value) => { value.stagingBoundary.projectName = PRODUCTION_PROJECT_NAME; }, /staging namespace/i],
@@ -290,11 +341,13 @@ test("RI08 first cutover preserves the exact full APPLICATION-DATA parent withou
 test("RI09 raw render, ordered files, profile, env, project, service, config, network, attachment and resource map hashes are exact", () => {
   for (const [mutate, pattern] of [
     [(value) => { [value.productionBoundary.compose.fileOrder[0], value.productionBoundary.compose.fileOrder[1]] = [value.productionBoundary.compose.fileOrder[1], value.productionBoundary.compose.fileOrder[0]]; }, /Compose file order/i],
+    [(value) => { value.productionBoundary.compose.fileOrder.splice(-1, 0, "compose.local-private.yaml", "compose.local-private.yaml"); }, /Compose file order/i],
     [(value) => { value.productionBoundary.compose.profiles = []; }, /profile set/i],
     [(value) => { value.productionBoundary.compose.projectName = STAGING_PROJECT_NAME; }, /production project/i],
     [(value) => { value.productionBoundary.compose.serviceNames.pop(); }, /service set/i],
     [(value) => { value.productionBoundary.compose.networkNames.pop(); }, /network set/i],
     [(value) => { value.productionBoundary.compose.resourceMap.services.pop(); }, /protected resource map/i],
+    [(value) => { value.productionBoundary.compose.resourceMap = structuredClone(LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP); }, /protected resource map/i],
     [(value) => { value.productionBoundary.compose.rawFullRenderBytesSha256 = null; }, /raw full render bytes|all external observations.*complete/i],
     [(value) => { value.productionBoundary.compose.fileOrderSha256 = h("wrong-order"); }, /file order SHA256/i],
     [(value) => { value.productionBoundary.compose.profilesSha256 = h("wrong-profiles"); }, /profiles SHA256/i],
@@ -350,7 +403,15 @@ test("RI12 JSON Schema mirrors the closed top-level and canonical constants", ()
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual([...schema.required].sort(), Object.keys(template).sort());
   assert.deepEqual(schema.properties.schema.const, RUNTIME_IDENTITY_SCHEMA);
-  assert.deepEqual(schema.$defs.composeFileOrder.prefixItems.map(({ const: value }) => value), CANONICAL_COMPOSE_FILE_ORDER);
+  assert.deepEqual(
+    schema.$defs.composeFileOrder.oneOf.map(({ prefixItems }) => prefixItems.map(({ const: value }) => value)),
+    Object.values(CANONICAL_COMPOSE_FILE_ORDERS),
+  );
+  assert.deepEqual(
+    schema.$defs.protectedResourceMap.properties.secrets.oneOf
+      .map(({ prefixItems }) => prefixItems.map(({ const: value }) => value)),
+    Object.values(PROTECTED_RESOURCE_MAPS).map(({ secrets }) => secrets),
+  );
   assert.deepEqual(schema.$defs.currentContracts.prefixItems.map(({ properties }) => properties.id.const), CURRENT_CONTRACTS.map(({ id }) => id));
   assert.deepEqual(schema.$defs.runtimeContainers.prefixItems.map(({ properties }) => properties.service.const), RUNTIME_SERVICES.map(({ service }) => service));
   assert.deepEqual(schema.$defs.runtimeVolumes.prefixItems.map(({ properties }) => properties.logicalName.const), RUNTIME_VOLUMES.map(({ logicalName }) => logicalName));
@@ -366,8 +427,21 @@ test("RI13 strict Ajv accepts both contract modes and rejects closed-schema host
   const validate = ajv.compile(schema);
   const template = JSON.parse(fs.readFileSync(TEMPLATE, "utf8"));
   const synthetic = completeSyntheticDocument();
+  const localPrivateSynthetic = mutateAndReseal((value) => {
+    value.productionBoundary.compose.fileOrder = [...LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER];
+    value.productionBoundary.compose.fileOrderSha256 = sha256Canonical(
+      value.productionBoundary.compose.fileOrder,
+    );
+    value.productionBoundary.compose.resourceMap = structuredClone(
+      LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP,
+    );
+    value.productionBoundary.compose.resourceMapSha256 = sha256Canonical(
+      value.productionBoundary.compose.resourceMap,
+    );
+  });
   assert.equal(validate(template), true, JSON.stringify(validate.errors));
   assert.equal(validate(synthetic), true, JSON.stringify(validate.errors));
+  assert.equal(validate(localPrivateSynthetic), true, JSON.stringify(validate.errors));
 
   const observationPaths = nullLeafPaths(template);
   assert.equal(observationPaths.length, 99, "template observation inventory drifted");

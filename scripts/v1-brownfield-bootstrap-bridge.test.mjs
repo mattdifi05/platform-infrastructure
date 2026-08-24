@@ -1,0 +1,303 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+const bridge = path.join(import.meta.dirname, "v1-brownfield-bootstrap-bridge.py");
+const consumer = path.join(import.meta.dirname, "v1-brownfield-install-consumer.py");
+const nodeHelper = path.join(import.meta.dirname, "v1-node-runtime-prerequisite.py");
+const sudoers = path.join(import.meta.dirname, "..", "sudoers", "platform-v1-local-private-control");
+const python = "/usr/bin/python3";
+
+const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object"
+  ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`
+  : JSON.stringify(value);
+const fixed = (root, logical) => path.join(root, logical.slice(1));
+
+function write(filename, value, mode = 0o600) {
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filename, value, { mode });
+  fs.chmodSync(filename, mode);
+}
+
+function git(cwd, args) {
+  const result = spawnSync("/usr/bin/git", args, {
+    cwd, encoding: "utf8",
+    env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", HOME: "/nonexistent", LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function createFixture(t) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-bootstrap-bridge-test-")));
+  fs.chmodSync(root, 0o700);
+  t.after(() => {
+    const pending = [root];
+    while (pending.length) {
+      const current = pending.pop();
+      if (!fs.existsSync(current)) continue;
+      const metadata = fs.lstatSync(current);
+      if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+        fs.chmodSync(current, 0o700);
+        for (const child of fs.readdirSync(current)) pending.push(path.join(current, child));
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const seed = path.join(root, "candidate");
+  fs.mkdirSync(seed, { mode: 0o700 });
+  git(seed, ["init", "--quiet"]);
+  git(seed, ["config", "user.name", "V1 Bootstrap Fixture"]);
+  git(seed, ["config", "user.email", "fixture@example.invalid"]);
+  write(path.join(seed, ".gitignore"), ".env\n", 0o644);
+  write(path.join(seed, "README.md"), "transport-only bootstrap fixture\n", 0o644);
+  write(path.join(seed, "scripts", "v1-brownfield-install-consumer.py"), fs.readFileSync(consumer), 0o755);
+  write(path.join(seed, "scripts", "v1-node-runtime-prerequisite.py"), fs.readFileSync(nodeHelper), 0o755);
+  write(path.join(seed, "scripts", "v1-local-private-control.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o755);
+  write(path.join(seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o755);
+  write(path.join(seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
+  write(path.join(seed, "sudoers", "platform-v1-local-private-control"), fs.readFileSync(sudoers), 0o644);
+  git(seed, ["add", "."]);
+  git(seed, ["commit", "--quiet", "-m", "fixture"]);
+  const commit = git(seed, ["rev-parse", "HEAD"]);
+  const tree = git(seed, ["rev-parse", "HEAD^{tree}"]);
+
+  const archive = path.join(root, "source.tar");
+  const bundle = path.join(root, "source.bundle");
+  let result = spawnSync("/usr/bin/git", ["archive", "--format=tar", `--output=${archive}`, "HEAD"], { cwd: seed, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync("/usr/bin/git", ["bundle", "create", bundle, "HEAD"], { cwd: seed, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const archiveBytes = fs.readFileSync(archive);
+  const bundleBytes = fs.readFileSync(bundle);
+  const bridgeBytes = fs.readFileSync(bridge);
+  const consumerBytes = fs.readFileSync(consumer);
+  const checkpoint = {
+    activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
+    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateConsumerSha256: sha(consumerBytes),
+    candidateTree: tree, createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundleBytes),
+    purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
+    sourceArchiveSha256: sha(archiveBytes), sourceArchiveSizeBytes: archiveBytes.length, transportVerified: true,
+  };
+  const checkpointBytes = Buffer.from(`${stable(checkpoint)}\n`);
+  const parts = { bridge: bridgeBytes, consumer: consumerBytes, checkpoint: checkpointBytes, gitBundle: bundleBytes, sourceArchive: archiveBytes };
+  const manifest = {
+    bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateTree: tree,
+    checkpointSha256: sha(checkpointBytes), consumerSha256: sha(consumerBytes), gitBundleSha256: sha(bundleBytes),
+    lengths: Object.fromEntries(Object.entries(parts).map(([name, bytes]) => [name, bytes.length])),
+    schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256: sha(archiveBytes),
+  };
+  const manifestBytes = Buffer.from(stable(manifest));
+  const frame = Buffer.concat([
+    Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")), manifestBytes,
+    ...["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"].map((name) => parts[name]),
+  ]);
+
+  const legacyConsumer = Buffer.from("test-only historical installed consumer\n");
+  const legacyV1Sudoers = Buffer.from([
+    "Defaults:platform_infrastructure env_reset",
+    "Defaults:platform_infrastructure secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control activate",
+    "",
+  ].join("\n"));
+  const broadGrant = Buffer.from("platform_infrastructure ALL=(ALL) NOPASSWD:ALL\n");
+  const liveEnvironment = Buffer.from("PLATFORM_MODE=LOCAL_PRIVATE\nFIXTURE_SECRET=not-printed\n");
+  write(fixed(root, "/usr/local/libexec/platform-v1-brownfield-install-consumer"), legacyConsumer, 0o555);
+  write(fixed(root, "/etc/sudoers.d/platform-v1-local-private-control"), legacyV1Sudoers, 0o440);
+  write(fixed(root, "/etc/sudoers.d/platform_infrastructure"), broadGrant, 0o440);
+  write(fixed(root, "/home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py"), bridgeBytes, 0o500);
+  write(fixed(root, "/home/platform_infrastructure/platform-infrastructure/.env"), liveEnvironment, 0o600);
+  for (const directory of ["/etc/systemd/system", "/run/lock", "/srv", "/var/lib/platform-infrastructure/v1"]) {
+    fs.mkdirSync(fixed(root, directory), { recursive: true, mode: 0o700 });
+    fs.chmodSync(fixed(root, directory), 0o700);
+  }
+  const tools = path.join(root, "tools");
+  const visudo = path.join(tools, "visudo");
+  const analyze = path.join(tools, "systemd-analyze");
+  const systemctl = path.join(tools, "systemctl");
+  const aptCache = path.join(tools, "apt-cache");
+  const aptGet = path.join(tools, "apt-get");
+  const dpkgQuery = path.join(tools, "dpkg-query");
+  const nodeRuntime = fixed(root, "/usr/bin/node");
+  const nodePackageState = path.join(root, "node-package-installed");
+  write(visudo, "#!/bin/sh\n[ \"$1\" = -c ] && [ \"$2\" = -f ] && [ -f \"$3\" ]\n", 0o700);
+  write(analyze, "#!/bin/sh\n[ \"$1\" = verify ] && [ -f \"$2\" ]\n", 0o700);
+  write(systemctl, "#!/bin/sh\n[ \"$1\" = daemon-reload ]\n", 0o700);
+  write(aptCache, `#!${process.execPath}\nprocess.stdout.write("Package: nodejs\\nVersion: 22.22.1+dfsg+~cs22.19.15-1ubuntu1\\nArchitecture: amd64\\n\\n");\n`, 0o700);
+  write(aptGet, `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(nodePackageState)}, "installed\\n");\n`, 0o700);
+  write(dpkgQuery, `#!${process.execPath}\nconst fs=require("node:fs"); if(fs.existsSync(${JSON.stringify(nodePackageState)})) process.stdout.write("nodejs\\tinstall ok installed\\t22.22.1+dfsg+~cs22.19.15-1ubuntu1\\tamd64\\n"); else process.exitCode=1;\n`, 0o700);
+  write(nodeRuntime, `#!${process.execPath}\nprocess.stdout.write("v22.22.1\\n");\n`, 0o700);
+
+  return {
+    broadGrant, commit, consumerBytes, frame, legacyConsumer, legacyV1Sudoers, liveEnvironment, root, tree,
+    environment: {
+      ...process.env,
+      PLATFORM_V1_BOOTSTRAP_TEST_ROOT: root,
+      PLATFORM_V1_BOOTSTRAP_TEST_LEGACY_CONSUMER_SHA256: sha(legacyConsumer),
+      PLATFORM_V1_INSTALL_CONSUMER_TEST_VISUDO: visudo,
+      PLATFORM_V1_INSTALL_CONSUMER_TEST_SYSTEMD_ANALYZE: analyze,
+      PLATFORM_V1_INSTALL_CONSUMER_TEST_SYSTEMCTL: systemctl,
+      PLATFORM_V1_NODE_RUNTIME_TEST_APT_CACHE: aptCache,
+      PLATFORM_V1_NODE_RUNTIME_TEST_APT_GET: aptGet,
+      PLATFORM_V1_NODE_RUNTIME_TEST_DPKG_QUERY: dpkgQuery,
+      PLATFORM_V1_NODE_RUNTIME_TEST_NODE: nodeRuntime,
+    },
+  };
+}
+
+function execute(candidate) {
+  return spawnSync(python, ["-I", bridge, "apply"], {
+    cwd: "/", encoding: "utf8", env: candidate.environment, input: candidate.frame, maxBuffer: 1024 * 1024, timeout: 30_000,
+  });
+}
+
+test("stages exact transport bytes, stable-copies .env, installs control artifacts, and preserves broad sudo", (t) => {
+  const candidate = createFixture(t);
+  const source = fs.readFileSync(bridge, "utf8");
+  assert.match(source, /GIT_CONFIG_GLOBAL.*\/dev\/null/s);
+  assert.match(source, /GIT_CONFIG_NOSYSTEM.*1/s);
+  assert.match(source, /safe\.directory=/);
+  const livePath = fixed(candidate.root, "/home/platform_infrastructure/platform-infrastructure/.env");
+  const liveBefore = fs.statSync(livePath);
+  const first = execute(candidate);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stderr, "");
+  const envelope = JSON.parse(first.stdout);
+  assert.equal(first.stdout, `${stable(envelope)}\n`);
+  assert.equal(envelope.schema, "platform.v1-brownfield-bootstrap-result/v1");
+  assert.equal(envelope.bootstrap.status, "BOOTSTRAP_CONTROL_INSTALLED");
+  assert.equal(envelope.bootstrap.dataMutation, false);
+  assert.equal(envelope.bootstrap.dockerMutation, false);
+  assert.equal(envelope.bootstrap.stagingMutation, true);
+  assert.equal(envelope.bootstrap.stagingEnvironmentSha256, sha(candidate.liveEnvironment));
+  assert.equal(envelope.bootstrap.legacyBroadSudoersBeforeSha256, sha(candidate.broadGrant));
+  assert.equal(envelope.bootstrap.legacyBroadSudoersAfterSha256, sha(candidate.broadGrant));
+  assert.equal(envelope.controlArtifacts.status, "CONTROL_ARTIFACTS_INSTALLED");
+  assert.equal(envelope.controlArtifacts.dataMutation, false);
+  assert.equal(envelope.controlArtifacts.dockerMutation, false);
+  assert.equal(envelope.nodeRuntime.status, "NODE_RUNTIME_READY");
+  assert.equal(envelope.nodeRuntime.hostControlMutation, true);
+  const nodeRuntimeBytes = Buffer.from(`${stable(envelope.nodeRuntime)}\n`);
+  assert.equal(envelope.bootstrap.nodeRuntimeReceiptSha256, sha(nodeRuntimeBytes));
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/node-runtime-prerequisite-receipt.json")),
+    nodeRuntimeBytes,
+  );
+
+  const stagingEnvironment = fixed(candidate.root, `/home/platform_infrastructure/.v1-release-staging/${candidate.commit}/.env`);
+  assert.deepEqual(fs.readFileSync(stagingEnvironment), candidate.liveEnvironment);
+  assert.equal(fs.statSync(stagingEnvironment).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readFileSync(livePath), candidate.liveEnvironment);
+  const liveAfter = fs.statSync(livePath);
+  assert.equal(liveAfter.ino, liveBefore.ino);
+  assert.equal(liveAfter.mtimeMs, liveBefore.mtimeMs);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/usr/local/libexec/platform-v1-brownfield-install-consumer")), candidate.consumerBytes);
+
+  const transport = JSON.parse(fs.readFileSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/predeploy/current/install-checkpoint.json"), "utf8"));
+  assert.equal(transport.schema, "platform.v1-bootstrap-transport-checkpoint/v1");
+  assert.equal(transport.backupEvidenceAuthoritative, false);
+  assert.equal(transport.activationAuthorized, false);
+  assert.equal("restoreVerified" in transport, false);
+  assert.equal("runtimeRecovered" in transport, false);
+
+  const second = execute(candidate);
+  assert.equal(second.status, 0, second.stderr);
+  const secondEnvelope = JSON.parse(second.stdout);
+  assert.equal(secondEnvelope.controlArtifacts.status, "ALREADY_INSTALLED");
+  assert.equal(secondEnvelope.controlArtifacts.hostControlMutation, false);
+  assert.equal(secondEnvelope.nodeRuntime.hostControlMutation, true);
+  assert.deepEqual(secondEnvelope.nodeRuntime, envelope.nodeRuntime);
+  assert.equal(secondEnvelope.bootstrap.stagingMutation, false);
+  assert.deepEqual(fs.readFileSync(livePath), candidate.liveEnvironment);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+});
+
+test("rejects a transport checkpoint that claims backup authority before mutation", (t) => {
+  const candidate = createFixture(t);
+  const manifestLength = Number.parseInt(candidate.frame.subarray(0, 8).toString(), 16);
+  const manifest = JSON.parse(candidate.frame.subarray(8, 8 + manifestLength).toString());
+  let offset = 8 + manifestLength + manifest.lengths.bridge + manifest.lengths.consumer;
+  const checkpointBytes = candidate.frame.subarray(offset, offset + manifest.lengths.checkpoint);
+  const checkpoint = JSON.parse(checkpointBytes.toString());
+  checkpoint.backupEvidenceAuthoritative = true;
+  const changedCheckpoint = Buffer.from(`${stable(checkpoint)}\n`);
+  manifest.lengths.checkpoint = changedCheckpoint.length;
+  manifest.checkpointSha256 = sha(changedCheckpoint);
+  const changedManifest = Buffer.from(stable(manifest));
+  offset += checkpointBytes.length;
+  candidate.frame = Buffer.concat([
+    Buffer.from(changedManifest.length.toString(16).padStart(8, "0")), changedManifest,
+    candidate.frame.subarray(8 + manifestLength, 8 + manifestLength + manifest.lengths.bridge + manifest.lengths.consumer),
+    changedCheckpoint,
+    candidate.frame.subarray(offset),
+  ]);
+  const result = execute(candidate);
+  assert.equal(result.status, 65);
+  assert.match(result.stderr, /transport checkpoint scope/);
+  assert.equal(fs.existsSync(fixed(candidate.root, `/srv/platform-infrastructure/releases/${candidate.commit}-${manifest.sourceArchiveSha256}`)), false);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+});
+
+test("recovers every control artifact preimage after a hard crash following control install", (t) => {
+  const candidate = createFixture(t);
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "12";
+  const crashed = execute(candidate);
+  assert.equal(crashed.status, 87, crashed.stderr);
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidate.root, "/usr/local/libexec/platform-v1-brownfield-install-consumer")),
+    candidate.consumerBytes,
+  );
+
+  delete candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
+  const corruptFrame = Buffer.from(candidate.frame);
+  corruptFrame[corruptFrame.length - 1] ^= 0xff;
+  candidate.frame = corruptFrame;
+  const recovery = execute(candidate);
+  assert.equal(recovery.status, 65, recovery.stderr);
+  assert.match(recovery.stderr, /sourceArchive body digest/);
+
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidate.root, "/usr/local/libexec/platform-v1-brownfield-install-consumer")),
+    candidate.legacyConsumer,
+  );
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform-v1-local-private-control")),
+    candidate.legacyV1Sudoers,
+  );
+  for (const logical of [
+    "/usr/local/libexec/platform-v1-local-private-control",
+    "/usr/local/libexec/platform-v1-local-private-reconcile",
+    "/etc/systemd/system/platform-v1-local-private-control.service",
+  ]) assert.equal(fs.existsSync(fixed(candidate.root, logical)), false, `${logical} was not rolled back`);
+  assert.equal(fs.existsSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/bootstrap-transaction")), false);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+});
+
+test("hard-crash retry preserves the durable Node mutation receipt and completes forward", (t) => {
+  const candidate = createFixture(t);
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "13";
+  const crashed = execute(candidate);
+  assert.equal(crashed.status, 87, crashed.stderr);
+  const nodeReceiptPath = fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/node-runtime-prerequisite-receipt.json");
+  const durableBefore = fs.readFileSync(nodeReceiptPath);
+  const firstNodeReceipt = JSON.parse(durableBefore);
+  assert.equal(firstNodeReceipt.hostControlMutation, true);
+
+  delete candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
+  const recovered = execute(candidate);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  const envelope = JSON.parse(recovered.stdout);
+  assert.deepEqual(envelope.nodeRuntime, firstNodeReceipt);
+  assert.equal(envelope.nodeRuntime.hostControlMutation, true);
+  assert.equal(envelope.bootstrap.nodeRuntimeReceiptSha256, sha(durableBefore));
+  assert.deepEqual(fs.readFileSync(nodeReceiptPath), durableBefore);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
+});

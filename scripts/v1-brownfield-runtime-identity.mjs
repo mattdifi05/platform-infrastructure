@@ -20,7 +20,7 @@ export const PRODUCTION_PROJECT_NAME = "platform_infra_vps";
 const CANONICAL_UTC_TIMESTAMP =
   /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9]\.[0-9]{3}Z$/;
 
-export const CANONICAL_COMPOSE_FILE_ORDER = deepFreeze([
+const CANONICAL_COMPOSE_FILE_PREFIX = deepFreeze([
   "compose.yaml",
   "compose.secrets.yaml",
   "compose.waf.yaml",
@@ -30,8 +30,23 @@ export const CANONICAL_COMPOSE_FILE_ORDER = deepFreeze([
   "compose.runtime.yaml",
   "compose.networks.yaml",
   "compose.runtime-isolation.yaml",
+]);
+
+export const CANONICAL_COMPOSE_FILE_ORDER = deepFreeze([
+  ...CANONICAL_COMPOSE_FILE_PREFIX,
   "compose.runtime-identity.yaml",
 ]);
+
+export const LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER = deepFreeze([
+  ...CANONICAL_COMPOSE_FILE_PREFIX,
+  "compose.local-private.yaml",
+  "compose.runtime-identity.yaml",
+]);
+
+export const CANONICAL_COMPOSE_FILE_ORDERS = deepFreeze({
+  VPS: CANONICAL_COMPOSE_FILE_ORDER,
+  LOCAL_PRIVATE: LOCAL_PRIVATE_CANONICAL_COMPOSE_FILE_ORDER,
+});
 
 const STAGING_SOURCE_FILES = deepFreeze([
   "compose.v1-control-plane.yaml",
@@ -217,6 +232,40 @@ export const PROTECTED_RESOURCE_MAP = deepFreeze({
     "nats_auth_config",
     "redis_auth_config",
   ],
+});
+
+export const LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP = deepFreeze({
+  ...PROTECTED_RESOURCE_MAP,
+  secrets: [
+    "alertmanager_webhook_token",
+    "control_center_database_url",
+    "control_center_first_configuration_bootstrap_token",
+    "control_center_first_configuration_keycloak_client_secret",
+    "control_center_vault_keys",
+    "docker_action_backup_catalog",
+    "docker_action_backup_job_execute",
+    "docker_action_backup_offsite_sync",
+    "docker_action_backup_prune_apply",
+    "docker_action_backup_prune_plan",
+    "docker_action_evidence_runtime_snapshot",
+    "docker_action_restore_drill_full",
+    "docker_action_runtime_intent_trust_key",
+    "grafana_admin_password",
+    "keycloak_admin_password",
+    "keycloak_db_password",
+    "mariadb_root_password",
+    "minio_root_password",
+    "nats_password",
+    "postgres_superuser_password",
+    "projects_gateway_signing_keys",
+    "redis_password",
+    "smtp_password",
+  ],
+});
+
+export const PROTECTED_RESOURCE_MAPS = deepFreeze({
+  VPS: PROTECTED_RESOURCE_MAP,
+  LOCAL_PRIVATE: LOCAL_PRIVATE_PROTECTED_RESOURCE_MAP,
 });
 
 export const CURRENT_CONTRACTS = deepFreeze([
@@ -499,8 +548,10 @@ function validateComposeIdentity(compose, pending) {
     "resourceMapSha256",
     "noHostedPolicyBytesSha256",
   ]);
-  if (!sameArray(compose.fileOrder, CANONICAL_COMPOSE_FILE_ORDER)) {
-    invalid("Production Compose file order is not the exact canonical wrapper order plus runtime identity overlay.");
+  const composeVariant = Object.entries(CANONICAL_COMPOSE_FILE_ORDERS)
+    .find(([, expectedOrder]) => sameArray(compose.fileOrder, expectedOrder))?.[0];
+  if (composeVariant === undefined) {
+    invalid("Production Compose file order is not one exact canonical VPS or LOCAL_PRIVATE wrapper order with runtime identity last.");
   }
   if (!sameArray(compose.profiles, ["backup"])) invalid("Production Compose profile set must be exactly backup.");
   if (compose.projectName !== PRODUCTION_PROJECT_NAME) invalid("Production project name is invalid.");
@@ -510,7 +561,7 @@ function validateComposeIdentity(compose, pending) {
   if (!sameArray(compose.networkNames, PRODUCTION_NETWORK_NAMES)) {
     invalid("Production network set does not match the no-hosted protected resource map.");
   }
-  if (!sameJson(compose.resourceMap, PROTECTED_RESOURCE_MAP)) {
+  if (!sameJson(compose.resourceMap, PROTECTED_RESOURCE_MAPS[composeVariant])) {
     invalid("Production protected resource map does not match the full no-hosted policy mapping.");
   }
 

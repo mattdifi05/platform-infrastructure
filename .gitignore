@@ -28,6 +28,7 @@ projects-portal/state/*
 *.seed
 *.local
 *.pem
+!config/local-private-recovery-escrow-cert.pem
 *.key
 *.p12
 *.pfx

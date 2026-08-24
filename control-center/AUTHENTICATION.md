@@ -109,11 +109,66 @@ catalog entry and role-matrix test.
 Apply `migrations/001_auth_sessions.sql`,
 `migrations/002_session_security.sql`, and
 `migrations/003_oidc_provider_revocation.sql` to the dedicated control-plane
-PostgreSQL database before starting the service. The runtime identity requires
-only CRUD access to `control_auth.oidc_transactions`,
+PostgreSQL database before starting the service. A LOCAL_PRIVATE deployment
+with guided First Configuration must also apply
+`migrations/004_first_configuration.sql`. Migration 004 fails closed unless
+the dedicated `control_center_runtime` PostgreSQL role already exists, then
+grants that role the bounded CRUD access required by both authentication and
+First Configuration. The application must connect with that same runtime role;
+the migration identity must remain separate.
+
+Outside First Configuration, the runtime identity requires only CRUD access to `control_auth.oidc_transactions`,
 `control_auth.sessions`, `control_auth.login_throttle`,
 `control_auth.provider_event_tokens`, and `control_auth.provider_revocations`; schema
 migration and backup identities remain separate.
+
+## LOCAL_PRIVATE guided First Configuration
+
+Guided First Configuration is enabled only with
+`CONTROL_CENTER_FIRST_CONFIGURATION_MODE=required` and a LOCAL_PRIVATE
+`CONTROL_CENTER_ENV`. It is not a second authentication mode. Until its
+persistent state reaches `FIRST_CONFIGURATION_COMPLETE`, the Control Center
+allows only health, OIDC/provider callbacks and the bounded
+`/first-configuration` workflow; all other application reads redirect to the
+workflow and API or mutation requests fail with 423.
+
+The deployment supplies two separate root-owned secrets: a high-entropy
+bootstrap code and the temporary Keycloak service-client secret. Neither is an
+environment value or persisted in clear text. The bootstrap code is accepted
+only from the configured management CIDRs, exact HTTPS host and exact same
+origin. A successful use revokes every earlier setup session. While setup is
+incomplete, replacing the deployment-owned bootstrap secret rotates its hash
+and revokes all setup sessions, providing an explicit recovery path without a
+permanent bypass.
+
+The closed workflow is:
+
+1. reconcile the exact staged Keycloak realm/client/flow structure while the
+   realm still uses the ordinary `browser` flow;
+2. confirm the one configured owner subject and issue a temporary password
+   solely for personal Account Console enrollment;
+3. require at least two `webauthn-passwordless` credentials for that exact
+   subject and the operator's explicit confirmation that both were tested and
+   are independent;
+4. verify the exact passkey readiness contract, then bind
+   `platform-passkey-browser` as the realm browser flow;
+5. require a real Control Center callback carrying the exact passkey ACR and
+   AMR before removing the temporary password and required enrollment action;
+6. revoke the resulting local session, require a second real passkey login,
+   then disable the temporary Keycloak service client and close First
+   Configuration.
+
+The finalization transition is persistent and retryable. A process or network
+failure must leave `FIRST_CONFIGURATION_FINALIZING`, never report completion,
+and allow the authenticated operator to retry the idempotent service-client
+disable. Completion is recorded only after the client is disabled (or the
+precise post-disable `invalid_client` result is observed during recovery).
+
+Before personal enrollment the only truthful operational state is
+`ACTIVE / FIRST CONFIGURATION READY / USER ACTION REQUIRED`. Deployment or
+automated tests must not describe passkey authentication as active or complete
+until the two user-controlled credentials, first login, logout revocation and
+second login have all succeeded.
 
 ## Keycloak contract
 

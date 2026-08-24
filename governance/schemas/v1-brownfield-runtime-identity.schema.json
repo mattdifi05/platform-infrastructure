@@ -201,22 +201,45 @@
       ]
     },
     "composeFileOrder": {
-      "type": "array",
-      "minItems": 10,
-      "maxItems": 10,
-      "prefixItems": [
-        { "const": "compose.yaml" },
-        { "const": "compose.secrets.yaml" },
-        { "const": "compose.waf.yaml" },
-        { "const": "compose.vps.yaml" },
-        { "const": "compose.vps-waf.yaml" },
-        { "const": "compose.backup-scheduler.yaml" },
-        { "const": "compose.runtime.yaml" },
-        { "const": "compose.networks.yaml" },
-        { "const": "compose.runtime-isolation.yaml" },
-        { "const": "compose.runtime-identity.yaml" }
-      ],
-      "items": false
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "prefixItems": [
+            { "const": "compose.yaml" },
+            { "const": "compose.secrets.yaml" },
+            { "const": "compose.waf.yaml" },
+            { "const": "compose.vps.yaml" },
+            { "const": "compose.vps-waf.yaml" },
+            { "const": "compose.backup-scheduler.yaml" },
+            { "const": "compose.runtime.yaml" },
+            { "const": "compose.networks.yaml" },
+            { "const": "compose.runtime-isolation.yaml" },
+            { "const": "compose.runtime-identity.yaml" }
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "prefixItems": [
+            { "const": "compose.yaml" },
+            { "const": "compose.secrets.yaml" },
+            { "const": "compose.waf.yaml" },
+            { "const": "compose.vps.yaml" },
+            { "const": "compose.vps-waf.yaml" },
+            { "const": "compose.backup-scheduler.yaml" },
+            { "const": "compose.runtime.yaml" },
+            { "const": "compose.networks.yaml" },
+            { "const": "compose.runtime-isolation.yaml" },
+            { "const": "compose.local-private.yaml" },
+            { "const": "compose.runtime-identity.yaml" }
+          ],
+          "items": false
+        }
+      ]
     },
     "productionServices": {
       "type": "array",
@@ -277,33 +300,68 @@
         },
         "networks": { "$ref": "#/$defs/productionNetworks" },
         "secrets": {
-          "type": "array",
-          "prefixItems": [
-            { "const": "alertmanager_webhook_token" },
-            { "const": "control_center_database_url" },
-            { "const": "control_center_vault_keys" },
-            { "const": "docker_action_backup_catalog" },
-            { "const": "docker_action_backup_job_execute" },
-            { "const": "docker_action_backup_offsite_sync" },
-            { "const": "docker_action_backup_prune_apply" },
-            { "const": "docker_action_backup_prune_plan" },
-            { "const": "docker_action_evidence_runtime_snapshot" },
-            { "const": "docker_action_restore_drill_full" },
-            { "const": "docker_action_runtime_intent_trust_key" },
-            { "const": "grafana_admin_password" },
-            { "const": "keycloak_admin_password" },
-            { "const": "keycloak_db_password" },
-            { "const": "mariadb_root_password" },
-            { "const": "minio_root_password" },
-            { "const": "nats_password" },
-            { "const": "postgres_superuser_password" },
-            { "const": "projects_gateway_signing_keys" },
-            { "const": "redis_password" },
-            { "const": "smtp_password" }
-          ],
-          "minItems": 21,
-          "maxItems": 21,
-          "items": false
+          "oneOf": [
+            {
+              "type": "array",
+              "prefixItems": [
+                { "const": "alertmanager_webhook_token" },
+                { "const": "control_center_database_url" },
+                { "const": "control_center_vault_keys" },
+                { "const": "docker_action_backup_catalog" },
+                { "const": "docker_action_backup_job_execute" },
+                { "const": "docker_action_backup_offsite_sync" },
+                { "const": "docker_action_backup_prune_apply" },
+                { "const": "docker_action_backup_prune_plan" },
+                { "const": "docker_action_evidence_runtime_snapshot" },
+                { "const": "docker_action_restore_drill_full" },
+                { "const": "docker_action_runtime_intent_trust_key" },
+                { "const": "grafana_admin_password" },
+                { "const": "keycloak_admin_password" },
+                { "const": "keycloak_db_password" },
+                { "const": "mariadb_root_password" },
+                { "const": "minio_root_password" },
+                { "const": "nats_password" },
+                { "const": "postgres_superuser_password" },
+                { "const": "projects_gateway_signing_keys" },
+                { "const": "redis_password" },
+                { "const": "smtp_password" }
+              ],
+              "minItems": 21,
+              "maxItems": 21,
+              "items": false
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                { "const": "alertmanager_webhook_token" },
+                { "const": "control_center_database_url" },
+                { "const": "control_center_first_configuration_bootstrap_token" },
+                { "const": "control_center_first_configuration_keycloak_client_secret" },
+                { "const": "control_center_vault_keys" },
+                { "const": "docker_action_backup_catalog" },
+                { "const": "docker_action_backup_job_execute" },
+                { "const": "docker_action_backup_offsite_sync" },
+                { "const": "docker_action_backup_prune_apply" },
+                { "const": "docker_action_backup_prune_plan" },
+                { "const": "docker_action_evidence_runtime_snapshot" },
+                { "const": "docker_action_restore_drill_full" },
+                { "const": "docker_action_runtime_intent_trust_key" },
+                { "const": "grafana_admin_password" },
+                { "const": "keycloak_admin_password" },
+                { "const": "keycloak_db_password" },
+                { "const": "mariadb_root_password" },
+                { "const": "minio_root_password" },
+                { "const": "nats_password" },
+                { "const": "postgres_superuser_password" },
+                { "const": "projects_gateway_signing_keys" },
+                { "const": "redis_password" },
+                { "const": "smtp_password" }
+              ],
+              "minItems": 23,
+              "maxItems": 23,
+              "items": false
+            }
+          ]
         },
         "services": { "$ref": "#/$defs/productionServices" },
         "volumes": {

@@ -61,6 +61,43 @@ jobs:
       - name: Install locked Control Center test dependencies
         working-directory: control-center
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Control Center disposable PostgreSQL integration
+        env:
+          POSTGRES_TEST_IMAGE: postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
+        run: |
+          set -eu
+          container="platform-control-center-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          password='control-center-postgres-ci-fixture'
+          database='control_center_test'
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          docker run --detach --rm \
+            --name "$container" \
+            --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m \
+            --env "POSTGRES_PASSWORD=$password" \
+            --env "POSTGRES_DB=$database" \
+            --env PGDATA=/var/lib/postgresql/data/pgdata \
+            --publish 127.0.0.1::5432 \
+            "$POSTGRES_TEST_IMAGE" >/dev/null
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec "$container" pg_isready --username postgres --dbname "$database" >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$container")"
+          case "$port" in ''|*[!0-9]*) exit 65 ;; esac
+          TEST_DATABASE_URL="postgresql://postgres:${password}@127.0.0.1:${port}/${database}" \
+          TEST_DATABASE_DISPOSABLE=1 \
+            node ./control-center/tests/postgres-auth-store.integration.mjs
       - name: Prepare SHA-pinned standalone Compose test renderer
         run: |
           curl --fail --silent --show-error --location \
@@ -314,6 +351,8 @@ jobs:
             scripts/v1-provider-gates.test.mjs \
             scripts/v1-phase-a-authorization.test.mjs \
             scripts/v1-brownfield-bootstrap.test.mjs \
+            scripts/v1-brownfield-bootstrap-bridge.test.mjs \
+            scripts/v1-node-runtime-prerequisite.test.mjs \
             scripts/v1-brownfield-admission.test.mjs \
             scripts/v1-brownfield-install-consumer.test.mjs \
             scripts/v1-install-package.test.mjs \
@@ -326,6 +365,8 @@ jobs:
             scripts/v1-brownfield-control-plane-gate.test.mjs \
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-control.e2e.test.mjs \
+            scripts/v1-local-private-evidence-producer.test.mjs \
+            scripts/v1-local-private-reconcile.test.mjs \
             scripts/deploy-v1-local-private.test.mjs \
             scripts/hosted-workload-preservation-guard.test.mjs
       - name: Upload supply-chain evidence reports
