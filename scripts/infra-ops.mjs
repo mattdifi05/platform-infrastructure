@@ -10746,7 +10746,7 @@ function repoCoverageCategory(filePath) {
   const rules = [
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
     ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
-    ["platform-config", /^config\/.+\.json$/],
+    ["platform-config", /^(?:config\/.+\.json|config\/local-private-recovery-escrow-cert\.pem)$/],
     ["object-storage", /^minio\//],
     ["documentation", /^[A-Z][A-Z0-9_-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
