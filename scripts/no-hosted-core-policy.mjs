@@ -5744,11 +5744,12 @@ function filesystemPathAuthority(
         }
         continue;
       }
+      const acceptedFileModes = Array.isArray(fileMode) ? fileMode : [fileMode];
       if (expectedType !== "file"
           || !currentStat.isFile()
           || currentStat.nlink !== 1
           || (requireNonempty && currentStat.size < 1)
-          || mode !== fileMode) {
+          || !acceptedFileModes.includes(mode)) {
         return false;
       }
     }
@@ -5771,7 +5772,9 @@ function bindTargetType(target) {
 }
 
 function bindTargetFileMode(target) {
-  return target === "/usr/local/bin/platform-postgres-entrypoint" ? 0o755 : 0o644;
+  return target === "/usr/local/bin/platform-postgres-entrypoint"
+    ? [0o755, 0o555]
+    : [0o644, 0o444];
 }
 
 function materializeBindRule(serviceName, rule, target, rootDirectory, environment) {
@@ -7609,7 +7612,10 @@ export function projectLocalPrivateNoHostedAuthority(
       || bootstrapToken === keycloakClientSecret) {
     violations.push("local-private:path-collision");
   }
-  if (!filesystemPathAuthority(localLock, root, { expectedType: "file", fileMode: 0o644 })
+  if (!filesystemPathAuthority(localLock, root, {
+    expectedType: "file",
+    fileMode: [0o644, 0o444],
+  })
       || environment.get("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE") !== localLock) {
     violations.push("local-private:runtime-lock-authority");
   }
