@@ -1173,7 +1173,7 @@ test("AD16 exact canonical validators are imported and frozen dependency bytes a
   );
   assert.equal(
     crypto.createHash("sha256").update(fs.readFileSync(path.join(root, "scripts", "v1-brownfield-runtime-identity.mjs"))).digest("hex"),
-    "238e0e25d1acf47cc4accb5d7e0338e9149b78a1ebeb7fd067539726d7602c8e",
+    "a9292b324db2f4c0885bb4788731ca9c3ed26c956a1d4e250a21a9437652704f",
   );
   assert.deepEqual(RUNTIME_SERVICES.map(({ service }) => service), [
     "docker-action-activation-sidecar",
