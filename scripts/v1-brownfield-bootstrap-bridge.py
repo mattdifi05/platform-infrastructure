@@ -1,12 +1,13 @@
 #!/usr/bin/python3 -I
-"""One-time V1 bridge from the observed historical installer to exact-main.
+"""V1 bridge from the observed historical or exact prior control set to exact-main.
 
-The live historical consumer accepts only its frozen candidate.  This bridge is
-therefore executed once through the separately observed legacy NOPASSWD grant.
-It accepts one closed, hash-bound frame, preserves every replaced predeploy
-input, invokes the uploaded exact-main consumer with empty stdin, and emits a
-canonical receipt.  It has no Docker, service, provider, data, or activation
-authority.
+The initial live historical consumer accepts only its frozen candidate.  This
+bridge therefore enters through the separately observed legacy NOPASSWD grant;
+later candidates additionally require one complete exact prior receipt,
+release, and installed-control chain.  It accepts one closed, hash-bound frame,
+preserves every replaced predeploy input, invokes the uploaded exact-main
+consumer with empty stdin, and emits a canonical receipt.  It has no Docker,
+service, provider, data, or activation authority.
 """
 
 from __future__ import annotations
@@ -85,6 +86,38 @@ CONTROL_ARTIFACT_PATHS: Tuple[str, ...] = (
     RECONCILER,
     UNIT,
     V1_SUDOERS,
+)
+CONTROL_ARTIFACT_SPECS: Tuple[Tuple[str, str, str, int, int, int], ...] = (
+    ("installer", "scripts/v1-brownfield-install-consumer.py", INSTALLED_CONSUMER, 0o555, 0o555, MAX_CONSUMER),
+    ("controller", "scripts/v1-local-private-control.py", CONTROLLER, 0o444, 0o555, MAX_CONTROL_ARTIFACT),
+    ("reconciler", "scripts/v1-local-private-reconcile.py", RECONCILER, 0o444, 0o555, MAX_CONTROL_ARTIFACT),
+    ("unit", "systemd/platform-v1-local-private-control.service", UNIT, 0o444, 0o444, 64 * 1024),
+    ("sudoers", "sudoers/platform-v1-local-private-control", V1_SUDOERS, 0o444, 0o440, 64 * 1024),
+)
+INSTALL_READY_BUT_DISABLED = (
+    "PROVIDER_ADMISSION",
+    "DNS_PUBLICATION",
+    "DAST",
+    "SIGSTORE_PROMOTION",
+    "DOCKER_CONTROL_PLANE",
+)
+BRIDGE_RECEIPT_FIELDS = (
+    "bridgeSha256", "candidateCommit", "candidateConsumerSha256", "candidateTree",
+    "checkpointAfterSha256", "checkpointBeforeSha256", "controlArtifactReceiptSha256",
+    "dataMutation", "dockerMutation", "documentId", "gitBundleSha256", "hostControlMutation",
+    "installReceiptSha256", "legacyBroadSudoersAfterSha256", "legacyBroadSudoersBeforeSha256",
+    "legacyConsumerSha256", "legacyV1SudoersSha256", "nodeRuntimeReceiptSha256",
+    "releaseRoot", "schema", "sourceArchiveAfterSha256", "sourceArchiveBeforeSha256",
+    "stagingEnvironmentSha256", "stagingMutation", "status",
+)
+CONTROL_RECEIPT_FIELDS = (
+    "artifacts", "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
+    "hostControlMutation", "schema", "sourceArchiveSha256", "status",
+)
+INSTALL_RECEIPT_FIELDS = (
+    "activationAuthorized", "authorizationSource", "backupEvidenceAuthoritative",
+    "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
+    "readyButDisabled", "releaseRoot", "schema", "sourceArchiveSha256", "status",
 )
 
 
@@ -192,6 +225,185 @@ def snapshot(logical: str, label: str, maximum: int, *, uid: Optional[int] = Non
     if identity(before) != identity(opened) or identity(opened) != identity(after) or len(data) != before.st_size:
         stop(f"{label} changed during stable capture.")
     return bytes(data)
+
+
+def parse_canonical_object(raw: bytes, fields: Iterable[str], label: str) -> Dict[str, object]:
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        stop(f"{label} is not strict JSON.")
+    if canonical(value) != raw:
+        stop(f"{label} is not canonical JSON.")
+    return exact_keys(value, fields, label)
+
+
+def validate_document_id(value: Dict[str, object], label: str) -> None:
+    without_id = dict(value)
+    document_id = without_id.pop("documentId", None)
+    sha(document_id, f"{label} documentId")
+    if document_id != digest(canonical(without_id)[:-1]):
+        stop(f"{label} document ID is invalid.")
+
+
+def validate_prior_install_receipt(prior: Dict[str, object], owner: int) -> None:
+    commit = prior["candidateCommit"]
+    archive_sha = prior["sourceArchiveAfterSha256"]
+    logical = f"{RECEIPTS_PARENT}/{commit}-{archive_sha}.json"
+    raw = snapshot(logical, "prior exact install-only receipt", MAX_RECEIPT, uid=owner, modes=(0o444,))
+    value = parse_canonical_object(raw, INSTALL_RECEIPT_FIELDS, "prior exact install-only receipt")
+    if (
+        value["schema"] != "platform.v1-brownfield-install-receipt/v1"
+        or value["status"] not in ("INSTALL_ONLY_COMPLETE", "ALREADY_INSTALLED")
+        or value["candidateCommit"] != commit
+        or value["candidateTree"] != prior["candidateTree"]
+        or value["sourceArchiveSha256"] != archive_sha
+        or value["releaseRoot"] != prior["releaseRoot"]
+        or value["authorizationSource"] != "ROOT_OPERATOR_EXPLICIT_INSTALL_ONLY"
+        or value["backupEvidenceAuthoritative"] is not False
+        or value["activationAuthorized"] is not False
+        or value["dataMutation"] is not False
+        or value["dockerMutation"] is not False
+        or value["readyButDisabled"] != list(INSTALL_READY_BUT_DISABLED)
+    ):
+        stop("prior exact install-only receipt boundary/binding is invalid.")
+    # An idempotent install returns ALREADY_INSTALLED while deliberately leaving
+    # the first immutable receipt untouched.  The bridge binds that exact output,
+    # so accept only the durable bytes or that one deterministic status rendering.
+    accepted = {digest(raw)}
+    if value["status"] == "INSTALL_ONLY_COMPLETE":
+        accepted.add(digest(canonical({**value, "status": "ALREADY_INSTALLED"})))
+    if prior["installReceiptSha256"] not in accepted:
+        stop("prior bootstrap/install receipt digest chain is invalid.")
+
+
+def validate_prior_control_chain(
+    entries: List[Dict[str, object]],
+    expected_legacy_consumer_sha: str,
+    owner: int,
+) -> Tuple[str, str, str]:
+    prior_raw = snapshot(
+        BRIDGE_RECEIPT,
+        "prior bootstrap bridge receipt",
+        MAX_RECEIPT,
+        uid=owner,
+        modes=(0o400,),
+    )
+    prior = parse_canonical_object(prior_raw, BRIDGE_RECEIPT_FIELDS, "prior bootstrap bridge receipt")
+    validate_document_id(prior, "prior bootstrap bridge receipt")
+    commit = prior["candidateCommit"]
+    tree = prior["candidateTree"]
+    archive_sha = prior["sourceArchiveAfterSha256"]
+    if (
+        prior["schema"] != SCHEMA
+        or prior["status"] != "BOOTSTRAP_CONTROL_INSTALLED"
+        or not isinstance(commit, str)
+        or GIT_OBJECT.fullmatch(commit) is None
+        or not isinstance(tree, str)
+        or GIT_OBJECT.fullmatch(tree) is None
+    ):
+        stop("prior bootstrap bridge receipt identity/status is invalid.")
+    for field in (
+        "bridgeSha256", "candidateConsumerSha256", "checkpointAfterSha256",
+        "controlArtifactReceiptSha256", "gitBundleSha256",
+        "installReceiptSha256", "legacyBroadSudoersAfterSha256",
+        "legacyBroadSudoersBeforeSha256", "legacyConsumerSha256",
+        "legacyV1SudoersSha256", "nodeRuntimeReceiptSha256", "sourceArchiveAfterSha256",
+        "stagingEnvironmentSha256",
+    ):
+        sha(prior[field], f"prior bootstrap bridge receipt {field}")
+    for field in ("checkpointBeforeSha256", "sourceArchiveBeforeSha256"):
+        if prior[field] is not None:
+            sha(prior[field], f"prior bootstrap bridge receipt {field}")
+    release = f"{RELEASES_PARENT}/{commit}-{archive_sha}"
+    if (
+        prior["releaseRoot"] != release
+        or prior["dataMutation"] is not False
+        or prior["dockerMutation"] is not False
+        or not isinstance(prior["hostControlMutation"], bool)
+        or not isinstance(prior["stagingMutation"], bool)
+        or prior["legacyConsumerSha256"] != expected_legacy_consumer_sha
+        or prior["legacyV1SudoersSha256"] != digest(LEGACY_V1_SUDOERS)
+        or prior["legacyBroadSudoersBeforeSha256"] != digest(LEGACY_BROAD_SUDOERS_BYTES)
+        or prior["legacyBroadSudoersAfterSha256"] != digest(LEGACY_BROAD_SUDOERS_BYTES)
+    ):
+        stop("prior bootstrap bridge receipt boundary/history is invalid.")
+    if (
+        entries[0]["sha256"] != archive_sha
+        or entries[1]["sha256"] != prior["checkpointAfterSha256"]
+        or entries[2]["sha256"] != digest(prior_raw)
+    ):
+        stop("current bootstrap transport preimage differs from the prior exact receipt.")
+
+    control_raw = snapshot(
+        CONTROL_RECEIPT,
+        "prior bootstrap control receipt",
+        MAX_RECEIPT,
+        uid=owner,
+        modes=(0o400,),
+    )
+    control = parse_canonical_object(control_raw, CONTROL_RECEIPT_FIELDS, "prior bootstrap control receipt")
+    if (
+        entries[3]["sha256"] != digest(control_raw)
+        or prior["controlArtifactReceiptSha256"] != digest(control_raw)
+        or control["schema"] != "platform.v1-control-artifact-install-receipt/v1"
+        or control["status"] not in ("CONTROL_ARTIFACTS_INSTALLED", "ALREADY_INSTALLED")
+        or control["candidateCommit"] != commit
+        or control["candidateTree"] != tree
+        or control["sourceArchiveSha256"] != archive_sha
+        or control["dataMutation"] is not False
+        or control["dockerMutation"] is not False
+        or control["hostControlMutation"] is not (control["status"] == "CONTROL_ARTIFACTS_INSTALLED")
+        or prior["hostControlMutation"] is not control["hostControlMutation"]
+        or not isinstance(control["artifacts"], list)
+        or len(control["artifacts"]) != len(CONTROL_ARTIFACT_SPECS)
+    ):
+        stop("prior bootstrap/control receipt chain is invalid.")
+
+    for index, (raw, spec) in enumerate(zip(control["artifacts"], CONTROL_ARTIFACT_SPECS)):
+        name, source, target, source_mode, target_mode, maximum = spec
+        artifact = exact_keys(raw, ("mode", "name", "path", "sha256"), f"prior control artifact {index}")
+        artifact_sha = sha(artifact["sha256"], f"prior control artifact {index}")
+        if (
+            artifact["name"] != name
+            or artifact["path"] != target
+            or artifact["mode"] != f"{target_mode:04o}"
+            or entries[index + 4]["sha256"] != artifact_sha
+            or entries[index + 4]["mode"] != target_mode
+        ):
+            stop("prior control artifact identity/preimage is invalid.")
+        installed = snapshot(
+            target,
+            f"current installed V1 {name} artifact",
+            maximum,
+            uid=owner,
+            modes=(target_mode,),
+        )
+        frozen = snapshot(
+            f"{release}/{source}",
+            f"prior frozen V1 {name} artifact",
+            maximum,
+            uid=owner,
+            modes=(source_mode,),
+        )
+        if digest(installed) != artifact_sha or digest(frozen) != artifact_sha:
+            stop("current/frozen V1 control artifact differs from the prior exact receipt.")
+
+    bridge_source = snapshot(
+        f"{release}/scripts/v1-brownfield-bootstrap-bridge.py",
+        "prior frozen V1 bootstrap bridge",
+        MAX_BRIDGE,
+        uid=owner,
+        modes=(0o444,),
+    )
+    installer_sha = control["artifacts"][0]["sha256"]
+    if digest(bridge_source) != prior["bridgeSha256"] or installer_sha != prior["candidateConsumerSha256"]:
+        stop("prior release does not contain its receipt-bound bridge/consumer bytes.")
+    validate_prior_install_receipt(prior, owner)
+    return (
+        prior["legacyConsumerSha256"],
+        prior["legacyV1SudoersSha256"],
+        prior["legacyBroadSudoersBeforeSha256"],
+    )
 
 
 def fsync_dir(pathname: str) -> None:
@@ -440,6 +652,11 @@ def validate_or_create_staging(manifest: Dict[str, object], bundle: str, journal
         ).stdout
         if tracked_environment:
             stop("bootstrap refuses a source-tracked deployment environment.")
+        git_run(
+            ["-C", temporary, "update-ref", "refs/remotes/github/main", commit, "0" * 40],
+            "bootstrap exact github/main ref creation",
+            repository=temporary,
+        )
         if TEST_ROOT is None:
             for root, directories, files in os.walk(temporary):
                 os.chown(root, uid, gid)
@@ -453,8 +670,13 @@ def validate_or_create_staging(manifest: Dict[str, object], bundle: str, journal
         crash_point()
     head = git_run(["-C", pathname, "rev-parse", "--verify", "HEAD^{commit}"], "bootstrap staging commit", repository=pathname).stdout.decode().strip()
     actual_tree = git_run(["-C", pathname, "rev-parse", "--verify", "HEAD^{tree}"], "bootstrap staging tree", repository=pathname).stdout.decode().strip()
+    github_main = git_run(
+        ["-C", pathname, "rev-parse", "--verify", "refs/remotes/github/main^{commit}"],
+        "bootstrap staging github/main ref",
+        repository=pathname,
+    ).stdout.decode().strip()
     dirty = git_run(["-C", pathname, "status", "--porcelain=v1", "--untracked-files=all"], "bootstrap staging cleanliness", repository=pathname).stdout
-    if head != commit or actual_tree != tree or dirty:
+    if head != commit or actual_tree != tree or github_main != commit or dirty:
         stop("bootstrap staging checkout identity is invalid.")
     if git_run(["-C", pathname, "ls-files", "--", ".env"], "bootstrap staging environment ownership", repository=pathname).stdout:
         stop("bootstrap staging deployment environment is source-tracked.")
@@ -769,41 +991,11 @@ def main_apply() -> Dict[str, object]:
             legacy_v1_sudoers_sha256 = digest(legacy_v1_sudoers)
             legacy_broad_before_sha256 = digest(broad_sudoers)
         else:
-            if digest(legacy_consumer) != manifest["consumerSha256"]:
-                stop("installed consumer is neither the exact historical nor selected exact-main consumer.")
-            try:
-                prior_raw = snapshot(
-                    BRIDGE_RECEIPT,
-                    "prior bootstrap bridge receipt",
-                    MAX_RECEIPT,
-                    modes=(0o400,),
-                )
-                prior = json.loads(prior_raw.decode("utf-8", errors="strict"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                stop("current control artifacts lack the prior exact bootstrap receipt.")
-            prior_without_id = dict(prior)
-            prior_document_id = prior_without_id.pop("documentId", None)
-            if (
-                canonical(prior) != prior_raw
-                or prior_document_id != digest(json.dumps(prior_without_id, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode())
-                or prior.get("schema") != SCHEMA
-                or prior.get("status") != "BOOTSTRAP_CONTROL_INSTALLED"
-                or prior.get("candidateCommit") != manifest["candidateCommit"]
-                or prior.get("candidateTree") != manifest["candidateTree"]
-                or prior.get("sourceArchiveAfterSha256") != manifest["sourceArchiveSha256"]
-                or prior.get("bridgeSha256") != manifest["bridgeSha256"]
-                or prior.get("candidateConsumerSha256") != manifest["consumerSha256"]
-            ):
-                stop("prior exact bootstrap receipt does not bind this idempotent retry.")
-            legacy_consumer_sha256 = prior.get("legacyConsumerSha256")
-            legacy_v1_sudoers_sha256 = prior.get("legacyV1SudoersSha256")
-            legacy_broad_before_sha256 = prior.get("legacyBroadSudoersBeforeSha256")
-            if (
-                legacy_consumer_sha256 != expected_legacy_consumer_sha
-                or legacy_v1_sudoers_sha256 != digest(LEGACY_V1_SUDOERS)
-                or legacy_broad_before_sha256 != digest(LEGACY_BROAD_SUDOERS_BYTES)
-            ):
-                stop("prior bootstrap receipt does not preserve the exact historical precondition.")
+            (
+                legacy_consumer_sha256,
+                legacy_v1_sudoers_sha256,
+                legacy_broad_before_sha256,
+            ) = validate_prior_control_chain(entries, expected_legacy_consumer_sha, 0 if TEST_ROOT is None else uid)
 
         atomic_write(SOURCE_ARCHIVE, snapshot(f"{TRANSACTION}/sourceArchive.bin", "staged source archive", MAX_ARCHIVE, modes=(0o400,)), 0o400, "archive")
         crash_point()
