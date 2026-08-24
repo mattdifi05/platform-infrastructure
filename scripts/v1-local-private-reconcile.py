@@ -1275,6 +1275,12 @@ def materialize_environment(
     data = read_deployment_environment(repo_root)
     lines, values = parse_env(data, "deployment environment")
     replacements = {
+        "DOCKER_ACTION_ACTIVATION_INBOX": "/srv/platform/provider-activation/inbox",
+        "DOCKER_ACTION_ACTIVE_RECEIPT_FILE": "/srv/platform/trust/active-receipt.json",
+        "DOCKER_ACTION_ACTIVE_RECEIPT_SHA256": "0" * 64,
+        "DOCKER_ACTION_COMBINED_RENDER_SHA256": "0" * 64,
+        "DOCKER_ACTION_RUNTIME_INTENT_FILE": "/srv/platform/trust/runtime-intent.json",
+        "DOCKER_ACTION_RUNTIME_INTENT_ID": "intent.v1-local-private-ready-but-disabled",
         "HOSTED_WORKLOAD_LOCK": "",
         "HOSTED_WORKLOAD_MODE": "no-hosted",
         "PLATFORM_COMPOSE_VARIANT": "LOCAL_PRIVATE",

@@ -133,12 +133,23 @@ def materialize(lines):
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
  rendered,values=m['materialize_environment'](root)
  text=rendered.decode()
+ provider_names=(
+  'DOCKER_ACTION_ACTIVATION_INBOX','DOCKER_ACTION_ACTIVE_RECEIPT_FILE',
+  'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256','DOCKER_ACTION_COMBINED_RENDER_SHA256',
+  'DOCKER_ACTION_RUNTIME_INTENT_FILE','DOCKER_ACTION_RUNTIME_INTENT_ID',
+ )
+ runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
+ _,final_values=m['materialize_environment'](root,runtime)
  return {
   'core':values.get('CORE_VALUE'),
   'lock':values.get('HOSTED_WORKLOAD_LOCK'),
   'lockLines':text.count('HOSTED_WORKLOAD_LOCK='),
   'mode':values.get('HOSTED_WORKLOAD_MODE'),
   'modeLines':text.count('HOSTED_WORKLOAD_MODE='),
+  'provider':{name:values.get(name) for name in provider_names},
+  'providerLines':{name:text.count(name+'=') for name in provider_names},
+  'providerStable':all(final_values.get(name)==values.get(name) for name in provider_names),
+  'runtimeComplete':all(name in final_values for name in m['RUNTIME_IDENTITY_ENV']),
   'variant':values.get('PLATFORM_COMPOSE_VARIANT'),
   'variantLines':text.count('PLATFORM_COMPOSE_VARIANT='),
  }
@@ -147,6 +158,12 @@ print(json.dumps({
  'hosted':materialize([
   'HOSTED_WORKLOAD_LOCK=/run/platform/hosted-workloads.lock.json',
   'HOSTED_WORKLOAD_MODE=hosted','PLATFORM_COMPOSE_VARIANT=VPS','CORE_VALUE=kept',
+  'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/active',
+  'DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active.json',
+  'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256='+'a'*64,
+  'DOCKER_ACTION_COMBINED_RENDER_SHA256='+'b'*64,
+  'DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/intent.json',
+  'DOCKER_ACTION_RUNTIME_INTENT_ID=intent.active-provider',
  ]),
 }))`);
   for (const descriptor of [value.absent, value.hosted]) {
@@ -156,6 +173,24 @@ print(json.dumps({
       lockLines: 1,
       mode: "no-hosted",
       modeLines: 1,
+      provider: {
+        DOCKER_ACTION_ACTIVATION_INBOX: "/srv/platform/provider-activation/inbox",
+        DOCKER_ACTION_ACTIVE_RECEIPT_FILE: "/srv/platform/trust/active-receipt.json",
+        DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "0".repeat(64),
+        DOCKER_ACTION_COMBINED_RENDER_SHA256: "0".repeat(64),
+        DOCKER_ACTION_RUNTIME_INTENT_FILE: "/srv/platform/trust/runtime-intent.json",
+        DOCKER_ACTION_RUNTIME_INTENT_ID: "intent.v1-local-private-ready-but-disabled",
+      },
+      providerLines: {
+        DOCKER_ACTION_ACTIVATION_INBOX: 1,
+        DOCKER_ACTION_ACTIVE_RECEIPT_FILE: 1,
+        DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: 1,
+        DOCKER_ACTION_COMBINED_RENDER_SHA256: 1,
+        DOCKER_ACTION_RUNTIME_INTENT_FILE: 1,
+        DOCKER_ACTION_RUNTIME_INTENT_ID: 1,
+      },
+      providerStable: true,
+      runtimeComplete: true,
       variant: "LOCAL_PRIVATE",
       variantLines: 1,
     });
