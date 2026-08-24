@@ -939,9 +939,9 @@ function materializeQa8CanonicalSources(sandbox, config) {
   for (const [secretName, definition] of Object.entries(config.secrets ?? {})) {
     assert.equal(typeof definition?.file, "string", `missing ${secretName} secret path`);
     fs.mkdirSync(path.dirname(definition.file), { recursive: true, mode: 0o755 });
-    fs.writeFileSync(definition.file, `qa8-${secretName}\n`, {
-      mode: secretName === "alertmanager_webhook_token" ? 0o640 : 0o600,
-    });
+    const mode = secretName === "alertmanager_webhook_token" ? 0o640 : 0o600;
+    fs.writeFileSync(definition.file, `qa8-${secretName}\n`, { mode });
+    fs.chmodSync(definition.file, mode);
   }
   for (const service of Object.values(config.services ?? {})) {
     for (const mount of service.volumes ?? []) {
