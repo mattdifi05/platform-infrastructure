@@ -177,9 +177,9 @@ for (const forbidden of [
 ]) lacks(remoteSink, forbidden, `remote shim must not contain ${forbidden}`);
 
 assert.equal(
-  (installWorkflow.match(/^\s+sh \.\/scripts\/deploy-v1-install-only\.sh > "\$receipt"\s*$/gm) ?? []).length,
-  1,
-  "install-only workflow must expose one exact fixed sink",
+  (installWorkflow.match(/^\s+(?:sh|bash) \.\/scripts\/deploy-v1-install-only\.sh(?:\s|$)/gm) ?? []).length,
+  0,
+  "install-only workflow must expose no remote sink",
 );
 checks += 1;
 for (const forbidden of [
