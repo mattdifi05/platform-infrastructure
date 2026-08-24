@@ -65,7 +65,7 @@ READY_BUT_DISABLED = [
 ]
 
 GIT = "/usr/bin/git"
-VISUDO = "/usr/sbin/visudo"
+VISUDO = "/usr/lib/cargo/bin/visudo"
 SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
 SYSTEMCTL = "/usr/bin/systemctl"
 TEST_VISUDO_ENV = "PLATFORM_V1_INSTALL_CONSUMER_TEST_VISUDO"
