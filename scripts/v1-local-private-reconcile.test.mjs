@@ -124,6 +124,44 @@ print(json.dumps({'call':calls[0],'render':json.loads(render),'runtimeCall':call
   assert.equal(value.runtimeCall.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER, "1");
 });
 
+test("LOCAL_PRIVATE materialization closes an absent or hosted workload descriptor to exact no-hosted", () => {
+  const value = jsonPython(`
+import os,tempfile
+def materialize(lines):
+ root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+ pathname=os.path.join(root,'.env')
+ open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
+ rendered,values=m['materialize_environment'](root)
+ text=rendered.decode()
+ return {
+  'core':values.get('CORE_VALUE'),
+  'lock':values.get('HOSTED_WORKLOAD_LOCK'),
+  'lockLines':text.count('HOSTED_WORKLOAD_LOCK='),
+  'mode':values.get('HOSTED_WORKLOAD_MODE'),
+  'modeLines':text.count('HOSTED_WORKLOAD_MODE='),
+  'variant':values.get('PLATFORM_COMPOSE_VARIANT'),
+  'variantLines':text.count('PLATFORM_COMPOSE_VARIANT='),
+ }
+print(json.dumps({
+ 'absent':materialize(['CORE_VALUE=kept']),
+ 'hosted':materialize([
+  'HOSTED_WORKLOAD_LOCK=/run/platform/hosted-workloads.lock.json',
+  'HOSTED_WORKLOAD_MODE=hosted','PLATFORM_COMPOSE_VARIANT=VPS','CORE_VALUE=kept',
+ ]),
+}))`);
+  for (const descriptor of [value.absent, value.hosted]) {
+    assert.deepEqual(descriptor, {
+      core: "kept",
+      lock: "",
+      lockLines: 1,
+      mode: "no-hosted",
+      modeLines: 1,
+      variant: "LOCAL_PRIVATE",
+      variantLines: 1,
+    });
+  }
+});
+
 test("runtime identity is two-pass, non-circular and every excluded container is explicitly LEGACY_UNMANAGED", () => {
   const value = jsonPython(`
 import copy,os,tempfile
