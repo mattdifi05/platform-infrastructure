@@ -124,22 +124,28 @@ print(json.dumps({'call':calls[0],'render':json.loads(render),'runtimeCall':call
   assert.equal(value.runtimeCall.environment.PLATFORM_V1_LOCAL_PRIVATE_RENDER, "1");
 });
 
-test("LOCAL_PRIVATE materialization closes an absent or hosted workload descriptor to exact no-hosted", () => {
+test("LOCAL_PRIVATE materialization closes hosted state and binds disabled images to the exact local ops digest", () => {
   const value = jsonPython(`
 import os,tempfile
+ops_repository='127.0.0.1:5000/platform/ops'
+ops_sha256='c'*64
+ops_image=ops_repository+'@sha256:'+ops_sha256
 def materialize(lines):
  root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
  pathname=os.path.join(root,'.env')
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
- rendered,values=m['materialize_environment'](root)
+ rendered,values=m['materialize_environment'](root,ops_image)
  text=rendered.decode()
  provider_names=(
   'DOCKER_ACTION_ACTIVATION_INBOX','DOCKER_ACTION_ACTIVE_RECEIPT_FILE',
   'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256','DOCKER_ACTION_COMBINED_RENDER_SHA256',
   'DOCKER_ACTION_RUNTIME_INTENT_FILE','DOCKER_ACTION_RUNTIME_INTENT_ID',
+  'PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY','PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256',
+  'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
+  'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY','PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
- _,final_values=m['materialize_environment'](root,runtime)
+ _,final_values=m['materialize_environment'](root,ops_image,runtime)
  return {
   'core':values.get('CORE_VALUE'),
   'lock':values.get('HOSTED_WORKLOAD_LOCK'),
@@ -153,9 +159,16 @@ def materialize(lines):
   'variant':values.get('PLATFORM_COMPOSE_VARIANT'),
   'variantLines':text.count('PLATFORM_COMPOSE_VARIANT='),
  }
+def rejected(lines,supplied):
+ root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+ pathname=os.path.join(root,'.env')
+ open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
+ try: m['materialize_environment'](root,supplied); return False
+ except m['Stop']: return True
 print(json.dumps({
- 'absent':materialize(['CORE_VALUE=kept']),
+ 'absent':materialize(['PLATFORM_OPS_IMAGE='+ops_image,'CORE_VALUE=kept']),
  'hosted':materialize([
+  'PLATFORM_OPS_IMAGE='+ops_image,
   'HOSTED_WORKLOAD_LOCK=/run/platform/hosted-workloads.lock.json',
   'HOSTED_WORKLOAD_MODE=hosted','PLATFORM_COMPOSE_VARIANT=VPS','CORE_VALUE=kept',
   'DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/active',
@@ -164,7 +177,22 @@ print(json.dumps({
   'DOCKER_ACTION_COMBINED_RENDER_SHA256='+'b'*64,
   'DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/intent.json',
   'DOCKER_ACTION_RUNTIME_INTENT_ID=intent.active-provider',
+  'PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=registry.example.invalid/hosted/scheduler',
+  'PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256='+'1'*64,
+  'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=registry.example.invalid/hosted/broker',
+  'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256='+'2'*64,
+  'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/hosted/sidecar',
+  'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256='+'3'*64,
  ]),
+ 'foreignRepositoryRejected':rejected(
+  ['PLATFORM_OPS_IMAGE=registry.example.invalid/platform/ops@sha256:'+'d'*64],
+  'registry.example.invalid/platform/ops@sha256:'+'d'*64),
+ 'missingRejected':rejected(['CORE_VALUE=kept'],ops_image),
+ 'mismatchRejected':rejected(['PLATFORM_OPS_IMAGE='+ops_image],ops_repository+'@sha256:'+'d'*64),
+ 'tagRejected':rejected(['PLATFORM_OPS_IMAGE='+ops_repository+':latest'],ops_repository+':latest'),
+ 'zeroRejected':rejected(
+  ['PLATFORM_OPS_IMAGE='+ops_repository+'@sha256:'+'0'*64],
+  ops_repository+'@sha256:'+'0'*64),
 }))`);
   for (const descriptor of [value.absent, value.hosted]) {
     assert.deepEqual(descriptor, {
@@ -180,6 +208,12 @@ print(json.dumps({
         DOCKER_ACTION_COMBINED_RENDER_SHA256: "0".repeat(64),
         DOCKER_ACTION_RUNTIME_INTENT_FILE: "/srv/platform/trust/runtime-intent.json",
         DOCKER_ACTION_RUNTIME_INTENT_ID: "intent.v1-local-private-ready-but-disabled",
+        PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
+        PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: "c".repeat(64),
+        PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
+        PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: "c".repeat(64),
+        PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
+        PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: "c".repeat(64),
       },
       providerLines: {
         DOCKER_ACTION_ACTIVATION_INBOX: 1,
@@ -188,6 +222,12 @@ print(json.dumps({
         DOCKER_ACTION_COMBINED_RENDER_SHA256: 1,
         DOCKER_ACTION_RUNTIME_INTENT_FILE: 1,
         DOCKER_ACTION_RUNTIME_INTENT_ID: 1,
+        PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: 1,
+        PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: 1,
+        PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY: 1,
+        PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: 1,
+        PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: 1,
+        PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: 1,
       },
       providerStable: true,
       runtimeComplete: true,
@@ -195,6 +235,11 @@ print(json.dumps({
       variantLines: 1,
     });
   }
+  assert.equal(value.foreignRepositoryRejected, true);
+  assert.equal(value.missingRejected, true);
+  assert.equal(value.mismatchRejected, true);
+  assert.equal(value.tagRejected, true);
+  assert.equal(value.zeroRejected, true);
 });
 
 test("runtime identity is two-pass, non-circular and every excluded container is explicitly LEGACY_UNMANAGED", () => {

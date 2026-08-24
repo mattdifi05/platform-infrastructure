@@ -1265,7 +1265,9 @@ def read_deployment_environment(repo_root: str) -> bytes:
 
 
 def materialize_environment(
-    repo_root: str, runtime_identity: Optional[Dict[str, str]] = None
+    repo_root: str,
+    local_ops_image: str,
+    runtime_identity: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, Dict[str, str]]:
     source = os.path.join(repo_root, ".env")
     if not os.path.exists(source):
@@ -1274,6 +1276,18 @@ def materialize_environment(
     # embedded in authority.  Its exact bytes are bound by hash only.
     data = read_deployment_environment(repo_root)
     lines, values = parse_env(data, "deployment environment")
+    ops_repository = "127.0.0.1:5000/platform/ops"
+    ops_prefix = f"{ops_repository}@sha256:"
+    if (
+        not isinstance(local_ops_image, str)
+        or DIGEST_REFERENCE_RE.fullmatch(local_ops_image) is None
+        or not local_ops_image.startswith(ops_prefix)
+        or values.get("PLATFORM_OPS_IMAGE") != local_ops_image
+    ):
+        stop("deployment environment lacks the exact immutable local ops image binding.")
+    ops_sha256 = local_ops_image.removeprefix(ops_prefix)
+    if SHA256_RE.fullmatch(ops_sha256) is None or ops_sha256 == "0" * 64:
+        stop("deployment environment local ops image digest is not one non-zero SHA-256.")
     replacements = {
         "DOCKER_ACTION_ACTIVATION_INBOX": "/srv/platform/provider-activation/inbox",
         "DOCKER_ACTION_ACTIVE_RECEIPT_FILE": "/srv/platform/trust/active-receipt.json",
@@ -1283,7 +1297,18 @@ def materialize_environment(
         "DOCKER_ACTION_RUNTIME_INTENT_ID": "intent.v1-local-private-ready-but-disabled",
         "HOSTED_WORKLOAD_LOCK": "",
         "HOSTED_WORKLOAD_MODE": "no-hosted",
+        # The three backup-profile services are deliberately not V1 activation
+        # targets.  Bind their render-only image inputs to the already built,
+        # locally published immutable ops image so Compose can render all 20
+        # services without introducing a provider image/build authority.  Its
+        # missing provider entrypoints also make accidental startup fail closed.
+        "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY": ops_repository,
+        "PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256": ops_sha256,
         "PLATFORM_COMPOSE_VARIANT": "LOCAL_PRIVATE",
+        "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY": ops_repository,
+        "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256": ops_sha256,
+        "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY": ops_repository,
+        "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256": ops_sha256,
         "PLATFORM_SECRETS_ROOT": SECRET_DIR,
         "CONTROL_CENTER_DATABASE_URL_SECRET_FILE": DATABASE_SECRET,
         "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE": BOOTSTRAP_SECRET,
@@ -3750,12 +3775,13 @@ def prepare() -> Dict[str, object]:
     release_path = physical(release)
     if not os.path.isdir(release_path) or os.path.islink(release_path):
         stop("commit/archive-derived frozen release root is not materialized.")
-    build_and_publish_local_images(repo_root, release, commit)
+    local_images = build_and_publish_local_images(repo_root, release, commit)
+    local_ops_image = local_images["PLATFORM_OPS_IMAGE"]
     # Never create the recovery key until the immutable exact-release public
     # certificate has been parsed and fingerprinted successfully.
     recovery_escrow_certificate_binding(release)
     provision_confidential_backup_passphrase()
-    source_env_bytes, _ = materialize_environment(repo_root)
+    source_env_bytes, _ = materialize_environment(repo_root, local_ops_image)
     ensure_directory(STATE_DIR, 0o700)
     ensure_directory(PREDEPLOY_DIR, 0o700)
     ensure_directory(AUTHORITY_ARCHIVE_DIR, 0o700)
@@ -3763,7 +3789,7 @@ def prepare() -> Dict[str, object]:
     atomic_bytes(RENDER_ENV, source_env_bytes, 0o400)
     source_render_bytes = render_with_wrapper(release, digest(source_env_bytes))
     runtime_environment = runtime_identity_environment(commit, tree, release, source_render_bytes)
-    env_bytes, env_values = materialize_environment(repo_root, runtime_environment)
+    env_bytes, env_values = materialize_environment(repo_root, local_ops_image, runtime_environment)
     atomic_bytes(RENDER_ENV, env_bytes, 0o400)
     render_bytes = render_with_wrapper(release, digest(env_bytes))
     atomic_bytes(RENDER, render_bytes, 0o444)
