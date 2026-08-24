@@ -2029,6 +2029,7 @@ def read_deployment_environment(repo_root: str) -> bytes:
 
 def materialize_environment(
     repo_root: str,
+    release: str,
     local_ops_image: str,
     runtime_identity: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, Dict[str, str]]:
@@ -2060,6 +2061,9 @@ def materialize_environment(
         "DOCKER_ACTION_RUNTIME_INTENT_ID": "intent.v1-local-private-ready-but-disabled",
         "HOSTED_WORKLOAD_LOCK": "",
         "HOSTED_WORKLOAD_MODE": "no-hosted",
+        "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE": (
+            f"{release}/config/no-hosted-workloads.local-private.lock.json"
+        ),
         "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE": LOCAL_CA_CERTIFICATE,
         # The three backup-profile services are deliberately not V1 activation
         # targets.  Bind their render-only image inputs to the already built,
@@ -4625,7 +4629,7 @@ def prepare() -> Dict[str, object]:
     recovery_escrow_certificate_binding(release)
     prepare_live_prerequisite_cohort(release)
     provision_confidential_backup_passphrase()
-    source_env_bytes, _ = materialize_environment(repo_root, local_ops_image)
+    source_env_bytes, _ = materialize_environment(repo_root, release, local_ops_image)
     ensure_directory(STATE_DIR, 0o700)
     ensure_directory(PREDEPLOY_DIR, 0o700)
     ensure_directory(AUTHORITY_ARCHIVE_DIR, 0o700)
@@ -4633,7 +4637,9 @@ def prepare() -> Dict[str, object]:
     atomic_bytes(RENDER_ENV, source_env_bytes, 0o400)
     source_render_bytes = render_with_wrapper(release, digest(source_env_bytes))
     runtime_environment = runtime_identity_environment(commit, tree, release, source_render_bytes)
-    env_bytes, env_values = materialize_environment(repo_root, local_ops_image, runtime_environment)
+    env_bytes, env_values = materialize_environment(
+        repo_root, release, local_ops_image, runtime_environment
+    )
     atomic_bytes(RENDER_ENV, env_bytes, 0o400)
     render_bytes = render_with_wrapper(release, digest(env_bytes))
     atomic_bytes(RENDER, render_bytes, 0o444)

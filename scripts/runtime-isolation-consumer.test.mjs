@@ -673,6 +673,69 @@ const qa8GoldenParserPath = path.join(
   "hosted-golden-parser.rb",
 );
 let qa8RepositoryGoldenTemplate;
+let gitArchiveBufferTemplate;
+let gitArchiveEntryTemplate;
+
+function gitArchiveBytes() {
+  if (gitArchiveBufferTemplate !== undefined) return gitArchiveBufferTemplate;
+  const archive = spawnSync(
+    "git",
+    ["-C", repositoryRoot, "archive", "--format=tar", "HEAD"],
+    { encoding: null, maxBuffer: 64 * 1024 * 1024 },
+  );
+  assert.equal(
+    archive.status,
+    0,
+    `git archive failed: ${archive.stderr?.toString("utf8") ?? ""}`,
+  );
+  gitArchiveBufferTemplate = archive.stdout;
+  return gitArchiveBufferTemplate;
+}
+
+function gitArchiveEntries() {
+  if (gitArchiveEntryTemplate !== undefined) return [...gitArchiveEntryTemplate];
+  const listing = spawnSync("/usr/bin/tar", ["-tf", "-"], {
+    encoding: "utf8",
+    input: gitArchiveBytes(),
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  assert.equal(listing.status, 0, `git archive listing failed: ${listing.stderr}`);
+  gitArchiveEntryTemplate = listing.stdout.trimEnd().split("\n");
+  return [...gitArchiveEntryTemplate];
+}
+
+function pinnedComposeRendererOrSkip(t) {
+  const binary = String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN || "");
+  const expectedSha256 = String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_SHA256 || "");
+  if (!binary && !expectedSha256) {
+    t.skip("NOT_RUN: SHA-pinned standalone Compose renderer is unavailable");
+    return null;
+  }
+  assert.equal(path.isAbsolute(binary), true, "Compose renderer path must be absolute");
+  assert.match(expectedSha256, /^[a-f0-9]{64}$/);
+  const metadata = fs.lstatSync(binary);
+  assert.equal(metadata.isFile() && !metadata.isSymbolicLink(), true);
+  assert.equal(metadata.nlink, 1, "Compose renderer must have one filesystem link");
+  assert.equal(
+    crypto.createHash("sha256").update(fs.readFileSync(binary)).digest("hex"),
+    expectedSha256,
+    "Compose renderer SHA-256 drifted",
+  );
+  const version = spawnSync(binary, ["version", "--short"], {
+    encoding: "utf8",
+    env: {
+      DOCKER_HOST: `unix://${path.join(os.tmpdir(), "v1-archive-render-engine-must-not-exist.sock")}`,
+      HOME: os.tmpdir(),
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: process.env.PATH,
+    },
+    timeout: 10_000,
+  });
+  assert.equal(version.status, 0, version.stderr);
+  assert.equal(version.stdout.trim(), "5.3.1");
+  return binary;
+}
 
 function qa8EnvironmentObject(sandbox) {
   return {
@@ -3121,6 +3184,315 @@ function localPrivateQa8Fixture(sandbox) {
   };
 }
 
+function parseMaterializedEnvironment(bytes) {
+  const environment = new Map();
+  for (const line of bytes.toString("utf8").replaceAll("\r\n", "\n").split("\n")) {
+    if (line === "" || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    assert.ok(separator > 0, `invalid materialized environment line: ${line}`);
+    const name = line.slice(0, separator);
+    assert.match(name, /^[A-Za-z_][A-Za-z0-9_]*$/);
+    assert.equal(environment.has(name), false, `duplicate materialized environment: ${name}`);
+    environment.set(name, line.slice(separator + 1));
+  }
+  return environment;
+}
+
+function materializeArchiveRenderEnvironment({
+  staging,
+  release,
+  reconciler,
+  opsImage,
+  runtimeIdentity = null,
+  paths,
+}) {
+  const program = String.raw`
+import json, os, runpy, sys
+m = runpy.run_path(os.environ["V1_TEST_RECONCILER"], run_name="v1_archive_render_fixture")
+g = m["materialize_environment"].__globals__
+for name in (
+    "PROJECT_SOURCE_ROOT", "DEPLOYMENT_REPO", "PROJECT_STATE_ROOT",
+    "CERTIFICATES_ROOT", "SECRET_DIR", "LOCAL_CA_CERTIFICATE",
+    "DATABASE_SECRET", "BOOTSTRAP_SECRET", "KEYCLOAK_CLIENT_SECRET",
+    "CONFIDENTIAL_BACKUP_PASSPHRASE",
+):
+    g[name] = os.environ["V1_TEST_" + name]
+runtime = json.loads(os.environ["V1_TEST_RUNTIME_IDENTITY"])
+data, _ = m["materialize_environment"](
+    os.environ["V1_TEST_STAGING"],
+    os.environ["V1_TEST_RELEASE"],
+    os.environ["V1_TEST_OPS_IMAGE"],
+    runtime,
+)
+sys.stdout.buffer.write(data)
+`;
+  const execution = spawnSync("python3", ["-I", "-c", program], {
+    encoding: null,
+    env: {
+      PATH: process.env.PATH,
+      LANG: "C",
+      LC_ALL: "C",
+      V1_TEST_RECONCILER: reconciler,
+      V1_TEST_STAGING: staging,
+      V1_TEST_RELEASE: release,
+      V1_TEST_OPS_IMAGE: opsImage,
+      V1_TEST_RUNTIME_IDENTITY: JSON.stringify(runtimeIdentity),
+      V1_TEST_PROJECT_SOURCE_ROOT: paths.source,
+      V1_TEST_DEPLOYMENT_REPO: paths.data,
+      V1_TEST_PROJECT_STATE_ROOT: paths.state,
+      V1_TEST_CERTIFICATES_ROOT: paths.certificates,
+      V1_TEST_SECRET_DIR: paths.secrets,
+      V1_TEST_LOCAL_CA_CERTIFICATE: paths.localCa,
+      V1_TEST_DATABASE_SECRET: paths.databaseSecret,
+      V1_TEST_BOOTSTRAP_SECRET: paths.bootstrapSecret,
+      V1_TEST_KEYCLOAK_CLIENT_SECRET: paths.keycloakClientSecret,
+      V1_TEST_CONFIDENTIAL_BACKUP_PASSPHRASE: paths.confidentialPassphrase,
+    },
+    maxBuffer: 2 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  assert.equal(
+    execution.status,
+    0,
+    execution.stderr?.toString("utf8") ?? "materialize_environment failed",
+  );
+  return execution.stdout;
+}
+
+test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and exact policy", { timeout: 60_000 }, (t) => {
+  const compose = pinnedComposeRendererOrSkip(t);
+  if (compose === null) return;
+  const archiveBytes = gitArchiveBytes();
+  const temporaryRoot = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "v1-local-private-archive-render-")),
+  );
+  const archiveSha256 = crypto.createHash("sha256").update(archiveBytes).digest("hex");
+  const releaseId = `${"1".repeat(40)}-${archiveSha256}`;
+  const release = path.join(temporaryRoot, "infrastructure", "releases", releaseId);
+  try {
+    fs.mkdirSync(release, { recursive: true, mode: 0o755 });
+    const extraction = spawnSync("/usr/bin/tar", ["-xf", "-", "-C", release], {
+      input: archiveBytes,
+      maxBuffer: 2 * 1024 * 1024,
+      timeout: 10_000,
+    });
+    assert.equal(extraction.status, 0, extraction.stderr?.toString("utf8"));
+    for (const relativePath of [
+      "scripts/no-hosted-core-policy.mjs",
+      "scripts/v1-local-private-reconcile.py",
+    ]) {
+      assert.deepEqual(
+        fs.readFileSync(path.join(release, relativePath)),
+        fs.readFileSync(path.join(repositoryRoot, relativePath)),
+        `${relativePath} differs between the true HEAD archive and the tested worktree`,
+      );
+    }
+    for (const excludedPath of ["projects-portal/state", "traefik/certs"]) {
+      assert.equal(
+        fs.existsSync(path.join(release, excludedPath)),
+        false,
+        `${excludedPath} unexpectedly survived extraction of the real git archive`,
+      );
+    }
+    freezeReleaseTree(release);
+
+    const paths = {
+      data: path.join(temporaryRoot, "live"),
+      state: path.join(temporaryRoot, "live", "projects-portal", "state"),
+      certificates: path.join(temporaryRoot, "live", "traefik", "certs"),
+      secrets: path.join(temporaryRoot, "live", "secrets"),
+      source: path.join(temporaryRoot, "src"),
+      staging: path.join(temporaryRoot, "staging"),
+      renderState: path.join(temporaryRoot, "render-state"),
+    };
+    for (const directory of [
+      paths.data,
+      paths.state,
+      paths.certificates,
+      paths.secrets,
+      paths.source,
+      paths.staging,
+      paths.renderState,
+    ]) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.chmodSync(directory, 0o700);
+    }
+    const writePrivateFixture = (filename, mode) => {
+      fs.writeFileSync(filename, "v1-archive-render-fixture\n", { flag: "wx", mode });
+      fs.chmodSync(filename, mode);
+    };
+    const certificate = path.join(paths.certificates, "local-cert.pem");
+    const privateKey = path.join(paths.certificates, "local-key.pem");
+    paths.localCa = path.join(paths.certificates, "ca.pem");
+    paths.bootstrapSecret = path.join(
+      paths.secrets,
+      "control_center_first_configuration_bootstrap_token.txt",
+    );
+    paths.keycloakClientSecret = path.join(
+      paths.secrets,
+      "control_center_first_configuration_keycloak_client_secret.txt",
+    );
+    for (const [filename, mode] of [
+      [certificate, 0o644],
+      [privateKey, 0o600],
+      [paths.localCa, 0o644],
+      [paths.bootstrapSecret, 0o600],
+      [paths.keycloakClientSecret, 0o600],
+    ]) writePrivateFixture(filename, mode);
+    for (const authority of Object.values(LOCAL_PRIVATE_BASE_SECRET_AUTHORITY)) {
+      writePrivateFixture(
+        path.join(paths.secrets, authority.filename),
+        Number.parseInt(authority.mode, 8),
+      );
+    }
+    paths.databaseSecret = path.join(
+      paths.secrets,
+      LOCAL_PRIVATE_BASE_SECRET_AUTHORITY.control_center_database_url.filename,
+    );
+    paths.confidentialPassphrase = path.join(paths.renderState, "confidential-backup-passphrase");
+    writePrivateFixture(paths.confidentialPassphrase, 0o600);
+
+    const opsSha256 = "f".repeat(64);
+    const opsRepository = "127.0.0.1:5000/platform/ops";
+    const opsImage = `${opsRepository}@sha256:${opsSha256}`;
+    const stagingEnvironment = [
+      "ALERT_EMAIL_TO=qa@fixture.invalid",
+      "COMPOSE_PROJECT_NAME=platform_infra_vps",
+      "DOMAIN=fixture.invalid",
+      "HOSTED_WORKLOAD_LOCK=/run/platform/hosted-workloads.lock.json",
+      "HOSTED_WORKLOAD_MODE=hosted",
+      "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=/tmp/not-the-release-lock.json",
+      "MAILER_FROM=qa@fixture.invalid",
+      "MAILER_REPLY_TO=qa@fixture.invalid",
+      `PLATFORM_OPS_IMAGE=${opsImage}`,
+      "PLATFORM_COMPOSE_VARIANT=VPS",
+      "PROJECTS_GATEWAY_EMAIL=qa@fixture.invalid",
+      "SMTP_HOST=smtp.fixture.invalid",
+      "SMTP_USER=qa",
+      "",
+    ].join("\n");
+    const stagingEnvironmentPath = path.join(paths.staging, ".env");
+    fs.writeFileSync(stagingEnvironmentPath, stagingEnvironment, { mode: 0o600 });
+    fs.chmodSync(stagingEnvironmentPath, 0o600);
+
+    const composeFiles = [
+      "compose.yaml",
+      "compose.secrets.yaml",
+      "compose.waf.yaml",
+      "compose.vps.yaml",
+      "compose.vps-waf.yaml",
+      "compose.backup-scheduler.yaml",
+      "compose.runtime.yaml",
+      "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
+      "compose.local-private.yaml",
+    ];
+    const dockerConfig = path.join(temporaryRoot, "docker-config");
+    fs.mkdirSync(dockerConfig, { mode: 0o700 });
+    const render = (label, environmentBytes, files) => {
+      const environmentFile = path.join(paths.renderState, `${label}.env`);
+      fs.writeFileSync(environmentFile, environmentBytes, { flag: "wx", mode: 0o400 });
+      fs.chmodSync(environmentFile, 0o400);
+      const result = spawnSync(compose, [
+        "--env-file",
+        environmentFile,
+        "-p",
+        "platform_infra_vps",
+        ...files.flatMap((filename) => ["-f", filename]),
+        "--profile",
+        "backup",
+        "config",
+        "--format",
+        "json",
+      ], {
+        cwd: release,
+        encoding: "utf8",
+        env: {
+          COMPOSE_ANSI: "never",
+          DOCKER_CONFIG: dockerConfig,
+          DOCKER_HOST: `unix://${path.join(temporaryRoot, "engine-must-not-exist.sock")}`,
+          HOME: temporaryRoot,
+          LANG: "C",
+          LC_ALL: "C",
+          PATH: process.env.PATH,
+        },
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 30_000,
+      });
+      assert.equal(
+        result.status,
+        0,
+        `${label} real Compose render failed:\n${result.stdout}\n${result.stderr}`,
+      );
+      return { bytes: Buffer.from(result.stdout), config: JSON.parse(result.stdout) };
+    };
+
+    const sourceEnvironmentBytes = materializeArchiveRenderEnvironment({
+      staging: paths.staging,
+      release,
+      reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
+      opsImage,
+      paths,
+    });
+    const sourceEnvironment = parseMaterializedEnvironment(sourceEnvironmentBytes);
+    assert.equal(
+      sourceEnvironment.get("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE"),
+      path.join(release, "config", "no-hosted-workloads.local-private.lock.json"),
+    );
+    assert.equal(
+      sourceEnvironmentBytes.toString("utf8")
+        .split("\n")
+        .filter((line) => line.startsWith("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=")).length,
+      1,
+    );
+    const source = render("source", sourceEnvironmentBytes, composeFiles);
+    const lockBytes = fs.readFileSync(
+      path.join(release, "config", "no-hosted-workloads.local-private.lock.json"),
+    );
+    const runtimeIdentity = {
+      PLATFORM_RUNTIME_CANDIDATE_ID: "2".repeat(64),
+      PLATFORM_RUNTIME_COMMIT: "3".repeat(40),
+      PLATFORM_RUNTIME_TREE: "4".repeat(40),
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: `v1-local-private:${"5".repeat(64)}`,
+      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256:
+        crypto.createHash("sha256").update(source.bytes).digest("hex"),
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256:
+        crypto.createHash("sha256").update(lockBytes).digest("hex"),
+    };
+    const finalEnvironmentBytes = materializeArchiveRenderEnvironment({
+      staging: paths.staging,
+      release,
+      reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
+      opsImage,
+      runtimeIdentity,
+      paths,
+    });
+    const finalEnvironment = parseMaterializedEnvironment(finalEnvironmentBytes);
+    const final = render(
+      "final",
+      finalEnvironmentBytes,
+      [...composeFiles, "compose.runtime-identity.yaml"],
+    );
+    const lock = JSON.parse(lockBytes);
+    assert.equal(Object.keys(source.config.services).length, 20);
+    assert.equal(Object.keys(final.config.services).length, 20);
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(lock, source.config, release, sourceEnvironment),
+      [],
+    );
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(lock, final.config, release, finalEnvironment),
+      [],
+    );
+    for (const excludedPath of ["projects-portal/state", "traefik/certs"]) {
+      assert.equal(fs.existsSync(path.join(release, excludedPath)), false);
+    }
+  } finally {
+    if (fs.existsSync(release)) thawReleaseTree(release);
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets outside the release", () => {
   const sandbox = createConsumerSandbox();
   try {
@@ -3174,7 +3546,25 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets 
 test("LOCAL_PRIVATE accepts the exact immutable release modes produced by the install consumer", () => {
   const sandbox = createConsumerSandbox();
   try {
+    const archiveEntries = gitArchiveEntries();
+    for (const excludedPrefix of ["projects-portal/state", "traefik/certs"]) {
+      assert.equal(
+        archiveEntries.some((entry) => (
+          entry === excludedPrefix || entry.startsWith(`${excludedPrefix}/`)
+        )),
+        false,
+        `${excludedPrefix} unexpectedly survived the real git archive boundary`,
+      );
+    }
     const fixture = localPrivateQa8Fixture(sandbox);
+    for (const excludedPath of ["projects-portal/state", "traefik/certs"]) {
+      fs.rmSync(path.join(sandbox.root, excludedPath), { recursive: true, force: true });
+      assert.equal(
+        fs.existsSync(path.join(sandbox.root, excludedPath)),
+        false,
+        `${excludedPath} was synthesized inside the archive fixture`,
+      );
+    }
     freezeReleaseTree(sandbox.root);
     assert.equal(
       fs.statSync(path.join(sandbox.root, "config", "no-hosted-workloads.local-private.lock.json")).mode & 0o777,
@@ -3191,6 +3581,45 @@ test("LOCAL_PRIVATE accepts the exact immutable release modes produced by the in
       fixture.environment,
     );
     assert.deepEqual(violations, [], `immutable release authority rejected: ${violations.join(",")}`);
+
+    const missingRuntimeLockEnvironment = new Map(fixture.environment);
+    missingRuntimeLockEnvironment.delete("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE");
+    assert.ok(
+      validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        missingRuntimeLockEnvironment,
+      ).includes("local-private:runtime-lock-authority"),
+      "a missing semantic runtime-lock binding escaped LOCAL_PRIVATE authority",
+    );
+    const wrongRuntimeLockEnvironment = new Map(fixture.environment);
+    wrongRuntimeLockEnvironment.set("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE", sandbox.canonicalLock);
+    assert.ok(
+      validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        wrongRuntimeLockEnvironment,
+      ).includes("local-private:runtime-lock-authority"),
+      "a different semantic runtime-lock binding escaped LOCAL_PRIVATE authority",
+    );
+
+    const unrelatedRepositoryBind = fixture.config.services.prometheus.volumes.find(
+      (mount) => mount?.type === "bind" && mount.target === "/etc/prometheus/prometheus.yml",
+    );
+    assert.ok(unrelatedRepositoryBind, "prometheus repository bind fixture drifted");
+    fs.chmodSync(unrelatedRepositoryBind.source, 0o400);
+    assert.ok(
+      validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        fixture.environment,
+      ).includes("prometheus:repository-bind-authority"),
+      "the projected-bind exception leaked to an unrelated repository bind",
+    );
+    fs.chmodSync(unrelatedRepositoryBind.source, 0o444);
 
     fs.chmodSync(
       path.join(sandbox.root, "config", "no-hosted-workloads.local-private.lock.json"),
@@ -3229,6 +3658,67 @@ test("LOCAL_PRIVATE wrapper renders once against its exact lock and semantic env
     );
   } finally {
     removeSandbox(sandbox);
+  }
+});
+
+test("LOCAL_PRIVATE projected archive bind exceptions remain exact across tuple and external-mode drift", () => {
+  const scenarios = [
+    ["source", ({ config }) => {
+      const certificateMount = config.services.waf.volumes
+        .find((mount) => mount.target === "/etc/nginx/conf/server.crt");
+      const privateKeyMount = config.services.waf.volumes
+        .find((mount) => mount.target === "/etc/nginx/conf/server.key");
+      certificateMount.source = privateKeyMount.source;
+    }, "waf:local-private-mount-/etc/nginx/conf/server.crt"],
+    ["read-only", ({ config }) => {
+      config.services.waf.volumes
+        .find((mount) => mount.target === "/etc/nginx/conf/server.crt").read_only = false;
+    }, "waf:local-private-mount-/etc/nginx/conf/server.crt"],
+    ["target", ({ config }) => {
+      config.services.waf.volumes
+        .find((mount) => mount.target === "/etc/nginx/conf/server.crt").target =
+          "/etc/nginx/conf/server.crt.drift";
+    }, "waf:local-private-mount-/etc/nginx/conf/server.crt"],
+    ["service", ({ config }) => {
+      const volumes = config.services["control-center"].volumes;
+      const index = volumes.findIndex((mount) => mount.target === "/var/www/project-state");
+      assert.notEqual(index, -1, "control-center state mount fixture drifted");
+      config.services.prometheus.volumes.push(...volumes.splice(index, 1));
+    }, "control-center:local-private-mount-/var/www/project-state"],
+    ["certificate mode", ({ config }) => {
+      fs.chmodSync(
+        config.services.waf.volumes
+          .find((mount) => mount.target === "/etc/nginx/conf/server.crt").source,
+        0o600,
+      );
+    }, "local-private:certificate-authority"],
+    ["state mode", ({ environment }) => {
+      fs.chmodSync(environment.get("PLATFORM_STATE_DIR"), 0o770);
+    }, "local-private:state-directory-authority"],
+  ];
+  for (const [label, mutate, expectedViolation] of scenarios) {
+    const sandbox = createConsumerSandbox();
+    try {
+      const fixture = localPrivateQa8Fixture(sandbox);
+      for (const excludedPath of ["projects-portal/state", "traefik/certs"]) {
+        fs.rmSync(path.join(sandbox.root, excludedPath), { recursive: true, force: true });
+      }
+      freezeReleaseTree(sandbox.root);
+      mutate(fixture);
+      const violations = validateNoHostedCoreAuthority(
+        fixture.lock,
+        fixture.config,
+        sandbox.root,
+        fixture.environment,
+      );
+      assert.ok(
+        violations.includes(expectedViolation),
+        `${label} did not revoke the projected bind exception: ${violations.join(",")}`,
+      );
+    } finally {
+      thawReleaseTree(sandbox.root);
+      removeSandbox(sandbox);
+    }
   }
 });
 
