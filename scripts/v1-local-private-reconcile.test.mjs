@@ -208,6 +208,43 @@ print(json.dumps({
   assert.match(source, /"composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit"/);
 });
 
+test("PRE render semantics accept Compose composite durations and inline configs only in their exact form", () => {
+  const value = jsonPython(`
+positives={item:m['duration_nanoseconds'](item,'fixture') for item in ('20s','1m0s','1h2m3s4ms5us6ns')}
+duration_rejected={}
+for item in ('','1s1m','1m0m','1m0sX','1.5s'):
+ try: m['duration_nanoseconds'](item,'fixture'); duration_rejected[item]=False
+ except m['Stop']: duration_rejected[item]=True
+render={'configs':{'routes':{'content':'http:\\n','name':'platform_routes'}},'secrets':{}}
+service={'configs':[{'source':'routes','target':'/etc/routes.yml'}]}
+inline_mounts=m['render_mounts'](render,service,'platform','fixture')
+content_drift={'configs':{'routes':{'content':'http:\\n# drift\\n','name':'platform_routes'}},'secrets':{}}
+content_bound=m['digest'](m['canonical_bytes'](render)) != m['digest'](m['canonical_bytes'](content_drift))
+inline_rejected={}
+mutants={
+ 'read-only':dict(service,read_only=True),
+ 'reference-extra':{'configs':[{'source':'routes','target':'/etc/routes.yml','mode':292}]},
+}
+for name,candidate in mutants.items():
+ try: m['render_mounts'](render,candidate,'platform','fixture'); inline_rejected[name]=False
+ except m['Stop']: inline_rejected[name]=True
+wrong={'configs':{'routes':{'content':'http:\\n','name':'platform_routes','file':'/tmp/routes'}},'secrets':{}}
+try: m['render_mounts'](wrong,service,'platform','fixture'); inline_rejected['definition-extra']=False
+except m['Stop']: inline_rejected['definition-extra']=True
+print(json.dumps({'positives':positives,'durationRejected':duration_rejected,'inlineMounts':inline_mounts,'inlineRejected':inline_rejected,'contentBound':content_bound},sort_keys=True))`);
+  assert.deepEqual(value, {
+    contentBound: true,
+    durationRejected: { "": true, "1.5s": true, "1m0m": true, "1m0sX": true, "1s1m": true },
+    inlineMounts: [],
+    inlineRejected: { "definition-extra": true, "read-only": true, "reference-extra": true },
+    positives: {
+      "1h2m3s4ms5us6ns": 3_723_004_005_006,
+      "1m0s": 60_000_000_000,
+      "20s": 20_000_000_000,
+    },
+  });
+});
+
 test("release renders use only the dedicated V1 LOCAL_PRIVATE authority and recheck the exact environment", () => {
   const value = jsonPython(`
 import os,tempfile

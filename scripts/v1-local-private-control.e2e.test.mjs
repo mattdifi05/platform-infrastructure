@@ -61,6 +61,46 @@ print(json.dumps({'accepted':accepted,'rejected':rejected}))
   });
 });
 
+test("controller revalidation matches PRE composite durations and inline config semantics", () => {
+  const output = runPython(String.raw`
+import importlib.util, json
+spec=importlib.util.spec_from_file_location("control", ${JSON.stringify(controller)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+positives={item:m.duration_nanoseconds(item,'fixture') for item in ('20s','1m0s','1h2m3s4ms5us6ns')}
+duration_rejected={}
+for item in ('','1s1m','1m0m','1m0sX','1.5s'):
+ try: m.duration_nanoseconds(item,'fixture'); duration_rejected[item]=False
+ except m.Stop: duration_rejected[item]=True
+render={'configs':{'routes':{'content':'http:\\n','name':'platform_routes'}},'secrets':{}}
+service={'configs':[{'source':'routes','target':'/etc/routes.yml'}]}
+inline_mounts=m.render_mounts(render,service,'platform','fixture')
+content_drift={'configs':{'routes':{'content':'http:\\n# drift\\n','name':'platform_routes'}},'secrets':{}}
+content_bound=m.digest(m.canonical_bytes(render)) != m.digest(m.canonical_bytes(content_drift))
+inline_rejected={}
+for name,candidate in (
+ ('read-only',dict(service,read_only=True)),
+ ('reference-extra',{'configs':[{'source':'routes','target':'/etc/routes.yml','mode':292}]}),
+):
+ try: m.render_mounts(render,candidate,'platform','fixture'); inline_rejected[name]=False
+ except m.Stop: inline_rejected[name]=True
+wrong={'configs':{'routes':{'content':'http:\\n','name':'platform_routes','file':'/tmp/routes'}},'secrets':{}}
+try: m.render_mounts(wrong,service,'platform','fixture'); inline_rejected['definition-extra']=False
+except m.Stop: inline_rejected['definition-extra']=True
+print(json.dumps({'positives':positives,'durationRejected':duration_rejected,'inlineMounts':inline_mounts,'inlineRejected':inline_rejected,'contentBound':content_bound},sort_keys=True))
+`);
+  assert.deepEqual(output, {
+    contentBound: true,
+    durationRejected: { "": true, "1.5s": true, "1m0m": true, "1m0sX": true, "1s1m": true },
+    inlineMounts: [],
+    inlineRejected: { "definition-extra": true, "read-only": true, "reference-extra": true },
+    positives: {
+      "1h2m3s4ms5us6ns": 3_723_004_005_006,
+      "1m0s": 60_000_000_000,
+      "20s": 20_000_000_000,
+    },
+  });
+});
+
 test("pure reconciliation model removes scheduler, retains legacy, and derives mutation truth", () => {
   const output = runPython(String.raw`
 import importlib.util, json
