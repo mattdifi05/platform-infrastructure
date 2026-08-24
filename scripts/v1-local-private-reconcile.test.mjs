@@ -137,12 +137,15 @@ def materialize(lines):
  rendered,values=m['materialize_environment'](root,ops_image)
  text=rendered.decode()
  provider_names=(
+  'CONTROL_CENTER_LOCAL_CA_CERT_SOURCE',
   'DOCKER_ACTION_ACTIVATION_INBOX','DOCKER_ACTION_ACTIVE_RECEIPT_FILE',
   'DOCKER_ACTION_ACTIVE_RECEIPT_SHA256','DOCKER_ACTION_COMBINED_RENDER_SHA256',
   'DOCKER_ACTION_RUNTIME_INTENT_FILE','DOCKER_ACTION_RUNTIME_INTENT_ID',
   'PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY','PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256',
+  'PLATFORM_CERTS_DIR','PLATFORM_DATA_ROOT',
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY','PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256',
+  'PLATFORM_STATE_DIR',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
  _,final_values=m['materialize_environment'](root,ops_image,runtime)
@@ -183,6 +186,10 @@ print(json.dumps({
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256='+'2'*64,
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/hosted/sidecar',
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256='+'3'*64,
+  'PLATFORM_DATA_ROOT=/srv/hosted/data',
+  'PLATFORM_STATE_DIR=/srv/hosted/state',
+  'PLATFORM_CERTS_DIR=/srv/hosted/certs',
+  'CONTROL_CENTER_LOCAL_CA_CERT_SOURCE=/srv/hosted/certs/ca.pem',
  ]),
  'foreignRepositoryRejected':rejected(
   ['PLATFORM_OPS_IMAGE=registry.example.invalid/platform/ops@sha256:'+'d'*64],
@@ -202,6 +209,7 @@ print(json.dumps({
       mode: "no-hosted",
       modeLines: 1,
       provider: {
+        CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: "/home/platform_infrastructure/platform-infrastructure/traefik/certs/ca.pem",
         DOCKER_ACTION_ACTIVATION_INBOX: "/srv/platform/provider-activation/inbox",
         DOCKER_ACTION_ACTIVE_RECEIPT_FILE: "/srv/platform/trust/active-receipt.json",
         DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "0".repeat(64),
@@ -210,12 +218,16 @@ print(json.dumps({
         DOCKER_ACTION_RUNTIME_INTENT_ID: "intent.v1-local-private-ready-but-disabled",
         PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
         PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: "c".repeat(64),
+        PLATFORM_CERTS_DIR: "/home/platform_infrastructure/platform-infrastructure/traefik/certs",
+        PLATFORM_DATA_ROOT: "/home/platform_infrastructure/platform-infrastructure",
         PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
         PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: "c".repeat(64),
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: "127.0.0.1:5000/platform/ops",
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: "c".repeat(64),
+        PLATFORM_STATE_DIR: "/home/platform_infrastructure/platform-infrastructure/projects-portal/state",
       },
       providerLines: {
+        CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: 1,
         DOCKER_ACTION_ACTIVATION_INBOX: 1,
         DOCKER_ACTION_ACTIVE_RECEIPT_FILE: 1,
         DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: 1,
@@ -224,10 +236,13 @@ print(json.dumps({
         DOCKER_ACTION_RUNTIME_INTENT_ID: 1,
         PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY: 1,
         PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256: 1,
+        PLATFORM_CERTS_DIR: 1,
+        PLATFORM_DATA_ROOT: 1,
         PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY: 1,
         PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: 1,
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: 1,
         PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: 1,
+        PLATFORM_STATE_DIR: 1,
       },
       providerStable: true,
       runtimeComplete: true,
