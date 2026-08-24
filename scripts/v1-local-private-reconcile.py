@@ -63,6 +63,8 @@ RESTIC_PASSWORD = f"{SECRET_DIR}/restic_password.txt"
 RCLONE_CONFIG = f"{SECRET_DIR}/rclone/rclone.conf"
 PROJECT_SOURCE_ROOT = "/home/platform_infrastructure/src"
 PROJECT_STATE_ROOT = f"{DEPLOYMENT_REPO}/projects-portal/state"
+CERTIFICATES_ROOT = f"{DEPLOYMENT_REPO}/traefik/certs"
+LOCAL_CA_CERTIFICATE = f"{CERTIFICATES_ROOT}/ca.pem"
 BACKUP_SIGNING_KEYS = f"{SECRET_DIR}/backup_signing_keys.txt"
 ROLLBACK_SPEC_DIR = f"{STATE_DIR}/rollback-specs"
 ABORT_RECORD = f"{STATE_DIR}/reconciliation-abort-record.json"
@@ -1297,6 +1299,7 @@ def materialize_environment(
         "DOCKER_ACTION_RUNTIME_INTENT_ID": "intent.v1-local-private-ready-but-disabled",
         "HOSTED_WORKLOAD_LOCK": "",
         "HOSTED_WORKLOAD_MODE": "no-hosted",
+        "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE": LOCAL_CA_CERTIFICATE,
         # The three backup-profile services are deliberately not V1 activation
         # targets.  Bind their render-only image inputs to the already built,
         # locally published immutable ops image so Compose can render all 20
@@ -1305,11 +1308,14 @@ def materialize_environment(
         "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY": ops_repository,
         "PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256": ops_sha256,
         "PLATFORM_COMPOSE_VARIANT": "LOCAL_PRIVATE",
+        "PLATFORM_CERTS_DIR": CERTIFICATES_ROOT,
+        "PLATFORM_DATA_ROOT": DEPLOYMENT_REPO,
         "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY": ops_repository,
         "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256": ops_sha256,
         "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY": ops_repository,
         "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256": ops_sha256,
         "PLATFORM_SECRETS_ROOT": SECRET_DIR,
+        "PLATFORM_STATE_DIR": PROJECT_STATE_ROOT,
         "CONTROL_CENTER_DATABASE_URL_SECRET_FILE": DATABASE_SECRET,
         "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE": BOOTSTRAP_SECRET,
         "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE": KEYCLOAK_CLIENT_SECRET,
