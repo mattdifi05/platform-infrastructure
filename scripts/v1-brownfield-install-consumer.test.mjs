@@ -195,7 +195,7 @@ function fixture(t, {
   const systemctl = path.join(tools, "systemctl");
   const systemctlLog = path.join(root, "systemctl.log");
   writeFile(visudo, "#!/bin/sh\n[ \"$1\" = -c ] && [ \"$2\" = -f ] && [ -f \"$3\" ]\n", 0o700);
-  writeFile(systemdAnalyze, "#!/bin/sh\n[ \"$1\" = verify ] && [ -f \"$2\" ]\n", 0o700);
+  writeFile(systemdAnalyze, "#!/bin/sh\n[ \"$1\" = verify ] && [ -f \"$2\" ] && [ \"${2##*.}\" = service ]\n", 0o700);
   writeFile(systemctl, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog)}\n[ "$1" = daemon-reload ]\n`, 0o700);
 
   const artifactTargets = [
