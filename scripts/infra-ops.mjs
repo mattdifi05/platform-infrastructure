@@ -2183,7 +2183,7 @@ async function backupPostgres(options = {}) {
 }
 
 function applicationSourceBackupExcludes(applicationName = "") {
-  const privateCache = applicationName ? `${applicationName}/private/cache` : "private/cache";
+  const scoped = (relative) => applicationName ? `${applicationName}/${relative}` : relative;
   return [
     ".git",
     ".hg",
@@ -2211,10 +2211,10 @@ function applicationSourceBackupExcludes(applicationName = "") {
     ".parcel-cache",
     "backups",
     ".codex-backups",
-    privateCache,
-    "storage/logs",
-    "var/cache",
-    "var/log",
+    scoped("private/cache"),
+    scoped("storage/logs"),
+    scoped("var/cache"),
+    scoped("var/log"),
   ];
 }
 

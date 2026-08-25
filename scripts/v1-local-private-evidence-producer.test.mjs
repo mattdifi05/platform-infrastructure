@@ -791,9 +791,11 @@ function createFixture() {
   for (const relative of [
     "anniversary/private/database/state.sqlite",
     "stream/private/database/state.sqlite",
+    "stream/private/database/migrations/001.json",
     "workcalendar/database/state.sqlite",
     "fiplatform/private/cache/app_cache.sqlite",
   ]) writeLogical(fixture, `${LOGICAL.source}/${relative}`, `fixture overlay ${relative}\n`, 0o600);
+  writeLogical(fixture, `${LOGICAL.source}/matthewdifilippo/private/storage/logs/.gitkeep`, "\n", 0o664);
   for (const relative of [
     "fiplatform/private/.env", "stream/private/.env", "stream/private/.env.example", "matthewdifilippo/.env",
   ]) writeLogical(fixture, `${LOGICAL.source}/${relative}`, `OVERLAY_SECRET_${sha(relative).slice(0, 16)}\n`, 0o600);
@@ -1280,6 +1282,51 @@ sys.stdout.write(json.dumps({
   }
 });
 
+test("confidential recovery overlay traverses directories but rejects links and special entries", () => {
+  const fixture = createFixture();
+  try {
+    const result = runPure(fixture, String.raw`
+import json, os
+
+selected = {relative for _source, relative in module.overlay_sources()}
+nested_selected = "stream/private/database/migrations/001.json" in selected
+
+database_root = os.path.join(module.physical(module.PROJECT_SOURCE_ROOT), "stream", "private", "database")
+symlink_path = os.path.join(database_root, "unsafe-link")
+os.symlink("state.sqlite", symlink_path)
+symlink_error = ""
+try:
+    module.overlay_sources()
+except module.Stop as error:
+    symlink_error = str(error)
+os.unlink(symlink_path)
+
+fifo_path = os.path.join(database_root, "unsafe-fifo")
+os.mkfifo(fifo_path, 0o600)
+special_error = ""
+try:
+    module.overlay_sources()
+except module.Stop as error:
+    special_error = str(error)
+os.unlink(fifo_path)
+
+sys.stdout.write(json.dumps({
+    "nestedSelected": nested_selected,
+    "specialError": special_error,
+    "symlinkError": symlink_error,
+}))
+`);
+    requireSuccess(result, "confidential recursive overlay unit");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      nestedSelected: true,
+      specialError: "recovery overlay contains a link or non-regular entry.",
+      symlinkError: "recovery overlay contains a link or non-regular entry.",
+    });
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("application restore verifies actual metadata under the service UMask", () => {
   const fixture = createFixture();
   try {
@@ -1711,6 +1758,10 @@ test("typed BACKUP_APPLICATIONS excludes cache trees without excluding lookalike
     fs.chmodSync(privateCache, 0o2775);
     writeFile(path.join(streamRoot, "private", "cache-data", "keep.txt"), "durable lookalike\n", 0o600);
     writeFile(path.join(streamRoot, "nested", "private", "cache", "keep.txt"), "durable nested path\n", 0o600);
+    for (const relative of ["storage/logs", "var/cache", "var/log"]) {
+      writeFile(path.join(streamRoot, relative, "runtime.txt"), `excluded ${relative}\n`, 0o600);
+      writeFile(path.join(streamRoot, "nested", relative, "keep.txt"), `durable ${relative}\n`, 0o600);
+    }
 
     const result = fixture.run();
     requireSuccess(result, "typed cache-excluding application backup");
@@ -1728,6 +1779,10 @@ test("typed BACKUP_APPLICATIONS excludes cache trees without excluding lookalike
     const streamEntries = archiveEntries("stream");
     assert.equal(stexorEntries.some((entry) => entry === "stexor/.pnpm-store" || entry.startsWith("stexor/.pnpm-store/")), false);
     assert.equal(streamEntries.some((entry) => entry === "stream/private/cache" || entry.startsWith("stream/private/cache/")), false);
+    for (const relative of ["storage/logs", "var/cache", "var/log"]) {
+      assert.equal(streamEntries.some((entry) => entry === `stream/${relative}` || entry.startsWith(`stream/${relative}/`)), false);
+      assert.ok(streamEntries.includes(`stream/nested/${relative}/keep.txt`));
+    }
     assert.ok(stexorEntries.includes("stexor/.pnpm-store-data/keep.txt"));
     assert.ok(streamEntries.includes("stream/private/cache-data/keep.txt"));
     assert.ok(streamEntries.includes("stream/nested/private/cache/keep.txt"));
