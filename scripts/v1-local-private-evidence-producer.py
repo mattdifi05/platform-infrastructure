@@ -1143,7 +1143,9 @@ def overlay_sources() -> List[Tuple[str, str]]:
         if not directory.is_dir() or directory.is_symlink():
             stop(f"required recovery overlay directory is missing: {relative}.")
         for file_path in sorted(directory.rglob("*")):
-            if file_path.is_symlink() or (file_path.exists() and not file_path.is_file()):
+            if file_path.is_symlink() or (
+                file_path.exists() and not file_path.is_file() and not file_path.is_dir()
+            ):
                 stop("recovery overlay contains a link or non-regular entry.")
             if file_path.is_file():
                 selected.append((str(file_path), str(file_path.relative_to(root))))
