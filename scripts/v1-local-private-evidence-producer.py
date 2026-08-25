@@ -95,11 +95,11 @@ APP_SLUGS = (
 )
 LOGICAL_KEYS = (*APP_SLUGS, "pg-stexor", "pg-keycloak", "mariadb", "minio", "keycloak-config", "confidential")
 APPLICATION_EXCLUDE_EXACT = frozenset((
-    ".git", ".hg", ".svn", ".env", "node_modules", "vendor", ".next", ".nuxt", "dist", "build",
+    ".git", ".hg", ".svn", ".env", "node_modules", ".pnpm-store", "vendor", ".next", ".nuxt", "dist", "build",
     "coverage", ".cache", ".turbo", ".parcel-cache", "backups", ".codex-backups",
 ))
 APPLICATION_EXCLUDE_GLOBS = (".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.dump", "*.sql", "*.sqlite", "*.sqlite3")
-APPLICATION_EXCLUDE_PATHS = ("storage/logs", "var/cache", "var/log")
+APPLICATION_EXCLUDE_PATHS = ("private/cache", "storage/logs", "var/cache", "var/log")
 
 EVIDENCE_FILES = {
     "logicalBackupEvidenceSha256": LOGICAL_EVIDENCE,
