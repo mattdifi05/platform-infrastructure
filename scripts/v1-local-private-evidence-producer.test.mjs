@@ -142,7 +142,10 @@ const selectedEntries = (slug) => {
   const visit = (directory, relative) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const childRelative = path.join(relative, entry.name);
-      if ([".git", ".hg", ".svn", "node_modules", "vendor", ".next", ".nuxt", "dist", "build", "coverage", ".cache", ".turbo", ".parcel-cache", "backups", ".codex-backups"].includes(entry.name) || excluded(entry.name)) continue;
+      const applicationRelative = path.relative(slug, childRelative).split(path.sep).join("/");
+      const excludedPath = ["private/cache", "storage/logs", "var/cache", "var/log"]
+        .some((prefix) => applicationRelative === prefix || applicationRelative.startsWith(prefix + "/"));
+      if ([".git", ".hg", ".svn", "node_modules", ".pnpm-store", "vendor", ".next", ".nuxt", "dist", "build", "coverage", ".cache", ".turbo", ".parcel-cache", "backups", ".codex-backups"].includes(entry.name) || excluded(entry.name) || excludedPath) continue;
       if (entry.isDirectory()) { result.push(childRelative); visit(path.join(directory, entry.name), childRelative); }
       else if (entry.isFile()) result.push(childRelative);
       else throw new Error("fixture source contains unsupported entry");
@@ -780,6 +783,11 @@ function createFixture() {
   for (const slug of FAMILIES.slice(0, 8)) {
     writeLogical(fixture, `${LOGICAL.source}/${slug}/index.txt`, `fixture application ${slug}\n`, 0o644);
   }
+  const pnpmStoreBlob = mapPath(fixture, `${LOGICAL.source}/stexor/.pnpm-store/v11/files/blob`);
+  writeFile(pnpmStoreBlob, "fixture hard-linked pnpm store blob\n", 0o600);
+  fs.linkSync(pnpmStoreBlob, `${pnpmStoreBlob}-linked`);
+  writeLogical(fixture, `${LOGICAL.source}/stream/private/cache/tmdb/entry.json`, "fixture runtime cache\n", 0o600);
+  fs.chmodSync(mapPath(fixture, `${LOGICAL.source}/stream/private/cache`), 0o2775);
   for (const relative of [
     "anniversary/private/database/state.sqlite",
     "stream/private/database/state.sqlite",
@@ -1203,6 +1211,75 @@ finally:
   }
 });
 
+test("application source excludes only the fixed dependency and runtime cache trees", () => {
+  const fixture = createFixture();
+  try {
+    const result = runPure(fixture, String.raw`
+import json, os
+
+stexor = module.capture_application_source("stexor")
+stream = module.capture_application_source("stream")
+
+stexor_paths = [row["path"] for row in stexor["rows"]]
+stream_paths = [row["path"] for row in stream["rows"]]
+
+stexor_root = os.path.join(module.physical(module.PROJECT_SOURCE_ROOT), "stexor")
+outside_hardlink = os.path.join(stexor_root, "linked-outside")
+outside_hardlink_peer = os.path.join(stexor_root, "linked-outside-peer")
+with open(outside_hardlink, "wb") as handle:
+    handle.write(b"must remain rejected\n")
+os.link(outside_hardlink, outside_hardlink_peer)
+hardlink_error = ""
+try:
+    module.capture_application_source("stexor")
+except module.Stop as error:
+    hardlink_error = str(error)
+os.unlink(outside_hardlink_peer)
+os.unlink(outside_hardlink)
+
+stream_root = os.path.join(module.physical(module.PROJECT_SOURCE_ROOT), "stream")
+lookalike_cache = os.path.join(stream_root, "private", "cache-data")
+os.makedirs(lookalike_cache, mode=0o775)
+os.chmod(lookalike_cache, 0o2775)
+special_mode_error = ""
+try:
+    module.capture_application_source("stream")
+except module.Stop as error:
+    special_mode_error = str(error)
+os.chmod(lookalike_cache, 0o775)
+os.rmdir(lookalike_cache)
+
+empty_root = os.path.join(module.physical(module.PROJECT_SOURCE_ROOT), "empty")
+os.makedirs(os.path.join(empty_root, ".pnpm-store"), mode=0o700)
+with open(os.path.join(empty_root, ".pnpm-store", "only-file"), "wb") as handle:
+    handle.write(b"excluded\n")
+empty_error = ""
+try:
+    module.capture_application_source("empty")
+except module.Stop as error:
+    empty_error = str(error)
+
+sys.stdout.write(json.dumps({
+    "emptyError": empty_error,
+    "hardlinkError": hardlink_error,
+    "pnpmStoreExcluded": not any(path == ".pnpm-store" or path.startswith(".pnpm-store/") for path in stexor_paths),
+    "privateCacheExcluded": not any(path == "private/cache" or path.startswith("private/cache/") for path in stream_paths),
+    "specialModeError": special_mode_error,
+}))
+`);
+    requireSuccess(result, "application source cache exclusion unit");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      emptyError: "application source has no selected regular files: empty.",
+      hardlinkError: "application source contains a special or hard-linked file.",
+      pnpmStoreExcluded: true,
+      privateCacheExcluded: true,
+      specialModeError: "application source directory entry contains unsupported special permission bits.",
+    });
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("application restore verifies actual metadata under the service UMask", () => {
   const fixture = createFixture();
   try {
@@ -1614,6 +1691,46 @@ test("typed BACKUP_APPLICATIONS writes exactly the eight closed application fami
       assert.equal(files.filter((name) => name.endsWith(".tar.gz.sha256")).length, 1, slug);
       assert.equal(files.filter((name) => name.endsWith(".tar.gz.sig.json")).length, 1, slug);
     }
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("typed BACKUP_APPLICATIONS excludes cache trees without excluding lookalike paths", () => {
+  const fixture = applicationBackupPolicyFixture(V1_APPLICATION_SLUGS);
+  try {
+    const stexorRoot = path.join(fixture.root, "source", "stexor");
+    const pnpmBlob = path.join(stexorRoot, ".pnpm-store", "v11", "files", "blob");
+    writeFile(pnpmBlob, "fixture hard-linked dependency cache\n", 0o600);
+    fs.linkSync(pnpmBlob, `${pnpmBlob}-linked`);
+    writeFile(path.join(stexorRoot, ".pnpm-store-data", "keep.txt"), "durable lookalike\n", 0o600);
+
+    const streamRoot = path.join(fixture.root, "source", "stream");
+    const privateCache = path.join(streamRoot, "private", "cache");
+    writeFile(path.join(privateCache, "tmdb", "entry.json"), "runtime cache\n", 0o600);
+    fs.chmodSync(privateCache, 0o2775);
+    writeFile(path.join(streamRoot, "private", "cache-data", "keep.txt"), "durable lookalike\n", 0o600);
+    writeFile(path.join(streamRoot, "nested", "private", "cache", "keep.txt"), "durable nested path\n", 0o600);
+
+    const result = fixture.run();
+    requireSuccess(result, "typed cache-excluding application backup");
+
+    const archiveEntries = (slug) => {
+      const directory = path.join(fixture.dataRoot, "backups", "applications", slug);
+      const archive = fs.readdirSync(directory).find((name) => name.endsWith(".tar.gz"));
+      assert.ok(archive, `${slug} archive is missing`);
+      const listing = run("/usr/bin/tar", ["-tzf", path.join(directory, archive)]);
+      requireSuccess(listing, `${slug} application archive listing`);
+      return listing.stdout.split(/\r?\n/).filter(Boolean).map((entry) => entry.replace(/\/$/, ""));
+    };
+
+    const stexorEntries = archiveEntries("stexor");
+    const streamEntries = archiveEntries("stream");
+    assert.equal(stexorEntries.some((entry) => entry === "stexor/.pnpm-store" || entry.startsWith("stexor/.pnpm-store/")), false);
+    assert.equal(streamEntries.some((entry) => entry === "stream/private/cache" || entry.startsWith("stream/private/cache/")), false);
+    assert.ok(stexorEntries.includes("stexor/.pnpm-store-data/keep.txt"));
+    assert.ok(streamEntries.includes("stream/private/cache-data/keep.txt"));
+    assert.ok(streamEntries.includes("stream/nested/private/cache/keep.txt"));
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }

@@ -2182,7 +2182,8 @@ async function backupPostgres(options = {}) {
   }
 }
 
-function applicationSourceBackupExcludes() {
+function applicationSourceBackupExcludes(applicationName = "") {
+  const privateCache = applicationName ? `${applicationName}/private/cache` : "private/cache";
   return [
     ".git",
     ".hg",
@@ -2198,6 +2199,7 @@ function applicationSourceBackupExcludes() {
     "*.sqlite",
     "*.sqlite3",
     "node_modules",
+    ".pnpm-store",
     "vendor",
     ".next",
     ".nuxt",
@@ -2209,6 +2211,7 @@ function applicationSourceBackupExcludes() {
     ".parcel-cache",
     "backups",
     ".codex-backups",
+    privateCache,
     "storage/logs",
     "var/cache",
     "var/log",
@@ -2267,11 +2270,12 @@ async function backupApplications(options = {}) {
   const timestamp = backupTimestamp();
   const applications = applicationSourceDirectories(options);
   const outputRoot = ensureBackupOutputDir(path.join(backupsRoot, "applications"));
-  const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
   const artifacts = [];
   const publications = [];
   try {
     for (const application of applications) {
+      const excludeArgs = applicationSourceBackupExcludes(application.name)
+        .flatMap((pattern) => ["--exclude", pattern]);
       const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
       const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
       const hostPath = path.join(outputDir, fileName);
