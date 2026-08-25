@@ -765,7 +765,7 @@ def validate_local_certificate_authority() -> None:
     descriptors = []
     try:
         for logical, label, mode in (
-            (LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE TLS private key", 0o600),
+            (LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE TLS private key", 0o640),
             (LOCAL_CERTIFICATE, "LOCAL_PRIVATE TLS certificate", 0o644),
             (LOCAL_CA_CERTIFICATE, "LOCAL_PRIVATE TLS certificate authority", 0o644),
         ):
@@ -828,7 +828,7 @@ def prepare_external_path_authority() -> None:
         external_directory_authority(logical, label, directory_modes)
     narrow_external_file_mode(
         LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE TLS private key", 1024 * 1024,
-        SECRET_UID, SECRET_GID, (0o600, 0o644), 0o600,
+        SECRET_UID, SECRET_GID, (0o600, 0o640, 0o644), 0o640,
     )
     read_external_regular(
         physical(LOCAL_CERTIFICATE), "LOCAL_PRIVATE TLS certificate", 1024 * 1024,
@@ -2135,6 +2135,7 @@ def materialize_environment(
         "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE": BOOTSTRAP_SECRET,
         "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE": KEYCLOAK_CLIENT_SECRET,
         "V1_CONFIDENTIAL_BACKUP_PASSPHRASE_FILE": CONFIDENTIAL_BACKUP_PASSPHRASE,
+        "WAF_TLS_KEY_GID": str(SECRET_GID),
     }
     if runtime_identity is not None:
         if set(runtime_identity) != set(RUNTIME_IDENTITY_ENV):

@@ -8,6 +8,8 @@
 # until the separately admitted broker/provider material is available.
 services:
   waf:
+    group_add: !override
+      - ${WAF_TLS_KEY_GID:?set WAF_TLS_KEY_GID}
     volumes: !override
       - ./waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
       - ./waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
@@ -55,7 +57,7 @@ services:
   project-router:
     environment:
       PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 9c33ac5e87cdb16f19a88d15942390ac752be7dc687b5a936c475c3da91eabbf
       PROJECT_HOST_SUFFIX: .platform-infrastructure.com
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
       NODE_PROJECT_HOSTS: ""

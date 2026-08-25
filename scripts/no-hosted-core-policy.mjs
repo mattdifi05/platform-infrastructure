@@ -5443,6 +5443,8 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
     dataRootVariable: "PLATFORM_DATA_ROOT",
     stateDirectoryVariable: "PLATFORM_STATE_DIR",
     certificatesDirectoryVariable: "PLATFORM_CERTS_DIR",
+    tlsPrivateKeyMode: "0640",
+    tlsPrivateKeyGidVariable: "WAF_TLS_KEY_GID",
     secretsRootVariable: "PLATFORM_SECRETS_ROOT",
     localCaVariable: "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE",
     bootstrapTokenVariable: "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE",
@@ -7555,11 +7557,31 @@ export function projectLocalPrivateNoHostedAuthority(
     })
     && filesystemPathAuthority(privateKey, certificatesDirectory, {
       expectedType: "file",
-      fileMode: 0o600,
+      fileMode: 0o640,
     });
   if (!certificateAuthorityValid) {
     violations.push("local-private:certificate-authority");
   }
+  const wafTlsKeyGid = environment.get("WAF_TLS_KEY_GID");
+  let observedPrivateKeyGid = null;
+  if (certificateAuthorityValid) {
+    try {
+      observedPrivateKeyGid = String(fs.lstatSync(privateKey).gid);
+    } catch {
+      // The certificate authority violation above remains canonical.
+    }
+  }
+  const waf = projectedConfig.services?.waf;
+  const observedWafGroups = Array.isArray(waf?.group_add)
+    ? waf.group_add.map(String)
+    : [];
+  if (typeof wafTlsKeyGid !== "string"
+      || !/^[1-9][0-9]{0,9}$/.test(wafTlsKeyGid)
+      || wafTlsKeyGid !== observedPrivateKeyGid
+      || !sameJson(observedWafGroups, [wafTlsKeyGid])) {
+    violations.push("waf:local-private-tls-key-group-authority");
+  }
+  if (plainObject(waf)) delete waf.group_add;
   if (localCa === null
       || certificatesDirectory === null
       || !pathWithinRoot(localCa, certificatesDirectory)

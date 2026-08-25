@@ -11,7 +11,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workloadLock = "secrets/hosted-workloads.lock.json";
 const workloadLockSha256 = "a".repeat(64);
 const noHostedWorkloadLockSha256 = "61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0";
-const localPrivateNoHostedWorkloadLockSha256 = "af1478fa5f11ad5f1a66ba02871454cb3f4991a879cdf85c4ceb06b3363bfc2c";
+const localPrivateNoHostedWorkloadLockSha256 = "9c33ac5e87cdb16f19a88d15942390ac752be7dc687b5a936c475c3da91eabbf";
 
 test("canonical plan invokes the deployment wrapper with a verified workload lock", () => {
   const plan = canonicalVpsTopologyPlan({
