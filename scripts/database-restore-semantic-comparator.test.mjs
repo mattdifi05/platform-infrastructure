@@ -33,9 +33,20 @@ test("PostgreSQL restore test binds two full deterministic independent restores 
   assert.match(typedPlan, /"--network", "none"/);
   assert.match(typedPlan, /"--read-only"/);
   assert.match(typedPlan, /"--cap-drop", "ALL"/);
+  assert.match(typedPlan, /"--tmpfs", "\/var\/lib\/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m"/);
+  assert.doesNotMatch(typedPlan, /"--tmpfs", "\/var\/lib\/postgresql\/data:/);
   assert.match(typedPlan, /"-v", backupMount/);
+  assert.match(typedPlan, /bootstrapSql:\s*\[[\s\S]*create role[\s\S]*create database[\s\S]*\]/);
+  const sandbox = body("async function restorePostgresArtifactSandbox", "async function restoreTestPostgres");
+  assert.match(sandbox, /for \(const bootstrapSql of plan\.bootstrapSql\)[\s\S]*"-c", bootstrapSql/);
+  assert.doesNotMatch(sandbox, /"-c", plan\.bootstrapSql/);
+  assert.match(sandbox, /dockerExec\(container, plan\.restoreArgs\)/);
+  assert.match(sandbox, /postgresSemanticFingerprint\(container, plan\.database, "postgres"\)/);
+  assert.doesNotMatch(sandbox, /postgresSemanticFingerprint\(container, plan\.database, plan\.role\)/);
   assert.match(restore, /restorePostgresArtifactSandbox\([\s\S]*firstSandboxContainer/);
   assert.match(restore, /restorePostgresArtifactSandbox\([\s\S]*secondSandboxContainer/);
+  assert.equal((restore.match(/\["rm", "-f", "-v",/g) ?? []).length, 2);
+  assert.doesNotMatch(restore, /\["rm", "-f", (?!"-v")/);
   assert.doesNotMatch(restore, /postgresSemanticFingerprint\(sourceContainer/);
   assert.match(restore, /semanticComparatorReceipt\("postgres", firstRestore\.fingerprint, secondRestore\.fingerprint\)/);
   assert.match(restore, /if \(!semanticComparator\.matched\)[\s\S]*independent restore mismatch/);
@@ -60,6 +71,10 @@ test("typed PostgreSQL restore stages one digest-identical 0444 copy and preserv
   assert.match(admission, /typedEvidenceTransactionRoot\(\)[\s\S]*postgres-restore-readable/);
   const dockerAdmission = body("function typedEvidenceDockerRunAllowed", "function assertTypedEvidenceDockerInvocation");
   assert.match(dockerAdmission, /typedEvidencePostgresReadableArtifactPath\(\)[\s\S]*:\/restore\/input\.dump:ro/);
+  assert.match(dockerAdmission, /sameStringArray\(tmpfs,[\s\S]*\/var\/lib\/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m/);
+  const removeAdmission = body("function typedEvidenceDockerRemoveAllowed", "function typedEvidenceDockerVolumeAllowed");
+  assert.match(removeAdmission, /RESTORE_POSTGRES[\s\S]*args\.length === 4[\s\S]*args\[1\] === "-f"[\s\S]*args\[2\] === "-v"/);
+  assert.doesNotMatch(removeAdmission, /RESTORE_POSTGRES"\) return args\.length === 3/);
 
   const restore = body("async function restoreTestPostgres", "async function backupRestoreDrill");
   assert.match(restore, /createTypedPostgresReadableArtifact\(backupFile, hash\)/);
@@ -100,7 +115,14 @@ test("MariaDB restore test compares exact schema set, complete structure, and ca
 
   const sandbox = body("async function restoreMariadbArtifactSandbox", "async function restoreTestMariadb");
   assert.match(sandbox, /--tmpfs[\s\S]*\/var\/lib\/mysql/);
+  assert.match(sandbox, /hostPathForContainerMount\(backupFile\)[\s\S]*:\/restore\/input\.sql\.gz:ro/);
+  assert.match(sandbox, /gzip -t \/restore\/input\.sql\.gz[\s\S]*gzip -dc \/restore\/input\.sql\.gz/);
+  assert.doesNotMatch(sandbox, /\["cp"|docker cp|containerPath/);
   assert.match(sandbox, /rm", "-f", "-v"/);
+  const copyAdmission = body("function typedEvidenceDockerCopyAllowed", "function typedEvidenceDockerRemoveAllowed");
+  assert.doesNotMatch(copyAdmission, /RESTORE_MARIADB/);
+  const runAdmission = body("function typedEvidenceDockerRunAllowed", "function assertTypedEvidenceDockerInvocation");
+  assert.match(runAdmission, /RESTORE_MARIADB[\s\S]*argv\.backupFile[\s\S]*:\/restore\/input\.sql\.gz:ro[\s\S]*mounts\.length === 1[\s\S]*mounts\[0\] === mount/);
 });
 
 test("typed restore evidence propagates comparator hashes instead of collapsing to counts", () => {
