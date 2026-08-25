@@ -35,7 +35,7 @@ export function postgresRestoreSandboxPlan({ image, containerName, backupMount, 
       "--memory", "1g",
       "--cpus", "1",
       "--user", "postgres",
-      "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,noexec,mode=1777,size=768m",
+      "--tmpfs", "/var/lib/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=128m",
       "--tmpfs", "/var/run/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=16m",
       "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
@@ -46,8 +46,7 @@ export function postgresRestoreSandboxPlan({ image, containerName, backupMount, 
     bootstrapSql: [
       `create role ${role} login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;`,
       `create database ${database} owner ${role};`,
-    ].join(" "),
+    ],
     restoreArgs: ["pg_restore", "-U", role, "-d", database, "--no-owner", "--no-acl", "--exit-on-error", "/restore/input.dump"],
   };
 }
-

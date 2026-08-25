@@ -16,8 +16,13 @@ test("restore plan is disposable, offline, bounded, and feeds the dump only to a
   for (const required of ["--network none", "--read-only", "--cap-drop ALL", "no-new-privileges:true", "--pids-limit 256", "--memory 1g", "--cpus 1", ":/restore/input.dump:ro"] ) {
     assert.match(argv, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+  assert.match(argv, /--tmpfs \/var\/lib\/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m/);
+  assert.doesNotMatch(argv, /--tmpfs \/var\/lib\/postgresql\/data:/);
   assert.doesNotMatch(argv, /enterprise-postgres|\/var\/run\/docker\.sock|platform.*volume/);
-  assert.match(plan.bootstrapSql, /nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls/);
+  assert.deepEqual(plan.bootstrapSql, [
+    "create role restore_runner login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;",
+    "create database restore_sandbox owner restore_runner;",
+  ]);
   assert.deepEqual(plan.restoreArgs.slice(0, 4), ["pg_restore", "-U", "restore_runner", "-d"]);
   assert.equal(plan.restoreArgs.includes("postgres"), false);
   assert.equal(plan.restoreArgs.includes("--exit-on-error"), true);

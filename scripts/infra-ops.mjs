@@ -520,17 +520,14 @@ function typedEvidenceDockerCopyAllowed(action, args) {
       && typedEvidencePathInside(`${typedEvidenceTransactionRoot()}/ops`, destination)
       && /^platform-keycloak-config-[A-Za-z0-9_-]+\/keycloak-config$/.test(relative);
   }
-  if (action === "RESTORE_MARIADB") {
-    return source === argv.backupFile
-      && typedEvidenceDisposableName(action, destination.split(":", 1)[0])
-      && destination === `${destination.split(":", 1)[0]}:/tmp/${path.basename(argv.backupFile)}`;
-  }
   return false;
 }
 
 function typedEvidenceDockerRemoveAllowed(action, args) {
   if (args[0] !== "rm") return false;
-  if (action === "RESTORE_POSTGRES") return args.length === 3 && args[1] === "-f" && typedEvidenceDisposableName(action, args[2]);
+  if (action === "RESTORE_POSTGRES") {
+    return args.length === 4 && args[1] === "-f" && args[2] === "-v" && typedEvidenceDisposableName(action, args[3]);
+  }
   if (action === "RESTORE_MARIADB") {
     return args.length === 4 && args[1] === "-f" && args[2] === "-v" && typedEvidenceDisposableName(action, args[3]);
   }
@@ -605,19 +602,25 @@ function typedEvidenceDockerRunAllowed(action, args) {
   if (action === "RESTORE_POSTGRES") {
     const nameIndex = args.indexOf("--name");
     const mount = `${typedEvidencePostgresReadableArtifactPath()}:/restore/input.dump:ro`;
+    const tmpfs = args.flatMap((value, index) => value === "--tmpfs" ? [args[index + 1]] : []);
     return args[imageIndexes[0]] === process.env.POSTGRES_RESTORE_TEST_IMAGE
       && nameIndex > 0 && typedEvidenceDisposableName(action, args[nameIndex + 1])
       && mounts.length === 1 && mounts[0] === mount
       && args.includes("--read-only") && args.includes("--cap-drop") && args.includes("no-new-privileges:true")
-      && args.filter((value) => value === "--tmpfs").length === 3;
+      && sameStringArray(tmpfs, [
+        "/var/lib/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m",
+        "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=128m",
+        "/var/run/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=16m",
+      ]);
   }
 
   if (action === "RESTORE_MARIADB") {
     const nameIndex = args.indexOf("--name");
     const passwordIndex = args.findIndex((value) => /^MARIADB_ROOT_PASSWORD=restore_[A-Za-z0-9_-]{24}$/.test(value));
+    const mount = `${path.resolve(String(argv.backupFile ?? ""))}:/restore/input.sql.gz:ro`;
     return args[imageIndexes[0]] === process.env.MARIADB_IMAGE
       && nameIndex > 0 && typedEvidenceDisposableName(action, args[nameIndex + 1])
-      && passwordIndex > 0 && args[passwordIndex - 1] === "-e" && mounts.length === 0
+      && passwordIndex > 0 && args[passwordIndex - 1] === "-e" && mounts.length === 1 && mounts[0] === mount
       && args.filter((value) => value === "--tmpfs").length === 3;
   }
 
@@ -11907,7 +11910,7 @@ function evidencePostgresRestoreSandboxPlan({ image, containerName, backupMount,
       "--memory", "1g",
       "--cpus", "1",
       "--user", "postgres",
-      "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,noexec,mode=1777,size=768m",
+      "--tmpfs", "/var/lib/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=768m",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=128m",
       "--tmpfs", "/var/run/postgresql:rw,nosuid,nodev,noexec,mode=1777,size=16m",
       "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
@@ -11918,7 +11921,7 @@ function evidencePostgresRestoreSandboxPlan({ image, containerName, backupMount,
     bootstrapSql: [
       `create role ${role} login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;`,
       `create database ${databaseName} owner ${role};`,
-    ].join(" "),
+    ],
     restoreArgs: ["pg_restore", "-U", role, "-d", databaseName, "--no-owner", "--no-acl", "--exit-on-error", "/restore/input.dump"],
   };
 }
@@ -11937,7 +11940,9 @@ async function restorePostgresArtifactSandbox({ container, plan, minimumTables, 
     await sleep(500);
   }
   if (!ready) fail("Isolated PostgreSQL restore sandbox did not become ready.");
-  dockerExec(container, ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", plan.bootstrapSql]);
+  for (const bootstrapSql of plan.bootstrapSql) {
+    dockerExec(container, ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", bootstrapSql]);
+  }
   dockerExec(container, plan.restoreArgs);
   const tableQuery = countAllUserTables
     ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
@@ -11948,7 +11953,7 @@ async function restorePostgresArtifactSandbox({ container, plan, minimumTables, 
   }
   return {
     tables,
-    fingerprint: postgresSemanticFingerprint(container, plan.database, plan.role),
+    fingerprint: postgresSemanticFingerprint(container, plan.database, "postgres"),
   };
 }
 
@@ -12001,7 +12006,7 @@ async function restoreTestPostgres(options = {}) {
       schemaName,
       activeContainers,
     });
-    run("docker", ["rm", "-f", firstSandboxContainer], { capture: true });
+    run("docker", ["rm", "-f", "-v", firstSandboxContainer], { capture: true });
     activeContainers.delete(firstSandboxContainer);
     const secondRestore = await restorePostgresArtifactSandbox({
       container: secondSandboxContainer,
@@ -12058,7 +12063,7 @@ async function restoreTestPostgres(options = {}) {
     }
     throw error;
   } finally {
-    for (const container of activeContainers) run("docker", ["rm", "-f", container], { capture: true, allowFailure: true });
+    for (const container of activeContainers) run("docker", ["rm", "-f", "-v", container], { capture: true, allowFailure: true });
     let artifactError = null;
     try {
       readableArtifact.assertSourceCurrent();
@@ -12327,7 +12332,6 @@ async function restoreMariadbArtifactSandbox({
   image,
   rootPassword,
   backupFile,
-  containerPath,
   minSchemas,
   expectedDatabase,
   activeContainers,
@@ -12339,6 +12343,7 @@ async function restoreMariadbArtifactSandbox({
     "--tmpfs", "/var/lib/mysql:rw,nosuid,nodev,noexec,size=2g,mode=0700",
     "--tmpfs", "/run/mysqld:rw,nosuid,nodev,noexec,size=64m,mode=0755",
     "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777",
+    "-v", `${hostPathForContainerMount(backupFile)}:/restore/input.sql.gz:ro`,
     "-e", `MARIADB_ROOT_PASSWORD=${rootPassword}`, image,
   ], { capture: true });
   activeContainers.add(container);
@@ -12354,8 +12359,7 @@ async function restoreMariadbArtifactSandbox({
   }
   if (!healthy) fail("Disposable MariaDB restore-test container did not become ready.");
 
-  run("docker", ["cp", backupFile, `${container}:${containerPath}`]);
-  dockerExec(container, ["sh", "-ec", `gzip -t ${shellQuote(containerPath)} && gzip -dc ${shellQuote(containerPath)} | mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"`]);
+  dockerExec(container, ["sh", "-ec", 'gzip -t /restore/input.sql.gz && gzip -dc /restore/input.sql.gz | mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"']);
   const schemas = mariadbUserSchemas(container);
   if (schemas.length < minSchemas) fail(`MariaDB restore test produced too few user schemas: ${schemas.length}`);
   if (expectedDatabase && (schemas.length !== 1 || schemas[0].schema !== expectedDatabase)) {
@@ -12379,8 +12383,6 @@ async function restoreTestMariadb(options = {}) {
   }
   const sourceContainer = options.container ?? argv.container ?? "mariadb";
   const backupFile = resolveRestoreTestArtifact(backupFileArg, "restore-test-mariadb");
-  const fileName = path.basename(backupFile);
-  const containerPath = `/tmp/${fileName}`;
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const drillContainer = options.drillContainer ?? argv.drillContainer ?? `platform-mariadb-restore-test-${suffix}`;
   const firstDrillContainer = `${drillContainer}-a`;
@@ -12402,7 +12404,6 @@ async function restoreTestMariadb(options = {}) {
       image,
       rootPassword: `restore_${crypto.randomBytes(18).toString("base64url")}`,
       backupFile,
-      containerPath,
       minSchemas,
       expectedDatabase,
       activeContainers,
@@ -12414,7 +12415,6 @@ async function restoreTestMariadb(options = {}) {
       image,
       rootPassword: `restore_${crypto.randomBytes(18).toString("base64url")}`,
       backupFile,
-      containerPath,
       minSchemas,
       expectedDatabase,
       activeContainers,
