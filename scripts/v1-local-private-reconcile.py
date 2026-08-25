@@ -339,14 +339,30 @@ LOCAL_IMAGE_BUILDS = (
     ("PLATFORM_ALERT_DISPATCHER_IMAGE", "docker/alert-dispatcher.Dockerfile", "platform/alert-dispatcher"),
     ("PLATFORM_OPS_IMAGE", "docker/ops.Dockerfile", "platform/ops"),
     ("PROJECT_ROUTER_IMAGE", "docker/project-router.Dockerfile", "platform/project-router"),
+    ("RESTIC_IMAGE", "docker/restic-rclone.Dockerfile", "platform/restic-rclone"),
 )
-BACKUP_TOOL_IMAGE_ENV = (
-    ("mariadbRestore", ("MARIADB_IMAGE",)),
-    ("minioRestore", ("MINIO_IMAGE",)),
-    ("nodeUtility", ("NODE_IMAGE",)),
-    ("postgresRestore", ("POSTGRES_RESTORE_TEST_IMAGE", "POSTGRES_IMAGE")),
-    ("resticRclone", ("RESTIC_IMAGE",)),
+DEPLOYMENT_LOCAL_IMAGE_ENV = (
+    "CONTROL_CENTER_IMAGE",
+    "PLATFORM_ALERT_DISPATCHER_IMAGE",
+    "PLATFORM_OPS_IMAGE",
+    "PROJECT_ROUTER_IMAGE",
 )
+BACKUP_TOOL_IMAGE_NAMES = (
+    "mariadbRestore",
+    "minioRestore",
+    "nodeUtility",
+    "postgresRestore",
+    "resticRclone",
+)
+NODE_UTILITY_DOCKERFILES = (
+    "docker/alert-dispatcher.Dockerfile",
+    "docker/backup-scheduler.Dockerfile",
+    "docker/control-center.Dockerfile",
+    "docker/ops.Dockerfile",
+    "docker/project-router.Dockerfile",
+)
+
+
 class Stop(Exception):
     def __init__(self, message: str, code: int = 78):
         super().__init__(message)
@@ -2050,6 +2066,7 @@ def materialize_environment(
     repo_root: str,
     release: str,
     local_ops_image: str,
+    local_restic_image: str,
     runtime_identity: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, Dict[str, str]]:
     source = os.path.join(repo_root, ".env")
@@ -2071,6 +2088,14 @@ def materialize_environment(
     ops_sha256 = local_ops_image.removeprefix(ops_prefix)
     if SHA256_RE.fullmatch(ops_sha256) is None or ops_sha256 == "0" * 64:
         stop("deployment environment local ops image digest is not one non-zero SHA-256.")
+    restic_prefix = "127.0.0.1:5000/platform/restic-rclone@sha256:"
+    if (
+        not isinstance(local_restic_image, str)
+        or DIGEST_REFERENCE_RE.fullmatch(local_restic_image) is None
+        or not local_restic_image.startswith(restic_prefix)
+        or local_restic_image.removeprefix(restic_prefix) == "0" * 64
+    ):
+        stop("prepared Restic/rclone helper is not one immutable loopback image authority.")
     replacements = {
         "DOCKER_ACTION_ACTIVATION_INBOX": "/srv/platform/provider-activation/inbox",
         "DOCKER_ACTION_ACTIVE_RECEIPT_FILE": "/srv/platform/trust/active-receipt.json",
@@ -2100,6 +2125,10 @@ def materialize_environment(
         "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256": ops_sha256,
         "PHP_PROJECTS_DIR": PROJECT_SOURCE_ROOT,
         "PROJECT_SOURCE_DIR": PROJECT_SOURCE_ROOT,
+        # The helper is built from the exact release and published locally, but
+        # it is not a Compose workload.  Bind it only into the immutable render
+        # descriptor; do not alter the deployment-owned brownfield .env.
+        "RESTIC_IMAGE": local_restic_image,
         "PLATFORM_SECRETS_ROOT": SECRET_DIR,
         "PLATFORM_STATE_DIR": PROJECT_STATE_ROOT,
         "CONTROL_CENTER_DATABASE_URL_SECRET_FILE": DATABASE_SECRET,
@@ -2266,7 +2295,7 @@ def provision_confidential_backup_passphrase() -> None:
 
 
 def update_deployment_environment(repo_root: str, replacements: Dict[str, str]) -> None:
-    if set(replacements) != {item[0] for item in LOCAL_IMAGE_BUILDS} or any(DIGEST_REFERENCE_RE.fullmatch(value) is None for value in replacements.values()):
+    if set(replacements) != set(DEPLOYMENT_LOCAL_IMAGE_ENV) or any(DIGEST_REFERENCE_RE.fullmatch(value) is None for value in replacements.values()):
         stop("deployment environment update differs from the four closed active local image variables.")
     pathname = os.path.join(repo_root, ".env")
     no_symlink_chain(pathname, "deployment environment")
@@ -2353,6 +2382,7 @@ def update_deployment_environment(repo_root: str, replacements: Dict[str, str]) 
 
 
 def build_and_publish_local_images(repo_root: str, release: str, commit: str) -> Dict[str, str]:
+    ensure_node_utility_image(release)
     replacements: Dict[str, str] = {}
     for variable, dockerfile_relative, repository in LOCAL_IMAGE_BUILDS:
         dockerfile = release_file(release, dockerfile_relative)
@@ -2380,7 +2410,10 @@ def build_and_publish_local_images(repo_root: str, release: str, commit: str) ->
         if not isinstance(digest_objects, list) or len(digest_objects) != 1 or digest_objects[0].get("Id") != image_id:
             stop(f"published {variable} RepoDigest does not resolve to its built image ID.")
         replacements[variable] = candidates[0]
-    update_deployment_environment(repo_root, replacements)
+    update_deployment_environment(
+        repo_root,
+        {name: replacements[name] for name in DEPLOYMENT_LOCAL_IMAGE_ENV},
+    )
     # .env is not a source artifact.  Re-prove the checkout stayed clean after
     # updating only this deployment-owned descriptor.
     if git_output(repo_root, ["status", "--porcelain=v1", "--untracked-files=all"], "post-image clean status"):
@@ -4298,6 +4331,85 @@ def image_id_for(reference: str) -> str:
     return image_id
 
 
+def exact_release_node_utility_image(release: str) -> str:
+    references = []
+    for relative in NODE_UTILITY_DOCKERFILES:
+        try:
+            text = secure_file(
+                f"{release}/{relative}",
+                f"exact-release Node authority Dockerfile {relative}",
+                1024 * 1024,
+            ).decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            stop(f"exact-release Node authority Dockerfile {relative} is not UTF-8.")
+        declarations = re.findall(r"^ARG[ \t]+NODE_IMAGE(?:[ \t]*=.*)?[ \t]*$", text, flags=re.MULTILINE)
+        matches = re.findall(r"^ARG NODE_IMAGE=([^\s#]+)$", text, flags=re.MULTILINE)
+        from_uses = re.findall(r"^FROM[ \t]+\$\{NODE_IMAGE\}(?:[ \t].*)?$", text, flags=re.MULTILINE)
+        from_lines = re.findall(r"^FROM \$\{NODE_IMAGE\}$", text, flags=re.MULTILINE)
+        if len(declarations) != 1 or len(matches) != 1 or len(from_uses) != 1 or len(from_lines) != 1:
+            stop(f"exact-release Node authority Dockerfile {relative} lacks one closed NODE_IMAGE source.")
+        references.append(matches[0])
+    if len(set(references)) != 1:
+        stop("exact-release Dockerfiles have divergent Node backup utility image authorities.")
+    reference = references[0]
+    if DIGEST_REFERENCE_RE.fullmatch(reference) is None or reference.endswith("@sha256:" + "0" * 64):
+        stop("exact-release Dockerfiles lack one non-zero digest-pinned Node backup utility image authority.")
+    return reference
+
+
+def ensure_node_utility_image(release: str) -> str:
+    reference = exact_release_node_utility_image(release)
+    inspection = run_result(
+        [docker_binary(), "image", "inspect", reference],
+        "local Node backup utility image inspection",
+        timeout=120,
+    )
+    if inspection.returncode != 0:
+        run(
+            [docker_binary(), "pull", reference],
+            "immutable Node backup utility image pull",
+            timeout=600,
+        )
+    image_id_for(reference)
+    return reference
+
+
+def backup_tool_image_references(
+    release: str, render: Dict[str, object], env_values: Dict[str, str]
+) -> Dict[str, str]:
+    services = render.get("services")
+    if not isinstance(services, dict):
+        stop("canonical exact release render has no services object for backup helpers.")
+
+    def service_image(service_name: str, helper_name: str) -> str:
+        service = services.get(service_name)
+        reference = service.get("image") if isinstance(service, dict) else None
+        if not isinstance(reference, str):
+            stop(f"canonical render omits the {helper_name} service image authority.")
+        return reference
+
+    postgres_restore = env_values.get("POSTGRES_RESTORE_TEST_IMAGE")
+    if not postgres_restore:
+        postgres_restore = service_image("postgres", "PostgreSQL restore")
+    references = {
+        "mariadbRestore": service_image("mariadb", "MariaDB restore"),
+        "minioRestore": service_image("minio", "MinIO restore"),
+        "nodeUtility": exact_release_node_utility_image(release),
+        "postgresRestore": postgres_restore,
+        "resticRclone": env_values.get("RESTIC_IMAGE", ""),
+    }
+    if set(references) != set(BACKUP_TOOL_IMAGE_NAMES):
+        stop("backup helper image authority differs from the closed V1 set.")
+    for name, reference in references.items():
+        match = DIGEST_REFERENCE_RE.fullmatch(reference) if isinstance(reference, str) else None
+        if match is None or reference.endswith("@sha256:" + "0" * 64):
+            stop(f"canonical inputs lack one non-zero digest-pinned {name} backup helper image authority.")
+    restic_prefix = "127.0.0.1:5000/platform/restic-rclone@sha256:"
+    if not references["resticRclone"].startswith(restic_prefix):
+        stop("Restic/rclone backup helper is not the exact locally published V1 image.")
+    return references
+
+
 def route_contract(render: Dict[str, object], env: Dict[str, str]) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
     # Preserved workloads retain enterprise_net and gain only the trust zones
     # required by their frozen configuration.  Aliases match the names already
@@ -4452,10 +4564,7 @@ def build_authority(
         stop("active exact release target grants raw Docker socket authority.")
     attachments, route_checks = route_contract(render, env_values)
     backup_tool_images = {}
-    for name, variables in BACKUP_TOOL_IMAGE_ENV:
-        reference = next((env_values.get(variable) for variable in variables if env_values.get(variable)), None)
-        if not isinstance(reference, str) or DIGEST_REFERENCE_RE.fullmatch(reference) is None:
-            stop(f"exact render environment lacks one digest-pinned {name} backup helper image authority.")
+    for name, reference in backup_tool_image_references(release, render, env_values).items():
         backup_tool_images[name] = {"imageId": image_id_for(reference), "imageReference": reference}
     wrapper = f"{release}/scripts/compose-vps.sh"
     artifacts = {
@@ -4556,11 +4665,13 @@ def read_authority() -> Tuple[Dict[str, object], bytes]:
         ("mariadbRestore", "minioRestore", "nodeUtility", "postgresRestore", "resticRclone"),
         "backup helper image authority",
     )
+    expected_backup_references = backup_tool_image_references(value["releaseRoot"], render, env_values)
     for name, raw in backup_tool_images.items():
         backup_tool = exact_keys(raw, ("imageId", "imageReference"), f"{name} backup helper image authority")
         if (
             not isinstance(backup_tool["imageReference"], str)
             or DIGEST_REFERENCE_RE.fullmatch(backup_tool["imageReference"]) is None
+            or backup_tool["imageReference"] != expected_backup_references[name]
             or not isinstance(backup_tool["imageId"], str)
             or IMAGE_ID_RE.fullmatch(backup_tool["imageId"]) is None
             or image_id_for(backup_tool["imageReference"]) != backup_tool["imageId"]
@@ -4649,12 +4760,15 @@ def prepare() -> Dict[str, object]:
         stop("installed V1 reconciler differs from the immutable exact release before prerequisite preparation.")
     local_images = build_and_publish_local_images(repo_root, release, commit)
     local_ops_image = local_images["PLATFORM_OPS_IMAGE"]
+    local_restic_image = local_images["RESTIC_IMAGE"]
     # Never create the recovery key until the immutable exact-release public
     # certificate has been parsed and fingerprinted successfully.
     recovery_escrow_certificate_binding(release)
     prepare_live_prerequisite_cohort(release)
     provision_confidential_backup_passphrase()
-    source_env_bytes, _ = materialize_environment(repo_root, release, local_ops_image)
+    source_env_bytes, _ = materialize_environment(
+        repo_root, release, local_ops_image, local_restic_image
+    )
     ensure_directory(STATE_DIR, 0o700)
     ensure_directory(PREDEPLOY_DIR, 0o700)
     ensure_directory(AUTHORITY_ARCHIVE_DIR, 0o700)
@@ -4663,7 +4777,7 @@ def prepare() -> Dict[str, object]:
     source_render_bytes = render_with_wrapper(release, digest(source_env_bytes))
     runtime_environment = runtime_identity_environment(commit, tree, release, source_render_bytes)
     env_bytes, env_values = materialize_environment(
-        repo_root, release, local_ops_image, runtime_environment
+        repo_root, release, local_ops_image, local_restic_image, runtime_environment
     )
     atomic_bytes(RENDER_ENV, env_bytes, 0o400)
     render_bytes = render_with_wrapper(release, digest(env_bytes))

@@ -3213,6 +3213,7 @@ function materializeArchiveRenderEnvironment({
   release,
   reconciler,
   opsImage,
+  resticImage,
   runtimeIdentity = null,
   paths,
 }) {
@@ -3232,6 +3233,7 @@ data, _ = m["materialize_environment"](
     os.environ["V1_TEST_STAGING"],
     os.environ["V1_TEST_RELEASE"],
     os.environ["V1_TEST_OPS_IMAGE"],
+    os.environ["V1_TEST_RESTIC_IMAGE"],
     runtime,
 )
 sys.stdout.buffer.write(data)
@@ -3246,6 +3248,7 @@ sys.stdout.buffer.write(data)
       V1_TEST_STAGING: staging,
       V1_TEST_RELEASE: release,
       V1_TEST_OPS_IMAGE: opsImage,
+      V1_TEST_RESTIC_IMAGE: resticImage,
       V1_TEST_RUNTIME_IDENTITY: JSON.stringify(runtimeIdentity),
       V1_TEST_PROJECT_SOURCE_ROOT: paths.source,
       V1_TEST_DEPLOYMENT_REPO: paths.data,
@@ -3440,19 +3443,22 @@ if any(key == "DOCKER_HOST" or any(marker in key for marker in ("PASSWORD", "SEC
 if not stat.S_ISREG(os.fstat(3).st_mode) or not stat.S_ISSOCK(os.fstat(4).st_mode):
   raise RuntimeError("simulated PRE producer did not inherit the lease and executor socket")
 endpoint = socket.socket(fileno=4)
-request = {"action":"RUNTIME_INVENTORY","id":1,"parameters":{"runId":run_id}}
-endpoint.sendall((json.dumps(request, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"))
 buffer = b""
-while b"\\n" not in buffer:
-  chunk = endpoint.recv(65536)
-  if not chunk: raise RuntimeError("simulated PRE executor closed before its response")
-  buffer += chunk
-response_frame = buffer.split(b"\\n", 1)[0]
-response = json.loads(response_frame)
-if response.get("id") != 1 or response.get("status") != 0:
-  raise RuntimeError("simulated PRE executor returned a non-PASS response")
-if response_frame + b"\\n" != (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"):
-  raise RuntimeError("simulated PRE executor response is not canonical")
+requests = [{"action":"RUNTIME_INVENTORY","id":1,"parameters":{"runId":run_id}}]
+for index, tool in enumerate(("mariadbRestore","minioRestore","nodeUtility","postgresRestore","resticRclone"), start=2):
+  requests.append({"action":"VERIFY_TOOL_IMAGE","id":index,"parameters":{"runId":run_id,"tool":tool}})
+for request in requests:
+  endpoint.sendall((json.dumps(request, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"))
+  while b"\\n" not in buffer:
+    chunk = endpoint.recv(65536)
+    if not chunk: raise RuntimeError("simulated PRE executor closed before its response")
+    buffer += chunk
+  response_frame, buffer = buffer.split(b"\\n", 1)
+  response = json.loads(response_frame)
+  if response.get("id") != request["id"] or response.get("status") != 0:
+    raise RuntimeError("simulated PRE executor returned a non-PASS response")
+  if response_frame + b"\\n" != (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\\n").encode("utf-8"):
+    raise RuntimeError("simulated PRE executor response is not canonical")
 endpoint.close()
 receipt = {"mode":sys.argv[1],"runId":run_id,"status":"PASS"}
 sys.stdout.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\\n")
@@ -3513,7 +3519,13 @@ except OSError:
   fd4_closed = True
 pre_entered = (
   pre_receipt == {"mode": "pre", "runId": "20990101T000000Z-deadbeef", "status": "PASS"}
-  and executed == [{"action": "RUNTIME_INVENTORY", "parameters": {"runId": "20990101T000000Z-deadbeef"}}]
+  and executed == [
+    {"action": "RUNTIME_INVENTORY", "parameters": {"runId": "20990101T000000Z-deadbeef"}},
+    *[
+      {"action": "VERIFY_TOOL_IMAGE", "parameters": {"runId": "20990101T000000Z-deadbeef", "tool": tool}}
+      for tool in ("mariadbRestore","minioRestore","nodeUtility","postgresRestore","resticRclone")
+    ],
+  ]
   and popen_calls == [expected_argv]
   and g["EXECUTOR_FD_RESERVED"] is False
   and fd4_closed
@@ -3521,6 +3533,9 @@ pre_entered = (
 )
 print(json.dumps({
   "attachments": len(authority["legacyNetworkAttachments"]),
+  "backupToolReferences": {
+    name: binding["imageReference"] for name, binding in authority["backupToolImages"].items()
+  },
   "backupTools": len(authority["backupToolImages"]),
   "documentId": authority["documentId"],
   "preExecutorActions": len(executed),
@@ -3655,6 +3670,7 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     const controlCenterImage = `127.0.0.1:5000/platform/control-center@sha256:${"b".repeat(64)}`;
     const alertDispatcherImage = `127.0.0.1:5000/platform/alert-dispatcher@sha256:${"c".repeat(64)}`;
     const projectRouterImage = `127.0.0.1:5000/platform/project-router@sha256:${"d".repeat(64)}`;
+    const resticImage = `127.0.0.1:5000/platform/restic-rclone@sha256:${"9".repeat(64)}`;
     const stagingEnvironment = [
       "ALERT_EMAIL_TO=qa@fixture.invalid",
       "COMPOSE_PROJECT_NAME=platform_infra_vps",
@@ -3665,16 +3681,11 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=/tmp/not-the-release-lock.json",
       "MAILER_FROM=qa@fixture.invalid",
       "MAILER_REPLY_TO=qa@fixture.invalid",
-      "MARIADB_IMAGE=mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
-      "MINIO_IMAGE=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
-      "NODE_IMAGE=node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
       `PLATFORM_ALERT_DISPATCHER_IMAGE=${alertDispatcherImage}`,
       `PLATFORM_OPS_IMAGE=${opsImage}`,
       "PLATFORM_COMPOSE_VARIANT=VPS",
-      "POSTGRES_IMAGE=postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
       "PROJECTS_GATEWAY_EMAIL=qa@fixture.invalid",
       `PROJECT_ROUTER_IMAGE=${projectRouterImage}`,
-      `RESTIC_IMAGE=restic@sha256:${"a".repeat(64)}`,
       "SMTP_HOST=smtp.fixture.invalid",
       "SMTP_USER=qa",
       "",
@@ -3741,9 +3752,18 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       release,
       reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
       opsImage,
+      resticImage,
       paths,
     });
     const sourceEnvironment = parseMaterializedEnvironment(sourceEnvironmentBytes);
+    assert.equal(sourceEnvironment.get("RESTIC_IMAGE"), resticImage);
+    for (const rawServiceVariable of ["MARIADB_IMAGE", "MINIO_IMAGE", "NODE_IMAGE", "POSTGRES_IMAGE"]) {
+      assert.equal(
+        sourceEnvironment.has(rawServiceVariable),
+        false,
+        `${rawServiceVariable} must remain absent so this fixture covers Compose-default helper authority`,
+      );
+    }
     assert.equal(
       sourceEnvironment.get("HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE"),
       path.join(release, "config", "no-hosted-workloads.local-private.lock.json"),
@@ -3781,6 +3801,7 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       release,
       reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
       opsImage,
+      resticImage,
       runtimeIdentity,
       paths,
     });
@@ -3825,9 +3846,16 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     });
     assert.deepEqual(preAuthority, {
       attachments: 30,
+      backupToolReferences: {
+        mariadbRestore: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+        minioRestore: "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+        nodeUtility: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
+        postgresRestore: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
+        resticRclone: resticImage,
+      },
       backupTools: 5,
       documentId: preAuthority.documentId,
-      preExecutorActions: 1,
+      preExecutorActions: 6,
       preEntered: true,
       routes: 10,
       status: "AUTHORIZED",

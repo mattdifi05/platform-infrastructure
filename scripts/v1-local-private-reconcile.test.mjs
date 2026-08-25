@@ -196,16 +196,71 @@ print(json.dumps({
     "PLATFORM_ALERT_DISPATCHER_IMAGE",
     "PLATFORM_OPS_IMAGE",
     "PROJECT_ROUTER_IMAGE",
+    "RESTIC_IMAGE",
   ]);
   assert.equal(value.secretRoot, "/home/platform_infrastructure/platform-infrastructure/secrets");
   assert.equal(value.sudoers, "/etc/sudoers.d/platform-v1-local-private-control");
-  assert.deepEqual(jsonPython(`print(json.dumps([item[0] for item in m['BACKUP_TOOL_IMAGE_ENV']]))`), [
+  assert.deepEqual(jsonPython(`print(json.dumps(list(m['BACKUP_TOOL_IMAGE_NAMES'])))`), [
     "mariadbRestore", "minioRestore", "nodeUtility", "postgresRestore", "resticRclone",
   ]);
   assert.doesNotMatch(source, /\bV2\b/);
   assert.doesNotMatch(source, /backupToolImage(?!s)/);
   assert.match(source, /prepare\|apply\|abort\|evidence/);
   assert.match(source, /"composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit"/);
+});
+
+test("exact-release image preparation publishes the Restic/rclone helper but updates only active deployment image bindings", () => {
+  const value = jsonPython(`
+g=m['build_and_publish_local_images'].__globals__
+commit='a'*40; release='/srv/releases/fixture'; repo='/srv/staging/fixture'
+events=[]; updated={}
+references={}; identifiers={}; tags={}
+for index,(variable,dockerfile,repository) in enumerate(m['LOCAL_IMAGE_BUILDS'],start=1):
+ digest=format(index,'064x')
+ references[variable]='127.0.0.1:5000/'+repository+'@sha256:'+digest
+ identifiers[variable]='sha256:'+format(index+10,'064x')
+ tags[variable]='127.0.0.1:5000/'+repository+':v1-'+commit
+g['release_file']=lambda candidate_release,relative:'/immutable/'+relative
+g['docker_binary']=lambda:'/usr/bin/docker'
+g['run']=lambda command,label,**kwargs: events.append({'command':command,'label':label}) or b''
+g['ensure_node_utility_image']=lambda candidate_release: events.append({'command':['ensure-node',candidate_release],'label':'node utility'}) or 'node@sha256:'+'9'*64
+def fake_docker_json(arguments,label):
+ target=arguments[2]
+ variable=next((name for name,value in tags.items() if value==target),None)
+ if variable is not None:
+  return [{'Id':identifiers[variable],'RepoDigests':[references[variable]]}]
+ variable=next((name for name,value in references.items() if value==target),None)
+ if variable is None: raise AssertionError('unexpected image inspection '+target)
+ return [{'Id':identifiers[variable]}]
+g['docker_json']=fake_docker_json
+g['update_deployment_environment']=lambda candidate_repo,replacements: updated.update(replacements)
+g['git_output']=lambda *args,**kwargs:b''
+result=m['build_and_publish_local_images'](repo,release,commit)
+print(json.dumps({
+ 'builds':sum(1 for event in events if len(event['command'])>1 and event['command'][1]=='build'),
+ 'nodeEnsureFirst':events[0]['command']==['ensure-node',release],
+ 'nodeEnsures':sum(1 for event in events if event['command'][0]=='ensure-node'),
+ 'pushes':sum(1 for event in events if len(event['command'])>1 and event['command'][1]=='push'),
+ 'result':result,'updated':updated,
+},sort_keys=True))`);
+  assert.equal(value.builds, 5);
+  assert.equal(value.nodeEnsureFirst, true);
+  assert.equal(value.nodeEnsures, 1);
+  assert.equal(value.pushes, 5);
+  assert.deepEqual(Object.keys(value.result).sort(), [
+    "CONTROL_CENTER_IMAGE",
+    "PLATFORM_ALERT_DISPATCHER_IMAGE",
+    "PLATFORM_OPS_IMAGE",
+    "PROJECT_ROUTER_IMAGE",
+    "RESTIC_IMAGE",
+  ]);
+  assert.deepEqual(Object.keys(value.updated).sort(), [
+    "CONTROL_CENTER_IMAGE",
+    "PLATFORM_ALERT_DISPATCHER_IMAGE",
+    "PLATFORM_OPS_IMAGE",
+    "PROJECT_ROUTER_IMAGE",
+  ]);
+  assert.match(value.result.RESTIC_IMAGE, /^127\.0\.0\.1:5000\/platform\/restic-rclone@sha256:[a-f0-9]{64}$/);
 });
 
 test("PRE render semantics accept Compose composite durations and inline configs only in their exact form", () => {
@@ -319,12 +374,14 @@ import os,tempfile
 ops_repository='127.0.0.1:5000/platform/ops'
 ops_sha256='c'*64
 ops_image=ops_repository+'@sha256:'+ops_sha256
+restic_repository='127.0.0.1:5000/platform/restic-rclone'
+restic_image=restic_repository+'@sha256:'+'e'*64
 def materialize(lines):
  root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
  release=os.path.join(root,'release')
  pathname=os.path.join(root,'.env')
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
- rendered,values=m['materialize_environment'](root,release,ops_image)
+ rendered,values=m['materialize_environment'](root,release,ops_image,restic_image)
  text=rendered.decode()
  provider_names=(
   'CONTROL_CENTER_LOCAL_CA_CERT_SOURCE',
@@ -336,10 +393,10 @@ def materialize(lines):
   'PLATFORM_CERTS_DIR','PLATFORM_DATA_ROOT',
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY','PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256',
-  'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR',
+  'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR','RESTIC_IMAGE',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
- _,final_values=m['materialize_environment'](root,release,ops_image,runtime)
+ _,final_values=m['materialize_environment'](root,release,ops_image,restic_image,runtime)
  return {
   'core':values.get('CORE_VALUE'),
   'lock':values.get('HOSTED_WORKLOAD_LOCK'),
@@ -354,11 +411,11 @@ def materialize(lines):
   'variant':values.get('PLATFORM_COMPOSE_VARIANT'),
   'variantLines':text.count('PLATFORM_COMPOSE_VARIANT='),
  }
-def rejected(lines,supplied):
+def rejected(lines,supplied_ops,supplied_restic=restic_image):
  root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
  pathname=os.path.join(root,'.env')
  open(pathname,'wb').write(('\\n'.join(lines)+'\\n').encode()); os.chmod(pathname,0o600)
- try: m['materialize_environment'](root,os.path.join(root,'release'),supplied); return False
+ try: m['materialize_environment'](root,os.path.join(root,'release'),supplied_ops,supplied_restic); return False
  except m['Stop']: return True
 print(json.dumps({
  'absent':materialize(['PLATFORM_OPS_IMAGE='+ops_image,'CORE_VALUE=kept']),
@@ -392,6 +449,13 @@ print(json.dumps({
  'zeroRejected':rejected(
   ['PLATFORM_OPS_IMAGE='+ops_repository+'@sha256:'+'0'*64],
   ops_repository+'@sha256:'+'0'*64),
+ 'foreignResticRejected':rejected(
+  ['PLATFORM_OPS_IMAGE='+ops_image],ops_image,
+  'registry.example.invalid/platform/restic-rclone@sha256:'+'e'*64),
+ 'tagResticRejected':rejected(
+  ['PLATFORM_OPS_IMAGE='+ops_image],ops_image,restic_repository+':latest'),
+ 'zeroResticRejected':rejected(
+  ['PLATFORM_OPS_IMAGE='+ops_image],ops_image,restic_repository+'@sha256:'+'0'*64),
 }))`);
   for (const descriptor of [value.absent, value.hosted]) {
     const runtimeLock = path.join(
@@ -427,6 +491,7 @@ print(json.dumps({
         PLATFORM_STATE_DIR: "/home/platform_infrastructure/platform-infrastructure/projects-portal/state",
         PHP_PROJECTS_DIR: "/home/platform_infrastructure/src",
         PROJECT_SOURCE_DIR: "/home/platform_infrastructure/src",
+        RESTIC_IMAGE: `127.0.0.1:5000/platform/restic-rclone@sha256:${"e".repeat(64)}`,
       },
       providerLines: {
         CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: 1,
@@ -448,6 +513,7 @@ print(json.dumps({
         PLATFORM_STATE_DIR: 1,
         PHP_PROJECTS_DIR: 1,
         PROJECT_SOURCE_DIR: 1,
+        RESTIC_IMAGE: 1,
       },
       providerStable: true,
       release: descriptor.release,
@@ -461,6 +527,132 @@ print(json.dumps({
   assert.equal(value.mismatchRejected, true);
   assert.equal(value.tagRejected, true);
   assert.equal(value.zeroRejected, true);
+  assert.equal(value.foreignResticRejected, true);
+  assert.equal(value.tagResticRejected, true);
+  assert.equal(value.zeroResticRejected, true);
+});
+
+test("Node utility authority is exact-release-derived and present in the daemon before local image publication", () => {
+  const value = jsonPython(`
+import os,shutil,tempfile,types
+root=os.path.realpath(tempfile.mkdtemp(prefix='v1-node-authority-'))
+g=m['ensure_node_utility_image'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+release='/release'; node='node:26@sha256:'+'3'*64; node_from='FROM '+chr(36)+'{NODE_IMAGE}'
+def write_sources(reference=node,overrides=None):
+ overrides=overrides or {}
+ for relative in m['NODE_UTILITY_DOCKERFILES']:
+  pathname=os.path.join(root,release.removeprefix('/'),relative); os.makedirs(os.path.dirname(pathname),exist_ok=True)
+  if os.path.lexists(pathname): os.unlink(pathname)
+  content=overrides.get(relative,'ARG NODE_IMAGE='+reference+'\\n'+node_from+'\\n')
+  with open(pathname,'wb') as stream: stream.write(content if isinstance(content,bytes) else content.encode())
+try:
+ write_sources()
+ events=[]; statuses=[0,1]
+ g['docker_binary']=lambda:'/usr/bin/docker'
+ def fake_result(command,label,**kwargs):
+  status=statuses.pop(0); events.append({'kind':'inspect','reference':command[-1],'status':status}); return types.SimpleNamespace(returncode=status)
+ g['run_result']=fake_result
+ g['run']=lambda command,label,**kwargs: events.append({'kind':'pull','reference':command[-1]}) or b''
+ g['image_id_for']=lambda reference: events.append({'kind':'identity','reference':reference}) or 'sha256:'+'4'*64
+ cached=m['ensure_node_utility_image'](release)
+ pulled=m['ensure_node_utility_image'](release)
+ rejected={}
+ first=m['NODE_UTILITY_DOCKERFILES'][0]; second=m['NODE_UTILITY_DOCKERFILES'][1]
+ cases={
+  'divergent':(node,{first:'ARG NODE_IMAGE=node:other@sha256:'+'7'*64+'\\n'+node_from+'\\n'}),
+  'duplicate-arg':(node,{first:'ARG NODE_IMAGE='+node+'\\nARG NODE_IMAGE\\n'+node_from+'\\n'}),
+  'missing-arg':(node,{first:node_from+'\\n'}),
+  'missing-from':(node,{first:'ARG NODE_IMAGE='+node+'\\nFROM node:latest\\n'}),
+  'from-alias':(node,{first:'ARG NODE_IMAGE='+node+'\\n'+node_from+' AS runtime\\n'}),
+  'mutable':('node:latest',{}),
+  'zero':('node:26@sha256:'+'0'*64,{}),
+  'invalid-utf8':(node,{first:b'ARG NODE_IMAGE='+node.encode()+b'\\n'+node_from.encode()+b'\\n'+bytes([255])}),
+ }
+ for name,(reference,overrides) in cases.items():
+  write_sources(reference,overrides)
+  try: m['exact_release_node_utility_image'](release); rejected[name]=False
+  except m['Stop']: rejected[name]=True
+ write_sources(); os.unlink(os.path.join(root,release.removeprefix('/'),first))
+ try: m['exact_release_node_utility_image'](release); rejected['missing-file']=False
+ except m['Stop']: rejected['missing-file']=True
+ write_sources(); first_path=os.path.join(root,release.removeprefix('/'),first); second_path=os.path.join(root,release.removeprefix('/'),second); os.unlink(second_path); os.link(first_path,second_path)
+ try: m['exact_release_node_utility_image'](release); rejected['hardlink']=False
+ except m['Stop']: rejected['hardlink']=True
+ print(json.dumps({'cached':cached,'events':events,'pulled':pulled,'rejected':rejected},sort_keys=True))
+finally: shutil.rmtree(root)`);
+  assert.equal(value.cached, `node:26@sha256:${"3".repeat(64)}`);
+  assert.equal(value.pulled, value.cached);
+  assert.deepEqual(value.events, [
+    { kind: "inspect", reference: value.cached, status: 0 },
+    { kind: "identity", reference: value.cached },
+    { kind: "inspect", reference: value.cached, status: 1 },
+    { kind: "pull", reference: value.cached },
+    { kind: "identity", reference: value.cached },
+  ]);
+  assert.deepEqual(value.rejected, {
+    "divergent": true,
+    "duplicate-arg": true,
+    "from-alias": true,
+    "hardlink": true,
+    "invalid-utf8": true,
+    "missing-arg": true,
+    "missing-file": true,
+    "missing-from": true,
+    "mutable": true,
+    "zero": true,
+  });
+});
+
+test("backup helper authority derives every sibling from exact-release and canonical inputs when raw service image variables are absent", () => {
+  const value = jsonPython(`
+import copy
+mariadb='mariadb:12@sha256:'+'1'*64
+minio='minio:latest@sha256:'+'2'*64
+node='node:26@sha256:'+'3'*64
+postgres='postgres:18@sha256:'+'4'*64
+restic='127.0.0.1:5000/platform/restic-rclone@sha256:'+'5'*64
+render={'services':{'mariadb':{'image':mariadb},'minio':{'image':minio},'postgres':{'image':postgres}}}
+environment={'RESTIC_IMAGE':restic}; release='/release'
+g=m['backup_tool_image_references'].__globals__; g['exact_release_node_utility_image']=lambda candidate_release: node
+references=m['backup_tool_image_references'](release,render,environment)
+override='postgres-restore:18@sha256:'+'6'*64
+override_references=m['backup_tool_image_references'](release,render,{**environment,'POSTGRES_RESTORE_TEST_IMAGE':override})
+rejected={}
+mutants={
+ 'missing-mariadb':(lambda value:value['services'].pop('mariadb')),
+ 'mutable-minio':(lambda value:value['services']['minio'].__setitem__('image','minio:latest')),
+ 'zero-postgres':(lambda value:value['services']['postgres'].__setitem__('image','postgres@sha256:'+'0'*64)),
+}
+for name,mutate in mutants.items():
+ candidate=copy.deepcopy(render); mutate(candidate)
+ try: m['backup_tool_image_references'](release,candidate,environment); rejected[name]=False
+ except m['Stop']: rejected[name]=True
+for name,candidate_environment in {
+ 'missing-restic':{},
+ 'foreign-restic':{'RESTIC_IMAGE':'registry.invalid/restic@sha256:'+'8'*64},
+ 'zero-restic':{'RESTIC_IMAGE':'127.0.0.1:5000/platform/restic-rclone@sha256:'+'0'*64},
+ 'mutable-postgres-override':{**environment,'POSTGRES_RESTORE_TEST_IMAGE':'postgres:latest'},
+}.items():
+ try: m['backup_tool_image_references'](release,render,candidate_environment); rejected[name]=False
+ except m['Stop']: rejected[name]=True
+print(json.dumps({'references':references,'override':override_references,'rejected':rejected},sort_keys=True))`);
+  assert.deepEqual(value.references, {
+    mariadbRestore: `mariadb:12@sha256:${"1".repeat(64)}`,
+    minioRestore: `minio:latest@sha256:${"2".repeat(64)}`,
+    nodeUtility: `node:26@sha256:${"3".repeat(64)}`,
+    postgresRestore: `postgres:18@sha256:${"4".repeat(64)}`,
+    resticRclone: `127.0.0.1:5000/platform/restic-rclone@sha256:${"5".repeat(64)}`,
+  });
+  assert.equal(value.override.postgresRestore, `postgres-restore:18@sha256:${"6".repeat(64)}`);
+  assert.deepEqual(value.rejected, {
+    "foreign-restic": true,
+    "missing-mariadb": true,
+    "missing-restic": true,
+    "mutable-minio": true,
+    "mutable-postgres-override": true,
+    "zero-postgres": true,
+    "zero-restic": true,
+  });
 });
 
 test("runtime identity is two-pass, non-circular and every excluded container is explicitly LEGACY_UNMANAGED", () => {
@@ -793,7 +985,7 @@ test("prepare is checkpoint/staging-bound and Git cannot execute caller or repos
   assert.match(gitSource, /safe\.directory=/);
   assert.match(envSource, /stat\.S_IMODE\(info\.st_mode\) not in \(0o400, 0o600\)/);
   assert.match(envSource, /current\.st_dev, current\.st_ino, current\.st_size, current\.st_mtime_ns/);
-  assert.match(envSource, /set\(replacements\).*LOCAL_IMAGE_BUILDS/);
+  assert.match(envSource, /set\(replacements\).*DEPLOYMENT_LOCAL_IMAGE_ENV/);
   assert.match(prepareSource, /recovery_escrow_certificate_binding\(release\)[\s\S]*prepare_live_prerequisite_cohort\(release\)[\s\S]*provision_confidential_backup_passphrase\(\)[\s\S]*materialize_environment/);
 });
 
@@ -849,8 +1041,22 @@ images={
  'PLATFORM_ALERT_DISPATCHER_IMAGE':'127.0.0.1:5000/platform/alert-dispatcher@sha256:'+'c'*64,
  'PLATFORM_OPS_IMAGE':ops_image,
  'PROJECT_ROUTER_IMAGE':'127.0.0.1:5000/platform/project-router@sha256:'+'d'*64,
+ 'RESTIC_IMAGE':'127.0.0.1:5000/platform/restic-rclone@sha256:'+'9'*64,
 }
-g['build_and_publish_local_images']=lambda repo,candidate_release,candidate_commit: events.append('images-simulated') or images
+def simulated_images(repo,candidate_release,candidate_commit):
+ events.append('images-simulated')
+ original_git_output=g['git_output']
+ g['git_output']=lambda *args,**kwargs: b''
+ try:
+  m['update_deployment_environment'](
+   repo,{name:images[name] for name in m['DEPLOYMENT_LOCAL_IMAGE_ENV']})
+ finally:
+  g['git_output']=original_git_output
+ _,deployment_values=m['parse_env'](m['read_deployment_environment'](repo),'simulated deployment environment')
+ assert deployment_values['PLATFORM_OPS_IMAGE']==ops_image
+ assert 'RESTIC_IMAGE' not in deployment_values
+ return images
+g['build_and_publish_local_images']=simulated_images
 g['recovery_escrow_certificate_binding']=lambda candidate_release: events.append('escrow-certificate') or {
  'path':candidate_release+'/config/local-private-recovery-escrow-cert.pem','sha256':'e'*64,'sha256Fingerprint':'f'*64}
 
@@ -880,15 +1086,17 @@ required=[m['DATABASE_SECRET'],m['BOOTSTRAP_SECRET'],m['KEYCLOAK_CLIENT_SECRET']
  f"{m['SECRET_DIR']}/{name}.txt" for name in m['SECRET_MANAGER_NEW_REQUIRED']]
 original_materialize=g['materialize_environment']
 materialize_calls={'count':0}
-def real_materialize(repo,candidate_release,local_ops,runtime_identity=None):
+def real_materialize(repo,candidate_release,local_ops,local_restic,runtime_identity=None):
  assert events[-1] in ('passphrase-pass','runtime-identity')
  assert candidate_release==release
+ assert local_restic==images['RESTIC_IMAGE']
  assert all(os.path.isfile(m['physical'](item)) for item in required)
  assert all(os.stat(m['physical'](item),follow_symlinks=False).st_nlink==1 for item in required)
- data,values=original_materialize(repo,candidate_release,local_ops,runtime_identity)
+ data,values=original_materialize(repo,candidate_release,local_ops,local_restic,runtime_identity)
  assert values['PHP_PROJECTS_DIR']==m['PROJECT_SOURCE_ROOT']
  assert values['PROJECT_SOURCE_DIR']==m['PROJECT_SOURCE_ROOT']
  assert values['HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE']==release+'/config/no-hosted-workloads.local-private.lock.json'
+ assert values['RESTIC_IMAGE']==images['RESTIC_IMAGE']
  materialize_calls['count']+=1
  events.append('materialize-source' if runtime_identity is None else 'materialize-final')
  return data,values
@@ -1386,6 +1594,52 @@ print(json.dumps({'accepted':[accepted(request,index) for index,request in enume
   assert.ok(serverSource.indexOf("validate_executor_request") < serverSource.indexOf("execute_typed_evidence_action"));
   assert.doesNotMatch(serverSource, /arguments|infraOperation|INFRA_DOCKER|PRODUCER_DOCKER/);
   assert.doesNotMatch(source, /def validate_infra_docker_arguments|"INFRA_DOCKER"|"PRODUCER_DOCKER"/);
+});
+
+test("typed helper image verification rejects retargeted or malformed daemon identity before PRE artifacts", () => {
+  const value = jsonPython(`
+import json,subprocess
+reference='node:26@sha256:'+'1'*64; image_id='sha256:'+'2'*64
+authority={'backupToolImages':{'nodeUtility':{'imageId':image_id,'imageReference':reference}}}
+g=m['executor_verify_tool'].__globals__; calls=[]; response={'code':0,'stdout':json.dumps([{'Id':image_id}]).encode(),'stderr':b''}
+def fake_run(arguments,label,timeout):
+ calls.append({'arguments':arguments,'label':label,'timeout':timeout})
+ return subprocess.CompletedProcess([],response['code'],response['stdout'],response['stderr'])
+g['executor_run_docker']=fake_run
+valid=m['executor_verify_tool'](authority,'nodeUtility')
+rejected={}
+for name,stdout in {
+ 'retargeted':json.dumps([{'Id':'sha256:'+'f'*64}]).encode(),
+ 'empty':b'[]',
+ 'duplicate':b'[{"Id":"sha256:'+b'2'*64+b'","Id":"sha256:'+b'2'*64+b'"}]',
+ 'malformed':b'{',
+}.items():
+ response.update(code=0,stdout=stdout,stderr=b'')
+ try: m['executor_verify_tool'](authority,'nodeUtility'); rejected[name]=False
+ except m['Stop']: rejected[name]=True
+response.update(code=42,stdout=b'',stderr=b'inspect failed')
+passthrough=m['executor_verify_tool'](authority,'nodeUtility')
+print(json.dumps({'calls':calls,'passthrough':[passthrough[0],passthrough[1].decode(),passthrough[2].decode()],
+ 'rejected':rejected,'valid':[valid[0],json.loads(valid[1]),valid[2].decode()]},sort_keys=True))`);
+  assert.deepEqual(value.valid, [0, {
+    imageId: `sha256:${"2".repeat(64)}`,
+    imageReference: `node:26@sha256:${"1".repeat(64)}`,
+    status: "PASS",
+    tool: "nodeUtility",
+  }, ""]);
+  assert.deepEqual(value.rejected, {
+    duplicate: true,
+    empty: true,
+    malformed: true,
+    retargeted: true,
+  });
+  assert.deepEqual(value.passthrough, [42, "", "inspect failed"]);
+  assert.equal(value.calls.length, 6);
+  for (const call of value.calls) {
+    assert.deepEqual(call.arguments, ["image", "inspect", `node:26@sha256:${"1".repeat(64)}`]);
+    assert.equal(call.label, "nodeUtility image inspection");
+    assert.equal(call.timeout, 60);
+  }
 });
 
 test("typed infra mappings fix exact release, tmpfs artifacts, images, containers and network policy", () => {
