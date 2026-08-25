@@ -393,7 +393,7 @@ def materialize(lines):
   'PLATFORM_CERTS_DIR','PLATFORM_DATA_ROOT',
   'PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY','PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256',
   'PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY','PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256',
-  'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR','RESTIC_IMAGE',
+  'PLATFORM_STATE_DIR','PHP_PROJECTS_DIR','PROJECT_SOURCE_DIR','RESTIC_IMAGE','WAF_TLS_KEY_GID',
  )
  runtime={name:'runtime-'+str(index) for index,name in enumerate(m['RUNTIME_IDENTITY_ENV'])}
  _,final_values=m['materialize_environment'](root,release,ops_image,restic_image,runtime)
@@ -492,6 +492,7 @@ print(json.dumps({
         PHP_PROJECTS_DIR: "/home/platform_infrastructure/src",
         PROJECT_SOURCE_DIR: "/home/platform_infrastructure/src",
         RESTIC_IMAGE: `127.0.0.1:5000/platform/restic-rclone@sha256:${"e".repeat(64)}`,
+        WAF_TLS_KEY_GID: String(process.getgid()),
       },
       providerLines: {
         CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: 1,
@@ -514,6 +515,7 @@ print(json.dumps({
         PHP_PROJECTS_DIR: 1,
         PROJECT_SOURCE_DIR: 1,
         RESTIC_IMAGE: 1,
+        WAF_TLS_KEY_GID: 1,
       },
       providerStable: true,
       release: descriptor.release,
@@ -1265,7 +1267,7 @@ test("pre-PRE prerequisite cohort preserves brownfield bytes and converges idemp
       "/home/platform_infrastructure/platform-infrastructure/traefik/certs",
       "/home/platform_infrastructure/src",
     ]) assert.equal(fs.statSync(fixture.logical(logical)).mode & 0o022, 0, logical);
-    assert.equal(fs.statSync(fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/local-key.pem")).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(fixture.logical("/home/platform_infrastructure/platform-infrastructure/traefik/certs/local-key.pem")).mode & 0o777, 0o640);
     assert.equal(fs.existsSync(fixture.logical("/run/platform-v1-local-private-secret-prep")), false);
 
     const second = runPrerequisiteCohort(fixture);

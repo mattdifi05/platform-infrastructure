@@ -7,7 +7,7 @@
   "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "coreSemanticPolicy": {
     "schema": "platform-no-hosted-core-capability-policy/v2",
-    "sha256": "de85089023558b7072a26300aa37f3adb00e50dd428020d6c5577b46cd9b4f8a"
+    "sha256": "b3cd1a257013dbee5466719157eed3dc0a41fd746b8c8eb959b9009f74faf77f"
   },
   "projectName": "platform_infra_vps",
   "protectedResourceNames": {

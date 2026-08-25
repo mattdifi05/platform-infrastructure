@@ -3045,7 +3045,7 @@ function localPrivateQa8Fixture(sandbox) {
   const keycloakClientSecret = path.join(secretsRoot, "first-configuration-keycloak-secret.txt");
   for (const [filename, mode] of [
     [certificate, 0o644],
-    [privateKey, 0o600],
+    [privateKey, 0o640],
     [localCa, 0o644],
     [bootstrapToken, 0o600],
     [keycloakClientSecret, 0o600],
@@ -3072,6 +3072,7 @@ function localPrivateQa8Fixture(sandbox) {
     PLATFORM_DATA_ROOT: dataRoot,
     PLATFORM_STATE_DIR: stateDirectory,
     PLATFORM_CERTS_DIR: certificatesDirectory,
+    WAF_TLS_KEY_GID: String(fs.statSync(privateKey).gid),
     PLATFORM_SECRETS_ROOT: secretsRoot,
     CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: localCa,
     CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE: bootstrapToken,
@@ -3142,6 +3143,7 @@ function localPrivateQa8Fixture(sandbox) {
   };
   replaceMount("waf", "/etc/nginx/conf/server.crt", certificate);
   replaceMount("waf", "/etc/nginx/conf/server.key", privateKey);
+  config.services.waf.group_add = [environment.get("WAF_TLS_KEY_GID")];
   replaceMount("control-center", "/var/www/project-state", stateDirectory);
   config.services["control-center"].volumes.push({
     type: "bind",
@@ -3646,7 +3648,7 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
     );
     for (const [filename, mode] of [
       [certificate, 0o644],
-      [privateKey, 0o600],
+      [privateKey, 0o640],
       [paths.localCa, 0o644],
       [paths.bootstrapSecret, 0o600],
       [paths.keycloakClientSecret, 0o600],
@@ -3886,6 +3888,14 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets 
     assert.equal(lock.coreSemanticPolicy.sha256, localPrivateCoreSemanticPolicySha256);
     assert.equal(lock.protectedResourceNames.secrets.length, 23);
     const overlay = fs.readFileSync(path.join(repositoryRoot, "compose.local-private.yaml"), "utf8");
+    assert.match(
+      overlay,
+      /group_add: !override\n\s+- \$\{WAF_TLS_KEY_GID:\?set WAF_TLS_KEY_GID\}/,
+    );
+    const privateKey = config.services.waf.volumes
+      .find((mount) => mount.target === "/etc/nginx/conf/server.key").source;
+    assert.equal(environment.get("WAF_TLS_KEY_GID"), String(fs.statSync(privateKey).gid));
+    assert.deepEqual(config.services.waf.group_add, [environment.get("WAF_TLS_KEY_GID")]);
     for (const [secretName, authority] of Object.entries(
       LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
     )) {
@@ -4078,6 +4088,32 @@ test("LOCAL_PRIVATE projected archive bind exceptions remain exact across tuple 
         0o600,
       );
     }, "local-private:certificate-authority"],
+    ["private key mode", ({ config }) => {
+      fs.chmodSync(
+        config.services.waf.volumes
+          .find((mount) => mount.target === "/etc/nginx/conf/server.key").source,
+        0o600,
+      );
+    }, "local-private:certificate-authority"],
+    ["world-readable private key mode", ({ config }) => {
+      fs.chmodSync(
+        config.services.waf.volumes
+          .find((mount) => mount.target === "/etc/nginx/conf/server.key").source,
+        0o644,
+      );
+    }, "local-private:certificate-authority"],
+    ["missing WAF key group", ({ config }) => {
+      delete config.services.waf.group_add;
+    }, "waf:local-private-tls-key-group-authority"],
+    ["mismatched WAF key group", ({ config }) => {
+      config.services.waf.group_add = ["9999"];
+    }, "waf:local-private-tls-key-group-authority"],
+    ["multiple WAF key groups", ({ config, environment }) => {
+      config.services.waf.group_add = [environment.get("WAF_TLS_KEY_GID"), "9999"];
+    }, "waf:local-private-tls-key-group-authority"],
+    ["mismatched WAF key GID authority", ({ environment }) => {
+      environment.set("WAF_TLS_KEY_GID", "9999");
+    }, "waf:local-private-tls-key-group-authority"],
     ["state mode", ({ environment }) => {
       fs.chmodSync(environment.get("PLATFORM_STATE_DIR"), 0o770);
     }, "local-private:state-directory-authority"],
