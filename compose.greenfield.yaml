@@ -1,0 +1,143 @@
+# V1 LOCAL_PRIVATE GREENFIELD projection overlay. Load LAST so every physical
+# resource name lands in the dedicated greenfield namespace and nothing can
+# inherit the frozen brownfield runtime (platform_infra_vps / enterprise-*).
+# Container identities, the shared data network and every data volume are
+# re-pointed explicitly; trust-zone networks stay parametric through
+# PLATFORM_NETWORK_PREFIX which the greenfield render wrapper pins to
+# platform_infra_greenfield. No images, ports, secrets or services are added
+# and no profile is enabled or disabled by this overlay.
+services:
+  alertmanager:
+    container_name: gf-alertmanager
+  backup-scheduler:
+    container_name: gf-backup-scheduler
+  broker-auth-bootstrap:
+    container_name: gf-broker-auth-bootstrap
+  cadvisor:
+    container_name: gf-cadvisor
+  control-center:
+    container_name: gf-control-center
+  docker-action-activation-sidecar:
+    container_name: gf-docker-action-activation-sidecar
+  docker-action-broker:
+    container_name: gf-docker-action-broker
+  grafana:
+    container_name: gf-grafana
+  keycloak:
+    container_name: gf-keycloak
+  local-dns:
+    container_name: gf-local-dns
+  local-registry:
+    container_name: gf-local-registry
+  loki:
+    container_name: gf-loki
+  mariadb:
+    container_name: gf-mariadb
+  minio:
+    container_name: gf-minio
+  nats:
+    container_name: gf-nats
+  node-exporter:
+    container_name: gf-node-exporter
+  php-apache:
+    container_name: gf-php-apache
+  phpmyadmin:
+    container_name: gf-phpmyadmin
+  phppgadmin:
+    container_name: gf-phppgadmin
+  platform-alert-dispatcher:
+    container_name: gf-platform-alert-dispatcher
+  postgres:
+    container_name: gf-postgres
+  project-router:
+    container_name: gf-project-router
+  prometheus:
+    container_name: gf-prometheus
+  promtail:
+    container_name: gf-promtail
+  redis:
+    container_name: gf-redis
+  traefik:
+    container_name: gf-traefik
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.251.3
+  waf:
+    container_name: gf-waf
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.251.2
+
+networks:
+  enterprise_net:
+    name: platform_infra_greenfield_enterprise_net
+    internal: true
+    external: false
+  platform_edge: !override
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_greenfield_platform}_edge
+    internal: true
+    labels: { com.platform.trust-zone: edge }
+    ipam:
+      config:
+        # Distinct from the frozen brownfield edge subnet (172.30.250.0/29) so
+        # the PARALLEL topology can run on the same host without overlap.
+        - subnet: 172.30.251.0/29
+
+# Every legacy logical key survives only so overlay merge semantics stay
+# deterministic; each physical name is freshly owned by the greenfield
+# namespace and none of them is external (no inherited brownfield state).
+volumes:
+  redis_auth_config:
+    name: greenfield_redis_auth_config
+    external: false
+  nats_auth_config:
+    name: greenfield_nats_auth_config
+    external: false
+  enterprise_mariadb_data:
+    name: greenfield_mariadb_data
+    external: false
+  enterprise_postgres_data:
+    name: greenfield_postgres_data
+    external: false
+  enterprise_redis_data:
+    name: greenfield_redis_data
+    external: false
+  enterprise_keycloak_data:
+    name: greenfield_keycloak_data
+    external: false
+  enterprise_nats_data:
+    name: greenfield_nats_data
+    external: false
+  enterprise_minio_data:
+    name: greenfield_minio_data
+    external: false
+  enterprise_alertmanager_data:
+    name: greenfield_alertmanager_data
+    external: false
+  enterprise_grafana_data:
+    name: greenfield_grafana_data
+    external: false
+  enterprise_prometheus_data:
+    name: greenfield_prometheus_data
+    external: false
+  enterprise_loki_data:
+    name: greenfield_loki_data
+    external: false
+  enterprise_local_registry_data:
+    name: greenfield_local_registry_data
+    external: false
+  backup_scheduler_jobs:
+    name: greenfield_backup_scheduler_jobs
+    external: false
+  backup_scheduler_logs:
+    name: greenfield_backup_scheduler_logs
+    external: false
+  docker_action_activation_cas:
+    name: greenfield_docker_action_activation_cas
+    external: false
+  docker_action_broker_socket:
+    name: greenfield_docker_action_broker_socket
+    external: false
+  docker_action_broker_state:
+    name: greenfield_docker_action_broker_state
+    external: false
