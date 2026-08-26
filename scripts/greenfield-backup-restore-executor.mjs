@@ -10,6 +10,7 @@ export const SCHEMA = "platform.greenfield-backup-restore-executor/v1";
 export const GREENFIELD_POSTGRES_CONTAINER = "gf-postgres";
 export const GREENFIELD_MARIADB_CONTAINER = "gf-mariadb";
 export const GREENFIELD_MINIO_CONTAINER = "gf-minio";
+export const GREENFIELD_NATS_CONTAINER = "gf-nats";
 
 const TIMESTAMP_PATTERN = "[0-9]{8}-[0-9]{6}";
 
@@ -35,6 +36,13 @@ export const CAPTURE_CONTRACTS = Object.freeze({
       "docker exec {container} tar czf - -C /data . > {outputDir}/minio-data-{ts}.tar.gz",
     ],
     artifacts: ["minio-data-{ts}.tar.gz"],
+  }),
+  "nats-data": Object.freeze({
+    container: GREENFIELD_NATS_CONTAINER,
+    commands: [
+      "docker exec {container} tar czf - -C /data . > {outputDir}/nats-data-{ts}.tar.gz",
+    ],
+    artifacts: ["nats-data-{ts}.tar.gz"],
   }),
   "postgres-keycloak": Object.freeze({
     container: GREENFIELD_POSTGRES_CONTAINER,
@@ -66,6 +74,7 @@ const VERIFICATION_CONTRACTS = Object.freeze({
   postgres: Object.freeze({ kind: "row-count-fingerprint", tablesMinimumPerDb: 5 }),
   mariadb: Object.freeze({ kind: "schema-table-fingerprint", minSchemas: 2 }),
   minio: Object.freeze({ kind: "object-count-checksum", objectCountMinimum: 1 }),
+  "nats-data": Object.freeze({ kind: "nats-stream-fingerprint", streamCountMinimum: 0 }),
   tree: Object.freeze({ kind: "tree-digest", fileCountMinimum: 1 }),
 });
 
@@ -114,6 +123,10 @@ export function buildCapturePlan({ families, outputRoot, runId }) {
 }
 
 const RESTORE_COMMANDS = Object.freeze({
+  "nats-data": [
+    "docker exec gf-nats sh -c 'find /data -mindepth 1 -delete'",
+    "cat {artifactPath} | docker exec -i gf-nats tar xzf - -C /data",
+  ],
   mariadb: [
     "gunzip -c {artifactPath} | docker exec -i gf-mariadb sh -c 'mariadb -u root -p\"$(cat /run/secrets/mariadb_root_password)\"'",
   ],

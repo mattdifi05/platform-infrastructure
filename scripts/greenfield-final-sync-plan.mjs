@@ -21,6 +21,7 @@ const WRITER_TO_FAMILY = Object.freeze({
   mariadb: "mariadb",
   minio: "minio",
   "app-bind-trees": "app-bind-trees",
+  "nats-data": "nats-data",
   "control-center-state": "control-center-state",
 });
 

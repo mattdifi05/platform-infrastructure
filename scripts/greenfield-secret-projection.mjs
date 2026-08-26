@@ -31,6 +31,12 @@ export const RCLONE_CONF_AUTHORITY_NOTE =
   + "(a prior read-only probe refreshed an OAuth token); captured digest is the baseline; "
   + "never suggest rollback of rclone.conf";
 
+// The manifest counted 37 *.txt files on host but published 36 digests. Until
+// the live phase enumerates the directory and reconciles the 37th file, any
+// full-enumeration observation containing an unknown file FAILS as "extra":
+// projection refuses to close while this count disagrees.
+export const GREENFIELD_EXPECTED_TXT_FILE_COUNT = 37;
+
 // Baseline digests copied VERBATIM from preservation-manifest.json field
 // secretFileSha256Baseline: 36 name -> sha256 entries plus the manifest
 // _comment annotation key (37 keys total). Values are digests, not secrets.
@@ -266,6 +272,7 @@ export function buildSecretProjectionPlan({
   return Object.freeze({
     schema: SCHEMA,
     greenfieldSecretsRoot,
+    expectedTxtFileCount: GREENFIELD_EXPECTED_TXT_FILE_COUNT,
     entries: Object.freeze(entries),
     additionalMaterial: Object.freeze(additionalMaterial),
   });
@@ -320,9 +327,15 @@ export function verifyObservedSecretSet({ plan, observed }) {
     if (typeof observation.sizeBytes !== "number" || !Number.isSafeInteger(observation.sizeBytes)
         || observation.sizeBytes < 0) {
       violations.push({ entry: name, reason: "size-missing" });
+    } else if (typeof entry.sizeBytes === "number" && observation.sizeBytes !== entry.sizeBytes) {
+      violations.push({ entry: name, reason: "size-altered" });
     }
     if (typeof entry.expectedSha256 === "string" && observation.sha256 !== entry.expectedSha256) {
       violations.push({ entry: name, reason: "digest-altered" });
+    }
+    if (entry.expectedSha256 === null
+        && (typeof observation.sha256 !== "string" || !SHA256_PATTERN.test(observation.sha256))) {
+      violations.push({ entry: name, reason: "digest-required-at-execution" });
     }
     if (entry.requiredMode !== null && observation.mode !== entry.requiredMode) {
       violations.push({ entry: name, reason: "mode-mismatch" });

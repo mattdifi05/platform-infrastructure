@@ -52,7 +52,6 @@ const WORKLOAD_BUILDER_PATH = path.join(ROOT_DIR, "scripts", "greenfield-workloa
 const ENV_EXAMPLE_PATH = path.join(ROOT_DIR, ".env.example");
 const COMPOSE_UNAVAILABLE_SKIP = "compose renderer unavailable on this host; exercised in CI";
 const DIRTY_WORKTREE_SKIP = "worktree dirty; authoritative run happens post-commit/CI";
-const NETWORK_NAMING_GAP_PATTERN = /^network:(platform_[a-z_]+):physical-name:not-greenfield$/;
 
 const startedAt = new Date().toISOString();
 const tally = { pass: 0, fail: 0, skipped: 0 };
@@ -285,6 +284,12 @@ function wrapperCallerEnvironment(fixture, topology) {
   environment.PHP_PROJECTS_DIR = fixture.projectsDir;
   environment.PLATFORM_CERTS_DIR = fixture.certsDir;
   environment.WAF_TLS_KEY_GID = "101";
+  // Canonical broker trust-input mount strings (runtime-isolation policy pins
+  // the /srv/platform/trust/ prefix); render-only, no files are created.
+  environment.DOCKER_ACTION_RUNTIME_INTENT_FILE = "/srv/platform/trust/runtime-intent.json";
+  environment.DOCKER_ACTION_ACTIVE_RECEIPT_FILE = "/srv/platform/trust/active-receipt.json";
+  environment.DOCKER_ACTION_RUNTIME_INTENT_ID = `greenfield-matrix-intent-${topology.toLowerCase()}`;
+  environment.DOCKER_ACTION_ACTIVE_RECEIPT_SHA256 = deterministicDigest(`receipt:${topology}`);
   return environment;
 }
 
@@ -296,70 +301,6 @@ function runWrapperConfig(fixture, topology) {
     timeout: 120_000,
     env: wrapperCallerEnvironment(fixture, topology),
   });
-}
-
-function isEnvelopeBuilderArgvDefect(result) {
-  return (
-    result.status !== 0
-    && (result.stdout ?? "") === ""
-    && /ENOENT/.test(String(result.stderr ?? ""))
-    && /envelope\.json/.test(String(result.stderr ?? ""))
-  );
-}
-
-function runInlineRecoveryRender(fixture, topology, capability) {
-  const edgeBinds = topology === "PARALLEL"
-    ? { http: "0.0.0.0:18080", https: "0.0.0.0:18443" }
-    : { http: "0.0.0.0:80", https: "0.0.0.0:443" };
-  const environment = stripRepoEnvironment(process.env);
-  environment.DOCKER_HOST = "unix:///var/run/docker.sock";
-  environment.GREENFIELD_RENDER_AUTHORITY = "1";
-  environment.PLATFORM_NETWORK_PREFIX = GREENFIELD_PROJECT_NAME;
-  environment.PLATFORM_SECRETS_ROOT = fixture.secretsRoot;
-  environment.CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE = fixture.tokenFile;
-  environment.CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE = fixture.clientSecretFile;
-  environment.PLATFORM_STATE_DIR = fixture.stateDir;
-  environment.PHP_PROJECTS_DIR = fixture.projectsDir;
-  environment.PLATFORM_CERTS_DIR = fixture.certsDir;
-  environment.WAF_TLS_KEY_GID = "101";
-  environment.WAF_HTTP_BIND = edgeBinds.http;
-  environment.WAF_HTTPS_BIND = edgeBinds.https;
-  const overlays = overlayChainFromWrapper();
-  const arguments_ = [
-    ...capability.command.slice(1),
-    "--env-file",
-    fixture.envFile,
-    "-p",
-    GREENFIELD_PROJECT_NAME,
-    ...overlays.flatMap((overlay) => ["-f", overlay]),
-    "--profile",
-    "backup",
-    "config",
-    "--format",
-    "json",
-  ];
-  return spawnSync(capability.command[0], arguments_, {
-    cwd: ROOT_DIR,
-    encoding: "buffer",
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 120_000,
-    env: environment,
-  });
-}
-
-function buildEnvelopeManually(fixture, topology, renderStdout) {
-  const renderText = Buffer.from(renderStdout).toString("utf8");
-  fs.writeFileSync(path.join(fixture.root, `render-${topology}.json`), renderText);
-  const config = JSON.parse(renderText);
-  const envelope = {
-    version: 1,
-    projectName: GREENFIELD_PROJECT_NAME,
-    topology,
-    lockSha256: sha256File(GREENFIELD_LOCK_PATH),
-    renderSha256: sha256Bytes(Buffer.from(renderStdout)),
-    config,
-  };
-  return envelope;
 }
 
 function runPolicyCli(renderPath, envSnapshotPath, lockPath, workspaceRoot) {
@@ -379,17 +320,6 @@ function runPolicyCli(renderPath, envSnapshotPath, lockPath, workspaceRoot) {
     maxBuffer: 8 * 1024 * 1024,
     timeout: 60_000,
   });
-}
-
-function classifyAuthorityViolations(violations, { allowInventoryGap }) {
-  let sawAny = false;
-  for (const violation of violations) {
-    sawAny = true;
-    if (NETWORK_NAMING_GAP_PATTERN.test(violation)) continue;
-    if (allowInventoryGap && violation === "networks:inventory") continue;
-    return "drift";
-  }
-  return sawAny ? "known-gap" : "clean";
 }
 
 function parsePolicyViolations(result) {
@@ -417,55 +347,37 @@ function loadRenderState() {
   renderState.attempted = true;
   if (!composeCapability.available) return renderState;
   renderState.fixture = createComposeFixtureWorkspace();
-  const warnings = [];
   for (const topology of ["PARALLEL", "CUTOVER"]) {
     const wrapperResult = runWrapperConfig(renderState.fixture, topology);
-    if (wrapperResult.status === 0) {
+    if (wrapperResult.status !== 0) {
+      // No harness-side recovery exists on purpose: a wrapper defect must
+      // fail the matrix loudly instead of being papered over by a
+      // test-constructed substitute envelope.
       renderState[topology.toLowerCase()] = {
-        ok: true,
-        pipeline: "wrapper",
-        envelope: JSON.parse(wrapperResult.stdout),
+        ok: false,
+        stage: "wrapper",
+        status: wrapperResult.status,
+        stderr: String(wrapperResult.stderr ?? ""),
       };
       continue;
     }
-    if (isEnvelopeBuilderArgvDefect(wrapperResult)) {
-      warnings.push(
-        `compose-greenfield.sh could not emit its envelope (${topology}): its inline "node -e" envelope builder reads process.argv with script-file offsets under -e mode, so it tries to open the not-yet-written envelope.json; recovering by driving the identical canonical compose render directly.`,
-      );
-      const inline = runInlineRecoveryRender(
-        renderState.fixture,
-        topology,
-        composeCapability,
-      );
-      if (inline.status !== 0) {
-        renderState[topology.toLowerCase()] = {
-          ok: false,
-          stage: "inline-recovery-compose",
-          status: inline.status,
-          stderr: Buffer.from(inline.stderr ?? []).toString("utf8"),
-        };
-        continue;
-      }
+    let envelope;
+    try {
+      envelope = JSON.parse(wrapperResult.stdout);
+    } catch (error) {
       renderState[topology.toLowerCase()] = {
-        ok: true,
-        pipeline: "inline-recovery",
-        envelope: buildEnvelopeManually(
-          renderState.fixture,
-          topology,
-          inline.stdout,
-        ),
+        ok: false,
+        stage: "wrapper-envelope-parse",
+        status: wrapperResult.status,
+        stderr: `canonical envelope is not one JSON document: ${error.message}`,
       };
       continue;
     }
     renderState[topology.toLowerCase()] = {
-      ok: false,
-      stage: "wrapper",
-      status: wrapperResult.status,
-      stderr: String(wrapperResult.stderr ?? ""),
+      ok: true,
+      pipeline: "wrapper",
+      envelope,
     };
-  }
-  if (warnings.length > 0) {
-    for (const warning of warnings) console.warn(`[greenfield-offline-matrix] ${warning}`);
   }
   if (renderState.parallel?.ok) {
     renderState.namespaceViolations = evaluateGreenfieldNamespace(
@@ -619,37 +531,24 @@ describe("A) RENDER TOPOLOGY (real Compose render, offline)", () => {
       assert.ok(published.includes("18443"), `expected WAF https 18443, got ${published}`);
       for (const auxiliary of GREENFIELD_AUXILIARY_SERVICES) {
         const definition = services[auxiliary];
-        if (definition === undefined) continue;
-        const profiles = Array.isArray(definition.profiles) ? definition.profiles.map(String) : [];
-        assert.ok(
-          profiles.some((profile) => DISABLING_PROFILES.has(profile)),
-          `disabled auxiliary service ${auxiliary} re-enabled without a disabling profile`,
+        // The canonical LOCAL_PRIVATE render profile-prunes every auxiliary
+        // service; their presence at all in the active render is a violation
+        // (READY_BUT_DISABLED must stay disabled), pinned gf-* names are
+        // additionally asserted by the namespace unit suite.
+        assert.equal(
+          definition,
+          undefined,
+          `auxiliary service ${auxiliary} must stay pruned from the active render`,
         );
       }
     },
   );
 
   const parallelState = composeCapability.available ? loadRenderState() : null;
-  const namespaceVerdict = parallelState?.namespaceViolations === null
-    ? "drift"
-    : classifyAuthorityViolations(parallelState?.namespaceViolations ?? [], { allowInventoryGap: false });
-  const namespaceSkipReason = namespaceVerdict === "known-gap"
-    ? "canonical overlay chain still renders trust-zone networks as platform_infra_greenfield_<zone> while the greenfield namespace authority pins platform_infra_greenfield_<logical>; tracked greenfield network re-pinning gap"
-    : false;
-  const policyVerdict = (() => {
-    if (!parallelState?.policyResult) return "unavailable";
-    const violations = parsePolicyViolations(parallelState.policyResult);
-    if (parallelState.policyResult.status === 0) return "clean";
-    if (violations === null) return "drift";
-    return classifyAuthorityViolations(violations, { allowInventoryGap: true });
-  })();
-  const policySkipReason = policyVerdict === "known-gap"
-    ? "policy CLI rejection is limited to the tracked greenfield network re-pinning/pruning gap (trust-zone names plus pruned enterprise_net inventory)"
-    : false;
 
   matrixTest(
     "evaluateGreenfieldNamespace accepts the canonical PARALLEL render",
-    { skip: composeSkip || namespaceSkipReason },
+    { skip: composeSkip },
     () => {
       const state = requireHealthyParallelRender();
       const violations = evaluateGreenfieldNamespace(state.parallel.envelope.config);
@@ -659,7 +558,7 @@ describe("A) RENDER TOPOLOGY (real Compose render, offline)", () => {
 
   matrixTest(
     "greenfield-core-policy CLI accepts the canonical PARALLEL render, lock and env snapshot",
-    { skip: composeSkip || policySkipReason },
+    { skip: composeSkip },
     () => {
       const state = requireHealthyParallelRender();
       const result = runPolicyCli(
@@ -800,7 +699,7 @@ describe("B) PROJECTIONS (pure planning authorities)", () => {
       observed.push({
         logicalName: entry.logicalName,
         sha256: entry.expectedSha256 ?? deterministicDigest(`observed:${entry.logicalName}`),
-        sizeBytes: 256,
+        sizeBytes: typeof entry.sizeBytes === "number" ? entry.sizeBytes : 256,
         mode: entry.requiredMode,
       });
     }

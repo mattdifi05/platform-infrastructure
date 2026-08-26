@@ -96,6 +96,11 @@ const EXPECTED_ENTRY_IDS = [
   "keycloak-runtime-data",
   "mariadb-all",
   "minio-data",
+  "nats-data",
+  "observe-grafana-alertmanager-pgadmin",
+  "observe-local-registry-cache",
+  "observe-loki-data",
+  "observe-prometheus-data",
   "postgres-keycloak",
   "postgres-stexor",
   "redis-data",
@@ -252,7 +257,7 @@ test("final-sync registry covers exactly the cutover writers with quiesce-before
   const registry = finalSyncWriterRegistry();
   assert.deepEqual(
     registry.map((writer) => writer.writerId),
-    ["postgres-stexor", "postgres-keycloak", "mariadb", "minio", "app-bind-trees", "control-center-state"],
+    ["postgres-stexor", "postgres-keycloak", "mariadb", "minio", "app-bind-trees", "nats-data", "control-center-state"],
   );
   const freshRegistry = finalSyncWriterRegistry();
   assert.notEqual(registry, freshRegistry);
@@ -279,6 +284,7 @@ test("final-sync registry covers exactly the cutover writers with quiesce-before
   assert.ok(coveredIds.has("postgres-keycloak"));
   assert.ok(coveredIds.has("mariadb"));
   assert.ok(coveredIds.has("minio"));
+  assert.ok(coveredIds.has("nats-data"));
   assert.ok(coveredIds.has("app-bind-trees"));
   assert.ok(coveredIds.has("control-center-state"));
 });

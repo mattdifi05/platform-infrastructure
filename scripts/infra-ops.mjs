@@ -3513,7 +3513,6 @@ function infraTestingHygiene() {
   ], { cwd: infraRoot });
   run(process.execPath, ["scripts/platform-activation-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/greenfield-namespace.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/greenfield-core-policy.test.mjs"], { cwd: infraRoot });

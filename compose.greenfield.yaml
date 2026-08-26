@@ -59,14 +59,29 @@ services:
     container_name: gf-redis
   traefik:
     container_name: gf-traefik
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.251.3
   waf:
     container_name: gf-waf
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.251.2
 
 networks:
   enterprise_net:
     name: platform_infra_greenfield_enterprise_net
     internal: true
     external: false
+  platform_edge: !override
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_greenfield_platform}_edge
+    internal: true
+    labels: { com.platform.trust-zone: edge }
+    ipam:
+      config:
+        # Distinct from the frozen brownfield edge subnet (172.30.250.0/29) so
+        # the PARALLEL topology can run on the same host without overlap.
+        - subnet: 172.30.251.0/29
 
 # Every legacy logical key survives only so overlay merge semantics stay
 # deterministic; each physical name is freshly owned by the greenfield

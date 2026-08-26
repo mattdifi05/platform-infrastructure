@@ -109,6 +109,7 @@ EXIT_ROLLBACK_INCAPABLE, EXIT_PONR_REFUSAL, EXIT_AMBIGUOUS_CRASH = 85, 86, 87
 EXIT_AUTHORITY_DRIFT, EXIT_SEALED = 88, 89
 
 AUTHORITY_FILENAME = "authority.json"
+ANCHOR_FILENAME = "chain-head.json"
 
 
 class TransactionError(Exception):
@@ -223,7 +224,8 @@ def call_step_executor(executor, state, context):
     except OSError as error:
         raise StepExecutionError(f"step executor could not be launched for {state}: {error}.")
     if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", errors="replace").strip()[-512:]
+        detail = _leak_guard(
+            completed.stderr.decode("utf-8", errors="replace").strip()[-512:])
         raise StepExecutionError(
             f"step executor failed for state {state} (exit {completed.returncode}): {detail}.")
     if len(completed.stdout) > MAX_REPLY_BYTES:
@@ -259,8 +261,25 @@ def call_step_executor(executor, state, context):
                 f"step executor output {key!r} for {state} is not one small string pair.",
                 EXIT_EXECUTOR,
             )
-        normalized[key] = value
+        normalized[key] = _leak_guard(value)
     return normalized
+
+
+# Mirrors assertNoSecretMaterialization from the sibling Node modules: receipts
+# and error surfaces must never carry credential-shaped material.
+_LEAK_PATTERNS = (
+    re.compile(r"-----BEGIN", re.IGNORECASE),
+    re.compile(r"(?:password|passwd|pwd)\s*=", re.IGNORECASE),
+    re.compile(r"token\s*=", re.IGNORECASE),
+    re.compile(r"[A-Za-z0-9+/]{65,}={0,2}"),
+)
+
+
+def _leak_guard(text):
+    if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
+        raise StepExecutionError(
+            "step executor surface refused: potential secret materialization.")
+    return text
 
 # Journal storage: append-only JSONL with one fsync per durable record.
 
@@ -508,6 +527,23 @@ def load_transaction(store):
         if kinds and kinds[-1] in (STATUS_ENTERED, STATUS_FAILED):
             view.dangling = {"state": pending_state, "kind": kinds[-1]}
     view.chain_head = previous_digest
+    if lines:
+        anchor = store.read_aux_document(
+            ANCHOR_FILENAME,
+            frozenset({"recordCount", "chainHeadSha256"}),
+            "journal chain anchor",
+        )
+        if anchor is None:
+            raise TransactionError(
+                "journal chain anchor is missing; out-of-band tail binding required.",
+                EXIT_JOURNAL_CORRUPT,
+            )
+        if anchor["recordCount"] != len(view.records) or anchor["chainHeadSha256"] != previous_digest:
+            raise TransactionError(
+                "journal tail diverges from its chain anchor (truncation, reordering, "
+                "or unanchored append detected).",
+                EXIT_JOURNAL_CORRUPT,
+            )
     view.received_set = frozenset(view.received)
     return view
 
@@ -584,6 +620,10 @@ def append_record(store, view, state, status, receipt_sha=None):
     digest = store.append_canonical(record)
     view.records.append(record)
     view.chain_head = digest
+    store.write_aux_file(
+        ANCHOR_FILENAME,
+        {"recordCount": len(view.records), "chainHeadSha256": digest},
+    )
     return record
 
 
@@ -698,6 +738,12 @@ def execute_forward(command, store, from_state, stop_after):
         start = view.prefix_len
     else:
         start = floor
+        if horizon >= STATE_INDEX[PONR_STATE] and floor > STATE_INDEX[STATES[0]]:
+            raise TransactionError(
+                f"a virgin journal cannot start a cutover-capable run at {from_state}; "
+                f"begin at {STATES[0]} so PREPARE/BACKUP_PRE evidence precedes every later state.",
+                EXIT_USAGE,
+            )
     if dangling is not None and horizon < view.prefix_len:
         raise TransactionError(
             f"--stop-after {stop_after} precedes pending state {dangling['state']}; "

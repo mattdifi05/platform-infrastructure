@@ -106,6 +106,23 @@ case "${MARIADB_DATA_VOLUME:-}" in
     exit 2
     ;;
 esac
+export MARIADB_DATA_VOLUME=$CANONICAL_MARIADB_DATA_VOLUME
+
+# Trust artifacts are issued per-render by the live executor. The parallel
+# render may omit them; the cutover render must present freshly issued ones so
+# the broker can never mount a brownfield-era intent/receipt pair.
+if [[ "$GREENFIELD_TOPOLOGY" = CUTOVER ]]; then
+  for trust_variable in \
+    DOCKER_ACTION_RUNTIME_INTENT_FILE \
+    DOCKER_ACTION_ACTIVE_RECEIPT_FILE \
+    DOCKER_ACTION_RUNTIME_INTENT_ID \
+    DOCKER_ACTION_ACTIVE_RECEIPT_SHA256; do
+    [[ -n "${!trust_variable:-}" ]] || {
+      printf 'CUTOVER renders require a freshly issued trust artifact: %s\n' "$trust_variable" >&2
+      exit 2
+    }
+  done
+fi
 
 for required_variable in \
   PLATFORM_SECRETS_ROOT \

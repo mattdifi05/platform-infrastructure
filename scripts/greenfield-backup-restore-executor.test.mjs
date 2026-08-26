@@ -16,6 +16,7 @@ const ALL_FAMILIES = Object.freeze([
   "postgres-keycloak",
   "mariadb",
   "minio",
+  "nats-data",
   "app-bind-trees",
   "control-center-state",
 ]);
@@ -43,6 +44,10 @@ test("capture plan is deterministic and ordered", () => {
       assert.equal(entry.container, "gf-postgres");
       assert.equal(entry.verification.kind, "row-count-fingerprint");
       assert.equal(entry.verification.tablesMinimumPerDb, 5);
+    }
+    if (entry.family === "nats-data") {
+      assert.equal(entry.container, "gf-nats");
+      assert.equal(entry.verification.kind, "nats-stream-fingerprint");
     }
     for (const artifact of entry.artifacts) {
       assert.equal(typeof artifact.pattern, "string");

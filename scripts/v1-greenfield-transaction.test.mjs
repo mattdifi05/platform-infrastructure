@@ -573,6 +573,83 @@ if (!pythonReady) {
       assert.match(result.stderr, /usage/i, arguments_.join(" "));
     }
     assert.equal(fs.existsSync(fx.journal), false);
-  }
-);
+  });
+
+  test("journal tail truncation and record reordering fail verification via the anchor", async (t) => {
+    const fx = fixture(t);
+    let result = runTransaction(fx, [
+      "run", "--from", "PREPARE", "--stop-after", "VERIFY",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+
+    const original = fs.readFileSync(fx.journal, "utf8");
+    const anchorPath = path.join(fx.journalDir, "chain-head.json");
+
+    // Truncation: drop the last record; the prefix alone revalidates, so only
+    // the out-of-band anchor exposes the loss.
+    const lines = original.split("\n").filter((line) => line !== "");
+    fs.writeFileSync(fx.journal, `${lines.slice(0, -1).join("\n")}\n`);
+    result = runTransaction(fx, ["verify-journal"]);
+    assert.equal(result.status, 79, result.stderr);
+    assert.match(result.stderr, /chain anchor|diverges/);
+
+    // Reordering: swap two adjacent records; seq/prev chain plus the anchor
+    // must both refuse it.
+    writeConfig(fx, {});
+    const reordered = [...lines];
+    [reordered[0], reordered[1]] = [reordered[1], reordered[0]];
+    fs.writeFileSync(fx.journal, `${reordered.join("\n")}\n`);
+    result = runTransaction(fx, ["verify-journal"]);
+    assert.equal(result.status, 79, result.stderr);
+
+    // Missing anchor entirely is corrupt even when records look consistent.
+    fs.writeFileSync(fx.journal, original);
+    fs.rmSync(anchorPath, { force: true });
+    result = runTransaction(fx, ["verify-journal"]);
+    assert.equal(result.status, 79, result.stderr);
+    assert.match(result.stderr, /anchor is missing/);
+  });
+
+  test("a virgin journal cannot start a cutover-capable run mid-chain", (t) => {
+    const fx = fixture(t);
+    const result = runTransaction(fx, [
+      "run", "--from", "FINAL_CAPTURE", "--stop-after", "GO",
+    ], { [ENV_FULL_RUN]: "1" });
+    assert.equal(result.status, 64, result.stderr);
+    assert.match(result.stderr, /virgin journal cannot start a cutover-capable run/);
+    assert.equal(fs.existsSync(fx.journal), false);
+
+    // The same mid-chain start stays legal when the horizon stays pre-PONR.
+    const safe = runTransaction(fx, [
+      "run", "--from", "RESTORE", "--stop-after", "FUNCTIONAL_VERIFY",
+    ]);
+    assert.equal(safe.status, 0, safe.stderr);
+  });
+
+  test("executor outputs carrying credential-shaped material are refused", (t) => {
+    const fx = fixture(t);
+    const leakyExecutor = path.join(fx.root, "leaky-executor.mjs");
+    fs.writeFileSync(leakyExecutor, `#!/usr/bin/env node
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ outputs: { note: "-----BEGIN RSA PRIVATE KEY-----" } }) + "\\n");
+});
+`, { mode: 0o755 });
+    const environment = transactionEnvironment(fx);
+    environment[ENV_EXECUTOR] = leakyExecutor;
+    const result = spawnSync(python, [script, "run", "--stop-after", "PREPARE"], {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: environment,
+    });
+    assert.equal(result.status, 78, result.stderr);
+    assert.match(result.stderr, /secret materialization/);
+    // The ENTERED→FAILED attempt pair for PREPARE is durable, but no receipt
+    // may exist and the failed attempt must block any blind `run` retry.
+    const status = JSON.parse(runTransaction(fx, ["status"]).stdout);
+    assert.equal(status.receivedCount, 0);
+    assert.deepEqual(status.dangling, { state: "PREPARE", kind: "FAILED" });
+  });
 }

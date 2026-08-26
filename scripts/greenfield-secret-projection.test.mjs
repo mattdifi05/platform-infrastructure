@@ -6,6 +6,7 @@ import {
   RCLONE_CONF_AUTHORITY_NOTE,
   GREENFIELD_SECRET_BASELINE_DIGESTS,
   GREENFIELD_ADDITIONAL_SECRET_MATERIAL_PATHS,
+  GREENFIELD_EXPECTED_TXT_FILE_COUNT,
   buildSecretProjectionPlan,
   serializeSecretPlan,
   verifyObservedSecretSet,
@@ -192,6 +193,40 @@ test("verifyObservedSecretSet detects altered digests and mode mismatches", () =
   const sizeResult = verifyObservedSecretSet({ plan, observed: sizeMissing });
   assert.equal(sizeResult.status, "FAIL");
   assert.deepEqual(sizeResult.violations, [{ entry: "smtp_password", reason: "size-missing" }]);
+
+  const additional = plan.additionalMaterial.find((entry) => typeof entry.sizeBytes === "number");
+  assert.ok(additional, "fixture must carry sized additional material");
+  const sizeAltered = fullObservationSet(plan).map((observation) => observation.logicalName === additional.logicalName
+    ? { ...observation, sizeBytes: additional.sizeBytes + 1 }
+    : observation);
+  const sizeAlteredResult = verifyObservedSecretSet({ plan, observed: sizeAltered });
+  assert.equal(sizeAlteredResult.status, "FAIL");
+  assert.deepEqual(sizeAlteredResult.violations, [{ entry: additional.logicalName, reason: "size-altered" }]);
+});
+
+test("critical material requires an execution-time digest and the 37th-file gate stays armed", () => {
+  const plan = syntheticPlan();
+  assert.equal(plan.expectedTxtFileCount, GREENFIELD_EXPECTED_TXT_FILE_COUNT);
+  assert.equal(GREENFIELD_EXPECTED_TXT_FILE_COUNT, 37);
+
+  const noDigest = fullObservationSet(plan).map((observation) => observation.logicalName === "rclone_conf"
+    ? { ...observation, sha256: undefined }
+    : observation);
+  const noDigestResult = verifyObservedSecretSet({ plan, observed: noDigest });
+  assert.equal(noDigestResult.status, "FAIL");
+  assert.ok(noDigestResult.violations.some((violation) => violation.reason === "digest-required-at-execution"));
+
+  // A full directory enumeration that surfaces the unresolved 37th txt file
+  // must FAIL closed as extra until it is classified in the baseline.
+  const unknown37th = [
+    ...fullObservationSet(plan),
+    { logicalName: "unidentified-37th-file", sha256: "b".repeat(64), sizeBytes: 12, mode: "0600" },
+  ];
+  const gateResult = verifyObservedSecretSet({ plan, observed: unknown37th });
+  assert.equal(gateResult.status, "FAIL");
+  assert.deepEqual(gateResult.violations.filter((violation) => violation.reason === "extra"), [
+    { entry: "unidentified-37th-file", reason: "extra" },
+  ]);
 });
 
 test("receipt carries metadata only and refuses leaky strings", () => {

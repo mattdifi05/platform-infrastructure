@@ -287,6 +287,38 @@ export function evaluateGreenfieldNamespace(renderedConfig) {
     }
   }
 
+  // Configs must resolve to project-owned physical names and never be
+  // external references into another runtime.
+  for (const [logical, declaration] of Object.entries(renderedConfig.configs ?? {})) {
+    if (declaration?.external === true) {
+      violations.push(`config:${logical}:external`);
+      continue;
+    }
+    const physical = typeof declaration?.name === "string" ? declaration.name : null;
+    if (physical !== null && isBrownfieldOwnedPhysicalName(physical)) {
+      violations.push(`config:${logical}:physical-name:brownfield`);
+    }
+  }
+
+  // Secrets must be project-prefixed file-backed declarations; an external or
+  // brownfield-owned secret name would silently re-import another runtime's
+  // credential material.
+  for (const [logical, declaration] of Object.entries(renderedConfig.secrets ?? {})) {
+    if (declaration?.external === true) {
+      violations.push(`secret:${logical}:external`);
+      continue;
+    }
+    const physical = typeof declaration?.name === "string" ? declaration.name : "";
+    const file = typeof declaration?.file === "string" ? declaration.file : "";
+    const ownedName = physical.startsWith(GREENFIELD_SECRET_PREFIX);
+    const ownedFile = file.includes("/secrets/") || file.endsWith(".txt");
+    if (!ownedName && !ownedFile) {
+      violations.push(`secret:${logical}:authority`);
+    } else if (physical.length > 0 && isBrownfieldOwnedPhysicalName(physical)) {
+      violations.push(`secret:${logical}:physical-name:brownfield`);
+    }
+  }
+
   return violations;
 }
 

@@ -8,6 +8,7 @@ const EXPECTED_WRITERS = Object.freeze([
   "control-center-state",
   "mariadb",
   "minio",
+  "nats-data",
   "postgres-keycloak",
   "postgres-stexor",
 ]);
