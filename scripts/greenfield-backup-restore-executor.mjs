@@ -12,6 +12,13 @@ export const GREENFIELD_MARIADB_CONTAINER = "gf-mariadb";
 export const GREENFIELD_MINIO_CONTAINER = "gf-minio";
 export const GREENFIELD_NATS_CONTAINER = "gf-nats";
 
+// Frozen brownfield source containers for BACKUP_PRE capture. These names are
+// read-only inputs for pre-cutover capture; nothing in this module ever
+// writes to or mutates them.
+export const BROWNFIELD_POSTGRES_CONTAINER = "enterprise-postgres";
+export const BROWNFIELD_MARIADB_CONTAINER = "mariadb";
+export const BROWNFIELD_MINIO_CONTAINER = "enterprise-minio";
+
 const TIMESTAMP_PATTERN = "[0-9]{8}-[0-9]{6}";
 
 export const CAPTURE_CONTRACTS = Object.freeze({
@@ -70,6 +77,43 @@ export const CAPTURE_CONTRACTS = Object.freeze({
   }),
 });
 
+// Pre-cutover capture contracts executed against the frozen brownfield
+// runtime (BACKUP_PRE transaction state). Same artifact naming and sidecar
+// conventions as the platform backup families so the existing verification
+// and retention tooling accepts them.
+export const BROWNFIELD_PRE_CAPTURE_CONTRACTS = Object.freeze({
+  "postgres-keycloak": Object.freeze({
+    container: BROWNFIELD_POSTGRES_CONTAINER,
+    database: "keycloak",
+    commands: [
+      "docker exec {container} pg_dump --format=custom --no-owner --no-acl -U postgres -d keycloak > {outputDir}/keycloak-{ts}.dump",
+    ],
+    artifacts: ["keycloak-{ts}.dump"],
+  }),
+  "postgres-stexor": Object.freeze({
+    container: BROWNFIELD_POSTGRES_CONTAINER,
+    database: "stexor",
+    commands: [
+      "docker exec {container} pg_dump --format=custom --no-owner --no-acl -U postgres -d stexor > {outputDir}/stexor-{ts}.dump",
+    ],
+    artifacts: ["stexor-{ts}.dump"],
+  }),
+  mariadb: Object.freeze({
+    container: BROWNFIELD_MARIADB_CONTAINER,
+    commands: [
+      "docker exec {container} sh -c 'export MARIADB_PWD=\"$(cat /run/secrets/mariadb_root_password)\"; mariadb-dump --single-transaction --routines --events --triggers --all-databases | gzip -9' > {outputDir}/mariadb-all-{ts}.sql.gz",
+    ],
+    artifacts: ["mariadb-all-{ts}.sql.gz"],
+  }),
+  minio: Object.freeze({
+    container: BROWNFIELD_MINIO_CONTAINER,
+    commands: [
+      "docker exec {container} tar czf - -C /data . > {outputDir}/minio-data-{ts}.tar.gz",
+    ],
+    artifacts: ["minio-data-{ts}.tar.gz"],
+  }),
+});
+
 const VERIFICATION_CONTRACTS = Object.freeze({
   postgres: Object.freeze({ kind: "row-count-fingerprint", tablesMinimumPerDb: 5 }),
   mariadb: Object.freeze({ kind: "schema-table-fingerprint", minSchemas: 2 }),
@@ -98,13 +142,13 @@ function deepFreeze(value) {
   return value;
 }
 
-export function buildCapturePlan({ families, outputRoot, runId }) {
-  const unknown = families.filter((family) => !Object.hasOwn(CAPTURE_CONTRACTS, family));
+export function buildCapturePlan({ families, outputRoot, runId, contracts = CAPTURE_CONTRACTS }) {
+  const unknown = families.filter((family) => !Object.hasOwn(contracts, family));
   if (unknown.length > 0) {
     throw new TypeError(`Unknown capture families: ${unknown.join(", ")}`);
   }
   const entries = [...families].sort().map((family) => {
-    const contract = CAPTURE_CONTRACTS[family];
+    const contract = contracts[family];
     return {
       family,
       runId,

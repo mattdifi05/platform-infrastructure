@@ -3,6 +3,10 @@ import test from "node:test";
 import {
   SCHEMA,
   CAPTURE_CONTRACTS,
+  BROWNFIELD_PRE_CAPTURE_CONTRACTS,
+  BROWNFIELD_POSTGRES_CONTAINER,
+  BROWNFIELD_MARIADB_CONTAINER,
+  BROWNFIELD_MINIO_CONTAINER,
   buildCapturePlan,
   buildRestorePlan,
   compareFingerprints,
@@ -126,4 +130,36 @@ test("executor receipts carry only whitelisted keys and reject failures", () => 
     failure = error;
   }
   assert.equal(failure.exitCode, 7);
+});
+
+test("brownfield BACKUP_PRE contracts target frozen sources without mutation", () => {
+  assert.deepEqual(Object.keys(BROWNFIELD_PRE_CAPTURE_CONTRACTS).sort(), [
+    "mariadb", "minio", "postgres-keycloak", "postgres-stexor",
+  ]);
+  assert.equal(BROWNFIELD_POSTGRES_CONTAINER, "enterprise-postgres");
+  assert.equal(BROWNFIELD_MARIADB_CONTAINER, "mariadb");
+  assert.equal(BROWNFIELD_MINIO_CONTAINER, "enterprise-minio");
+
+  const pre = buildCapturePlan({
+    families: Object.keys(BROWNFIELD_PRE_CAPTURE_CONTRACTS),
+    outputRoot: "/tmp/pre",
+    runId: "run-pre",
+    contracts: BROWNFIELD_PRE_CAPTURE_CONTRACTS,
+  });
+  const serialized = JSON.stringify(pre);
+  assert.match(serialized, /enterprise-postgres/);
+  assert.match(serialized, /pg_dump --format=custom/);
+  assert.match(serialized, /mariadb-dump --single-transaction/);
+  for (const entry of pre.entries) {
+    for (const command of entry.commands) {
+      // Capture commands must only read from the source containers and write
+      // to stdout redirections; no exec with write flags into the sources.
+      assert.ok(!command.includes("docker cp"), command);
+      assert.ok(!command.includes(" rm "), command);
+    }
+  }
+
+  // Greenfield capture contracts stay untouched by the parameter.
+  const gf = buildCapturePlan({ families: ALL_FAMILIES, outputRoot: "/tmp/x", runId: "r" });
+  assert.equal(JSON.parse(JSON.stringify(gf.entries[0])).family, ALL_FAMILIES.slice().sort()[0]);
 });
