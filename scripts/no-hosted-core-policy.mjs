@@ -4072,7 +4072,8 @@ const CURRENT_CLOSED_AUTHORITY = {
         "weight": 600
       },
       "cap_add": [
-        "CHOWN"
+        "CHOWN",
+        "DAC_READ_SEARCH"
       ],
       "cap_drop": [
         "ALL"
@@ -5365,7 +5366,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     redis_auth_config: ["name"],
   },
   nodeBuildImageDefault: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
-  normalizedRenderSha256: "60917b31cf817d8f569befda5e3a728a40bd97b9eb1067c562c5b3b03a7c6737",
+  normalizedRenderSha256: "16e4fb3d94692137fd463dc8ed6ae2957b77825a2cba5563161948743f420672",
 };
 
 const CORE_SEMANTIC_POLICY_BYTES = `${JSON.stringify(CORE_SEMANTIC_POLICY)}\n`;
@@ -6727,7 +6728,7 @@ function validateCurrentPrivilegedServices(
 
   if (plainObject(bootstrap)) {
     addExactViolation(violations, "broker-auth-bootstrap", "restart", bootstrap.restart, "no");
-    addExactViolation(violations, "broker-auth-bootstrap", "cap-add", bootstrap.cap_add, ["CHOWN"]);
+    addExactViolation(violations, "broker-auth-bootstrap", "cap-add", bootstrap.cap_add, ["CHOWN", "DAC_READ_SEARCH"]);
     addExactViolation(violations, "broker-auth-bootstrap", "entrypoint", bootstrap.entrypoint, [
       "node",
       "/broker/render-workload-broker-config.mjs",

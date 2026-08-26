@@ -57,7 +57,7 @@ services:
   project-router:
     environment:
       PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 9c33ac5e87cdb16f19a88d15942390ac752be7dc687b5a936c475c3da91eabbf
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f
       PROJECT_HOST_SUFFIX: .platform-infrastructure.com
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
       NODE_PROJECT_HOSTS: ""

@@ -39,7 +39,7 @@ jq -e '
   .services["broker-auth-bootstrap"].network_mode == "none" and
   .services["broker-auth-bootstrap"].read_only == true and
   .services["broker-auth-bootstrap"].cap_drop == ["ALL"] and
-  .services["broker-auth-bootstrap"].cap_add == ["CHOWN"] and
+  .services["broker-auth-bootstrap"].cap_add == ["CHOWN", "DAC_READ_SEARCH"] and
   .services.redis.command == ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"] and
   .services.nats.user == "1000:1000" and
   .services.nats.entrypoint == ["/bin/sh", "-ec"] and
