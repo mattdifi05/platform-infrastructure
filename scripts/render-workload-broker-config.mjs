@@ -172,8 +172,14 @@ function applyOwnership(filePath, uid, gid) {
   fs.chownSync(filePath, uid, gid);
 }
 
+const SUPPORTED_LOCK_CONTRACTS = Object.freeze([
+  Object.freeze({ version: 2, validatorVersion: "hosted-contract-v2" }),
+  Object.freeze({ version: 4, validatorVersion: "hosted-contract-v4" }),
+]);
+
 function validateLock(lock) {
-  if (lock?.version !== 2 || lock?.validatorVersion !== "hosted-contract-v2" || lock?.state !== "verified" || !Array.isArray(lock.workloads)) {
+  const supportedContract = SUPPORTED_LOCK_CONTRACTS.some((contract) => lock?.version === contract.version && lock?.validatorVersion === contract.validatorVersion);
+  if (!supportedContract || lock.state !== "verified" || !Array.isArray(lock.workloads)) {
     throw new Error("Broker authorization requires a verified hosted workload lock.");
   }
   assertBrokerPolicyDigest(lock);

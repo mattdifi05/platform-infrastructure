@@ -9,6 +9,8 @@ import {
   BROWNFIELD_MINIO_CONTAINER,
   buildCapturePlan,
   buildRestorePlan,
+  buildOwnershipNormalizationSql,
+  buildOwnershipNormalizationCommand,
   compareFingerprints,
   dockerAvailability,
   executeCaptureStep,
@@ -77,6 +79,62 @@ test("restore plan targets only greenfield resources", () => {
   assert.equal(restore.entries.find((entry) => entry.family === "minio").targetKind, "volume");
   assert.equal(restore.entries.find((entry) => entry.family === "control-center-state").targetKind, "bind");
   assert.throws(() => buildRestorePlan({ captureReceipt: { kind: "bogus" } }), TypeError);
+});
+
+test("restore plan normalizes object ownership for every postgres family", () => {
+  const capture = buildCapturePlan({ families: ALL_FAMILIES, outputRoot: "/tmp/x", runId: "run-owner" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+
+  const keycloak = restore.entries.find((entry) => entry.family === "postgres-keycloak");
+  const stexor = restore.entries.find((entry) => entry.family === "postgres-stexor");
+  assert.equal(keycloak.ownerRole, "keycloak");
+  assert.equal(stexor.ownerRole, "postgres");
+
+  for (const [entry, database, expectedRole] of [
+    [keycloak, "keycloak", "keycloak"],
+    [stexor, "stexor", "postgres"],
+  ]) {
+    assert.equal(entry.commands.length, 2, `${entry.family} must pair pg_restore with ownership normalization`);
+    assert.match(entry.commands[0], /pg_restore --clean --if-exists --no-owner --no-acl/);
+    const normalization = entry.commands[1];
+    assert.equal(normalization, buildOwnershipNormalizationCommand({ database, ownerRole: expectedRole }));
+    assert.match(normalization, /^docker exec gf-postgres psql -U postgres -d /);
+    assert.ok(normalization.includes(`-d ${database} `), normalization);
+    assert.ok(normalization.includes(`OWNER TO ${expectedRole}`), normalization);
+    assert.doesNotMatch(normalization, /\{ownerRole\}/, "owner role must be resolved at plan time");
+  }
+
+  for (const family of ["mariadb", "minio", "nats-data", "app-bind-trees", "control-center-state"]) {
+    const entry = restore.entries.find((candidate) => candidate.family === family);
+    assert.equal(entry.ownerRole, null, `${family} carries no owner metadata`);
+    assert.ok(!entry.commands.some((command) => command.includes("OWNER TO")), family);
+  }
+});
+
+test("ownership normalization SQL is a DO block over non-system schemas", () => {
+  const sql = buildOwnershipNormalizationSql({ ownerRole: "keycloak" });
+  assert.match(sql, /^DO \$\$/);
+  assert.match(sql, /\bEND \$\$\;/);
+  assert.match(sql, /FROM pg_class c\b/);
+  assert.match(sql, /FROM pg_proc p\b/);
+  assert.match(sql, /relkind IN \('r', 'p', 'v', 'm', 'f', 'S'\)/);
+  assert.match(sql, /n\.nspname NOT IN \('pg_catalog', 'information_schema'\)/);
+  assert.match(sql, /n\.nspname NOT LIKE 'pg\\_%'/);
+  assert.match(sql, /ALTER SEQUENCE %I\.%I OWNER TO keycloak/);
+  assert.match(sql, /ALTER TABLE %I\.%I OWNER TO keycloak/);
+  assert.match(sql, /ALTER FUNCTION %I\.%I\(%s\) OWNER TO keycloak/);
+
+  // Role and database identifiers are validated before interpolation.
+  assert.throws(() => buildOwnershipNormalizationSql({ ownerRole: "role; DROP SCHEMA x" }), TypeError);
+  assert.throws(() => buildOwnershipNormalizationSql({ ownerRole: "" }), TypeError);
+  assert.throws(() => buildOwnershipNormalizationCommand({ database: "keycloak; DROP SCHEMA x", ownerRole: "keycloak" }), TypeError);
+
+  const command = buildOwnershipNormalizationCommand({ database: "keycloak", ownerRole: "keycloak" });
+  assert.match(command, /^docker exec gf-postgres psql -U postgres -d keycloak -c "/);
+  assert.match(command, /"\s*$/, "SQL body must stay inside one double-quoted argument");
+  assert.ok(command.includes("DO \\$\\$"), command.slice(0, 120));
+  // Shell safety: no unescaped $ survives inside the quoted SQL body.
+  assert.doesNotMatch(command, /[^\\]\$/, command);
 });
 
 function fingerprint(family, items) {

@@ -303,6 +303,91 @@ test("FG-055 rejects a weak 16-character NATS tenant credential", () => {
   }
 });
 
+test("accepts a verified hosted-contract-v4 no-hosted lock with empty workloads", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "no-hosted-v4-lock-"));
+  try {
+    writeSecret(root, "redis_password", "Redis-Platform-Unique-Value-1234567890!ABCDE");
+    writeSecret(root, "nats_password", "Nats-Platform-Unique-Value-1234567890!ABCDE");
+    const lock = noHostedLock();
+    const redis = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
+    assert.match(redis.text, /^user default reset off$/m);
+    assert.match(redis.text, /^user platform reset on #[a-f0-9]{64} ~\* &\* \+@all$/m);
+    assert.equal(redis.workloadUsers, 0);
+    assert.equal(redis.policySha256, lock.brokerPolicySha256);
+    assert.doesNotMatch(redis.text, /^user wl_/m);
+    const nats = renderNatsConfig(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "nats_password") });
+    assert.match(nats.text, /PLATFORM \{/);
+    assert.doesNotMatch(nats.text, /^  WL_/m);
+    assert.equal(nats.workloadAccounts, 0);
+    assert.equal(nats.workloadUsers, 0);
+    assert.equal(nats.policySha256, lock.brokerPolicySha256);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects locks with an unsupported version and validator pairing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lock-contract-pairing-"));
+  try {
+    writeSecret(root, "redis_password", "Redis-Platform-Unique-Value-1234567890!ABCDE");
+    for (const [version, validatorVersion] of [[2, "hosted-contract-v4"], [4, "hosted-contract-v2"], [3, "hosted-contract-v3"]]) {
+      assert.throws(
+        () => renderRedisAcl({ ...noHostedLock(), version, validatorVersion }, {
+          secretsRoot: root,
+          platformPasswordFile: path.join(root, "redis_password"),
+        }),
+        /verified hosted workload lock/,
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects unverified locks and locks without a workloads array", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "invalid-lock-shapes-"));
+  try {
+    writeSecret(root, "redis_password", "Redis-Platform-Unique-Value-1234567890!ABCDE");
+    const invalidLocks = [
+      { ...noHostedLock(), state: "pending" },
+      { ...noHostedLock(), state: null },
+      { ...noHostedLock(), workloads: undefined },
+      { ...noHostedLock(), workloads: {} },
+      { ...noHostedLock(), brokerPolicySha256: "0".repeat(64) },
+    ];
+    for (const lock of invalidLocks) {
+      assert.throws(
+        () => renderRedisAcl(lock, {
+          secretsRoot: root,
+          platformPasswordFile: path.join(root, "redis_password"),
+        }),
+        /verified hosted workload lock|broker policy digest/i,
+      );
+      assert.throws(
+        () => renderNatsConfig(lock, {
+          secretsRoot: root,
+          platformPasswordFile: path.join(root, "redis_password"),
+        }),
+        /verified hosted workload lock|broker policy digest/i,
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function noHostedLock() {
+  const workloads = [];
+  return {
+    version: 4,
+    validatorVersion: "hosted-contract-v4",
+    state: "verified",
+    routes: [],
+    workloads,
+    brokerPolicySha256: brokerPolicySha256(workloads),
+  };
+}
+
 function writeSecret(root, name, value) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(root, name), `${value}\n`, { mode: 0o600 });

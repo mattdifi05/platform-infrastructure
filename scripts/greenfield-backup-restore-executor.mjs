@@ -166,27 +166,115 @@ export function buildCapturePlan({ families, outputRoot, runId, contracts = CAPT
   return deepFreeze({ schema: SCHEMA, kind: "capture", outputRoot, runId, entries });
 }
 
+// Ownership normalization template for greenfield restores. pg_restore runs
+// with --no-owner, so restored objects would otherwise be owned by the
+// postgres superuser while the workload (e.g. keycloak) connects as a
+// non-superuser role and fails with "permission denied for table
+// databasechangelog". The DO block reassigns ownership of every table,
+// sequence, view, materialized view, foreign table and function in all
+// non-system schemas to the contract's ownerRole.
+const OWNERSHIP_NORMALIZATION_SQL_TEMPLATE = Object.freeze(`
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT n.nspname AS schema_name, c.relname AS object_name, c.relkind
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND n.nspname NOT LIKE 'pg\\_%'
+  LOOP
+    IF r.relkind = 'S' THEN
+      EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO {ownerRole}', r.schema_name, r.object_name);
+    ELSE
+      EXECUTE format('ALTER TABLE %I.%I OWNER TO {ownerRole}', r.schema_name, r.object_name);
+    END IF;
+  END LOOP;
+  FOR r IN
+    SELECT n.nspname AS schema_name, p.proname AS function_name,
+           pg_get_function_identity_arguments(p.oid) AS identity_args
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.prokind = 'f'
+       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND n.nspname NOT LIKE 'pg\\_%'
+  LOOP
+    EXECUTE format('ALTER FUNCTION %I.%I(%s) OWNER TO {ownerRole}', r.schema_name, r.function_name, r.identity_args);
+  END LOOP;
+END $$;
+`);
+
+const IDENTIFIER_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
+
+export function buildOwnershipNormalizationSql({ ownerRole }) {
+  if (typeof ownerRole !== "string" || !IDENTIFIER_PATTERN.test(ownerRole)) {
+    throw new TypeError(`invalid owner role identifier: ${ownerRole}`);
+  }
+  return OWNERSHIP_NORMALIZATION_SQL_TEMPLATE.trim().replaceAll("{ownerRole}", ownerRole);
+}
+
+// The normalization command is executed via `sh -c`, so the SQL body is shell
+// double-quoted: every `$`, backtick, backslash and double quote must be
+// escaped or the shell would expand e.g. $$ dollar-quoting into a PID.
+function shellDoubleQuoted(value) {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", "\\$")
+    .replaceAll("`", "\\`")}"`;
+}
+
+export function buildOwnershipNormalizationCommand({ database, ownerRole }) {
+  if (typeof database !== "string" || !IDENTIFIER_PATTERN.test(database)) {
+    throw new TypeError(`invalid database identifier: ${database}`);
+  }
+  const sql = buildOwnershipNormalizationSql({ ownerRole }).replace(/\s+/g, " ").trim();
+  return `docker exec ${GREENFIELD_POSTGRES_CONTAINER} psql -U postgres -d ${database} -c ${shellDoubleQuoted(sql)}`;
+}
+
 const RESTORE_COMMANDS = Object.freeze({
-  "nats-data": [
-    "docker exec gf-nats sh -c 'find /data -mindepth 1 -delete'",
-    "cat {artifactPath} | docker exec -i gf-nats tar xzf - -C /data",
-  ],
-  mariadb: [
-    "gunzip -c {artifactPath} | docker exec -i gf-mariadb sh -c 'mariadb -u root -p\"$(cat /run/secrets/mariadb_root_password)\"'",
-  ],
-  minio: [
-    "docker exec gf-minio sh -c 'find /data -mindepth 1 -delete'",
-    "cat {artifactPath} | docker exec -i gf-minio tar xzf - -C /data",
-  ],
-  tree: [
-    "mkdir -p {targetPath} && tar xzf {artifactPath} -C {targetPath} --preserve-permissions",
-  ],
-  "postgres-keycloak": [
-    "docker exec -i gf-postgres pg_restore --clean --if-exists --no-owner --no-acl -U postgres -d keycloak < {artifactPath}",
-  ],
-  "postgres-stexor": [
-    "docker exec -i gf-postgres pg_restore --clean --if-exists --no-owner --no-acl -U postgres -d stexor < {artifactPath}",
-  ],
+  "nats-data": Object.freeze({
+    commands: [
+      "docker exec gf-nats sh -c 'find /data -mindepth 1 -delete'",
+      "cat {artifactPath} | docker exec -i gf-nats tar xzf - -C /data",
+    ],
+  }),
+  mariadb: Object.freeze({
+    commands: [
+      "gunzip -c {artifactPath} | docker exec -i gf-mariadb sh -c 'mariadb -u root -p\"$(cat /run/secrets/mariadb_root_password)\"'",
+    ],
+  }),
+  minio: Object.freeze({
+    commands: [
+      "docker exec gf-minio sh -c 'find /data -mindepth 1 -delete'",
+      "cat {artifactPath} | docker exec -i gf-minio tar xzf - -C /data",
+    ],
+  }),
+  tree: Object.freeze({
+    commands: [
+      "mkdir -p {targetPath} && tar xzf {artifactPath} -C {targetPath} --preserve-permissions",
+    ],
+  }),
+  "postgres-keycloak": Object.freeze({
+    database: "keycloak",
+    // Keycloak (KC_DB_USER=keycloak) connects as this non-superuser role; the
+    // restore must hand ownership of every object back to it.
+    ownerRole: "keycloak",
+    commands: [
+      "docker exec -i gf-postgres pg_restore --clean --if-exists --no-owner --no-acl -U postgres -d keycloak < {artifactPath}",
+    ],
+  }),
+  "postgres-stexor": Object.freeze({
+    database: "stexor",
+    // stexor may run as the superuser today; normalize to postgres so the
+    // plan stays explicit even when no dedicated app principal exists yet.
+    ownerRole: "postgres",
+    commands: [
+      "docker exec -i gf-postgres pg_restore --clean --if-exists --no-owner --no-acl -U postgres -d stexor < {artifactPath}",
+    ],
+  }),
 });
 
 function restoreFamilyKey(family) {
@@ -203,16 +291,26 @@ export function buildRestorePlan({ captureReceipt }) {
   if (!captureReceipt || captureReceipt.kind !== "capture") {
     throw new TypeError("buildRestorePlan requires a capture plan receipt");
   }
-  const entries = captureReceipt.entries.map((entry) => ({
-    family: entry.family,
-    runId: captureReceipt.runId,
-    targetKind: entry.family.startsWith("postgres-")
-      ? "database"
-      : (entry.family === "app-bind-trees" || entry.family === "control-center-state" ? "bind" : "volume"),
-    commands: [...RESTORE_COMMANDS[restoreFamilyKey(entry.family)]],
-    artifacts: entry.artifacts.map((artifact) => artifact.name),
-    verification: entry.verification,
-  }));
+  const entries = captureReceipt.entries.map((entry) => {
+    const contract = RESTORE_COMMANDS[restoreFamilyKey(entry.family)];
+    const commands = [...contract.commands];
+    if (contract.ownerRole) {
+      commands.push(
+        buildOwnershipNormalizationCommand({ database: contract.database, ownerRole: contract.ownerRole }),
+      );
+    }
+    return {
+      family: entry.family,
+      runId: captureReceipt.runId,
+      targetKind: entry.family.startsWith("postgres-")
+        ? "database"
+        : (entry.family === "app-bind-trees" || entry.family === "control-center-state" ? "bind" : "volume"),
+      ownerRole: contract.ownerRole ?? null,
+      commands,
+      artifacts: entry.artifacts.map((artifact) => artifact.name),
+      verification: entry.verification,
+    };
+  });
   return deepFreeze({ schema: SCHEMA, kind: "restore", runId: captureReceipt.runId, entries });
 }
 
