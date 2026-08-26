@@ -272,6 +272,7 @@ const RESTORE_COMMANDS = Object.freeze({
     // plan stays explicit even when no dedicated app principal exists yet.
     ownerRole: "postgres",
     commands: [
+      `docker exec gf-postgres sh -ec 'exists="$(psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname = '\\''stexor'\\''")" || { echo "stexor database probe failed" >&2; exit 1; } ; case "$exists" in 1) ;; "") createdb -U postgres -O postgres stexor ;; *) echo "unexpected stexor database probe result" >&2; exit 1 ;; esac'`,
       "docker exec -i gf-postgres pg_restore --clean --if-exists --no-owner --no-acl -U postgres -d stexor < {artifactPath}",
     ],
   }),
