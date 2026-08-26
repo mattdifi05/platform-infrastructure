@@ -33,7 +33,7 @@ export const CAPTURE_CONTRACTS = Object.freeze({
   mariadb: Object.freeze({
     container: GREENFIELD_MARIADB_CONTAINER,
     commands: [
-      "docker exec {container} sh -c 'export MARIADB_PWD=\"$(cat /run/secrets/mariadb_root_password)\"; mariadb-dump --single-transaction --routines --events --triggers --all-databases | gzip -9' > {outputDir}/mariadb-all-{ts}.sql.gz",
+      "docker exec {container} sh -c 'export MYSQL_PWD=\"$(cat /run/secrets/mariadb_root_password)\"; mariadb-dump --single-transaction --routines --events --triggers --all-databases | gzip -9' > {outputDir}/mariadb-all-{ts}.sql.gz",
     ],
     artifacts: ["mariadb-all-{ts}.sql.gz"],
   }),
@@ -101,7 +101,7 @@ export const BROWNFIELD_PRE_CAPTURE_CONTRACTS = Object.freeze({
   mariadb: Object.freeze({
     container: BROWNFIELD_MARIADB_CONTAINER,
     commands: [
-      "docker exec {container} sh -c 'export MARIADB_PWD=\"$(cat /run/secrets/mariadb_root_password)\"; mariadb-dump --single-transaction --routines --events --triggers --all-databases | gzip -9' > {outputDir}/mariadb-all-{ts}.sql.gz",
+      "docker exec {container} sh -c 'export MYSQL_PWD=\"$(cat /run/secrets/mariadb_root_password)\"; mariadb-dump --single-transaction --routines --events --triggers --all-databases | gzip -9' > {outputDir}/mariadb-all-{ts}.sql.gz",
     ],
     artifacts: ["mariadb-all-{ts}.sql.gz"],
   }),
