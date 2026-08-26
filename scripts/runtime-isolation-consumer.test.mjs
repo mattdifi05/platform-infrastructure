@@ -2604,7 +2604,7 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v2",
-    sha256: "a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a",
+    sha256: "8c3c4e35da4df27d0c622372ad7f9ea6f2f39dfc6694ee829d48e4d9eb59bcf1",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);

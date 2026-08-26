@@ -84,6 +84,7 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      - DAC_READ_SEARCH
     restart: "no"
     entrypoint:
       - node

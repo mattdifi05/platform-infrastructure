@@ -977,13 +977,13 @@ if [[ -n "$workload_lock" ]]; then
 else
   if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
-    canonical_no_hosted_lock_sha256=9c33ac5e87cdb16f19a88d15942390ac752be7dc687b5a936c475c3da91eabbf
-    canonical_no_hosted_policy_sha256=b3cd1a257013dbee5466719157eed3dc0a41fd746b8c8eb959b9009f74faf77f
+    canonical_no_hosted_lock_sha256=1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f
+    canonical_no_hosted_policy_sha256=091b61c3cef05c55d4c6cf6f5adaf54a386299c5f9877bff8743b196ba8cffb8
     canonical_no_hosted_secret_count=23
   else
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.lock.json
-    canonical_no_hosted_lock_sha256=61c9a61f500681574647d70b18868b2ef4a5ca6412fd107642d772c335d9dee0
-    canonical_no_hosted_policy_sha256=a2f334ea3eb59507ae6b9b6542bb1511743233aa4f2ef05b8e890a7d37399f9a
+    canonical_no_hosted_lock_sha256=657a3c17f18dcadb9097d6dd8363e0e2d4294bd6bd6bdf32436cc8edccaaf217
+    canonical_no_hosted_policy_sha256=8c3c4e35da4df27d0c622372ad7f9ea6f2f39dfc6694ee829d48e4d9eb59bcf1
     canonical_no_hosted_secret_count=21
   fi
   runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$canonical_no_hosted_lock}")

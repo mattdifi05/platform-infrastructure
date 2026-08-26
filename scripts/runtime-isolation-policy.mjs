@@ -119,7 +119,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .map((mount) => `${mount.type}:${mount.target}:${mount.readOnly ? "ro" : "rw"}`)
     .sort();
   record("broker-bootstrap-config-volumes", same(brokerOutputs, ["volume:/out/nats:rw", "volume:/out/redis:rw"]), `outputs=${brokerOutputs.join(",") || "none"}`);
-  record("broker-bootstrap-minimum-capability", brokerBootstrap.cap_drop?.includes("ALL") && same([...(brokerBootstrap.cap_add ?? [])].sort(), ["CHOWN"]), `capAdd=${brokerBootstrap.cap_add || "none"}`);
+  record("broker-bootstrap-minimum-capability", brokerBootstrap.cap_drop?.includes("ALL") && same([...(brokerBootstrap.cap_add ?? [])].sort(), ["CHOWN", "DAC_READ_SEARCH"]), `capAdd=${brokerBootstrap.cap_add || "none"}`);
   const redisMounts = volumes(services.redis);
   record("redis-generated-acl-read-only", redisMounts.some((mount) => mount.target === "/run/platform-broker" && mount.readOnly), "Redis consumes only its generated ACL volume");
   const nats = services.nats || {};

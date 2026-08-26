@@ -157,7 +157,7 @@ function buildAcceptRender() {
       read_only: true,
       security_opt: ["no-new-privileges:true"],
       cap_drop: ["ALL"],
-      cap_add: ["CHOWN"],
+      cap_add: ["CHOWN", "DAC_READ_SEARCH"],
       restart: "no",
       network_mode: "none",
       ...coreResources("0.25", "128m", "32m", 64),
