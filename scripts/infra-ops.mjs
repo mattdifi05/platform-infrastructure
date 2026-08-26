@@ -3440,6 +3440,22 @@ function infraTestingHygiene() {
     "scripts/platform-activation-transport.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
+    "scripts/greenfield-namespace.mjs",
+    "scripts/greenfield-namespace.test.mjs",
+    "scripts/greenfield-core-policy.mjs",
+    "scripts/greenfield-core-policy.test.mjs",
+    "scripts/greenfield-state-projection.mjs",
+    "scripts/greenfield-state-projection.test.mjs",
+    "scripts/greenfield-secret-projection.mjs",
+    "scripts/greenfield-secret-projection.test.mjs",
+    "scripts/greenfield-backup-restore-executor.mjs",
+    "scripts/greenfield-backup-restore-executor.test.mjs",
+    "scripts/greenfield-final-sync-plan.mjs",
+    "scripts/greenfield-final-sync-plan.test.mjs",
+    "scripts/greenfield-auth-bootstrap.mjs",
+    "scripts/greenfield-auth-bootstrap.test.mjs",
+    "scripts/greenfield-offline-matrix.test.mjs",
+    "scripts/v1-greenfield-transaction.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -3497,7 +3513,21 @@ function infraTestingHygiene() {
   ], { cwd: infraRoot });
   run(process.execPath, ["scripts/platform-activation-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-namespace.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-core-policy.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-state-projection.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-secret-projection.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-backup-restore-executor.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-final-sync-plan.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-auth-bootstrap.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/v1-greenfield-transaction.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["sh", "scripts/greenfield-workload-builder.test.sh"], { cwd: infraRoot });
+  run(process.execPath, [
+    "--test",
+    "scripts/greenfield-offline-matrix.test.mjs",
+  ], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
     const shell = readText(path.join(infraRoot, "scripts", file)).startsWith("#!/usr/bin/env bash") ? "bash" : "sh";
@@ -3888,6 +3918,7 @@ function infraMaintainabilityHygiene() {
     "collect-host-reliability.sh",
     "compose-runtime-check.sh",
     "compose-vps.sh",
+    "compose-greenfield.sh",
     "configure-host-wait-online.sh",
     "container-metrics-sandbox-test.sh",
     "core-image-supply-chain-test.sh",
@@ -3917,6 +3948,7 @@ function infraMaintainabilityHygiene() {
     "verify-locked-images.sh",
     "vps-evidence-remote.sh",
     "workload-egress-firewall.sh",
+    "greenfield-workload-builder.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
     "infra-ops.sh",
