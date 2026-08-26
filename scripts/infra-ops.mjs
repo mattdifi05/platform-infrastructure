@@ -3454,6 +3454,8 @@ function infraTestingHygiene() {
     "scripts/greenfield-final-sync-plan.test.mjs",
     "scripts/greenfield-auth-bootstrap.mjs",
     "scripts/greenfield-auth-bootstrap.test.mjs",
+    "scripts/greenfield-control-plane-separation.mjs",
+    "scripts/greenfield-control-plane-separation.test.mjs",
     "scripts/greenfield-offline-matrix.test.mjs",
     "scripts/v1-greenfield-transaction.test.mjs",
   ];
@@ -3521,6 +3523,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/greenfield-backup-restore-executor.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/greenfield-final-sync-plan.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/greenfield-auth-bootstrap.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/greenfield-control-plane-separation.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/v1-greenfield-transaction.test.mjs"], { cwd: infraRoot });
   run("sh", ["scripts/greenfield-workload-builder.test.sh"], { cwd: infraRoot });
   run(process.execPath, [

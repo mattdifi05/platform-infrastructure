@@ -97,6 +97,15 @@ ENV_CANDIDATE_TREE = "PLATFORM_RUNTIME_CANDIDATE_TREE"
 ENV_TOPOLOGY = "PLATFORM_GREENFIELD_TOPOLOGY"
 ENV_ALLOW_FULL_RUN = "PLATFORM_GREENFIELD_ALLOW_FULL_RUN"
 TOPOLOGIES = ("PARALLEL", "CUTOVER")
+# Architectural separation gates carried in every execution context and
+# receipt: the infrastructure control plane (Control Center, Keycloak admin
+# auth, server management components) must never depend on hosted
+# applications such as Stexor. The existing Stexor passkey belongs to the
+# Stexor application state alone and is never part of First Configuration.
+DEPENDENCY_GATES = {
+    "controlCenterDependsOnStexor": False,
+    "infrastructureDependsOnStexor": False,
+}
 
 STEP_TIMEOUT_SECONDS = 300
 MAX_REPLY_BYTES = 64 * 1024
@@ -654,6 +663,7 @@ def build_context(authority, store, command, stop_after, attempt, previous, view
         "previousAttempt": previous,
         "command": command,
         "stopAfter": stop_after,
+        "dependencyGates": dict(DEPENDENCY_GATES),
     }
 
 

@@ -10,6 +10,11 @@ import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { evaluateGreenfieldNamespace, GREENFIELD_AUXILIARY_SERVICES, GREENFIELD_PROJECT_NAME } from "./greenfield-namespace.mjs";
 import {
+  evaluateControlPlaneSeparation,
+  separationDescriptor,
+  serviceDependencyClass,
+} from "./greenfield-control-plane-separation.mjs";
+import {
   buildStateProjectionPlan,
   finalSyncWriterRegistry,
   serializeProjectionPlan,
@@ -860,7 +865,7 @@ const TREE_B = "d".repeat(40);
 
 function transactionFixture(t) {
   const root = makeTempRoot("greenfield-matrix-tx-");
-  t.after(() => {
+  after(() => {
     try {
       const pidFile = path.join(root, "executor.pid");
       if (fs.existsSync(pidFile)) {
@@ -1377,6 +1382,103 @@ describe("E) AUTH BOOTSTRAP (offline planner)", () => {
     const bind = keycloakPasskeyReconcileInvocation({ stage: "bind" });
     assert.equal(bind.env.KEYCLOAK_PASSKEY_INDEPENDENCE_CONFIRMED, "true");
   });
+});
+
+describe("F) CONTROL PLANE / WORKLOAD SEPARATION (architectural invariant)", () => {
+  const composeSkip = composeCapability.available ? false : COMPOSE_UNAVAILABLE_SKIP;
+  function separationStateFixture() {
+    return {
+      hostStateTrees: {
+        "/home/platform_infrastructure/src": { projects: ["stexor", "workcalendar", "public"] },
+        "/home/platform_infrastructure/platform-infrastructure/projects-portal/state": { size: "916K" },
+        "/home/platform_infrastructure/platform-infrastructure/secrets": { size: "220K" },
+        "/home/platform_infrastructure/platform-infrastructure/backups": { families: ["a"] },
+      },
+      anonymousVolumesCountApprox: 135,
+    };
+  }
+  const stateProjectionPlan = buildStateProjectionPlan({ manifest: separationStateFixture() });
+  const finalSyncSequence = buildFinalSyncSequence();
+  const authBootstrap = buildAuthBootstrapSequence();
+
+  matrixTest(
+    "the exported gates are hard-false and every control-plane service is classified",
+    () => {
+      assert.deepEqual(separationDescriptor, {
+        schema: "platform.greenfield-control-plane-separation/v1",
+        controlCenterDependsOnStexor: false,
+        infrastructureDependsOnStexor: false,
+        controlPlaneServiceCount: separationDescriptor.controlPlaneServiceCount,
+        workloadServiceCount: separationDescriptor.workloadServiceCount,
+      });
+      const renderedServices = composeCapability.available && loadRenderState().parallel?.ok
+        ? Object.keys(loadRenderState().parallel.envelope.config.services)
+        : [];
+      for (const service of renderedServices) {
+        assert.notEqual(
+          serviceDependencyClass(service),
+          "unknown",
+          `rendered service ${service} must be classified control-plane or workload`,
+        );
+      }
+    },
+  );
+
+  matrixTest(
+    "the canonical render, state plan, final sync and auth bootstrap satisfy the separation invariant",
+    { skip: composeSkip },
+    () => {
+      const state = requireHealthyParallelRender();
+      const violations = evaluateControlPlaneSeparation({
+        renderedConfig: state.parallel.envelope.config,
+        stateProjectionPlan,
+        finalSyncSequence,
+        authBootstrap,
+      });
+      assert.deepEqual(violations, []);
+    },
+  );
+
+  matrixTest(
+    "wiring a workload dependency into the Control Center fails the gate closed",
+    () => {
+      const hostile = {
+        name: GREENFIELD_PROJECT_NAME,
+        services: {
+          "control-center": {
+            container_name: "gf-control-center",
+            depends_on: { "php-apache": { condition: "service_healthy" } },
+          },
+          "php-apache": { container_name: "gf-php-apache" },
+        },
+      };
+      assert.deepEqual(evaluateControlPlaneSeparation({
+        renderedConfig: hostile,
+        stateProjectionPlan,
+        finalSyncSequence,
+        authBootstrap,
+      }), ["separation:control-center:depends-on-workload:php-apache"]);
+    },
+  );
+
+  matrixTest(
+    "the Stexor passkey stays application-workload state and never enters First Configuration",
+    () => {
+      for (const entry of stateProjectionPlan.entries) {
+        if (entry.entryId === "postgres-stexor" || entry.entryId === "app-src-stexor") {
+          assert.equal(entry.classification.startsWith("PRESERVE"), true, entry.entryId);
+        }
+      }
+      const serializedBootstrap = JSON.stringify(authBootstrap);
+      assert.ok(!/stexor/i.test(serializedBootstrap), serializedBootstrap);
+      // First Configuration materials are exclusively Control Center/Keycloak.
+      for (const step of authBootstrap) {
+        if (step.kind === "human-gate") {
+          assert.match(step.stepId, /ENROLL_PASSKEY_[12]$/, step.stepId);
+        }
+      }
+    },
+  );
 });
 
 after(() => {
