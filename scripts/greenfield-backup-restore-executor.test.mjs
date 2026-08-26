@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import {
   SCHEMA,
@@ -74,7 +78,10 @@ test("restore plan targets only greenfield resources", () => {
   assert.ok(!serialized.includes("enterprise_"), serialized);
   assert.ok(!serialized.includes("platform_infra_vps"));
   const pgRestore = restore.entries.find((entry) => entry.family === "postgres-stexor");
-  assert.match(pgRestore.commands[0], /pg_restore --clean --if-exists/);
+  assert.match(pgRestore.commands[0], /psql.*SELECT 1 FROM pg_database WHERE datname/);
+  assert.match(pgRestore.commands[0], /createdb/);
+  assert.match(pgRestore.commands[0], /stexor/);
+  assert.match(pgRestore.commands[1], /pg_restore --clean --if-exists/);
   assert.equal(pgRestore.targetKind, "database");
   assert.equal(restore.entries.find((entry) => entry.family === "minio").targetKind, "volume");
   assert.equal(restore.entries.find((entry) => entry.family === "control-center-state").targetKind, "bind");
@@ -90,13 +97,21 @@ test("restore plan normalizes object ownership for every postgres family", () =>
   assert.equal(keycloak.ownerRole, "keycloak");
   assert.equal(stexor.ownerRole, "postgres");
 
-  for (const [entry, database, expectedRole] of [
-    [keycloak, "keycloak", "keycloak"],
-    [stexor, "stexor", "postgres"],
+  for (const [entry, database, expectedRole, expectedCommandCount] of [
+    [keycloak, "keycloak", "keycloak", 2],
+    [stexor, "stexor", "postgres", 3],
   ]) {
-    assert.equal(entry.commands.length, 2, `${entry.family} must pair pg_restore with ownership normalization`);
-    assert.match(entry.commands[0], /pg_restore --clean --if-exists --no-owner --no-acl/);
-    const normalization = entry.commands[1];
+    assert.equal(entry.commands.length, expectedCommandCount, `${entry.family} must have ${expectedCommandCount} commands`);
+    if (entry.family === "postgres-stexor") {
+      assert.match(entry.commands[0], /psql.*SELECT 1 FROM pg_database/);
+      assert.match(entry.commands[0], /createdb/);
+      assert.match(entry.commands[1], /pg_restore --clean --if-exists --no-owner --no-acl/);
+      const normalization = entry.commands[2];
+    } else {
+      assert.match(entry.commands[0], /pg_restore --clean --if-exists --no-owner --no-acl/);
+      const normalization = entry.commands[1];
+    }
+    const normalization = entry.commands[entry.commands.length - 1];
     assert.equal(normalization, buildOwnershipNormalizationCommand({ database, ownerRole: expectedRole }));
     assert.match(normalization, /^docker exec gf-postgres psql -U postgres -d /);
     assert.ok(normalization.includes(`-d ${database} `), normalization);
@@ -220,4 +235,192 @@ test("brownfield BACKUP_PRE contracts target frozen sources without mutation", (
   // Greenfield capture contracts stay untouched by the parameter.
   const gf = buildCapturePlan({ families: ALL_FAMILIES, outputRoot: "/tmp/x", runId: "r" });
   assert.equal(JSON.parse(JSON.stringify(gf.entries[0])).family, ALL_FAMILIES.slice().sort()[0]);
+});
+
+test("postgres-stexor restore plan ordering: ensure-db, pg_restore, normalization", () => {
+  const capture = buildCapturePlan({ families: ["postgres-stexor"], outputRoot: "/tmp/x", runId: "r" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+  const entry = restore.entries.find((e) => e.family === "postgres-stexor");
+  assert.equal(entry.commands.length, 3, "stexor must have 3 commands");
+  assert.match(entry.commands[0], /psql.*SELECT 1 FROM pg_database/);
+  assert.match(entry.commands[0], /createdb/);
+  assert.match(entry.commands[1], /pg_restore --clean --if-exists --no-owner --no-acl/);
+  assert.match(entry.commands[2], /OWNER TO postgres/);
+  assert.equal(entry.ownerRole, "postgres");
+});
+
+test("postgres-stexor ensure-db command is idempotent: probe then conditionally create", () => {
+  const capture = buildCapturePlan({ families: ["postgres-stexor"], outputRoot: "/tmp/x", runId: "r" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+  const ensureDb = restore.entries.find((e) => e.family === "postgres-stexor").commands[0];
+  // Must probe pg_database
+  assert.match(ensureDb, /SELECT 1 FROM pg_database WHERE datname/);
+  // Must use createdb (not CREATE DATABASE) for conditional creation
+  assert.match(ensureDb, /createdb/);
+  // Must NOT use unconditional CREATE DATABASE
+  assert.doesNotMatch(ensureDb, /CREATE DATABASE(?!.*IF NOT EXISTS)/, "must not use unconditional CREATE DATABASE");
+  // Must NOT use CREATE DATABASE IF NOT EXISTS (invalid PostgreSQL)
+  assert.doesNotMatch(ensureDb, /CREATE DATABASE IF NOT EXISTS/);
+  // Must NOT use DROP DATABASE
+  assert.doesNotMatch(ensureDb, /DROP DATABASE/);
+  // Must use case statement for fail-closed branching
+  assert.match(ensureDb, /case/);
+  assert.match(ensureDb, /unexpected.*probe.*result/);
+  // Must have ON_ERROR_STOP for fail-closed probe
+  assert.match(ensureDb, /ON_ERROR_STOP=1/);
+});
+
+test("postgres-stexor ensure-db does not create when database already exists", () => {
+  const capture = buildCapturePlan({ families: ["postgres-stexor"], outputRoot: "/tmp/x", runId: "r" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+  const ensureDb = restore.entries.find((e) => e.family === "postgres-stexor").commands[0];
+  // The case 1) branch must be empty (no-op when database exists)
+  const caseMatch = ensureDb.match(/1\)\s*(.*?)\s*;;\s*""\)/s);
+  assert.ok(caseMatch, "must have a case 1) branch for existing database");
+  const existingBranch = caseMatch[1].trim();
+  assert.equal(existingBranch, "", "existing database branch must be empty (no-op)");
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic behavioural tests for the stexor ensure-database command.
+// These execute the INNER shell logic directly (no Docker, no root, no live
+// database) by substituting fake `psql` and `createdb` executables on PATH.
+// ---------------------------------------------------------------------------
+
+function buildEnsureDbCommand(ensureDbFull) {
+  const marker = "sh -ec ";
+  const idx = ensureDbFull.indexOf(marker);
+  assert.ok(idx !== -1, `ensure-db command must contain "${marker}"`);
+  const afterMarker = ensureDbFull.slice(idx + marker.length);
+  const firstQuote = afterMarker.indexOf("'");
+  assert.ok(firstQuote !== -1, "ensure-db command must have opening single quote");
+  const lastQuote = afterMarker.lastIndexOf("'");
+  assert.ok(lastQuote > firstQuote, "ensure-db command must have closing single quote");
+  return afterMarker.slice(firstQuote + 1, lastQuote);
+}
+
+function runEnsureDbWithFakes(innerLogic, control) {
+  const psqlStdout = control?.psqlStdout ?? "";
+  const psqlExitCode = control?.psqlExitCode ?? 0;
+  const createdbExitCode = control?.createdbExitCode ?? 0;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stexor-ensure-db-"));
+  const binDir = path.join(tmpDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const createdbCalls = path.join(tmpDir, "CREATEDB_CALLS");
+  // psql stdout and exit status are independent controls so the probe-failure
+  // path exercises a REAL nonzero psql exit, not merely unexpected stdout.
+  fs.writeFileSync(
+    path.join(binDir, "psql"),
+    `#!/bin/sh\nprintf '%s' '${psqlStdout}'\nexit ${psqlExitCode}\n`,
+    { mode: 0o755 },
+  );
+  // createdb records ONE line per invocation so call count is exact.
+  fs.writeFileSync(
+    path.join(binDir, "createdb"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> '${createdbCalls}'\nexit ${createdbExitCode}\n`,
+    { mode: 0o755 },
+  );
+  const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+  let exitCode = 0;
+  try {
+    execFileSync("sh", ["-ec", innerLogic], { env, stdio: "ignore" });
+  } catch (error) {
+    exitCode = error.status ?? 1;
+  }
+  let createdbCallCount = 0;
+  let createdbArgs = "";
+  try {
+    createdbArgs = fs.readFileSync(createdbCalls, "utf8");
+    createdbCallCount = createdbArgs.split("\n").filter((line) => line.trim().length > 0).length;
+  } catch {
+    createdbCallCount = 0;
+    createdbArgs = "";
+  }
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  return { exitCode, createdbCallCount, createdbArgs };
+}
+
+function getStexorEnsureDbCommand() {
+  const capture = buildCapturePlan({ families: ["postgres-stexor"], outputRoot: "/tmp/x", runId: "r" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+  return restore.entries.find((e) => e.family === "postgres-stexor").commands[0];
+}
+
+// Test 1: MISSING DATABASE path – probe returns "", createdb invoked EXACTLY once
+test("ensure-db MISSING DATABASE: probe empty, createdb invoked exactly once with stexor owned by postgres", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+  const result = runEnsureDbWithFakes(inner, { psqlStdout: "", psqlExitCode: 0 });
+  assert.equal(result.exitCode, 0, "must exit 0 when database is missing");
+  assert.equal(result.createdbCallCount, 1, "createdb must be invoked exactly once");
+  assert.ok(result.createdbArgs.includes("stexor"), "createdb must include stexor as target");
+  assert.ok(result.createdbArgs.includes("-U postgres"), "createdb must run as postgres user");
+  assert.ok(result.createdbArgs.includes("-O postgres"), "createdb owner must be postgres");
+});
+
+// Test 2: EXISTING DATABASE path – probe returns "1", createdb not invoked
+test("ensure-db EXISTING DATABASE: probe returns 1, createdb not invoked", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+  const result = runEnsureDbWithFakes(inner, { psqlStdout: "1", psqlExitCode: 0 });
+  assert.equal(result.exitCode, 0, "must exit 0 when database already exists");
+  assert.equal(result.createdbCallCount, 0, "createdb must not be invoked");
+});
+
+// Test 3: PROBE FAILURE – psql exits nonzero (REAL failure), createdb not invoked
+test("ensure-db PROBE FAILURE: psql exits nonzero, createdb not invoked", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+  const result = runEnsureDbWithFakes(inner, { psqlStdout: "", psqlExitCode: 1 });
+  assert.ok(result.exitCode !== 0, "must exit nonzero when probe fails");
+  assert.equal(result.createdbCallCount, 0, "createdb must not be invoked on probe failure");
+});
+
+// Test 4: CREATE FAILURE – probe returns empty but createdb exits nonzero
+test("ensure-db CREATE FAILURE: createdb invoked once but fails, command exits nonzero", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+  const result = runEnsureDbWithFakes(inner, { psqlStdout: "", psqlExitCode: 0, createdbExitCode: 1 });
+  assert.ok(result.exitCode !== 0, "must exit nonzero when createdb fails");
+  assert.equal(result.createdbCallCount, 1, "createdb must be invoked exactly once (even though it fails)");
+  assert.ok(result.createdbArgs.includes("stexor"), "createdb must target stexor");
+});
+
+// Test 5: UNEXPECTED PROBE OUTPUT – psql outputs "garbage", createdb not invoked
+test("ensure-db UNEXPECTED PROBE OUTPUT: psql outputs garbage, createdb not invoked", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+  const result = runEnsureDbWithFakes(inner, { psqlStdout: "garbage", psqlExitCode: 0 });
+  assert.ok(result.exitCode !== 0, "must exit nonzero on unexpected probe output");
+  assert.equal(result.createdbCallCount, 0, "createdb must not be invoked on unexpected output");
+});
+
+// Test 6: Structural assertions on the full stexor restore entry
+test("ensure-db structural assertions: command shape and ordering", () => {
+  const ensureDb = getStexorEnsureDbCommand();
+  const inner = buildEnsureDbCommand(ensureDb);
+
+  // The extracted logic must be non-empty and contain the case/pattern structure
+  assert.ok(inner.length > 0, "extracted inner logic must be non-empty");
+  assert.match(inner, /case/);
+  assert.match(inner, /1\)/);
+  assert.match(inner, /""/);
+  assert.match(inner, /\*\)/);
+  assert.match(inner, /createdb/);
+  assert.match(inner, /psql/);
+  assert.match(inner, /ON_ERROR_STOP=1/);
+  assert.match(inner, /database probe failed/);
+  assert.match(inner, /unexpected.*probe.*result/);
+
+  // commands[0] is the ensure-db shell command
+  assert.match(ensureDb, /docker exec gf-postgres sh -ec/);
+  // commands[1] is pg_restore
+  const capture = buildCapturePlan({ families: ["postgres-stexor"], outputRoot: "/tmp/x", runId: "r" });
+  const restore = buildRestorePlan({ captureReceipt: capture });
+  const entry = restore.entries.find((e) => e.family === "postgres-stexor");
+  assert.match(entry.commands[1], /pg_restore --clean --if-exists --no-owner --no-acl/);
+  // commands[2] is ownership normalization
+  assert.match(entry.commands[2], /OWNER TO postgres/);
+  // ownerRole metadata
+  assert.equal(entry.ownerRole, "postgres");
 });
