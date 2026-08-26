@@ -248,6 +248,10 @@ interpolation_passthrough_variables=(
   PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256
   PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY
   PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256
+  PLATFORM_OPS_IMAGE
+  CONTROL_CENTER_IMAGE
+  PROJECT_ROUTER_IMAGE
+  PLATFORM_ALERT_DISPATCHER_IMAGE
 )
 for interpolation_variable in "${interpolation_passthrough_variables[@]}"; do
   if [[ -n "${!interpolation_variable:-}" ]]; then
