@@ -49,7 +49,15 @@ RECONCILER = "/usr/local/libexec/platform-v1-local-private-reconcile"
 UNIT = "/etc/systemd/system/platform-v1-local-private-control.service"
 UPLOAD_BRIDGE = "/home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py"
 STAGING_PARENT = "/home/platform_infrastructure/.v1-release-staging"
-LIVE_ENV = "/home/platform_infrastructure/platform-infrastructure/.env"
+DEFAULT_LIVE_ENV = "/home/platform_infrastructure/platform-infrastructure/.env"
+GREENFIELD_LIVE_ENV_ROOT = "/home/platform_infrastructure/greenfield-live/"
+LIVE_ENV_ENV = "PLATFORM_V1_LIVE_ENV"
+LIVE_ENV_REQUIRE_ENV = "PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE"
+LIVE_ENV_PROVENANCE_ENV = "PLATFORM_V1_LIVE_ENV_PROVENANCE"
+# Backward-compatible default: the frozen brownfield rollback authority.  This
+# file is NEVER mutated by a greenfield install and is only ever compared
+# against when no greenfield preimage override is supplied.
+LIVE_ENV = DEFAULT_LIVE_ENV
 RELEASES_PARENT = "/srv/platform-infrastructure/releases"
 RECEIPTS_PARENT = "/var/lib/platform-infrastructure/v1/install-receipts"
 PYTHON = "/usr/bin/python3"
@@ -625,6 +633,56 @@ def git_run(arguments: List[str], label: str, *, repository: Optional[str] = Non
     )
 
 
+def resolve_live_env(manifest_commit: str) -> str:
+    """Select the live preimage environment this bootstrap compares against.
+
+    Default (no override) is the frozen brownfield rollback authority.  A
+    greenfield LOCAL_PRIVATE install supplies an explicit GREENFIELD preimage
+    that is cryptographically bound to the candidate release through a
+    provenance manifest.  The greenfield preimage must never equal, and must
+    never accidentally consume, the brownfield live environment.  Every
+    misconfiguration FAILS CLOSED.
+    """
+    override = os.environ.get(LIVE_ENV_ENV)
+    require_greenfield = os.environ.get(LIVE_ENV_REQUIRE_ENV) == "1"
+    if not override:
+        if require_greenfield:
+            stop("greenfield install requires an explicit GREENFIELD preimage (PLATFORM_V1_LIVE_ENV).", 65)
+        return DEFAULT_LIVE_ENV
+    if override == DEFAULT_LIVE_ENV:
+        stop("greenfield preimage must not equal the brownfield live environment.", 65)
+    if not override.startswith(GREENFIELD_LIVE_ENV_ROOT) or override != os.path.normpath(override):
+        stop("greenfield preimage must live under the greenfield authority.", 65)
+    provenance_path = os.environ.get(LIVE_ENV_PROVENANCE_ENV)
+    if not provenance_path or not provenance_path.startswith(GREENFIELD_LIVE_ENV_ROOT) or provenance_path != os.path.normpath(provenance_path):
+        stop("greenfield preimage provenance is missing or outside the greenfield authority.", 65)
+    prov_raw = snapshot(provenance_path, "greenfield preimage provenance", MAX_RECEIPT, modes=(0o400, 0o600))
+    prov = parse_canonical_object(prov_raw, (
+        "schema", "generatedAtUnixSeconds", "releaseCommit", "greenfieldEnvSha256",
+        "renderEnvSha256", "preimagePath", "preimageSha256", "imageIdentities",
+    ), "greenfield preimage provenance")
+    if prov["schema"] != "platform.v1-greenfield-preimage/v1":
+        stop("greenfield preimage provenance schema is invalid.", 65)
+    if not GIT_OBJECT.fullmatch(prov["releaseCommit"]):
+        stop("greenfield preimage provenance release commit is invalid.", 65)
+    if prov["releaseCommit"] != manifest_commit:
+        stop("greenfield preimage provenance release commit does not match the candidate.", 65)
+    if prov["preimagePath"] != override:
+        stop("greenfield preimage provenance path does not match the live env path.", 65)
+    sha(prov["preimageSha256"], "greenfield preimage provenance digest")
+    if prov["preimageSha256"] != digest(snapshot(override, "greenfield preimage", MAX_ENV, modes=(0o400, 0o600))):
+        stop("greenfield preimage digest does not match the provenance.", 65)
+    identities = prov.get("imageIdentities")
+    if not isinstance(identities, dict):
+        stop("greenfield preimage image identities are invalid.", 65)
+    for key in ("PLATFORM_OPS_IMAGE", "CONTROL_CENTER_IMAGE", "PROJECT_ROUTER_IMAGE", "PLATFORM_ALERT_DISPATCHER_IMAGE"):
+        value = identities.get(key)
+        if not isinstance(value, str) or "@sha256:" not in value:
+            stop(f"greenfield preimage missing image identity {key}.", 65)
+        sha(value.split("@sha256:", 1)[1], f"greenfield preimage {key} digest")
+    return override
+
+
 def validate_or_create_staging(manifest: Dict[str, object], bundle: str, journal: Dict[str, object]) -> str:
     commit = manifest["candidateCommit"]
     tree = manifest["candidateTree"]
@@ -632,8 +690,9 @@ def validate_or_create_staging(manifest: Dict[str, object], bundle: str, journal
     pathname = physical(logical)
     uid = owner_uid()
     gid = owner_gid()
+    live_env_path = resolve_live_env(manifest["candidateCommit"])
     live_environment = snapshot(
-        LIVE_ENV,
+        live_env_path,
         "live deployment environment",
         MAX_ENV,
         uid=uid,
@@ -690,7 +749,7 @@ def validate_or_create_staging(manifest: Dict[str, object], bundle: str, journal
     if staged_environment != live_environment:
         stop("staging deployment environment differs from the stable live preimage.")
     if snapshot(
-        LIVE_ENV,
+        live_env_path,
         "live deployment environment",
         MAX_ENV,
         uid=uid,
