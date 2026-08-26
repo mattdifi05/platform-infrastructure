@@ -655,4 +655,34 @@ process.stdin.on("end", () => {
     assert.equal(status.receivedCount, 0);
     assert.deepEqual(status.dangling, { state: "PREPARE", kind: "FAILED" });
   });
+
+  test("every execution context carries the architectural separation gates", (t) => {
+    const fx = fixture(t);
+    const gatesExecutor = path.join(fx.root, "gates-executor.mjs");
+    fs.writeFileSync(gatesExecutor, `#!/usr/bin/env node
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(raw);
+  process.stdout.write(JSON.stringify({ outputs: {
+    observedGates: JSON.stringify(request.context.dependencyGates),
+  } }) + "\\n");
+});
+`, { mode: 0o755 });
+    const environment = transactionEnvironment(fx);
+    environment[ENV_EXECUTOR] = gatesExecutor;
+    const result = spawnSync(python, [script, "run", "--stop-after", "PREPARE"], {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: environment,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const receiptPath = path.join(fx.journalDir, "PREPARE-receipt.json");
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    assert.deepEqual(JSON.parse(receipt.outputs.observedGates), {
+      controlCenterDependsOnStexor: false,
+      infrastructureDependsOnStexor: false,
+    });
+  });
 }
