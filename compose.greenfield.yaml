@@ -49,6 +49,10 @@ services:
     container_name: gf-platform-alert-dispatcher
   postgres:
     container_name: gf-postgres
+    # The platform entrypoint wrapper stages init secrets then execs
+    # docker-entrypoint.sh "$@"; compose v5.3.1 clears the image CMD when a
+    # service overrides entrypoint without an explicit command, so pin it.
+    command: ["postgres"]
   project-router:
     container_name: gf-project-router
   prometheus:
