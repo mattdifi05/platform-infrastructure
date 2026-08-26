@@ -449,3 +449,66 @@ test("hard-crash retry preserves the durable Node mutation receipt and completes
   assert.deepEqual(fs.readFileSync(nodeReceiptPath), durableBefore);
   assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/etc/sudoers.d/platform_infrastructure")), candidate.broadGrant);
 });
+
+function stageGreenfieldPreimage(candidate, greenfieldEnv, releaseCommit) {
+  const envPath = "/home/platform_infrastructure/greenfield-live/render/preimage/greenfield-deployment.env";
+  const provenancePath = "/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json";
+  write(fixed(candidate.root, envPath), greenfieldEnv, 0o400);
+  const imageIdentities = {
+    PLATFORM_OPS_IMAGE: `127.0.0.1:5000/platform/ops@sha256:${"e".repeat(64)}`,
+    CONTROL_CENTER_IMAGE: `127.0.0.1:5000/platform/control-center@sha256:${"f".repeat(64)}`,
+    PROJECT_ROUTER_IMAGE: `127.0.0.1:5000/platform/router@sha256:${"1".repeat(64)}`,
+    PLATFORM_ALERT_DISPATCHER_IMAGE: `127.0.0.1:5000/platform/alert@sha256:${"2".repeat(64)}`,
+    PLATFORM_BACKUP_SCHEDULER_IMAGE_POSTGRES: `127.0.0.1:5000/platform/bs-pg@sha256:${"3".repeat(64)}`,
+    PLATFORM_DOCKER_ACTION_BROKER_IMAGE_POSTGRES: `127.0.0.1:5000/platform/broker@sha256:${"4".repeat(64)}`,
+    PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_POSTGRES: `127.0.0.1:5000/platform/sidecar@sha256:${"5".repeat(64)}`,
+  };
+  const provenance = {
+    schema: "platform.v1-greenfield-preimage/v1",
+    generatedAtUnixSeconds: 1800000000,
+    releaseCommit,
+    greenfieldEnvSha256: sha(greenfieldEnv),
+    renderEnvSha256: sha(greenfieldEnv),
+    preimagePath: envPath,
+    preimageSha256: sha(greenfieldEnv),
+    imageIdentities,
+  };
+  write(fixed(candidate.root, provenancePath), Buffer.from(`${stable(provenance)}\n`), 0o400);
+  candidate.environment.PLATFORM_V1_LIVE_ENV = envPath;
+  candidate.environment.PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE = "1";
+  candidate.environment.PLATFORM_V1_LIVE_ENV_PROVENANCE = provenancePath;
+}
+
+test("greenfield preimage selection binds the bridge to the greenfield .env and never the brownfield .env", (t) => {
+  const candidate = createFixture(t);
+  const greenfieldEnv = Buffer.from("PLATFORM_MODE=LOCAL_PRIVATE\nGREENFIELD_SECRET=only-in-greenfield\n");
+  stageGreenfieldPreimage(candidate, greenfieldEnv, candidate.commit);
+  const result = execute(candidate);
+  assert.equal(result.status, 0, result.stderr);
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.bootstrap.status, "BOOTSTRAP_CONTROL_INSTALLED");
+  assert.equal(envelope.bootstrap.stagingEnvironmentSha256, sha(greenfieldEnv));
+  assert.notEqual(envelope.bootstrap.stagingEnvironmentSha256, sha(candidate.liveEnvironment));
+  const stagingEnv = fixed(candidate.root, `/home/platform_infrastructure/.v1-release-staging/${candidate.commit}/.env`);
+  assert.deepEqual(fs.readFileSync(stagingEnv), greenfieldEnv);
+  assert.deepEqual(fs.readFileSync(fixed(candidate.root, "/home/platform_infrastructure/platform-infrastructure/.env")), candidate.liveEnvironment);
+});
+
+test("greenfield preimage selection fails closed when provenance does not bind the candidate commit", (t) => {
+  const candidate = createFixture(t);
+  const greenfieldEnv = Buffer.from("PLATFORM_MODE=LOCAL_PRIVATE\nGREENFIELD_SECRET=only-in-greenfield\n");
+  stageGreenfieldPreimage(candidate, greenfieldEnv, "0".repeat(40));
+  const result = execute(candidate);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /preimage|provenance|candidate/i);
+});
+
+test("greenfield preimage selection fails closed when the preimage path equals the brownfield live environment", (t) => {
+  const candidate = createFixture(t);
+  candidate.environment.PLATFORM_V1_LIVE_ENV = "/home/platform_infrastructure/platform-infrastructure/.env";
+  candidate.environment.PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE = "1";
+  candidate.environment.PLATFORM_V1_LIVE_ENV_PROVENANCE = "/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json";
+  const result = execute(candidate);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /brownfield/i);
+});
