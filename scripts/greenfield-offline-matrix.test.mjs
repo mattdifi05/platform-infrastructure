@@ -471,6 +471,11 @@ function loadRenderState() {
     renderState.namespaceViolations = evaluateGreenfieldNamespace(
       renderState.parallel.envelope.config,
     );
+    fs.writeFileSync(
+      path.join(renderState.fixture.root, "render-PARALLEL.json"),
+      `${JSON.stringify(renderState.parallel.envelope.config)}\n`,
+      { mode: 0o600 },
+    );
     renderState.policyResult = runPolicyCli(
       path.join(renderState.fixture.root, "render-PARALLEL.json"),
       renderState.fixture.policyEnvFile,

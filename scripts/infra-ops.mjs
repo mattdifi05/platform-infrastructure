@@ -3523,7 +3523,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/greenfield-final-sync-plan.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/greenfield-auth-bootstrap.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/v1-greenfield-transaction.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["sh", "scripts/greenfield-workload-builder.test.sh"], { cwd: infraRoot });
+  run("sh", ["scripts/greenfield-workload-builder.test.sh"], { cwd: infraRoot });
   run(process.execPath, [
     "--test",
     "scripts/greenfield-offline-matrix.test.mjs",

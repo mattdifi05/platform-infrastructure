@@ -291,7 +291,8 @@ node "$ROOT_DIR/scripts/greenfield-core-policy.mjs" \
   --root "$ROOT_DIR" \
   --lock "$ROOT_DIR/config/no-hosted-workloads.greenfield.lock.json" \
   --config "$render_file" \
-  --env "$environment_snapshot_file" || {
+  --env "$environment_snapshot_file" \
+  > "$handoff_directory/policy-validation.json" || {
   printf '%s\n' "Greenfield render semantic authority validation failed." >&2
   exit 1
 }
