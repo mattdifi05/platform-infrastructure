@@ -140,36 +140,36 @@ export function renderBrokerConfigs(lock, {
   };
 }
 
-export function writeProtectedConfig(outputPath, rendered, { mode = 0o600, uid = null, gid = null } = {}) {
+export function writeProtectedConfig(outputPath, rendered, { mode = 0o600, uid = null, gid = null, io = fs } = {}) {
   const destination = path.resolve(outputPath);
   const parent = path.dirname(destination);
-  const parentStat = fs.lstatSync(parent, { throwIfNoEntry: false });
+  const parentStat = io.lstatSync(parent, { throwIfNoEntry: false });
   if (!parentStat?.isDirectory() || parentStat.isSymbolicLink()) throw new Error("Broker config output parent must be a real directory.");
   const temporary = path.join(parent, `.${path.basename(destination)}.tmp-${process.pid}-${Date.now()}`);
   try {
-    fs.writeFileSync(temporary, rendered.text, { flag: "wx", mode });
-    applyOwnership(temporary, uid, gid);
-    fs.chmodSync(temporary, mode);
-    fs.renameSync(temporary, destination);
+    io.writeFileSync(temporary, rendered.text, { flag: "wx", mode });
+    io.chmodSync(temporary, mode);
+    applyOwnership(temporary, uid, gid, io);
+    io.renameSync(temporary, destination);
     const digestPath = `${destination}.sha256`;
     const digestTemporary = `${temporary}.sha256`;
-    fs.writeFileSync(digestTemporary, `${rendered.sha256}  ${path.basename(destination)}\n`, { mode, flag: "wx" });
-    applyOwnership(digestTemporary, uid, gid);
-    fs.chmodSync(digestTemporary, mode);
-    fs.renameSync(digestTemporary, digestPath);
+    io.writeFileSync(digestTemporary, `${rendered.sha256}  ${path.basename(destination)}\n`, { mode, flag: "wx" });
+    io.chmodSync(digestTemporary, mode);
+    applyOwnership(digestTemporary, uid, gid, io);
+    io.renameSync(digestTemporary, digestPath);
     return { outputPath: destination, digestPath };
   } finally {
-    fs.rmSync(temporary, { force: true });
-    fs.rmSync(`${temporary}.sha256`, { force: true });
+    io.rmSync(temporary, { force: true });
+    io.rmSync(`${temporary}.sha256`, { force: true });
   }
 }
 
-function applyOwnership(filePath, uid, gid) {
+function applyOwnership(filePath, uid, gid, io = fs) {
   if (uid === null && gid === null) return;
   if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
     throw new Error("Broker config owner must be a non-negative numeric uid and gid.");
   }
-  fs.chownSync(filePath, uid, gid);
+  io.chownSync(filePath, uid, gid);
 }
 
 const SUPPORTED_LOCK_CONTRACTS = Object.freeze([

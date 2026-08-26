@@ -376,6 +376,66 @@ test("rejects unverified locks and locks without a workloads array", () => {
   }
 });
 
+test("writeProtectedConfig performs chmod before chown for payload and sidecar", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "write-protected-ordering-"));
+  try {
+    const output = path.join(root, "test.conf");
+    const text = "test config content\n";
+    const sha256 = "abc123";
+    const rendered = { text, sha256 };
+    const uid = 1000;
+    const gid = 1000;
+    const calls = [];
+    const fakeIo = Object.fromEntries(Object.entries(fs).map(([key, value]) => {
+      if (typeof value === "function") {
+        return [key, (...args) => {
+          calls.push({ op: key, args: args.slice(0, 2) });
+          return value(...args);
+        }];
+      }
+      return [key, value];
+    }));
+    fakeIo.chownSync = (filePath, ...rest) => {
+      calls.push({ op: "chownSync", target: filePath });
+    };
+    fakeIo.chmodSync = (filePath, ...rest) => {
+      calls.push({ op: "chmodSync", target: filePath });
+    };
+    fakeIo.writeFileSync = (filePath, data, options) => {
+      calls.push({ op: "writeFileSync", target: filePath });
+      fs.writeFileSync(filePath, data, options);
+    };
+    fakeIo.renameSync = (oldPath, newPath) => {
+      calls.push({ op: "renameSync", target: newPath });
+      fs.renameSync(oldPath, newPath);
+    };
+    fakeIo.lstatSync = (filePath, options) => {
+      calls.push({ op: "lstatSync", target: filePath });
+      return fs.lstatSync(filePath, options);
+    };
+    fakeIo.rmSync = (filePath, options) => {
+      calls.push({ op: "rmSync", target: filePath });
+      fs.rmSync(filePath, options);
+    };
+
+    writeProtectedConfig(output, rendered, { mode: 0o600, uid, gid, io: fakeIo });
+
+    const chmodIndices = calls.reduce((acc, c, i) => { if (c.op === "chmodSync") acc.push(i); return acc; }, []);
+    const chownIndices = calls.reduce((acc, c, i) => { if (c.op === "chownSync") acc.push(i); return acc; }, []);
+    assert.ok(chmodIndices.length >= 2, "at least two chmodSync calls (payload + sidecar)");
+    assert.ok(chownIndices.length >= 2, "at least two chownSync calls (payload + sidecar)");
+    assert.ok(chmodIndices[0] < chownIndices[0], "payload: chmod must occur before chown");
+    assert.ok(chmodIndices[1] < chownIndices[1], "sidecar: chmod must occur before chown");
+
+    const lstatCalls = calls.filter(c => c.op === "lstatSync");
+    assert.ok(lstatCalls.length >= 1, "lstatSync must be called through injected io");
+    const rmCalls = calls.filter(c => c.op === "rmSync");
+    assert.ok(rmCalls.length >= 2, "rmSync must be called through injected io for temp files");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function noHostedLock() {
   const workloads = [];
   return {
