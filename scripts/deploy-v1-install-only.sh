@@ -210,7 +210,7 @@ if (!sanctionCorePath !== !sanctionSignature) throw new Error("Transport sanctio
 if (sanctionCorePath) {
   const core = JSON.parse(fs.readFileSync(sanctionCorePath, "utf8"));
   if (!core || typeof core !== "object" || Array.isArray(core)) throw new Error("Transport sanction core is not an object.");
-  sanctionBytes = Buffer.from(stable({ ...core, signatureBase64: sanctionSignature }));
+  sanctionBytes = Buffer.from(`${stable({ ...core, signatureBase64: sanctionSignature })}\n`);
 } else {
   sanctionBytes = Buffer.from("{}");
 }
