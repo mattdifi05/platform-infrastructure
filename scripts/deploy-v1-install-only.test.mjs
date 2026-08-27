@@ -245,7 +245,7 @@ if (command.startsWith("/usr/bin/python3 -I -c ") && command.includes("tempfile.
     const bootstrap = { ...base, documentId: sha(stable(base)) };
     process.stdout.write(stable({ bootstrap, controlArtifacts: control, nodeRuntime, schema: "platform.v1-brownfield-bootstrap-result/v1" }) + "\\n");
   }
-} else if (command === "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare") {
+} else if (command.startsWith("/usr/bin/sudo -n -- /bin/bash -o pipefail") && command.includes("platform-v1-local-private-reconcile prepare")) {
   process.stdout.write('${prepareReceipt}\\n');
 } else if (command === "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json") {
   const calls = (fs.readFileSync(process.env.PLATFORM_V1_INSTALL_TEST_SSH_ARGUMENTS, "utf8").match(/^CALL$/gm) || []).length;
@@ -385,7 +385,7 @@ test("runs the fixed install, release bootstrap, prepare, and double authority r
     assert.doesNotMatch(commands[0], /\/dev\/stdin/);
     assert.deepEqual(commands.slice(1), [
       "/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply",
-      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare",
+      '/usr/bin/sudo -n -- /bin/bash -o pipefail -c "/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log"',
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
     ]);
@@ -537,7 +537,7 @@ test("source derives exact-main identity and exposes only the closed staging seq
     'bundle verify "$git_bundle"', 'bundle list-heads "$git_bundle"',
     "platform.v1-bootstrap-transport-checkpoint/v1", "platform.v1-brownfield-bootstrap-frame/v1",
     "UPLOAD_BRIDGE_REMOTE_COMMAND=", "BOOTSTRAP_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply'",
-    "PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare'",
+    "PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /bin/bash -o pipefail -c \"/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log\"'",
     "READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'",
     "nodeRuntimeReceiptSha256", "verify-node-runtime",
     "verify-bootstrap", "verify-control-artifacts", "verify-authority", "verify-prepare", "SSH=/usr/bin/ssh",

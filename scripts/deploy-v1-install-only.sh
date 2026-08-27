@@ -16,7 +16,7 @@ BOOTSTRAP_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform
 if [ -n "${PLATFORM_V1_LIVE_ENV:-}" ]; then
   BOOTSTRAP_REMOTE_COMMAND="/usr/bin/sudo -n -- env PLATFORM_V1_LIVE_ENV='${PLATFORM_V1_LIVE_ENV}' PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE='${PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE:-1}' PLATFORM_V1_LIVE_ENV_PROVENANCE='${PLATFORM_V1_LIVE_ENV_PROVENANCE:?PLATFORM_V1_LIVE_ENV_PROVENANCE is required when PLATFORM_V1_LIVE_ENV is set}' ${BOOTSTRAP_REMOTE_COMMAND}"
 fi
-PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile prepare'
+PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /bin/bash -o pipefail -c "/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log"'
 READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 SSH=/usr/bin/ssh
 GIT=/usr/bin/git
