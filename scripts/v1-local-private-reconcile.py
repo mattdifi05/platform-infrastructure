@@ -2490,7 +2490,11 @@ def install_binding() -> Dict[str, str]:
     for key in ("bridgeSha256", "candidateConsumerSha256", "gitBundleSha256"):
         if not isinstance(checkpoint[key], str) or SHA256_RE.fullmatch(checkpoint[key]) is None or checkpoint[key] == "0" * 64:
             stop("bootstrap transport checkpoint contains a non-canonical integrity digest.")
-    source_archive = secure_file(SOURCE_ARCHIVE, "bootstrap exact source archive", MAX_ARCHIVE, 0o400)
+    # Bytes are digest-bound below; the durable mode differs across lifecycle
+    # stages (0o400 while freshly staged by the bootstrap bridge, 0o444 after a
+    # completed prepare republishes it), so identity checks stay mode-agnostic
+    # here and lifecycle-correctness is owned by prepare's write ordering.
+    source_archive = secure_file(SOURCE_ARCHIVE, "bootstrap exact source archive", MAX_ARCHIVE)
     if len(source_archive) != checkpoint["sourceArchiveSizeBytes"] or digest(source_archive) != archive_sha:
         stop("bootstrap exact source archive differs from its transport size/digest binding.")
     release = release_root(commit, archive_sha)
@@ -4783,7 +4787,6 @@ def prepare() -> Dict[str, object]:
     atomic_bytes(RENDER_ENV, env_bytes, 0o400)
     render_bytes = render_with_wrapper(release, digest(env_bytes))
     atomic_bytes(RENDER, render_bytes, 0o444)
-    atomic_bytes(SOURCE_ARCHIVE, archive_bytes, 0o444)
     authority = build_authority(
         commit, tree, archive_sha, release, env_bytes, render_bytes, env_values, runtime_environment
     )
@@ -4793,6 +4796,10 @@ def prepare() -> Dict[str, object]:
         stop("exact release authority archive copy is not byte-identical.")
     prepared_authority, _ = read_authority()
     invoke_evidence_producer(prepared_authority, "pre")
+    # Republish the exact source archive only after evidence production has
+    # succeeded: the producer reads it through its own identity checks while
+    # prepare is still inside the transaction window.
+    atomic_bytes(SOURCE_ARCHIVE, archive_bytes, 0o444)
     refresh_local_checkpoint(authority)
     return {
         "authorityDocumentId": authority["documentId"],
