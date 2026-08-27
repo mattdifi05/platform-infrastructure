@@ -1140,12 +1140,17 @@ def simulated_read_authority():
  value=authority_holder['value']; data=m['secure_file'](m['AUTHORITY'],'simulated authority',m['MAX_AUTHORITY'],0o444)
  assert data==m['canonical_bytes'](value)
  assert m['digest'](m['secure_file'](m['RENDER'],'simulated render',m['MAX_JSON'],0o444))==value['renderSha256']
- assert m['digest'](m['secure_file'](m['SOURCE_ARCHIVE'],'simulated source archive',m['MAX_ARCHIVE'],0o444))==value['sourceArchiveSha256']
+ # The staged archive is digest-checked here without a mode pin: at this point
+ # in the lifecycle it is the bridge-staged 0o400 copy on a fresh host, and a
+ # previous prepare's 0o444 republication on later runs.
+ assert m['digest'](m['secure_file'](m['SOURCE_ARCHIVE'],'simulated source archive',m['MAX_ARCHIVE']))==value['sourceArchiveSha256']
  events.append('authority-reopened'); return value,data
 g['read_authority']=simulated_read_authority
 
 def pre_entry(value,operation):
  assert operation=='pre'
+ st=__import__('stat').S_IMODE(os.stat(m['physical'](m['SOURCE_ARCHIVE']),follow_symlinks=False).st_mode)
+ assert st==0o400, 'archive must still be bridge-staged 0o400 when evidence production starts'
  assert events[-1]=='authority-reopened'
  assert not forbidden
  assert all(os.path.isfile(m['physical'](item)) for item in required)
@@ -1165,6 +1170,11 @@ for name in ('apply_database_prerequisites','apply_data_prerequisites','compose_
  if name in g:
   g[name]=lambda *args,_name=name,**kwargs: (_ for _ in ()).throw(AssertionError(_name+' must not run during prepare'))
 
+# The bridge stages the exact archive before prepare ever runs; seed that
+# pre-state (0o400) since publication to 0o444 now happens post-evidence.
+__archive_path=m['physical'](m['SOURCE_ARCHIVE'])
+__import__('os').makedirs(__import__('os').path.dirname(__archive_path),mode=0o700,exist_ok=True)
+open(__archive_path,'wb').write(archive_bytes); __import__('os').chmod(__archive_path,0o400)
 result=m['prepare']()
 print(json.dumps({'events':events,'forbidden':forbidden,'materializeCalls':materialize_calls['count'],
  'renderCalls':render_calls['count'],'result':result},sort_keys=True))`;
