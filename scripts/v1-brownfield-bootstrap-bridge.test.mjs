@@ -41,9 +41,12 @@ function git(cwd, args) {
   return result.stdout.trim();
 }
 
-function buildTransport(seed, root, label) {
+function buildTransport(seed, root, label, options = {}) {
   const commit = git(seed, ["rev-parse", "HEAD"]);
   const tree = git(seed, ["rev-parse", "HEAD^{tree}"]);
+  const checkpointUnixSeconds = options.checkpointUnixSeconds
+    ?? Number.parseInt(git(seed, ["show", "-s", "--format=%ct", "HEAD"]), 10);
+  assert.equal(Number.isInteger(checkpointUnixSeconds) && checkpointUnixSeconds > 0, true);
   const archive = path.join(root, `source-${label}.tar`);
   const bundle = path.join(root, `source-${label}.bundle`);
   let result = spawnSync("/usr/bin/git", ["archive", "--format=tar", `--output=${archive}`, "HEAD"], { cwd: seed, encoding: "utf8" });
@@ -57,24 +60,24 @@ function buildTransport(seed, root, label) {
   const checkpoint = {
     activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
     bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateConsumerSha256: sha(consumerBytes),
-    candidateTree: tree, createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundleBytes),
+    candidateTree: tree, createdAtUnixSeconds: checkpointUnixSeconds, gitBundleSha256: sha(bundleBytes),
     purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
     sourceArchiveSha256: sha(archiveBytes), sourceArchiveSizeBytes: archiveBytes.length, transportVerified: true,
   };
   const checkpointBytes = Buffer.from(`${stable(checkpoint)}\n`);
-  const parts = { bridge: bridgeBytes, consumer: consumerBytes, checkpoint: checkpointBytes, gitBundle: bundleBytes, sourceArchive: archiveBytes };
+  const parts = { bridge: bridgeBytes, consumer: consumerBytes, checkpoint: checkpointBytes, sanction: options.sanctionBytes ?? Buffer.from("{}"), gitBundle: bundleBytes, sourceArchive: archiveBytes };
   const manifest = {
     bridgeSha256: sha(bridgeBytes), candidateCommit: commit, candidateTree: tree,
     checkpointSha256: sha(checkpointBytes), consumerSha256: sha(consumerBytes), gitBundleSha256: sha(bundleBytes),
     lengths: Object.fromEntries(Object.entries(parts).map(([name, bytes]) => [name, bytes.length])),
-    schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256: sha(archiveBytes),
+    schema: "platform.v1-brownfield-bootstrap-frame/v1", sanctionSha256: sha(parts.sanction), sourceArchiveSha256: sha(archiveBytes),
   };
   const manifestBytes = Buffer.from(stable(manifest));
   const frame = Buffer.concat([
     Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")), manifestBytes,
-    ...["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"].map((name) => parts[name]),
+    ...["bridge", "consumer", "checkpoint", "sanction", "gitBundle", "sourceArchive"].map((name) => parts[name]),
   ]);
-  return { archiveBytes, checkpointBytes, commit, consumerBytes, frame, manifest, tree };
+  return { archiveBytes, checkpointBytes, checkpointUnixSeconds, commit, consumerBytes, frame, manifest, tree };
 }
 
 function createFixture(t) {
@@ -108,6 +111,8 @@ function createFixture(t) {
   write(path.join(seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\nraise SystemExit(0)\n", 0o644);
   write(path.join(seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
   write(path.join(seed, "sudoers", "platform-v1-local-private-control"), fs.readFileSync(sudoers), 0o644);
+  fs.mkdirSync(path.join(seed, "config"), { recursive: true });
+  write(path.join(seed, "config", "local-private-recovery-escrow-cert.pem"), ensureSanctionTrust().certBytes, 0o644);
   git(seed, ["add", "."]);
   git(seed, ["commit", "--quiet", "-m", "fixture"]);
   const transport = buildTransport(seed, root, "a");
@@ -177,7 +182,7 @@ function advanceCandidate(candidate) {
   write(path.join(candidate.seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture candidate B\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
   git(candidate.seed, ["add", "."]);
   git(candidate.seed, ["commit", "--quiet", "-m", "candidate B"]);
-  return { ...candidate, ...buildTransport(candidate.seed, candidate.root, "b") };
+  return { ...candidate, ...buildTransport(candidate.seed, candidate.root, "b", { checkpointUnixSeconds: candidate.checkpointUnixSeconds }) };
 }
 
 function execute(candidate) {
@@ -346,7 +351,7 @@ test("candidate B crash rolls every control artifact back to candidate A before 
   const preimages = new Map(artifactPaths.map((logical) => [logical, fs.readFileSync(fixed(candidateA.root, logical))]));
   const candidateB = advanceCandidate(candidateA);
   const cleanFrame = Buffer.from(candidateB.frame);
-  candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "12";
+  candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "13";
   const crashed = execute(candidateB);
   assert.equal(crashed.status, 87, crashed.stderr);
   assert.deepEqual(fs.readFileSync(fixed(candidateB.root, artifactPaths[0])), candidateB.consumerBytes);
@@ -396,7 +401,7 @@ test("rejects a transport checkpoint that claims backup authority before mutatio
 
 test("recovers every control artifact preimage after a hard crash following control install", (t) => {
   const candidate = createFixture(t);
-  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "12";
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "13";
   const crashed = execute(candidate);
   assert.equal(crashed.status, 87, crashed.stderr);
   assert.deepEqual(
@@ -431,7 +436,7 @@ test("recovers every control artifact preimage after a hard crash following cont
 
 test("hard-crash retry preserves the durable Node mutation receipt and completes forward", (t) => {
   const candidate = createFixture(t);
-  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "13";
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = "14";
   const crashed = execute(candidate);
   assert.equal(crashed.status, 87, crashed.stderr);
   const nodeReceiptPath = fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/node-runtime-prerequisite-receipt.json");
@@ -511,4 +516,189 @@ test("greenfield preimage selection fails closed when the preimage path equals t
   const result = execute(candidate);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /brownfield/i);
+});
+
+const SANCTION_OPENSSL_BIN = process.env.PLATFORM_V1_TEST_SANCTION_OPENSSL || "openssl";
+const sanctionTrustRoots = [];
+let SANCTION_TRUST = null;
+function ensureSanctionTrust() {
+  if (SANCTION_TRUST) return SANCTION_TRUST;
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-sanction-trust-")));
+  sanctionTrustRoots.push(root);
+  const certPath = path.join(root, "cert.pem");
+  const keyPath = path.join(root, "key.pem");
+  const generate = (name, certOut, keyOut) => {
+    const result = spawnSync(SANCTION_OPENSSL_BIN,
+      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", `/CN=${name}`, "-keyout", keyOut, "-out", certOut],
+      { encoding: "buffer" });
+    assert.equal(result.status, 0, result.stderr?.toString());
+  };
+  generate("V1 Sanction Test Root", certPath, keyPath);
+  SANCTION_TRUST = { root, certPath, keyPath, certBytes: fs.readFileSync(certPath) };
+  SANCTION_TRUST.sha256 = sha(SANCTION_TRUST.certBytes);
+  return SANCTION_TRUST;
+}
+process.on("exit", () => { for (const root of sanctionTrustRoots) fs.rmSync(root, { recursive: true, force: true }); });
+
+let FOREIGN_SIGNER = null;
+function ensureForeignSigner() {
+  if (FOREIGN_SIGNER) return FOREIGN_SIGNER;
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "v1-sanction-foreign-")));
+  sanctionTrustRoots.push(root);
+  const certPath = path.join(root, "cert.pem");
+  const keyPath = path.join(root, "key.pem");
+  const result = spawnSync(SANCTION_OPENSSL_BIN,
+    ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=V1 Foreign Signer", "-keyout", keyPath, "-out", certPath],
+    { encoding: "buffer" });
+  assert.equal(result.status, 0, result.stderr?.toString());
+  FOREIGN_SIGNER = { certPath, keyPath };
+  return FOREIGN_SIGNER;
+}
+
+function craftTransportSanction(priorBootstrap, candidateManifest, overrides = {}) {
+  const trust = ensureSanctionTrust();
+  const core = {
+    checkpointSha256: overrides.checkpointSha256 ?? candidateManifest.checkpointSha256,
+    createdAtUnixSeconds: overrides.createdAtUnixSeconds ?? Math.floor(Date.now() / 1000),
+    priorCheckpointAfterSha256: overrides.priorCheckpointAfterSha256 ?? priorBootstrap.checkpointAfterSha256,
+    priorReceiptDocumentId: overrides.priorReceiptDocumentId ?? priorBootstrap.documentId,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES",
+    schema: "platform.v1-transport-checkpoint-sanction/v1",
+  };
+  const coreBuffer = Buffer.from(`${stable(core)}\n`);
+  const coreFile = path.join(trust.root, `core-${sha(coreBuffer).slice(0, 12)}.bin`);
+  fs.writeFileSync(coreFile, coreBuffer);
+  let signatureBase64 = overrides.signatureBase64 ?? null;
+  if (!signatureBase64) {
+    const signatureOut = path.join(trust.root, `sig-${sha(coreBuffer).slice(0, 12)}.der`);
+    const signResult = spawnSync(SANCTION_OPENSSL_BIN,
+      ["cms", "-sign", "-binary", "-in", coreFile, "-signer", overrides.signerCert ?? trust.certPath, "-inkey", overrides.signerKey ?? trust.keyPath, "-outform", "DER", "-out", signatureOut],
+      { encoding: "buffer" });
+    assert.equal(signResult.status, 0, signResult.stderr?.toString());
+    signatureBase64 = fs.readFileSync(signatureOut).toString("base64");
+  }
+  return Buffer.from(`${stable({ ...core, signatureBase64 })}\n`);
+}
+
+function divergeDiskCheckpoint(candidate) {
+  const checkpointLogical = "/var/lib/platform-infrastructure/v1/predeploy/current/install-checkpoint.json";
+  const target = fixed(candidate.root, checkpointLogical);
+  const pristine = fs.readFileSync(target);
+  const rogue = Buffer.from(`${stable({
+    activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
+    bridgeSha256: candidate.manifest.bridgeSha256, candidateCommit: candidate.commit,
+    candidateConsumerSha256: candidate.manifest.consumerSha256, candidateTree: candidate.manifest.candidateTree,
+    createdAtUnixSeconds: candidate.checkpointUnixSeconds - 3600, gitBundleSha256: candidate.manifest.gitBundleSha256,
+    purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
+    sourceArchiveSha256: candidate.manifest.sourceArchiveSha256, sourceArchiveSizeBytes: candidate.archiveBytes.length,
+    transportVerified: true,
+  })}\n`);
+  fs.chmodSync(target, 0o600);
+  fs.writeFileSync(target, rogue);
+  fs.chmodSync(target, 0o400);
+  return { checkpointLogical, pristine, rogue };
+}
+
+function sanctionSeams(candidate) {
+  const trust = ensureSanctionTrust();
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_SANCTION_OPENSSL = SANCTION_OPENSSL_BIN;
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_SANCTION_CERT_SHA256 = trust.sha256;
+}
+
+test("unchanged empty-marker flow keeps the original fail-closed guard for a diverged disk checkpoint", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const priorBootstrap = JSON.parse(installedA.stdout).bootstrap;
+  const candidateB = advanceCandidate(candidateA);
+  divergeDiskCheckpoint(candidateB);
+  const guardResult = execute(candidateB);
+  assert.equal(guardResult.status, 78, guardResult.stderr);
+  assert.match(guardResult.stderr, /current bootstrap transport preimage differs from the prior exact receipt\./);
+});
+
+test("an operator-signed transport sanction authorizes regeneration and records an auditable receipt", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const priorBootstrap = JSON.parse(installedA.stdout).bootstrap;
+  const candidateB = advanceCandidate(candidateA);
+  sanctionSeams(candidateB);
+  const divergence = divergeDiskCheckpoint(candidateB);
+  assert.notDeepEqual(divergence.rogue, divergence.pristine);
+  candidateB.frame = buildTransport(
+    candidateB.seed, candidateB.root, "b-sanctioned",
+    { sanctionBytes: craftTransportSanction(priorBootstrap, candidateB.manifest), checkpointUnixSeconds: candidateB.checkpointUnixSeconds },
+  ).frame;
+  const repaired = execute(candidateB);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const envelope = JSON.parse(repaired.stdout);
+  assert.equal(envelope.bootstrap.transportSanction.present, true);
+  assert.equal(envelope.bootstrap.transportSanction.reasonCode, "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES");
+  const retried = execute(candidateB);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(JSON.parse(retried.stdout).bootstrap.transportSanction.present, false);
+});
+
+for (const variant of ["tampered-signature", "wrong-prior-digest", "wrong-frame-binding", "foreign-signer"]) {
+  test(`sanction variant ${variant} fails closed without mutating state`, (t) => {
+    const candidate = createFixture(t);
+    const base = execute(candidate);
+    assert.equal(base.status, 0, base.stderr);
+    const priorBootstrap = JSON.parse(base.stdout).bootstrap;
+    const activeCandidate = variant === "tampered-signature" || variant === "foreign-signer"
+      ? advanceCandidate(candidate)
+      : candidate;
+    sanctionSeams(activeCandidate);
+    divergeDiskCheckpoint(activeCandidate);
+    const overrides = {};
+    if (variant === "wrong-prior-digest") overrides.priorCheckpointAfterSha256 = "f".repeat(64);
+    if (variant === "wrong-frame-binding") overrides.checkpointSha256 = "e".repeat(64);
+    let bytes;
+    if (variant === "tampered-signature") {
+      bytes = craftTransportSanction(priorBootstrap, activeCandidate.manifest);
+      const marker = bytes.indexOf(Buffer.from('"signatureBase64":"'));
+      bytes[marker + 25] ^= 0x01;
+    } else if (variant === "foreign-signer") {
+      ensureForeignSigner();
+      bytes = craftTransportSanction(priorBootstrap, activeCandidate.manifest, { signerCert: FOREIGN_SIGNER.certPath, signerKey: FOREIGN_SIGNER.keyPath });
+    } else {
+      bytes = craftTransportSanction(priorBootstrap, activeCandidate.manifest, overrides);
+    }
+    activeCandidate.frame = buildTransport(activeCandidate.seed, activeCandidate.root, `v-${variant}`, { sanctionBytes: bytes, checkpointUnixSeconds: activeCandidate.checkpointUnixSeconds }).frame;
+    const result = execute(activeCandidate);
+    assert.equal(result.status, 78, `${variant}: ${result.stderr}`);
+    if (variant === "wrong-prior-digest" || variant === "wrong-frame-binding") {
+      assert.match(result.stderr, /sanction binding is invalid/);
+    } else {
+      assert.doesNotMatch(result.stderr, /sanction binding is invalid/);
+      assert.match(result.stderr, /signature rejected|trust anchor|sanction/);
+    }
+  });
+}
+
+function crashSeamAt(marker) {
+  const source = fs.readFileSync(bridge, "utf8");
+  return (source.slice(0, source.indexOf(marker)).match(/crash_point\(\)/g) || []).length;
+}
+
+test("a sanctioned-flow crash rolls back to the pristine divergent pre-state and retries cleanly", (t) => {
+  const candidateA = createFixture(t);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const priorBootstrap = JSON.parse(installedA.stdout).bootstrap;
+  const candidateB = advanceCandidate(candidateA);
+  sanctionSeams(candidateB);
+  const divergence = divergeDiskCheckpoint(candidateB);
+  candidateB.frame = buildTransport(
+    candidateB.seed, candidateB.root, "b-crash",
+    { sanctionBytes: craftTransportSanction(priorBootstrap, candidateB.manifest), checkpointUnixSeconds: candidateB.checkpointUnixSeconds },
+  ).frame;
+  candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = String(crashSeamAt("atomic_write(INSTALL_CHECKPOINT"));
+  const crashed = execute(candidateB);
+  assert.equal(crashed.status, 87, crashed.stderr);
+  assert.deepEqual(fs.readFileSync(fixed(candidateB.root, divergence.checkpointLogical)), divergence.rogue);
+  delete candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
+  const retried = execute(candidateB);
+  assert.equal(retried.status, 0, retried.stderr);
 });

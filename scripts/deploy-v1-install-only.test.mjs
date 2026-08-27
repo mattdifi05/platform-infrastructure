@@ -240,6 +240,7 @@ if (command.startsWith("/usr/bin/python3 -I -c ") && command.includes("tempfile.
       schema: "platform.v1-brownfield-bootstrap-bridge-receipt/v1",
       sourceArchiveAfterSha256: manifest.sourceArchiveSha256, sourceArchiveBeforeSha256: "3".repeat(64),
       stagingEnvironmentSha256: "4".repeat(64), stagingMutation: true, status: "BOOTSTRAP_CONTROL_INSTALLED",
+      transportSanction: { present: false },
     };
     const bootstrap = { ...base, documentId: sha(stable(base)) };
     process.stdout.write(stable({ bootstrap, controlArtifacts: control, nodeRuntime, schema: "platform.v1-brownfield-bootstrap-result/v1" }) + "\\n");
@@ -269,6 +270,7 @@ case "$1:$2" in
   bundle:create) printf '%s\\n' 'fixture-git-bundle' > "$3" ;;
   bundle:verify) : ;;
   bundle:list-heads) printf '%s HEAD\\n' '${candidateCommit}' ;;
+  show:-s) printf '%s\\n' '1756100000' ;;
   *) exit 93 ;;
 esac
 `, { mode: 0o700 });
@@ -364,7 +366,7 @@ test("runs the fixed install, release bootstrap, prepare, and double authority r
     assert.equal(manifest.candidateCommit, candidateCommit);
     assert.equal(manifest.candidateTree, candidateTree);
     assert.equal(manifest.sourceArchiveSha256, sourceArchiveSha256);
-    assert.deepEqual(Object.keys(manifest.lengths).sort(), ["bridge", "checkpoint", "consumer", "gitBundle", "sourceArchive"]);
+    assert.deepEqual(Object.keys(manifest.lengths).sort(), ["bridge", "checkpoint", "consumer", "gitBundle", "sanction", "sourceArchive"]);
     const bootstrapReceipt = JSON.parse(fs.readFileSync(current.bootstrapOutput, "utf8"));
     assert.equal(bootstrapReceipt.status, "BOOTSTRAP_CONTROL_INSTALLED");
     assert.equal(bootstrapReceipt.dataMutation, false);
