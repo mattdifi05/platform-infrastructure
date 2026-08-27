@@ -195,14 +195,17 @@ fi
 
 CHECKPOINT_SHA256=$("$NODE" --input-type=module - \
   "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$git_bundle" "$source_archive" \
-  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" "$CANDIDATE_COMMIT_UNIX" <<'NODE'
+  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" <<'NODE'
 import crypto from "node:crypto";
 import fs from "node:fs";
-const [bridge, consumer, checkpoint, bundle, archive, candidateCommit, candidateTree, sourceArchiveSha256, commitUnix] = process.argv.slice(2);
+const [bridge, consumer, checkpoint, bundle, archive, candidateCommit, candidateTree, sourceArchiveSha256] = process.argv.slice(2);
 const sha = (filename) => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
 const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
-const createdAtUnixSeconds = Number.parseInt(commitUnix, 10);
-if (!Number.isInteger(createdAtUnixSeconds) || createdAtUnixSeconds <= 0) throw new Error("Candidate commit timestamp is invalid.");
+// Wall-clock stamp: the bridge enforces a 900s freshness window, so a
+// commit-time stamp would make every later-than-15-minutes-after-merge
+// deployment structurally "stale". Per-run freshness is the contract;
+// anti-replay comes from the frame digests + prior-chain validation.
+const createdAtUnixSeconds = Math.floor(Date.now() / 1000);
 const checkpointValue = {
   activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
   bridgeSha256: sha(bridge), candidateCommit, candidateConsumerSha256: sha(consumer), candidateTree,
