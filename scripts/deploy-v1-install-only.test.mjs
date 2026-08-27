@@ -399,33 +399,40 @@ test("runs the fixed install, release bootstrap, prepare, and double authority r
 });
 
 test("packaging embeds a canonical newline-terminated sanction payload and keeps the empty marker byte-exact", () => {
-  const withSanction = fixture();
+  const OPENSSL_BIN = process.env.PLATFORM_V1_INSTALL_TEST_OPENSSL ?? "/usr/bin/openssl";
+  const signingRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "sanction-signing-")));
+  const certPath = path.join(signingRoot, "cert.pem");
+  const keyPath = path.join(signingRoot, "key.pem");
   try {
-    const corePath = path.join(withSanction.root, "sanction-core.json");
-    fs.writeFileSync(corePath, `${stableJson({
-      checkpointSha256: "a".repeat(64),
-      createdAtUnixSeconds: 1756100000,
-      priorCheckpointAfterSha256: "b".repeat(64),
-      priorReceiptDocumentId: "c".repeat(64),
-      reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES",
-      schema: "platform.v1-transport-checkpoint-sanction/v1",
-    })}\n`);
-    const result = execute(withSanction, undefined, {
-      PLATFORM_V1_TRANSPORT_SANCTION_CORE: corePath,
-      PLATFORM_V1_TRANSPORT_SANCTION_SIGNATURE_B64: "Zml4dHVyZS1zaWduYXR1cmU=",
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const frameLength = Number.parseInt(fs.readFileSync(withSanction.bootstrapFrameFile).subarray(0, 8).toString(), 16);
-    const frameBytes = fs.readFileSync(withSanction.bootstrapFrameFile);
-    const manifest = JSON.parse(frameBytes.subarray(8, 8 + frameLength).toString());
-    let offset = 8 + frameLength + manifest.lengths.bridge + manifest.lengths.consumer + manifest.lengths.checkpoint;
-    const sanctionPart = frameBytes.subarray(offset, offset + manifest.lengths.sanction);
-    assert.ok(manifest.lengths.sanction > 2);
-    assert.equal(sanctionPart[sanctionPart.length - 1], 0x0a);
-    const sanction = JSON.parse(sanctionPart.toString());
-    assert.equal(sanction.signatureBase64, "Zml4dHVyZS1zaWduYXR1cmU=");
-    assert.equal(manifest.sanctionSha256, sha256(sanctionPart));
-  } finally { cleanup(withSanction); }
+    const generated = spawnSync(OPENSSL_BIN,
+      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=V1 Packaging Sanction Test", "-keyout", keyPath, "-out", certPath],
+      { encoding: "buffer" });
+    assert.equal(generated.status, 0, generated.stderr?.toString());
+
+    const withSanction = fixture();
+    try {
+      const result = execute(withSanction, undefined, {
+        PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_RECEIPT_DOCUMENT_ID: "c".repeat(64),
+        PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_CHECKPOINT_SHA256: "b".repeat(64),
+        PLATFORM_V1_TRANSPORT_SANCTION_CERT: certPath,
+        PLATFORM_V1_TRANSPORT_SANCTION_KEY: keyPath,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const frameBytes = fs.readFileSync(withSanction.bootstrapFrameFile);
+      const frameLength = Number.parseInt(frameBytes.subarray(0, 8).toString(), 16);
+      const manifest = JSON.parse(frameBytes.subarray(8, 8 + frameLength).toString());
+      let offset = 8 + frameLength + manifest.lengths.bridge + manifest.lengths.consumer + manifest.lengths.checkpoint;
+      const sanctionPart = frameBytes.subarray(offset, offset + manifest.lengths.sanction);
+      assert.ok(manifest.lengths.sanction > 2);
+      assert.equal(sanctionPart[sanctionPart.length - 1], 0x0a);
+      const sanction = JSON.parse(sanctionPart.toString());
+      assert.equal(sanction.schema, "platform.v1-transport-checkpoint-sanction/v1");
+      assert.equal(sanction.reasonCode, "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES");
+      assert.ok(sanction.signatureBase64.length > 100);
+      assert.match(sanction.signerCertSha256 ?? "", /^$/); // core carries no cert field by contract
+      assert.equal(manifest.sanctionSha256, sha256(sanctionPart));
+    } finally { cleanup(withSanction); }
+  } finally { fs.rmSync(signingRoot, { recursive: true, force: true }); }
 
   const withoutSanction = fixture();
   try {
