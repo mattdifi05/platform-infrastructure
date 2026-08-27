@@ -42,7 +42,7 @@ const EXACT_BOOTSTRAP_BRIDGE_RECEIPT_FIELDS = Object.freeze([
   "installReceiptSha256", "legacyBroadSudoersAfterSha256", "legacyBroadSudoersBeforeSha256",
   "legacyConsumerSha256", "legacyV1SudoersSha256", "nodeRuntimeReceiptSha256",
   "releaseRoot", "schema", "sourceArchiveAfterSha256", "sourceArchiveBeforeSha256",
-  "stagingEnvironmentSha256", "stagingMutation", "status",
+  "stagingEnvironmentSha256", "stagingMutation", "status", "transportSanction",
 ]);
 const EXACT_PREPARE_RECEIPT_FIELDS = Object.freeze([
   "authorityDocumentId", "authorityPath", "authoritySha256", "renderSha256",
@@ -533,6 +533,22 @@ export function verifyV1BootstrapBridgeReceipt(options_) {
     "legacyBroadSudoersAfterSha256", "legacyBroadSudoersBeforeSha256", "legacyConsumerSha256",
     "legacyV1SudoersSha256", "sourceArchiveBeforeSha256", "stagingEnvironmentSha256",
   ]) lowercaseSha256(receipt[field], "V1 bootstrap bridge " + field);
+  const sanction = receipt.transportSanction;
+  if (!sanction || typeof sanction !== "object" || Array.isArray(sanction)) {
+    invalid("V1 bootstrap bridge transportSanction is not an object.");
+  } else {
+    const sanctionKeys = Object.keys(sanction).sort();
+    if (sanction.present === true) {
+      if (JSON.stringify(sanctionKeys) !== JSON.stringify(["present", "reasonCode", "sanctionDigest", "signerCertSha256"])
+        || sanction.reasonCode !== "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES"
+        || !/^[0-9a-f]{64}$/.test(sanction.sanctionDigest)
+        || !/^[0-9a-f]{64}$/.test(sanction.signerCertSha256)) {
+        invalid("V1 bootstrap bridge transportSanction payload is invalid.");
+      }
+    } else if (sanction.present !== false || JSON.stringify(sanctionKeys) !== JSON.stringify(["present"])) {
+      invalid("V1 bootstrap bridge transportSanction sentinel is invalid.");
+    }
+  }
   if (receipt.legacyConsumerSha256 !== "9902e8c83f12cee7d16ee97b660cde12444da479acbe85f9efa4c613d82f76a9"
     || receipt.legacyV1SudoersSha256 !== sha256([
       "Defaults:platform_infrastructure env_reset",

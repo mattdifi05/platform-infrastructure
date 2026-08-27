@@ -12,6 +12,7 @@ service, provider, data, or activation authority.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -81,10 +82,18 @@ LEGACY_V1_SUDOERS = (
     b"platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control activate\n"
 )
 LEGACY_BROAD_SUDOERS_BYTES = b"platform_infrastructure ALL=(ALL) NOPASSWD:ALL\n"
+MAX_SANCTION = 64 * 1024
+SANCTION_SCHEMA = "platform.v1-transport-checkpoint-sanction/v1"
+SANCTION_REASON = "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES"
+SANCTION_EMPTY_SHA256 = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+SANCTION_TRUST_CERT_RELPATH = "config/local-private-recovery-escrow-cert.pem"
+SANCTION_TRUST_CERT_SHA256 = "358dcd60560f0976f6b27db0972cc996d336516a529c48bf4236dcf22e0c55a2"
+PRODUCTION_OPENSSL = "/usr/bin/openssl"
 FRAME_PARTS: Tuple[Tuple[str, int], ...] = (
     ("bridge", MAX_BRIDGE),
     ("consumer", MAX_CONSUMER),
     ("checkpoint", MAX_CHECKPOINT),
+    ("sanction", MAX_SANCTION),
     ("gitBundle", MAX_BUNDLE),
     ("sourceArchive", MAX_ARCHIVE),
 )
@@ -118,6 +127,7 @@ BRIDGE_RECEIPT_FIELDS = (
     "releaseRoot", "schema", "sourceArchiveAfterSha256", "sourceArchiveBeforeSha256",
     "stagingEnvironmentSha256", "stagingMutation", "status",
 )
+BRIDGE_RECEIPT_FIELDS_V2 = BRIDGE_RECEIPT_FIELDS + ("transportSanction",)
 CONTROL_RECEIPT_FIELDS = (
     "artifacts", "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
     "hostControlMutation", "schema", "sourceArchiveSha256", "status",
@@ -284,11 +294,136 @@ def validate_prior_install_receipt(prior: Dict[str, object], owner: int) -> None
         stop("prior bootstrap/install receipt digest chain is invalid.")
 
 
+def resolve_sanction_openssl() -> str:
+    if TEST_ROOT is not None:
+        override = os.environ.get("PLATFORM_V1_BOOTSTRAP_TEST_SANCTION_OPENSSL")
+        if override:
+            return override
+    return PRODUCTION_OPENSSL
+
+
+def resolve_sanction_trust_cert_sha() -> str:
+    if TEST_ROOT is not None:
+        override = os.environ.get("PLATFORM_V1_BOOTSTRAP_TEST_SANCTION_CERT_SHA256")
+        if override:
+            return override
+    return SANCTION_TRUST_CERT_SHA256
+
+
+def evaluate_transport_sanction(
+    raw: bytes,
+    manifest: Dict[str, object],
+    prior: Dict[str, object],
+    owner: int,
+) -> Dict[str, object]:
+    if digest(raw) == SANCTION_EMPTY_SHA256:
+        stop("current bootstrap transport preimage differs from the prior exact receipt.")
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        stop("bootstrap transport sanction is not strict JSON.")
+    if canonical(value) != raw or not isinstance(value, dict):
+        stop("bootstrap transport sanction is not canonical JSON.")
+    value = exact_keys(value, (
+        "checkpointSha256", "createdAtUnixSeconds", "priorCheckpointAfterSha256",
+        "priorReceiptDocumentId", "reasonCode", "schema", "signatureBase64",
+    ), "bootstrap transport sanction")
+    timestamp = value["createdAtUnixSeconds"]
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or not isinstance(value["reasonCode"], str):
+        stop("bootstrap transport sanction fields are invalid.")
+    now = int(time.time())
+    if timestamp > now + 60 or now - timestamp > 900:
+        stop("bootstrap transport sanction is stale.")
+    core = {key: item for key, item in value.items() if key != "signatureBase64"}
+    core_bytes = canonical(core)
+    signature = value["signatureBase64"]
+    if not isinstance(signature, str) or len(signature) > MAX_SANCTION // 2:
+        stop("bootstrap transport sanction signature is invalid.")
+    try:
+        signature_der = base64.b64decode(signature.encode("ascii"), validate=True)
+    except (TypeError, ValueError):
+        stop("bootstrap transport sanction signature encoding is invalid.")
+    if (
+        value["schema"] != SANCTION_SCHEMA
+        or value["reasonCode"] != SANCTION_REASON
+        or sha(value["checkpointSha256"], "transport sanction checkpoint digest") != manifest["checkpointSha256"]
+        or sha(value["priorCheckpointAfterSha256"], "transport sanction prior checkpoint digest") != prior["checkpointAfterSha256"]
+        or value["priorReceiptDocumentId"] != prior["documentId"]
+    ):
+        stop("bootstrap transport sanction binding is invalid.")
+    release = prior["releaseRoot"]
+    if not isinstance(release, str) or not os.path.isabs(release):
+        stop("bootstrap transport sanction trust anchor path is invalid.")
+    cert_bytes = snapshot(
+        f"{release}/{SANCTION_TRUST_CERT_RELPATH}",
+        "pinned V1 recovery escrow certificate",
+        MAX_RECEIPT,
+        uid=owner,
+        modes=(0o444, 0o644),
+    )
+    cert_sha = resolve_sanction_trust_cert_sha()
+    if digest(cert_bytes) != cert_sha:
+        stop("bootstrap transport sanction trust anchor differs from the pinned certificate.")
+    openssl_bin = resolve_sanction_openssl()
+    core_path = physical(f"{TRANSACTION}/.sanction-core.tmp")
+    signature_path = physical(f"{TRANSACTION}/.sanction-signature.der")
+    for pathname in (core_path, signature_path):
+        try:
+            os.unlink(pathname)
+        except FileNotFoundError:
+            pass
+    result_code = 78
+    try:
+        descriptor = os.open(core_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            offset = 0
+            while offset < len(core_bytes):
+                offset += os.write(descriptor, core_bytes[offset:])
+        finally:
+            os.close(descriptor)
+        descriptor = os.open(signature_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            offset = 0
+            while offset < len(signature_der):
+                offset += os.write(descriptor, signature_der[offset:])
+        finally:
+            os.close(descriptor)
+        verify = subprocess.run(
+            [
+                openssl_bin, "cms", "-verify", "-binary", "-inform", "DER",
+                "-in", signature_path, "-content", core_path, "-CAfile",
+                physical(f"{release}/{SANCTION_TRUST_CERT_RELPATH}"),
+                "-purpose", "any", "-no_check_time",
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd="/", timeout=30, check=False,
+        )
+        result_code = verify.returncode
+    except (OSError, subprocess.SubprocessError):
+        stop("bootstrap transport sanction verification failed.")
+    finally:
+        for pathname in (core_path, signature_path):
+            try:
+                os.unlink(pathname)
+            except OSError:
+                pass
+    if result_code != 0:
+        stop("bootstrap transport sanction signature rejected.")
+    return {
+        "present": True,
+        "reasonCode": SANCTION_REASON,
+        "sanctionDigest": digest(raw),
+        "signerCertSha256": cert_sha,
+    }
+
+
 def validate_prior_control_chain(
     entries: List[Dict[str, object]],
     expected_legacy_consumer_sha: str,
     owner: int,
-) -> Tuple[str, str, str]:
+    sanction_raw: bytes,
+    manifest: Dict[str, object],
+) -> Tuple[str, str, str, Dict[str, object]]:
     prior_raw = snapshot(
         BRIDGE_RECEIPT,
         "prior bootstrap bridge receipt",
@@ -296,7 +431,17 @@ def validate_prior_control_chain(
         uid=owner,
         modes=(0o400,),
     )
-    prior = parse_canonical_object(prior_raw, BRIDGE_RECEIPT_FIELDS, "prior bootstrap bridge receipt")
+    try:
+        parsed = json.loads(prior_raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        stop("prior bootstrap bridge receipt is not strict JSON.")
+    if isinstance(parsed, dict) and set(parsed) == set(BRIDGE_RECEIPT_FIELDS_V2):
+        prior_fields = BRIDGE_RECEIPT_FIELDS_V2
+    elif isinstance(parsed, dict) and set(parsed) == set(BRIDGE_RECEIPT_FIELDS):
+        prior_fields = BRIDGE_RECEIPT_FIELDS
+    else:
+        stop("prior bootstrap bridge receipt is not one exact closed object.")
+    prior = parse_canonical_object(prior_raw, prior_fields, "prior bootstrap bridge receipt")
     validate_document_id(prior, "prior bootstrap bridge receipt")
     commit = prior["candidateCommit"]
     tree = prior["candidateTree"]
@@ -335,9 +480,11 @@ def validate_prior_control_chain(
         or prior["legacyBroadSudoersAfterSha256"] != digest(LEGACY_BROAD_SUDOERS_BYTES)
     ):
         stop("prior bootstrap bridge receipt boundary/history is invalid.")
+    sanction_summary: Dict[str, object] = {"present": False}
+    if entries[1]["sha256"] != prior["checkpointAfterSha256"]:
+        sanction_summary = evaluate_transport_sanction(sanction_raw, manifest, prior, owner)
     if (
         entries[0]["sha256"] != archive_sha
-        or entries[1]["sha256"] != prior["checkpointAfterSha256"]
         or entries[2]["sha256"] != digest(prior_raw)
     ):
         stop("current bootstrap transport preimage differs from the prior exact receipt.")
@@ -411,6 +558,7 @@ def validate_prior_control_chain(
         prior["legacyConsumerSha256"],
         prior["legacyV1SudoersSha256"],
         prior["legacyBroadSudoersBeforeSha256"],
+        sanction_summary,
     )
 
 
@@ -512,7 +660,7 @@ def read_manifest() -> Dict[str, object]:
         stop("bootstrap frame manifest is not canonical JSON.", 65)
     value = exact_keys(value, (
         "bridgeSha256", "candidateCommit", "candidateTree", "checkpointSha256",
-        "consumerSha256", "gitBundleSha256", "lengths", "schema",
+        "consumerSha256", "gitBundleSha256", "lengths", "sanctionSha256", "schema",
         "sourceArchiveSha256",
     ), "bootstrap frame manifest")
     if value["schema"] != FRAME_SCHEMA:
@@ -1045,6 +1193,7 @@ def main_apply() -> Dict[str, object]:
             stop("stable bridge frame differs from executed bridge.", 65)
         validate_checkpoint(captured["checkpoint"], manifest)
 
+        sanction_summary: Dict[str, object] = {"present": False}
         if historical_precondition:
             legacy_consumer_sha256 = digest(legacy_consumer)
             legacy_v1_sudoers_sha256 = digest(legacy_v1_sudoers)
@@ -1054,7 +1203,14 @@ def main_apply() -> Dict[str, object]:
                 legacy_consumer_sha256,
                 legacy_v1_sudoers_sha256,
                 legacy_broad_before_sha256,
-            ) = validate_prior_control_chain(entries, expected_legacy_consumer_sha, 0 if TEST_ROOT is None else uid)
+                sanction_summary,
+            ) = validate_prior_control_chain(
+                entries,
+                expected_legacy_consumer_sha,
+                0 if TEST_ROOT is None else uid,
+                captured["sanction"],
+                manifest,
+            )
 
         atomic_write(SOURCE_ARCHIVE, snapshot(f"{TRANSACTION}/sourceArchive.bin", "staged source archive", MAX_ARCHIVE, modes=(0o400,)), 0o400, "archive")
         crash_point()
@@ -1247,6 +1403,7 @@ def main_apply() -> Dict[str, object]:
             "sourceArchiveBeforeSha256": before_archive,
             "stagingEnvironmentSha256": staging_environment_sha256,
             "stagingMutation": journal["stagingCreated"],
+            "transportSanction": sanction_summary,
             "status": "BOOTSTRAP_CONTROL_INSTALLED",
         }
         receipt = {**receipt_base, "documentId": digest(json.dumps(receipt_base, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode())}

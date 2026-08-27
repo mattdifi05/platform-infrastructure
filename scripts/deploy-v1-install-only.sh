@@ -129,6 +129,7 @@ consumer_snapshot="$work/v1-brownfield-install-consumer.py"
 source_archive="$work/exact-source-archive.tar"
 git_bundle="$work/exact-source.bundle"
 transport_checkpoint="$work/bootstrap-transport-checkpoint.json"
+transport_sanction="$work/bootstrap-transport-sanction.json"
 bootstrap_frame="$work/bootstrap-frame.bin"
 bootstrap_envelope="$work/bootstrap-envelope.json"
 bootstrap_receipt="$work/bootstrap-receipt.json"
@@ -169,28 +170,57 @@ chmod 500 "$bridge_snapshot" "$consumer_snapshot"
   && [ -z "$($GIT -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)" ] \
   || fail "The clean exact-main checkout changed during transport capture." 65
 
+CANDIDATE_COMMIT_UNIX=$($GIT -C "$REPOSITORY_ROOT" show -s --format=%ct "$CANDIDATE_COMMIT") \
+  || fail "The install-only client cannot read the candidate commit timestamp." 65
+case "$CANDIDATE_COMMIT_UNIX" in ''|*[!0-9]*) fail "The candidate commit timestamp is invalid." 65 ;; esac
+SANCTION_CORE_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_CORE:-}
+SANCTION_SIGNATURE_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_SIGNATURE_B64:-}
+if [ -n "$SANCTION_CORE_INPUT" ] || [ -n "$SANCTION_SIGNATURE_INPUT" ]; then
+  { [ -n "$SANCTION_CORE_INPUT" ] && [ -n "$SANCTION_SIGNATURE_INPUT" ] && [ ! -L "$SANCTION_CORE_INPUT" ] && [ -s "$SANCTION_CORE_INPUT" ]; } \
+    || fail "Transport sanction inputs must be provided together with a readable core file." 65
+else
+  SANCTION_CORE_INPUT=""
+  SANCTION_SIGNATURE_INPUT=""
+fi
+export PLATFORM_V1_SANCTION_CORE="$SANCTION_CORE_INPUT"
+export PLATFORM_V1_SANCTION_SIGNATURE_B64="$SANCTION_SIGNATURE_INPUT"
+
 "$NODE" --input-type=module - \
-  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$git_bundle" "$source_archive" "$bootstrap_frame" \
-  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" <<'NODE'
+  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$transport_sanction" "$git_bundle" "$source_archive" "$bootstrap_frame" \
+  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" "$CANDIDATE_COMMIT_UNIX" <<'NODE'
 import crypto from "node:crypto";
 import fs from "node:fs";
-const [bridge, consumer, checkpoint, bundle, archive, frame, candidateCommit, candidateTree, sourceArchiveSha256] = process.argv.slice(2);
+const [bridge, consumer, checkpoint, sanction, bundle, archive, frame, candidateCommit, candidateTree, sourceArchiveSha256, commitUnix] = process.argv.slice(2);
 const sha = (filename) => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
 const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+const createdAtUnixSeconds = Number.parseInt(commitUnix, 10);
+if (!Number.isInteger(createdAtUnixSeconds) || createdAtUnixSeconds <= 0) throw new Error("Candidate commit timestamp is invalid.");
 const checkpointValue = {
   activationAuthorized: false, authoritative: false, backupEvidenceAuthoritative: false,
   bridgeSha256: sha(bridge), candidateCommit, candidateConsumerSha256: sha(consumer), candidateTree,
-  createdAtUnixSeconds: Math.floor(Date.now() / 1000), gitBundleSha256: sha(bundle),
+  createdAtUnixSeconds, gitBundleSha256: sha(bundle),
   purpose: "CONTROL_PLANE_STAGING_ONLY", schema: "platform.v1-bootstrap-transport-checkpoint/v1",
   sourceArchiveSha256, sourceArchiveSizeBytes: fs.statSync(archive).size, transportVerified: true,
 };
 fs.writeFileSync(checkpoint, `${stable(checkpointValue)}\n`, { flag: "wx", mode: 0o400 });
-const parts = { bridge, consumer, checkpoint, gitBundle: bundle, sourceArchive: archive };
+const sanctionCorePath = process.env.PLATFORM_V1_SANCTION_CORE || "";
+const sanctionSignature = process.env.PLATFORM_V1_SANCTION_SIGNATURE_B64 || "";
+let sanctionBytes;
+if (!sanctionCorePath !== !sanctionSignature) throw new Error("Transport sanction core and signature must be provided together.");
+if (sanctionCorePath) {
+  const core = JSON.parse(fs.readFileSync(sanctionCorePath, "utf8"));
+  if (!core || typeof core !== "object" || Array.isArray(core)) throw new Error("Transport sanction core is not an object.");
+  sanctionBytes = Buffer.from(stable({ ...core, signatureBase64: sanctionSignature }));
+} else {
+  sanctionBytes = Buffer.from("{}");
+}
+fs.writeFileSync(sanction, sanctionBytes, { flag: "wx", mode: 0o400 });
+const parts = { bridge, consumer, checkpoint, sanction, gitBundle: bundle, sourceArchive: archive };
 const manifest = {
   bridgeSha256: sha(bridge), candidateCommit, candidateTree, checkpointSha256: sha(checkpoint),
   consumerSha256: sha(consumer), gitBundleSha256: sha(bundle),
   lengths: Object.fromEntries(Object.entries(parts).map(([name, filename]) => [name, fs.statSync(filename).size])),
-  schema: "platform.v1-brownfield-bootstrap-frame/v1", sourceArchiveSha256,
+  schema: "platform.v1-brownfield-bootstrap-frame/v1", sanctionSha256: sha(sanction), sourceArchiveSha256,
 };
 const manifestBytes = Buffer.from(stable(manifest));
 if (manifestBytes.length < 2 || manifestBytes.length > 16 * 1024) throw new Error("Bootstrap manifest size is invalid.");
@@ -198,7 +228,7 @@ const output = fs.openSync(frame, "wx", 0o400);
 try {
   fs.writeSync(output, Buffer.from(manifestBytes.length.toString(16).padStart(8, "0")));
   fs.writeSync(output, manifestBytes);
-  for (const name of ["bridge", "consumer", "checkpoint", "gitBundle", "sourceArchive"]) {
+  for (const name of ["bridge", "consumer", "checkpoint", "sanction", "gitBundle", "sourceArchive"]) {
     const input = fs.openSync(parts[name], "r");
     try {
       const buffer = Buffer.allocUnsafe(1024 * 1024);
