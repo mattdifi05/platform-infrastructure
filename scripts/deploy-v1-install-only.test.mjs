@@ -398,6 +398,47 @@ test("runs the fixed install, release bootstrap, prepare, and double authority r
   } finally { cleanup(current); }
 });
 
+test("packaging embeds a canonical newline-terminated sanction payload and keeps the empty marker byte-exact", () => {
+  const withSanction = fixture();
+  try {
+    const corePath = path.join(withSanction.root, "sanction-core.json");
+    fs.writeFileSync(corePath, `${stableJson({
+      checkpointSha256: "a".repeat(64),
+      createdAtUnixSeconds: 1756100000,
+      priorCheckpointAfterSha256: "b".repeat(64),
+      priorReceiptDocumentId: "c".repeat(64),
+      reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES",
+      schema: "platform.v1-transport-checkpoint-sanction/v1",
+    })}\n`);
+    const result = execute(withSanction, undefined, {
+      PLATFORM_V1_TRANSPORT_SANCTION_CORE: corePath,
+      PLATFORM_V1_TRANSPORT_SANCTION_SIGNATURE_B64: "Zml4dHVyZS1zaWduYXR1cmU=",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const frameLength = Number.parseInt(fs.readFileSync(withSanction.bootstrapFrameFile).subarray(0, 8).toString(), 16);
+    const frameBytes = fs.readFileSync(withSanction.bootstrapFrameFile);
+    const manifest = JSON.parse(frameBytes.subarray(8, 8 + frameLength).toString());
+    let offset = 8 + frameLength + manifest.lengths.bridge + manifest.lengths.consumer + manifest.lengths.checkpoint;
+    const sanctionPart = frameBytes.subarray(offset, offset + manifest.lengths.sanction);
+    assert.ok(manifest.lengths.sanction > 2);
+    assert.equal(sanctionPart[sanctionPart.length - 1], 0x0a);
+    const sanction = JSON.parse(sanctionPart.toString());
+    assert.equal(sanction.signatureBase64, "Zml4dHVyZS1zaWduYXR1cmU=");
+    assert.equal(manifest.sanctionSha256, sha256(sanctionPart));
+  } finally { cleanup(withSanction); }
+
+  const withoutSanction = fixture();
+  try {
+    const result = execute(withoutSanction);
+    assert.equal(result.status, 0, result.stderr);
+    const frameLength = Number.parseInt(fs.readFileSync(withoutSanction.bootstrapFrameFile).subarray(0, 8).toString(), 16);
+    const frameBytes = fs.readFileSync(withoutSanction.bootstrapFrameFile);
+    const manifest = JSON.parse(frameBytes.subarray(8, 8 + frameLength).toString());
+    assert.equal(manifest.lengths.sanction, 2);
+    assert.equal(manifest.sanctionSha256, "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a");
+  } finally { cleanup(withoutSanction); }
+});
+
 test("rejects caller argument drift and unsafe output paths before SSH", () => {
   for (const args of [[], ["/tmp/attacker"]]) {
     const current = fixture();
