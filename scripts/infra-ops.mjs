@@ -11965,11 +11965,21 @@ async function restorePostgresArtifactSandbox({ container, plan, minimumTables, 
   run("docker", plan.dockerRunArgs, { capture: true });
   activeContainers.add(container);
   let ready = false;
-  for (let attempt = 0; attempt < 90; attempt += 1) {
+  let readyStreak = 0;
+  // The official image entrypoint starts a temporary server during initdb,
+  // shuts it down, then starts the final server. A single pg_isready success
+  // can land inside that temporary window, so require consecutive successes
+  // spanning longer than the init gap before treating the sandbox as ready.
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     const probe = dockerExec(container, ["pg_isready", "-U", "postgres", "-d", "postgres"], { capture: true, allowFailure: true });
     if (probe.status === 0) {
-      ready = true;
-      break;
+      readyStreak += 1;
+      if (readyStreak >= 3) {
+        ready = true;
+        break;
+      }
+    } else {
+      readyStreak = 0;
     }
     await sleep(500);
   }
@@ -12383,11 +12393,20 @@ async function restoreMariadbArtifactSandbox({
   activeContainers.add(container);
 
   let healthy = false;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  let readyStreak = 0;
+  // Same two-phase-startup race as the PostgreSQL sandbox: require three
+  // consecutive successful pings ~1s apart so the temporary init server
+  // cannot satisfy readiness.
+  for (let attempt = 0; attempt < 90; attempt += 1) {
     const probe = dockerExec(container, ["sh", "-ec", 'mariadb-admin ping -h 127.0.0.1 -uroot -p"$MARIADB_ROOT_PASSWORD" --silent'], { allowFailure: true, capture: true });
     if (probe.status === 0) {
-      healthy = true;
-      break;
+      readyStreak += 1;
+      if (readyStreak >= 3) {
+        healthy = true;
+        break;
+      }
+    } else {
+      readyStreak = 0;
     }
     await sleep(1000);
   }
