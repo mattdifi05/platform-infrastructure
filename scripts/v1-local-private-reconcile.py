@@ -1451,7 +1451,34 @@ def run_result(
     return result
 
 
-def run(command: List[str], label: str, **kwargs: object) -> bytes:
+def archive_producer_failure(operation: str, stderr: bytes, returncode: int) -> str:
+    """Persist a bounded, root-only diagnostic for a failed producer child."""
+    pathname = physical(f"{MUTATION_EVIDENCE_DIR}/{operation}-producer-failure.log")
+    payload = stderr[:MAX_JSON]
+    header = (
+        f"returncode={returncode} stderr_bytes={len(stderr)} "
+        f"captured_unix_seconds={int(time.time())}\n"
+    ).encode()
+    try:
+        descriptor = os.open(pathname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o400)
+        try:
+            offset = 0
+            for chunk in (header, payload):
+                view = memoryview(chunk)
+                while len(view):
+                    written = os.write(descriptor, view)
+                    view = view[written:]
+            os.fchmod(descriptor, 0o400)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return "unwritable"
+    digest_line = f"sha256={digest(payload)}\n" if payload else ""
+    return f"{pathname} ({digest_line.strip() or 'empty'})"
+
+
+def run(
+command: List[str], label: str, **kwargs: object) -> bytes:
     result = run_result(command, label, **kwargs)
     if result.returncode != 0:
         if kwargs.get("sensitive") is True:
@@ -4093,7 +4120,12 @@ def invoke_evidence_producer(authority: Dict[str, object], operation: str) -> Di
                 raise error
             stop(f"evidence executor failed closed: {type(error).__name__}.")
         if len(stdout) > MAX_AUTHORITY or len(stderr) > MAX_AUTHORITY or child.returncode != 0:
-            stop(f"fixed sensitive exact-release {operation} evidence producer failed; output was suppressed.")
+            diagnostic = archive_producer_failure(operation, stderr, int(child.returncode))
+            stop(
+                f"fixed sensitive exact-release {operation} evidence producer failed; output was "
+                f"suppressed. returncode={int(child.returncode)} stdout_bytes={len(stdout)} "
+                f"stderr_bytes={len(stderr)} audit={diagnostic}"
+            )
         receipt = parse_json(stdout, f"exact-release {operation} evidence producer receipt", True)
         if (
             receipt.get("mode") != operation or receipt.get("status") != "PASS"
@@ -4787,6 +4819,7 @@ def prepare() -> Dict[str, object]:
     atomic_bytes(RENDER_ENV, env_bytes, 0o400)
     render_bytes = render_with_wrapper(release, digest(env_bytes))
     atomic_bytes(RENDER, render_bytes, 0o444)
+    atomic_bytes(SOURCE_ARCHIVE, archive_bytes, 0o444)
     authority = build_authority(
         commit, tree, archive_sha, release, env_bytes, render_bytes, env_values, runtime_environment
     )
@@ -4796,10 +4829,6 @@ def prepare() -> Dict[str, object]:
         stop("exact release authority archive copy is not byte-identical.")
     prepared_authority, _ = read_authority()
     invoke_evidence_producer(prepared_authority, "pre")
-    # Republish the exact source archive only after evidence production has
-    # succeeded: the producer reads it through its own identity checks while
-    # prepare is still inside the transaction window.
-    atomic_bytes(SOURCE_ARCHIVE, archive_bytes, 0o444)
     refresh_local_checkpoint(authority)
     return {
         "authorityDocumentId": authority["documentId"],
