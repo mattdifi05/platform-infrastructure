@@ -373,10 +373,38 @@ def run(
     return result.stdout
 
 
+def archive_infra_failure(label: str, stderr: bytes, status: int) -> str:
+    """Persist a bounded root-only diagnostic for a failing typed executor child."""
+    pathname = f"{PREDEPLOY_DIR}/infra-executor-failure.log"
+    payload = stderr[:65536]
+    header = (
+        f"action_exit={status} stderr_bytes={len(stderr)} "
+        f"captured_unix_seconds={int(time.time())} label={label}\n"
+    ).encode()
+    try:
+        descriptor = os.open(pathname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o400)
+        try:
+            for chunk in (header, payload):
+                view = memoryview(chunk)
+                while len(view):
+                    written = os.write(descriptor, view)
+                    view = view[written:]
+            os.fchmod(descriptor, 0o400)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return "unwritable"
+    return f"{pathname}"
+
+
 def typed_executor(action: str, parameters: Dict[str, object], label: str) -> bytes:
-    status, stdout, _ = executor_request(action, parameters)
+    status, stdout, stderr = executor_request(action, parameters)
     if status != 0:
-        stop(f"fixed admitted {label} returned exit {status}; output was suppressed.")
+        audit_path = archive_infra_failure(label, stderr, int(status))
+        stop(
+            f"fixed admitted {label} returned exit {int(status)}; output was suppressed. "
+            f"stderr_bytes={len(stderr)} audit={audit_path}"
+        )
     return stdout
 
 
