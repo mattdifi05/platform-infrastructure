@@ -20,6 +20,7 @@ PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local
 READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 SSH=/usr/bin/ssh
 GIT=/usr/bin/git
+OPENSSL=${PLATFORM_V1_INSTALL_TEST_OPENSSL:-/usr/bin/openssl}
 SYSTEM_NAME=$(/usr/bin/uname -s)
 case "$SYSTEM_NAME" in
   Darwin)
@@ -173,24 +174,31 @@ chmod 500 "$bridge_snapshot" "$consumer_snapshot"
 CANDIDATE_COMMIT_UNIX=$($GIT -C "$REPOSITORY_ROOT" show -s --format=%ct "$CANDIDATE_COMMIT") \
   || fail "The install-only client cannot read the candidate commit timestamp." 65
 case "$CANDIDATE_COMMIT_UNIX" in ''|*[!0-9]*) fail "The candidate commit timestamp is invalid." 65 ;; esac
-SANCTION_CORE_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_CORE:-}
-SANCTION_SIGNATURE_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_SIGNATURE_B64:-}
-if [ -n "$SANCTION_CORE_INPUT" ] || [ -n "$SANCTION_SIGNATURE_INPUT" ]; then
-  { [ -n "$SANCTION_CORE_INPUT" ] && [ -n "$SANCTION_SIGNATURE_INPUT" ] && [ ! -L "$SANCTION_CORE_INPUT" ] && [ -s "$SANCTION_CORE_INPUT" ]; } \
-    || fail "Transport sanction inputs must be provided together with a readable core file." 65
+SANCTION_PRIOR_DOCUMENT_ID=${PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_RECEIPT_DOCUMENT_ID:-}
+SANCTION_PRIOR_CHECKPOINT_SHA256=${PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_CHECKPOINT_SHA256:-}
+SANCTION_CERT_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_CERT:-}
+SANCTION_KEY_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_KEY:-}
+if [ -n "$SANCTION_PRIOR_DOCUMENT_ID" ] || [ -n "$SANCTION_PRIOR_CHECKPOINT_SHA256" ] \
+  || [ -n "$SANCTION_CERT_INPUT" ] || [ -n "$SANCTION_KEY_INPUT" ]; then
+  case "$SANCTION_PRIOR_DOCUMENT_ID" in ????????????????????????????????????????????????????????????????) ;; *) fail "Transport sanction prior receipt document id is invalid." 65 ;; esac
+  case "$SANCTION_PRIOR_DOCUMENT_ID" in *[!0-9a-f]*) fail "Transport sanction prior receipt document id is not lowercase hexadecimal." 65 ;; esac
+  case "$SANCTION_PRIOR_CHECKPOINT_SHA256" in ????????????????????????????????????????????????????????????????) ;; *) fail "Transport sanction prior checkpoint digest is invalid." 65 ;; esac
+  case "$SANCTION_PRIOR_CHECKPOINT_SHA256" in *[!0-9a-f]*) fail "Transport sanction prior checkpoint digest is not lowercase hexadecimal." 65 ;; esac
+  require_input_file "Transport sanction escrow certificate" "$SANCTION_CERT_INPUT"
+  require_input_file "Transport sanction operator signing key" "$SANCTION_KEY_INPUT"
 else
-  SANCTION_CORE_INPUT=""
-  SANCTION_SIGNATURE_INPUT=""
+  SANCTION_PRIOR_DOCUMENT_ID=""
+  SANCTION_PRIOR_CHECKPOINT_SHA256=""
+  SANCTION_CERT_INPUT=""
+  SANCTION_KEY_INPUT=""
 fi
-export PLATFORM_V1_SANCTION_CORE="$SANCTION_CORE_INPUT"
-export PLATFORM_V1_SANCTION_SIGNATURE_B64="$SANCTION_SIGNATURE_INPUT"
 
-"$NODE" --input-type=module - \
-  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$transport_sanction" "$git_bundle" "$source_archive" "$bootstrap_frame" \
+CHECKPOINT_SHA256=$("$NODE" --input-type=module - \
+  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$git_bundle" "$source_archive" \
   "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" "$CANDIDATE_COMMIT_UNIX" <<'NODE'
 import crypto from "node:crypto";
 import fs from "node:fs";
-const [bridge, consumer, checkpoint, sanction, bundle, archive, frame, candidateCommit, candidateTree, sourceArchiveSha256, commitUnix] = process.argv.slice(2);
+const [bridge, consumer, checkpoint, bundle, archive, candidateCommit, candidateTree, sourceArchiveSha256, commitUnix] = process.argv.slice(2);
 const sha = (filename) => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
 const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
 const createdAtUnixSeconds = Number.parseInt(commitUnix, 10);
@@ -203,14 +211,48 @@ const checkpointValue = {
   sourceArchiveSha256, sourceArchiveSizeBytes: fs.statSync(archive).size, transportVerified: true,
 };
 fs.writeFileSync(checkpoint, `${stable(checkpointValue)}\n`, { flag: "wx", mode: 0o400 });
-const sanctionCorePath = process.env.PLATFORM_V1_SANCTION_CORE || "";
-const sanctionSignature = process.env.PLATFORM_V1_SANCTION_SIGNATURE_B64 || "";
+process.stdout.write(sha(checkpoint));
+NODE
+) || fail "Transport checkpoint generation failed." 65
+case "$CHECKPOINT_SHA256" in ????????????????????????????????????????????????????????????????) ;; *) fail "Transport checkpoint digest is malformed." 65 ;; esac
+
+SANCTION_CERT_STABLE=""
+SANCTION_KEY_SNAPSHOT=""
+if [ -n "$SANCTION_PRIOR_DOCUMENT_ID" ]; then
+  sanction_core="$work/bootstrap-transport-sanction-core.json"
+  sanction_sig="$work/bootstrap-transport-sanction.sig"
+  SANCTION_CERT_STABLE="$work/sanction-cert.pem"
+  cp -- "$SANCTION_CERT_INPUT" "$SANCTION_CERT_STABLE"
+  chmod 444 "$SANCTION_CERT_STABLE"
+  SANCTION_CERT_SHA256=$(hash_file "$SANCTION_CERT_STABLE")
+  [ "$(hash_file "$SANCTION_CERT_INPUT")" = "$SANCTION_CERT_SHA256" ] \
+    || fail "The transport sanction escrow certificate changed during stable capture." 65
+  printf '%s\n' "{\"checkpointSha256\":\"$CHECKPOINT_SHA256\",\"createdAtUnixSeconds\":$(date -u +%s),\"priorCheckpointAfterSha256\":\"$SANCTION_PRIOR_CHECKPOINT_SHA256\",\"priorReceiptDocumentId\":\"$SANCTION_PRIOR_DOCUMENT_ID\",\"reasonCode\":\"TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES\",\"schema\":\"platform.v1-transport-checkpoint-sanction/v1\"}" > "$sanction_core"
+  "$OPENSSL" cms -sign -binary -in "$sanction_core" -signer "$SANCTION_CERT_STABLE" -inkey "$SANCTION_KEY_INPUT" -outform DER -out "$sanction_sig" 2>/dev/null \
+    || fail "The transport sanction CMS signature failed." 65
+  "$OPENSSL" base64 -A -in "$sanction_sig" -out "$work/sanction-sig.b64" \
+    || fail "The transport sanction signature encoding failed." 65
+  export PLATFORM_V1_SANCTION_SIGNABLE_JSON="$sanction_core"
+  export PLATFORM_V1_SANCTION_SIGNATURE_B64
+  PLATFORM_V1_SANCTION_SIGNATURE_B64=$(cat "$work/sanction-sig.b64")
+else
+  unset PLATFORM_V1_SANCTION_SIGNABLE_JSON || true
+  export PLATFORM_V1_SANCTION_SIGNATURE_B64=""
+fi
+
+"$NODE" --input-type=module - \
+  "$bridge_snapshot" "$consumer_snapshot" "$transport_checkpoint" "$transport_sanction" "$git_bundle" "$source_archive" "$bootstrap_frame" \
+  "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" <<'NODE'
+import crypto from "node:crypto";
+import fs from "node:fs";
+const [bridge, consumer, checkpoint, sanction, bundle, archive, frame, candidateCommit, candidateTree, sourceArchiveSha256] = process.argv.slice(2);
+const sha = (filename) => crypto.createHash("sha256").update(fs.readFileSync(filename)).digest("hex");
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
 let sanctionBytes;
-if (!sanctionCorePath !== !sanctionSignature) throw new Error("Transport sanction core and signature must be provided together.");
-if (sanctionCorePath) {
-  const core = JSON.parse(fs.readFileSync(sanctionCorePath, "utf8"));
+if (process.env.PLATFORM_V1_SANCTION_SIGNATURE_B64) {
+  const core = JSON.parse(fs.readFileSync(process.env.PLATFORM_V1_SANCTION_SIGNABLE_JSON, "utf8"));
   if (!core || typeof core !== "object" || Array.isArray(core)) throw new Error("Transport sanction core is not an object.");
-  sanctionBytes = Buffer.from(`${stable({ ...core, signatureBase64: sanctionSignature })}\n`);
+  sanctionBytes = Buffer.from(`${stable({ ...core, signatureBase64: process.env.PLATFORM_V1_SANCTION_SIGNATURE_B64 })}\n`);
 } else {
   sanctionBytes = Buffer.from("{}");
 }
