@@ -3465,7 +3465,12 @@ def refresh_local_checkpoint(
         or checkpoint["candidateTree"] != authority["candidateTree"]
         or checkpoint["sourceArchiveSha256"] != authority["sourceArchiveSha256"]
         or isinstance(captured, bool) or not isinstance(captured, int)
-        or captured > now + 60 or now - captured > 3600
+        # backupCapturedUnixSeconds is recorded when the live backup phase
+        # completes, mid-producer; the restore/upload/readback cycle on the
+        # deployment host legitimately exceeds one hour, so the post-publish
+        # guard bounds by the full measured cycle (6h) while the destructive
+        # pre-mutation gate keeps its own 1h freshness at apply time.
+        or captured > now + 60 or now - captured > 6 * 3600
     ):
         stop("LOCAL_PRIVATE checkpoint is not one fresh candidate-bound backup/restore guard.")
     snapshots, snapshot_identities = stable_checkpoint_evidence_snapshots()
