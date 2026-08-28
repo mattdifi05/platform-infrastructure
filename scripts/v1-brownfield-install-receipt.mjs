@@ -247,9 +247,11 @@ function validateAuthorityCollections(authority) {
     }
     lowercaseSha256(item.configHash, `V1 authority service target ${index} Compose config hash`);
     const semantic = exactObject(item.semantic, [
-      "capAdd", "capDrop", "command", "entrypoint", "environment", "healthcheck", "imageId", "imageReference",
-      "init", "mounts", "networkMode", "networks", "pidsLimit", "ports", "privileged", "readOnlyRootfs",
-      "restartPolicy", "securityOpt", "user",
+      "blkioWeight", "capAdd", "capDrop", "command", "cpuShares", "entrypoint", "environment",
+      "extraHosts", "groupAdd", "healthcheck", "imageId", "imageReference", "init", "memoryBytes",
+      "memoryReservationBytes", "logging", "mounts", "nanoCpus", "networkEndpoints", "networkMode",
+      "networks", "pidMode", "pidsLimit", "ports", "privileged", "readOnlyRootfs", "restartPolicy",
+      "routingLabels", "runtimeIdentityLabels", "securityOpt", "tmpfs", "ulimits", "user", "workingDirectory",
     ], `V1 authority service target ${index} semantic`);
     if (typeof semantic.imageReference !== "string" || !/^[^@\s]+@sha256:[a-f0-9]{64}$/.test(semantic.imageReference)
       || typeof semantic.imageId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(semantic.imageId)) {
