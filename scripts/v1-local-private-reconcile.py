@@ -4108,7 +4108,11 @@ def invoke_evidence_producer(authority: Dict[str, object], operation: str) -> Di
         )
         thread.start()
         try:
-            stdout, stderr = child.communicate(timeout=7200)
+            # The full PRE cycle (live backups, 14 isolated restores, OneDrive
+            # upload + readback) runs ~2h on the deployment host and sits at
+            # the edge of the previous budget; 4h keeps headroom for slow
+            # offsite windows while remaining a hard bound.
+            stdout, stderr = child.communicate(timeout=14400)
         except subprocess.TimeoutExpired:
             child.kill()
             stdout, stderr = child.communicate()
