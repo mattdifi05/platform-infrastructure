@@ -34,13 +34,17 @@ function canonicalDocument(value) {
 
 function validSemantic() {
   return {
-    capAdd: [], capDrop: ["ALL"], command: [], entrypoint: [],
+    blkioWeight: 0, capAdd: [], capDrop: ["ALL"], command: [], cpuShares: 0, entrypoint: [],
     environment: [{ name: "PLATFORM_MODE", valueSha256: sha256("LOCAL_PRIVATE") }],
-    healthcheck: null, imageId: `sha256:${"c".repeat(64)}`,
+    extraHosts: [], groupAdd: [], healthcheck: null, imageId: `sha256:${"c".repeat(64)}`,
     imageReference: `127.0.0.1:5000/platform/managed@sha256:${"d".repeat(64)}`,
-    init: true, mounts: [], networkMode: "managed", networks: ["platform_infra_vps_internal"],
-    pidsLimit: 128, ports: [], privileged: false, readOnlyRootfs: true,
-    restartPolicy: "unless-stopped", securityOpt: ["no-new-privileges:true"], user: "65532:65532",
+    init: true, memoryBytes: 0, memoryReservationBytes: 0,
+    logging: { driver: "json-file", options: {} }, mounts: [], nanoCpus: 0,
+    networkEndpoints: [], networkMode: "managed", networks: ["platform_infra_vps_internal"],
+    pidMode: "", pidsLimit: 128, ports: [], privileged: false, readOnlyRootfs: true,
+    restartPolicy: "unless-stopped", routingLabels: {}, runtimeIdentityLabels: {},
+    securityOpt: ["no-new-privileges:true"], tmpfs: [], ulimits: [], user: "65532:65532",
+    workingDirectory: "",
   };
 }
 
