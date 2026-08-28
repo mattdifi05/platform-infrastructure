@@ -52,6 +52,7 @@ jobs:
             scripts/v1-node-runtime-prerequisite.py \
             scripts/v1-local-private-control.py \
             scripts/v1-local-private-reconcile.py \
+            scripts/v1-local-private-recovery-refresh.py \
             scripts/v1-local-private-evidence-producer.py
           node --check scripts/v1-brownfield-install-receipt.mjs
           node --check scripts/v1-local-private-control-receipt.mjs
@@ -62,6 +63,7 @@ jobs:
             scripts/v1-node-runtime-prerequisite.test.mjs \
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
+            scripts/v1-local-private-recovery-refresh.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs
       - name: Stop before any remote mutation without the Mac-only recovery key
         run: |

@@ -49,6 +49,7 @@ jobs:
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-control.e2e.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
+            scripts/v1-local-private-recovery-refresh.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs
       - name: Stop before cutover without the Mac-only recovery key
         run: |
