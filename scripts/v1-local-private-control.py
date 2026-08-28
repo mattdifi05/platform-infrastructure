@@ -84,7 +84,11 @@ MAX_DOCKER_JSON = 4 * 1024 * 1024
 MAX_RECOVERY_EXPORT_BYTES = 4 * 1024 * 1024 * 1024
 MAX_RECOVERY_CONFIG_BYTES = 16 * 1024 * 1024
 MAX_CHECKPOINT_AGE = 900
-MAX_BACKUP_AGE = 3600
+# backupCapturedUnixSeconds is stamped mid-producer (backup phase); the
+# restore/upload/readback cycle legitimately exceeds 1h on the deployment
+# host, so the activate-side bound matches the measured 6h cycle while
+# generatedAtUnixSeconds keeps the tight 900s publish-freshness anchor.
+MAX_BACKUP_AGE = 6 * 3600
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 ID_RE = re.compile(r"^[a-f0-9]{64}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
