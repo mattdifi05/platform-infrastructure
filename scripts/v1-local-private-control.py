@@ -3276,6 +3276,14 @@ def begin_maintenance() -> Dict[str, object]:
     install_sha, state, receipt = active_baseline_for_reconciliation()
     predecessor_identities = stable_runtime_identities(observation_names(state["observation"], "LOCAL_PRIVATE predecessor state"))
     rollback_checkpoint_sha, _, rollback_recovery, _, _ = validate_checkpoint()
+    # Promote the live scheduler identity into top-level binding keys: the
+    # reconciliation retry/seal validators require the closed 16-key recovery
+    # object while the export parser yields the 14-key archive-derived set.
+    rollback_recovery = {
+        **rollback_recovery,
+        "configHash": rollback_recovery["exportLabels"][RECOVERY_LABELS["configHash"]],
+        "containerId": rollback_recovery["exportLabels"][RECOVERY_LABELS["containerId"]],
+    }
     scheduler = next((item for item in predecessor_identities if item["name"] == "enterprise-backup-scheduler"), None)
     if scheduler is not None and (
         rollback_recovery["runningImageId"] != scheduler["imageId"]
