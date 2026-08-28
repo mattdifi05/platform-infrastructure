@@ -3995,7 +3995,10 @@ def execute_typed_evidence_action(
                 stop("typed Restic readback directory is invalid.")
             base = executor_restic_base(authority, run_id, ["-v", f"{readback}:/restore:rw"])
             command = ["restore", "--target", "/restore", parameters["snapshotId"]]
-        result = executor_run_docker([*base, *command], f"{action} {logical_key}", 900)
+        # RESTIC_BACKUP/RESTORE include the full OneDrive round-trip for large
+        # datasets (MinIO archive alone exceeded 900s); match the 3600s budget
+        # already granted to typed infra actions.
+        result = executor_run_docker([*base, *command], f"{action} {logical_key}", 3600)
         return result.returncode, result.stdout, result.stderr
     workspace = executor_workspace(run_id)
     name = f"v1-local-private-recovery-{run_id}.cms"
