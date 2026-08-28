@@ -2,8 +2,8 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 
 const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protected == true";
-const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "1afaa1c74ecd31e68ab7766b661b17ea93f5b2d8f40a9d4ca5b82364630992bd";
-const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "19bc618cff10ecf90340a1027f2acb04dc923373ed87ae8b8d8d6fdb7f56a491";
+const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "2213782f5b3bed8485975acdc4f715693cf8d78e927c2fec85cd654d0d2d3e75";
+const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "f855b1e3fc65f16fd639f8049a249eab2ec2c3285c881324886a5a4f8e07f140";
 const LOCAL_RECOVERY_PRIVATE_AUTHORITY = /operator-recovery-private|recovery[_-]private[_-]key|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|\.platform-infrastructure-recovery|openssl[\s\S]{0,160}\bcms\b[\s\S]{0,160}\bdecrypt\b/i;
 const RUN_EVIDENCE_SECRET_FIXTURES = "postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot";
 const RUN_EVIDENCE_ENV_OVERRIDE_KEYS = "DOMAIN PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256 ALERT_EMAIL_TO MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER";
