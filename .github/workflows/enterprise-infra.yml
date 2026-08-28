@@ -367,6 +367,7 @@ jobs:
             scripts/v1-local-private-control.e2e.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
+            scripts/v1-local-private-recovery-refresh.test.mjs \
             scripts/deploy-v1-local-private.test.mjs \
             scripts/hosted-workload-preservation-guard.test.mjs
       - name: Upload supply-chain evidence reports
