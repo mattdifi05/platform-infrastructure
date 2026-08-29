@@ -63,6 +63,7 @@ jobs:
             scripts/v1-node-runtime-prerequisite.test.mjs \
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
+            scripts/v1-local-private-reconcile.abort-superseded.test.mjs \
             scripts/v1-local-private-control.begin-retry-apply.test.mjs \
             scripts/v1-local-private-recovery-refresh.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs
