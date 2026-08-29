@@ -293,8 +293,9 @@ function fixture() {
   const preEvidence = evidenceFixture(authority, "PRE");
   const postEvidence = evidenceFixture(authority, "POST");
   const responsePaths = Object.fromEntries([
-    "preOffhost", "preSecrets", "postOffhost", "postSecrets", "begin", "apply", "evidence",
-    "active", "unboundActive", "abortRecord", "abortActive", "abortFinalized", "abortClean",
+    "preOffhost", "preSecrets", "postOffhost", "postSecrets", "begin", "apply", "validationApply", "evidence",
+    "validationMode", "productionMode", "validationEvidence", "active", "unboundActive", "abortRecord", "abortRecordResidual", "abortRecordDocument", "abortActive", "abortActiveHistorical",
+    "abortFinalized", "abortClean",
   ].map((name) => [name, path.join(root, `${name}.json`)]));
   writeCanonical(responsePaths.preOffhost, preEvidence.offhost);
   writeCanonical(responsePaths.preSecrets, preEvidence.secrets);
@@ -307,9 +308,22 @@ function fixture() {
   });
   const transactionId = sha("transaction");
   writeCanonical(responsePaths.apply, { authorityDocumentId: authority.documentId, status: "APPLIED", transactionId });
+  writeCanonical(responsePaths.validationApply, {
+    authorityDocumentId: authority.documentId, status: "VALIDATED_NO_MUTATION", transactionId,
+  });
   writeCanonical(responsePaths.evidence, {
     evidencePath: "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence.json",
     evidenceSha256: sha("runtime-evidence"), status: "PASS",
+  });
+  writeCanonical(responsePaths.validationMode, {
+    candidateCommit, schema: "platform.v1-local-private-validation-mode/v1", status: "VALIDATION",
+  });
+  writeCanonical(responsePaths.productionMode, {
+    candidateCommit, schema: "platform.v1-local-private-validation-mode/v1", status: "PRODUCTION",
+  });
+  writeCanonical(responsePaths.validationEvidence, {
+    evidencePath: `/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation-${transactionId}.json`,
+    evidenceSha256: sha("runtime-validation-evidence"), status: "VALIDATION", transactionId,
   });
   const activeReceipt = {
     candidateCommit, candidateTree,
@@ -334,15 +348,54 @@ function fixture() {
     abortRecordSha256, authorityDocumentId: authority.documentId,
     status: "ABORTED_NO_DATA_MUTATION", transactionId,
   });
-  writeCanonical(responsePaths.abortActive, {
+  writeCanonical(responsePaths.abortRecordResidual, {
+    abortRecordPath: `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${transactionId}-${abortRecordSha256}.json`,
+    abortRecordSha256, authorityDocumentId: authority.documentId,
+    status: "ABORTED_WITH_RESIDUAL_DATA_MUTATIONS", transactionId,
+  });
+  writeCanonical(responsePaths.abortRecordDocument, {
+    authorityDocumentId: authority.documentId,
+    authoritySha256,
+    completedAtUnixSeconds: 1_800_000_500,
+    journalSha256: sha("aborted-journal"),
+    residualDataMutations: [],
+    residualDataMutationsSha256: sha(stableJson([])),
+    schema: "platform.v1-local-private-reconciliation-abort-record/v1",
+    status: "ABORTED_NO_DATA_MUTATION",
+    transactionId,
+  });
+  const abortActive = {
     abortedAuthorizedReconciliation: {
       authorityDocumentId: authority.documentId, authoritySha256,
       recordPath: `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${transactionId}-${abortRecordSha256}.json`,
       recordSha256: abortRecordSha256, status: "ABORTED_NO_DATA_MUTATION", transactionId,
     },
     candidateCommit, candidateTree,
+    externalAuthorizedReconciliation: {
+      releaseAuthorityDocumentId: authority.documentId,
+      releaseAuthoritySha256: authoritySha256,
+      status: "SEALED",
+    },
+    predecessorRuntimeProvenance: {
+      candidateCommit, candidateTree,
+      controllerIdentityProjection: "FULL_34",
+      controllerSha256,
+      profile: "CANONICAL_RECONCILED_V1",
+      releaseRoot: authority.releaseRoot,
+      sourceArchiveSha256,
+    },
     schema: "platform.v1-local-private-control-receipt/v1", status: "ACTIVE",
-  });
+  };
+  writeCanonical(responsePaths.abortActive, abortActive);
+  const abortActiveHistorical = {
+    ...abortActive,
+    predecessorRuntimeProvenance: {
+      ...abortActive.predecessorRuntimeProvenance,
+      profile: "HISTORICAL_V1",
+    },
+  };
+  delete abortActiveHistorical.externalAuthorizedReconciliation;
+  writeCanonical(responsePaths.abortActiveHistorical, abortActiveHistorical);
   writeCanonical(responsePaths.abortFinalized, {
     authorityDocumentId: authority.documentId,
     journalArchivePath: `/var/lib/platform-infrastructure/v1/local-private/reconcile-journals/${transactionId}-${sha("journal")}.json`,
@@ -355,16 +408,30 @@ function fixture() {
   fs.writeFileSync(path.join(fixtureScripts, "v1-local-private-control-receipt.mjs"), `#!/usr/bin/env node
 import fs from "node:fs";
 const argv = process.argv.slice(2);
-const value = (flag) => argv[argv.indexOf(flag) + 1];
-if (argv.length !== 5 || argv[0] !== "verify" || argv[1] !== "--file" || argv[3] !== "--authorityFile") {
-  throw new Error("invalid verifier invocation");
+if (argv[0] !== "verify" || (argv.length - 1) % 2 !== 0) throw new Error("invalid verifier invocation");
+const flags = {};
+for (let index = 1; index < argv.length; index += 2) {
+  if (!argv[index].startsWith("--") || argv[index + 1] === undefined) throw new Error("invalid verifier option");
+  flags[argv[index]] = argv[index + 1];
 }
-const authority = JSON.parse(fs.readFileSync(value("--authorityFile"), "utf8"));
-const receipt = JSON.parse(fs.readFileSync(value("--file"), "utf8"));
+const authority = JSON.parse(fs.readFileSync(flags["--authorityFile"], "utf8"));
+const receipt = JSON.parse(fs.readFileSync(flags["--file"], "utf8"));
 if (receipt.schema !== "platform.v1-local-private-control-receipt/v1"
   || receipt.status !== "ACTIVE"
   || receipt.candidateCommit !== authority.candidateCommit) {
   throw new Error("invalid LOCAL_PRIVATE receipt");
+}
+if (receipt.abortedAuthorizedReconciliation) {
+  if (!flags["--abortRecordFile"]) throw new Error("missing abort record");
+  const record = JSON.parse(fs.readFileSync(flags["--abortRecordFile"], "utf8"));
+  if (record.schema !== "platform.v1-local-private-reconciliation-abort-record/v1"
+    || record.status !== "ABORTED_NO_DATA_MUTATION"
+    || record.transactionId !== receipt.abortedAuthorizedReconciliation.transactionId) throw new Error("abort record mismatch");
+  if (receipt.externalAuthorizedReconciliation) {
+    if (!flags["--predecessorAuthorityFile"]) throw new Error("missing predecessor authority");
+    const predecessor = JSON.parse(fs.readFileSync(flags["--predecessorAuthorityFile"], "utf8"));
+    if (predecessor.documentId !== receipt.externalAuthorizedReconciliation.releaseAuthorityDocumentId) throw new Error("predecessor authority mismatch");
+  } else if (flags["--predecessorAuthorityFile"]) throw new Error("historical receipt received a predecessor authority");
 }
 `, { mode: 0o700 });
   fs.writeFileSync(key, "test-only-private-key\n", { mode: 0o600 });
@@ -420,6 +487,13 @@ lost_once() {
 case "$command" in
   *"/usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json")
     /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_AUTHORITY" ;;
+  *"platform-v1-local-private-control validation-mode")
+    lost_once validation-mode && exit 255
+    if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE:-}" = 1 ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_MODE"
+    else
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_PRODUCTION_MODE"
+    fi ;;
   *"/usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json")
     case "$state" in EVIDENCED|ACTIVE) /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_POST_OFFHOST" ;; *) /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_PRE_OFFHOST" ;; esac ;;
   *"/usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json")
@@ -432,15 +506,44 @@ case "$command" in
     [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_FAIL_STAGE:-}" != apply ] || exit 70
     printf 'APPLIED\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
     lost_once apply && exit 255
-    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_APPLY" ;;
+    if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE:-}" = 1 ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_APPLY"
+    else
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_APPLY"
+    fi ;;
   *"platform-v1-local-private-reconcile evidence")
     if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_FAIL_STAGE:-}" = evidence ]; then
-      printf 'COMMITTING\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
+      if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE:-}" = 1 ]; then
+        printf 'VALIDATED_NO_MUTATION\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
+      else
+        printf 'COMMITTING\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
+      fi
       exit 70
     fi
     printf 'EVIDENCED\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
     lost_once evidence && exit 255
-    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_EVIDENCE" ;;
+    if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE:-}" = 1 ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_EVIDENCE"
+    else
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_EVIDENCE"
+    fi ;;
+  *"platform-v1-local-private-control activate")
+    case "$state" in FINALIZED|ACTIVE) ;; *) exit 65 ;; esac
+    printf 'ACTIVE\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
+    lost_once activate && exit 255
+    if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_ACTIVATE_MODE:-}" = drift ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ACTIVE"
+    elif [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_HISTORICAL_ABORT:-}" = 1 ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE_HISTORICAL"
+    else
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE"
+    fi ;;
+  *"platform-v1-local-private-control aborted-record")
+    [ "$state" = ACTIVE ] || exit 65
+    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD_DOCUMENT" ;;
+  *"platform-v1-local-private-control runtime-authority")
+    [ "$state" = ACTIVE ] || exit 65
+    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_AUTHORITY" ;;
   *"platform-v1-local-private-control seal")
     if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_FAIL_STAGE:-}" = seal-first ] && [ ! -e "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE.seal-first" ]; then
       : > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE.seal-first"
@@ -451,7 +554,12 @@ case "$command" in
     /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ACTIVE" ;;
   *"platform-v1-local-private-control abort-maintenance")
     printf 'ABORT_ACTIVE\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
-    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE" ;;
+    lost_once abort-maintenance && exit 255
+    if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_HISTORICAL_ABORT:-}" = 1 ]; then
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE_HISTORICAL"
+    else
+      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE"
+    fi ;;
   *"platform-v1-local-private-reconcile abort")
     if [ "$state" = ABORT_ACTIVE ]; then
       printf 'FINALIZED\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
@@ -461,12 +569,22 @@ case "$command" in
       /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_CLEAN"
     else
       printf 'ABORTED\\n' > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE"
-      /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD"
+      lost_once abort-initial && exit 255
+      if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RESIDUAL:-}" = 1 ]; then
+        /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD_RESIDUAL"
+      else
+        /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD"
+      fi
     fi ;;
   *"platform-v1-local-private-control verify")
     case "$state" in
       ACTIVE) [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_RECEIPT_MODE:-valid}" = unbound ] && /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_UNBOUND_ACTIVE" || /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ACTIVE" ;;
-      ABORT_ACTIVE|FINALIZED) /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE" ;;
+      ABORT_ACTIVE|FINALIZED)
+        if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_HISTORICAL_ABORT:-}" = 1 ]; then
+          /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE_HISTORICAL"
+        else
+          /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE"
+        fi ;;
       *) /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_BEGIN" ;;
     esac ;;
   *) exit 64 ;;
@@ -497,11 +615,18 @@ esac
     PLATFORM_V1_LOCAL_PRIVATE_TEST_POST_SECRETS: responsePaths.postSecrets,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_BEGIN: responsePaths.begin,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_APPLY: responsePaths.apply,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_APPLY: responsePaths.validationApply,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_EVIDENCE: responsePaths.evidence,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_MODE: responsePaths.validationMode,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_PRODUCTION_MODE: responsePaths.productionMode,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_EVIDENCE: responsePaths.validationEvidence,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ACTIVE: responsePaths.active,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_UNBOUND_ACTIVE: responsePaths.unboundActive,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD: responsePaths.abortRecord,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD_RESIDUAL: responsePaths.abortRecordResidual,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RECORD_DOCUMENT: responsePaths.abortRecordDocument,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE: responsePaths.abortActive,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE_HISTORICAL: responsePaths.abortActiveHistorical,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_FINALIZED: responsePaths.abortFinalized,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_CLEAN: responsePaths.abortClean,
   };
@@ -509,7 +634,10 @@ esac
     root, authorityFile, knownHosts, composeWrapperSource, controllerSource, installerSource,
     reconcilerSource, sudoersSource, unitSource, workloadLockSource, fixtureScript, recoveryPrivateKey,
     argumentsFile, commandsFile, stdinSizeFile, environment,
-    receipt: `${stableJson(activeReceipt)}\n`, responsePaths,
+    receipt: `${stableJson(activeReceipt)}\n`,
+    abortReceipt: fs.readFileSync(responsePaths.abortActive, "utf8"),
+    historicalAbortReceipt: fs.readFileSync(responsePaths.abortActiveHistorical, "utf8"),
+    responsePaths, remoteStateFile,
   };
 }
 
@@ -553,7 +681,7 @@ test("pins host trust and runs the fixed begin/apply/evidence/seal/verify sequen
     const commands = fs.readFileSync(current.commandsFile, "utf8").trim().split("\n");
     assert.deepEqual(commands, [
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
-      "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/validation-lane.json",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control validation-mode",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control begin-maintenance",
@@ -564,6 +692,262 @@ test("pins host trust and runs the fixed begin/apply/evidence/seal/verify sequen
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control seal",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control verify",
     ]);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation closes and finalizes the transaction, then idempotently activates without CMS or seal", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, { PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, current.abortReceipt);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.status, "ACTIVE");
+    assert.equal(receipt.candidateCommit, candidateCommit);
+    assert.equal(receipt.candidateTree, candidateTree);
+    assert.equal(fs.readFileSync(current.remoteStateFile, "utf8"), "ACTIVE\n");
+    assert.deepEqual(remoteCommands(current), [
+      "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control validation-mode",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control begin-maintenance",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile apply",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile evidence",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile abort",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control abort-maintenance",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control verify",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile abort",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control verify",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control runtime-authority",
+    ]);
+    const commands = remoteCommands(current);
+    assert.equal(commands.some((command) => command.includes("offhost-backup-evidence.json")), false);
+    assert.equal(commands.some((command) => command.includes("secrets-backup-evidence.json")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation canonically verifies historical provenance without requesting a predecessor authority", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_HISTORICAL_ABORT: "1",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, current.historicalAbortReceipt);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.predecessorRuntimeProvenance.profile, "HISTORICAL_V1");
+    assert.equal(Object.hasOwn(receipt, "externalAuthorizedReconciliation"), false);
+    const commands = remoteCommands(current);
+    assert.equal(commands.at(-1), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record");
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control runtime-authority")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation requires the distinct no-mutation apply status", () => {
+  const current = fixture();
+  try {
+    mutateCanonicalFile(current.responsePaths.validationApply, (response) => {
+      response.status = "APPLIED";
+    });
+    const result = execute(current, undefined, { PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1" });
+    assert.equal(result.status, 70, result.stderr);
+    assert.match(result.stderr, /reconcile apply failed; the exact pre-commit transaction was rolled back and finalized/);
+    const commands = remoteCommands(current);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-reconcile evidence")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation rejects residual mutation evidence when apply has no trusted response", () => {
+  const current = fixture();
+  try {
+    mutateCanonicalFile(current.responsePaths.validationApply, (response) => {
+      response.status = "APPLIED";
+    });
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RESIDUAL: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+    });
+    assert.equal(result.status, 65, result.stderr);
+    assert.match(result.stderr, /reconcile apply failed and the pre-commit abort could not be fully verified/);
+    const commands = remoteCommands(current);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control abort-maintenance")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation safely aborts invalid or unavailable evidence using the no-mutation apply proof", () => {
+  for (const [stage, prepare] of [
+    ["transaction-drift", (current, environment) => {
+      mutateCanonicalFile(current.responsePaths.validationEvidence, (response) => {
+        response.transactionId = sha("foreign-evidence-transaction");
+        response.evidencePath = `/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation-${response.transactionId}.json`;
+      });
+      return environment;
+    }],
+    ["unavailable", (_current, environment) => ({ ...environment, PLATFORM_V1_LOCAL_PRIVATE_TEST_FAIL_STAGE: "evidence" })],
+  ]) {
+    const current = fixture();
+    try {
+      const environment = prepare(current, { PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1" });
+      const result = execute(current, undefined, environment);
+      assert.equal(result.status, 70, `${stage}: ${result.stderr}`);
+      assert.match(result.stderr, /validation evidence failed; the exact no-mutation transaction was rolled back and finalized/);
+      const commands = remoteCommands(current);
+      assert.equal(commands.filter((command) => command.endsWith("platform-v1-local-private-reconcile abort")).length, 2, stage);
+      assert.equal(commands.at(-1), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control verify", stage);
+      assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false, stage);
+    } finally {
+      fs.rmSync(current.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("FAST validation rejects abort-record transaction drift and non-exact response keys", () => {
+  for (const [stage, mutate] of [
+    ["transaction-drift", (current) => {
+      mutateCanonicalFile(current.responsePaths.abortRecord, (response) => {
+        response.transactionId = sha("foreign-abort-transaction");
+        response.abortRecordPath = `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${response.transactionId}-${response.abortRecordSha256}.json`;
+      });
+    }],
+    ["extra-key", (current) => {
+      mutateCanonicalFile(current.responsePaths.abortRecord, (response) => {
+        response.unexpected = true;
+      });
+    }],
+  ]) {
+    const current = fixture();
+    try {
+      mutate(current);
+      const result = execute(current, undefined, { PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1" });
+      assert.equal(result.status, 65, `${stage}: ${result.stderr}`);
+      const commands = remoteCommands(current);
+      assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control abort-maintenance")), false, stage);
+      assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false, stage);
+    } finally {
+      fs.rmSync(current.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("FAST validation rejects a post-abort ACTIVE receipt bound to a predecessor candidate", () => {
+  const current = fixture();
+  try {
+    const receipt = JSON.parse(current.abortReceipt);
+    fs.chmodSync(current.responsePaths.abortActive, 0o600);
+    writeCanonical(current.responsePaths.abortActive, {
+      ...receipt,
+      candidateCommit: sha("predecessor-candidate").slice(0, 40),
+    });
+    const result = execute(current, undefined, { PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1" });
+    assert.equal(result.status, 65, result.stderr);
+    assert.match(result.stderr, /could not be rolled back, verified, and finalized/);
+    assert.equal(remoteCommands(current).some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation rejects any residual data mutation before controller rebaseline", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_RESIDUAL: "1",
+    });
+    assert.equal(result.status, 65, result.stderr);
+    assert.match(result.stderr, /could not be rolled back, verified, and finalized/);
+    const commands = remoteCommands(current);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control abort-maintenance")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation rejects activation bytes that differ from the final post-abort verify receipt", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_ACTIVATE_MODE: "drift",
+    });
+    assert.equal(result.status, 65, result.stderr);
+    assert.match(result.stderr, /activation differs from the verified post-abort ACTIVE receipt/);
+    const commands = remoteCommands(current);
+    assert.equal(commands.at(-1), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate");
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation retries a lost idempotent activation response without opening a seal path", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_LOST_ONCE: "activate",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, current.abortReceipt);
+    const commands = remoteCommands(current);
+    assert.equal(commands.filter((command) => command.endsWith("platform-v1-local-private-control activate")).length, 2);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation recovers lost stdout from the initial abort and controller abort-maintenance", () => {
+  for (const [stage, command, expectedCount] of [
+    ["abort-initial", "platform-v1-local-private-reconcile abort", 3],
+    ["abort-maintenance", "platform-v1-local-private-control abort-maintenance", 2],
+  ]) {
+    const current = fixture();
+    try {
+      const result = execute(current, undefined, {
+        PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+        PLATFORM_V1_LOCAL_PRIVATE_TEST_LOST_ONCE: stage,
+      });
+      assert.equal(result.status, 0, `${stage}: ${result.stderr}`);
+      assert.equal(result.stdout, current.abortReceipt);
+      const commands = remoteCommands(current);
+      assert.equal(commands.filter((item) => item.endsWith(command)).length, expectedCount, stage);
+      assert.equal(commands.some((item) => item.endsWith("platform-v1-local-private-control seal")), false);
+    } finally {
+      fs.rmSync(current.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("FAST validation retries an unavailable mode response without falling into production", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_LOST_ONCE: "validation-mode",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const commands = remoteCommands(current);
+    assert.equal(commands.filter((command) => command.endsWith("platform-v1-local-private-control validation-mode")).length, 2);
+    assert.equal(commands.some((command) => command.includes("offhost-backup-evidence.json")), false);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
   } finally {
     fs.rmSync(current.root, { recursive: true, force: true });
   }

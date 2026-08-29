@@ -337,8 +337,11 @@ const expectedBrownfieldOfflineStep = [
   "            scripts/v1-brownfield-control-plane-gate.test.mjs \\",
   "            scripts/v1-local-private-control.test.mjs \\",
   "            scripts/v1-local-private-control.e2e.test.mjs \\",
+  "            scripts/v1-local-private-runtime-semantics-contract.test.mjs \\",
+  "            scripts/v1-local-private-validation-lane.test.mjs \\",
   "            scripts/v1-local-private-evidence-producer.test.mjs \\",
   "            scripts/v1-local-private-reconcile.test.mjs \\",
+  "            scripts/v1-local-private-reconcile-journal-contract.test.mjs \\",
   "            scripts/deploy-v1-local-private.test.mjs \\",
   "            scripts/hosted-workload-preservation-guard.test.mjs",
 ].join("\n");
@@ -361,8 +364,11 @@ for (const command of [
   "scripts/v1-node-runtime-prerequisite.test.mjs",
   "scripts/v1-local-private-control.test.mjs",
   "scripts/v1-local-private-control.e2e.test.mjs",
+  "scripts/v1-local-private-runtime-semantics-contract.test.mjs",
+  "scripts/v1-local-private-validation-lane.test.mjs",
   "scripts/v1-local-private-evidence-producer.test.mjs",
   "scripts/v1-local-private-reconcile.test.mjs",
+  "scripts/v1-local-private-reconcile-journal-contract.test.mjs",
   "scripts/deploy-v1-local-private.test.mjs",
 ]) {
   assert.equal(

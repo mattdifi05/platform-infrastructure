@@ -545,7 +545,10 @@ test("the closed sudoers set retains exact verify and candidate-B install author
     "utf8",
   );
   assert.equal(installedSudoers, fs.readFileSync(productionSudoers, "utf8"));
-  assert.equal(installedSudoers.trimEnd().split("\n").length, 16);
+  assert.equal(installedSudoers.trimEnd().split("\n").length, 19);
+  for (const command of ["aborted-record", "runtime-authority", "validation-mode"]) {
+    assert.match(installedSudoers, new RegExp(`platform-v1-local-private-control ${command}\\n`));
+  }
   assert.match(installedSudoers, /platform-v1-local-private-control verify\n/);
   assert.match(installedSudoers, /platform-v1-brownfield-install-consumer install\n/);
   assert.match(installedSudoers, /\/usr\/bin\/cat \/var\/lib\/platform-infrastructure\/v1\/predeploy\/current\/offhost-backup-evidence\.json\n/);
@@ -657,7 +660,7 @@ test("rejects every sudoers deviation before the first artifact write", (t) => {
 
     const result = run(candidate, ["install-control-artifacts"]);
     assert.equal(result.status, 78);
-    assert.match(result.stderr, /exact closed sixteen-line grant set/);
+    assert.match(result.stderr, /exact closed nineteen-line grant set/);
     assert.equal(
       fs.existsSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/predeploy/current/control-artifact-install-transaction")),
       false,

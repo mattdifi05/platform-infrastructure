@@ -162,6 +162,53 @@ function authorityFixture() {
   return canonicalDocument(value);
 }
 
+function predecessorAuthorityFixture() {
+  const value = mutable(authorityFixture());
+  delete value.documentId;
+  const predecessorCommit = sha("predecessor-candidate").slice(0, 40);
+  const predecessorTree = sha("predecessor-tree").slice(0, 40);
+  const predecessorArchive = sha("predecessor-archive");
+  const predecessorRoot = `/srv/platform-infrastructure/releases/${predecessorCommit}-${predecessorArchive}`;
+  const predecessorSourceRender = sha("predecessor-runtime-source-render");
+  const predecessorWorkloadLock = sha("predecessor-workload-lock");
+  const predecessorCandidateId = sha(stableJson({
+    candidateCommit: predecessorCommit,
+    candidateTree: predecessorTree,
+    sourceRenderSha256: predecessorSourceRender,
+    workloadLockSha256: predecessorWorkloadLock,
+  }));
+  const predecessorRuntimeIdentity = {
+    candidateId: predecessorCandidateId,
+    commit: predecessorCommit,
+    deploymentId: `v1-local-private:${predecessorCandidateId}`,
+    sourceRenderSha256: predecessorSourceRender,
+    tree: predecessorTree,
+    workloadLockSha256: predecessorWorkloadLock,
+  };
+  const predecessorLabels = runtimeIdentityLabels instanceof Function
+    ? runtimeIdentityLabels(predecessorRuntimeIdentity)
+    : {
+        "com.platform.runtime.candidate-id": predecessorRuntimeIdentity.candidateId,
+        "com.platform.runtime.commit": predecessorRuntimeIdentity.commit,
+        "com.platform.runtime.deployment-id": predecessorRuntimeIdentity.deploymentId,
+        "com.platform.runtime.source-render-sha256": predecessorRuntimeIdentity.sourceRenderSha256,
+        "com.platform.runtime.tree": predecessorRuntimeIdentity.tree,
+        "com.platform.runtime.workload-lock-sha256": predecessorRuntimeIdentity.workloadLockSha256,
+      };
+  value.candidateCommit = predecessorCommit;
+  value.candidateTree = predecessorTree;
+  value.sourceArchiveSha256 = predecessorArchive;
+  value.releaseRoot = predecessorRoot;
+  value.runtimeIdentity = predecessorRuntimeIdentity;
+  value.checkoutProof = { ...value.checkoutProof, githubMainCommit: predecessorCommit, headCommit: predecessorCommit, headTree: predecessorTree };
+  value.artifacts.composeWrapper.path = `${predecessorRoot}/scripts/compose-vps.sh`;
+  value.artifacts.controller.sha256 = "f60c20fabeaf3f68b2478ebe31018d52d2d9a967a3598c2ac8256bc01dd33f7d";
+  value.evidenceProducer.path = `${predecessorRoot}/scripts/v1-local-private-evidence-producer.py`;
+  value.recoveryEscrowCertificate.path = `${predecessorRoot}/config/local-private-recovery-escrow-cert.pem`;
+  for (const target of value.serviceTargets) target.semantic.runtimeIdentityLabels = predecessorLabels;
+  return canonicalDocument(value);
+}
+
 function ports() {
   return [
     { containerName: "enterprise-local-dns", containerPort: 53, hostIp: "192.168.1.10", hostPort: 53, protocol: "tcp" },
@@ -348,6 +395,59 @@ function reconciledFixture(authoritySha, { noOp = false } = {}) {
   return canonicalDocument(receipt);
 }
 
+function abortBindingFixture(root, authority) {
+  const authoritySha = sha(`${stableJson(authority)}\n`);
+  const record = {
+    authorityDocumentId: authority.documentId,
+    authoritySha256: authoritySha,
+    completedAtUnixSeconds: 1_800_000_200,
+    journalSha256: sha("aborted-journal"),
+    residualDataMutations: [],
+    residualDataMutationsSha256: sha(stableJson([])),
+    schema: "platform.v1-local-private-reconciliation-abort-record/v1",
+    status: "ABORTED_NO_DATA_MUTATION",
+    transactionId: sha("aborted-transaction"),
+  };
+  const recordBytes = `${stableJson(record)}\n`;
+  const recordSha256 = sha(recordBytes);
+  const recordPath = `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${record.transactionId}-${recordSha256}.json`;
+  const physical = `${root}${recordPath}`;
+  fs.mkdirSync(path.dirname(physical), { recursive: true });
+  fs.writeFileSync(physical, recordBytes, { mode: 0o444 });
+  return { ...record, recordPath, recordSha256 };
+}
+
+function mixedGenerationAbortedFixture(root, currentAuthority, predecessorAuthority) {
+  const predecessorAuthoritySha = sha(`${stableJson(predecessorAuthority)}\n`);
+  const receipt = mutable(reconciledFixture(predecessorAuthoritySha, { noOp: true }));
+  delete receipt.documentId;
+  const external = receipt.externalAuthorizedReconciliation;
+  external.releaseAuthorityDocumentId = predecessorAuthority.documentId;
+  external.releaseAuthoritySha256 = predecessorAuthoritySha;
+  external.runtimeIdentity = predecessorAuthority.runtimeIdentity;
+  for (const transition of external.serviceTransitions) {
+    if (transition.current) transition.current.runtimeConfigSha256 = sha(`legacy-19:${transition.current.name}`);
+    if (transition.previous) transition.previous.runtimeConfigSha256 = sha(`legacy-19:${transition.previous.name}`);
+  }
+  external.serviceTransitionsSha256 = sha(stableJson(external.serviceTransitions));
+  const predecessorCommit = predecessorAuthority.candidateCommit;
+  const recoveryBinding = receipt.localArtifactTrust.schedulerRecovery;
+  recoveryBinding.exportLabels["com.platform.v1.local-private.candidate-commit"] = predecessorCommit;
+  recoveryBinding.recoveryTag = `platform/v1-scheduler-recovery:${predecessorCommit}`;
+  receipt.abortedAuthorizedReconciliation = abortBindingFixture(root, currentAuthority);
+  receipt.predecessorRuntimeProvenance = {
+    candidateCommit: predecessorAuthority.candidateCommit,
+    candidateTree: predecessorAuthority.candidateTree,
+    controllerIdentityProjection: "LEGACY_19",
+    controllerSha256: predecessorAuthority.artifacts.controller.sha256,
+    profile: "CANONICAL_RECONCILED_V1",
+    releaseRoot: predecessorAuthority.releaseRoot,
+    sourceArchiveSha256: predecessorAuthority.sourceArchiveSha256,
+  };
+  receipt.mutationModel = "ABORTED_EXTERNAL_AUTHORIZED_RECONCILIATION";
+  return canonicalDocument(receipt);
+}
+
 test("closed V1 inventory is 36 total, 17 active managed, and 19 preserved legacy", () => {
   assert.equal(canonicalNames.length, 36);
   assert.equal(activeManaged.length, 17);
@@ -390,6 +490,270 @@ test("repeated no-op V1 reconciliation is accepted with all mutation booleans fa
     assert.equal(verified.containerRecreate, false);
     assert.equal(verified.dockerMutation, false);
     assert.equal(verified.dataMutation, false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mixed-generation aborted receipt binds current control authority and registered predecessor runtime provenance", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-mixed-abort-"));
+  try {
+    const currentAuthority = authorityFixture();
+    const predecessorAuthority = predecessorAuthorityFixture();
+    const authorityFile = writeCanonical(root, "current-authority.json", currentAuthority);
+    const predecessorAuthorityFile = writeCanonical(root, "predecessor-authority.json", predecessorAuthority);
+    const receipt = mixedGenerationAbortedFixture(root, currentAuthority, predecessorAuthority);
+    const file = writeCanonical(root, "mixed-aborted-receipt.json", receipt);
+    const abortRecordFile = `${root}${receipt.abortedAuthorizedReconciliation.recordPath}`;
+    const verified = verifyV1LocalPrivateControlReceipt({
+      file, authorityFile, predecessorAuthorityFile, abortRecordFile,
+    });
+    assert.equal(verified.candidateCommit, currentAuthority.candidateCommit);
+    assert.equal(verified.externalAuthorizedReconciliation.runtimeIdentity.commit, predecessorAuthority.candidateCommit);
+    assert.equal(
+      verified.localArtifactTrust.schedulerRecovery.exportLabels["com.platform.v1.local-private.candidate-commit"],
+      predecessorAuthority.candidateCommit,
+    );
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file, authorityFile, abortRecordFile }),
+      /requires --predecessorAuthorityFile/,
+    );
+
+    const falseRecovery = mutable(receipt);
+    falseRecovery.localArtifactTrust.schedulerRecovery.exportLabels["com.platform.v1.local-private.candidate-commit"] = currentAuthority.candidateCommit;
+    falseRecovery.localArtifactTrust.schedulerRecovery.recoveryTag = `platform/v1-scheduler-recovery:${currentAuthority.candidateCommit}`;
+    const falseRecoveryFile = writeCanonical(root, "false-recovery-provenance.json", recanonicalize(falseRecovery));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: falseRecoveryFile, authorityFile, predecessorAuthorityFile, abortRecordFile }),
+      /runtime-provenance-bound/,
+    );
+
+    const unknownProjection = mutable(receipt);
+    unknownProjection.predecessorRuntimeProvenance.controllerSha256 = sha("unregistered-controller");
+    const unknownProjectionFile = writeCanonical(root, "unknown-projection.json", recanonicalize(unknownProjection));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: unknownProjectionFile, authorityFile, predecessorAuthorityFile, abortRecordFile }),
+      /projection is unregistered/,
+    );
+
+    const commonIdentityDrift = mutable(receipt);
+    const runtime = commonIdentityDrift.runtime.containers.find((item) => item.name === "enterprise-control-center");
+    runtime.containerId = sha("foreign-common-container-id");
+    commonIdentityDrift.localArtifactTrust.subjects.find((item) => item.name === runtime.name).containerId = runtime.containerId;
+    const commonIdentityDriftFile = writeCanonical(root, "common-identity-drift.json", recanonicalize(commonIdentityDrift));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: commonIdentityDriftFile, authorityFile, predecessorAuthorityFile, abortRecordFile }),
+      /Transition current identity differs from runtime/,
+    );
+
+    const corruptedAbortRecordFile = writeCanonical(root, "corrupted-abort-record.json", {
+      status: "ABORTED_NO_DATA_MUTATION",
+    });
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file, authorityFile, predecessorAuthorityFile, abortRecordFile: corruptedAbortRecordFile }),
+      /missing or unexpected fields|bytes differ/,
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy-dispatcher historical abort remains a closed ACTIVE receipt with predecessor-bound recovery", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-legacy-abort-"));
+  try {
+    const currentAuthority = authorityFixture();
+    const predecessorAuthority = predecessorAuthorityFixture();
+    const authorityFile = writeCanonical(root, "current-authority.json", currentAuthority);
+    const receipt = mutable(historicFixture());
+    delete receipt.documentId;
+    receipt.runtime.containers.push(runtimeRecord("enterprise-alert-dispatcher", false));
+    receipt.runtime.containers.sort((left, right) => left.name.localeCompare(right.name));
+    receipt.runtime.containerCount = receipt.runtime.containers.length;
+    receipt.runtime.runningCount = receipt.runtime.containers.filter((item) => item.state === "running").length;
+    receipt.localArtifactTrust.subjects = receipt.runtime.containers.map(
+      ({ configHash, containerId, imageAvailability, imageId, name }) => ({ configHash, containerId, imageAvailability, imageId, name }),
+    );
+    receipt.controller = {
+      ...receipt.controller,
+      sudoersPath: "/etc/sudoers.d/platform-v1-local-private-control",
+      sudoersSha256: sudoersSha,
+    };
+    const predecessorCommit = predecessorAuthority.candidateCommit;
+    receipt.localArtifactTrust.schedulerRecovery.exportLabels["com.platform.v1.local-private.candidate-commit"] = predecessorCommit;
+    receipt.localArtifactTrust.schedulerRecovery.recoveryTag = `platform/v1-scheduler-recovery:${predecessorCommit}`;
+    receipt.abortedAuthorizedReconciliation = abortBindingFixture(root, currentAuthority);
+    receipt.predecessorRuntimeProvenance = {
+      candidateCommit: predecessorAuthority.candidateCommit,
+      candidateTree: predecessorAuthority.candidateTree,
+      controllerIdentityProjection: "LEGACY_19",
+      controllerSha256: predecessorAuthority.artifacts.controller.sha256,
+      profile: "HISTORICAL_V1",
+      releaseRoot: predecessorAuthority.releaseRoot,
+      sourceArchiveSha256: predecessorAuthority.sourceArchiveSha256,
+    };
+    receipt.mutationModel = "ABORTED_EXTERNAL_AUTHORIZED_RECONCILIATION";
+    const value = canonicalDocument(receipt);
+    const file = writeCanonical(root, "legacy-aborted-receipt.json", value);
+    const abortRecordFile = `${root}${value.abortedAuthorizedReconciliation.recordPath}`;
+    const verified = verifyV1LocalPrivateControlReceipt({ file, authorityFile, abortRecordFile });
+    assert.equal(verified.runtime.containers.some((item) => item.name === "enterprise-alert-dispatcher"), true);
+    assert.equal(
+      verified.localArtifactTrust.schedulerRecovery.exportLabels["com.platform.v1.local-private.candidate-commit"],
+      predecessorCommit,
+    );
+
+    const unbound = mutable(value);
+    delete unbound.predecessorRuntimeProvenance;
+    const unboundFile = writeCanonical(root, "legacy-unbound-abort.json", recanonicalize(unbound));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: unboundFile, authorityFile, abortRecordFile }),
+      /runtime-provenance-bound/,
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("transition evidence rejects runtime digest drift across aligned controller and reconciler domains", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-"));
+  try {
+    const authority = authorityFixture();
+    const authorityFile = writeCanonical(root, "authority.json", authority);
+    const authoritySha = sha(`${stableJson(authority)}\n`);
+    const receipt = mutable(reconciledFixture(authoritySha, { noOp: true }));
+    const transition = receipt.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-control-center");
+    transition.current.runtimeConfigSha256 = sha("foreign-current-runtime-config");
+    receipt.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(receipt.externalAuthorizedReconciliation.serviceTransitions));
+    const file = writeCanonical(root, "current-digest-drift.json", recanonicalize(receipt));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file, authorityFile }),
+      /Transition current identity differs from runtime/,
+    );
+
+    const previousDrift = mutable(reconciledFixture(authoritySha, { noOp: true }));
+    const previousTransition = previousDrift.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-control-center");
+    previousTransition.previous.runtimeConfigSha256 = sha("foreign-previous-runtime-config");
+    previousDrift.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(previousDrift.externalAuthorizedReconciliation.serviceTransitions));
+    const previousFile = writeCanonical(root, "previous-digest-drift.json", recanonicalize(previousDrift));
+    assert.throws(() => verifyV1LocalPrivateControlReceipt({ file: previousFile, authorityFile }), /Service transition status is false/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("transition status remains fail-closed for every stable identity discriminator", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-"));
+  try {
+    const authority = authorityFixture();
+    const authorityFile = writeCanonical(root, "authority.json", authority);
+    const authoritySha = sha(`${stableJson(authority)}\n`);
+    const drifts = {
+      configHash: sha("foreign-transition-config"),
+      containerId: sha("foreign-transition-container"),
+      imageId: image("foreign-transition-image"),
+      imageReference: `registry.local/foreign@sha256:${sha("foreign-transition-manifest")}`,
+      runtimeConfigSha256: sha("foreign-transition-runtime-config"),
+    };
+    for (const [field, value] of Object.entries(drifts)) {
+      const receipt = mutable(reconciledFixture(authoritySha, { noOp: true }));
+      const transition = receipt.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-control-center");
+      transition.previous[field] = value;
+      receipt.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(receipt.externalAuthorizedReconciliation.serviceTransitions));
+      const file = writeCanonical(root, `stable-drift-${field}.json`, recanonicalize(receipt));
+      assert.throws(
+        () => verifyV1LocalPrivateControlReceipt({ file, authorityFile }),
+        /Service transition status is false/,
+        field,
+      );
+    }
+
+    const renamed = mutable(reconciledFixture(authoritySha, { noOp: true }));
+    const dispatcher = renamed.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-platform-alert-dispatcher");
+    dispatcher.previous.name = "enterprise-alert-dispatcher";
+    renamed.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(renamed.externalAuthorizedReconciliation.serviceTransitions));
+    const renamedFile = writeCanonical(root, "stable-drift-name.json", recanonicalize(renamed));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: renamedFile, authorityFile }),
+      /Service transition status is false/,
+      "name",
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("transition replacement accepts only the declared legacy dispatcher predecessor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-"));
+  try {
+    const authority = authorityFixture();
+    const authorityFile = writeCanonical(root, "authority.json", authority);
+    const authoritySha = sha(`${stableJson(authority)}\n`);
+    const receipt = mutable(reconciledFixture(authoritySha, { noOp: true }));
+    const dispatcher = receipt.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-platform-alert-dispatcher");
+    dispatcher.previous.name = "enterprise-alert-dispatcher";
+    dispatcher.status = "REPLACED";
+    receipt.externalAuthorizedReconciliation.containerRecreate = true;
+    receipt.externalAuthorizedReconciliation.externalDockerMutation = true;
+    receipt.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(receipt.externalAuthorizedReconciliation.serviceTransitions));
+    receipt.containerRecreate = true;
+    receipt.dockerMutation = true;
+    const allowedFile = writeCanonical(root, "declared-dispatcher-replacement.json", recanonicalize(receipt));
+    assert.equal(
+      verifyV1LocalPrivateControlReceipt({ file: allowedFile, authorityFile }).externalAuthorizedReconciliation.containerRecreate,
+      true,
+    );
+
+    const undeclared = mutable(receipt);
+    undeclared.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-platform-alert-dispatcher").previous.name = "enterprise-undeclared-dispatcher";
+    undeclared.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(undeclared.externalAuthorizedReconciliation.serviceTransitions));
+    const undeclaredFile = writeCanonical(root, "undeclared-dispatcher-replacement.json", recanonicalize(undeclared));
+    assert.throws(
+      () => verifyV1LocalPrivateControlReceipt({ file: undeclaredFile, authorityFile }),
+      /Transition previous identity is not a declared predecessor/,
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("transition current binding rejects stable identity drift across domains", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-"));
+  try {
+    const authority = authorityFixture();
+    const authorityFile = writeCanonical(root, "authority.json", authority);
+    const authoritySha = sha(`${stableJson(authority)}\n`);
+    const drifts = {
+      configHash: sha("foreign-current-config"),
+      containerId: sha("foreign-current-container"),
+      imageId: image("foreign-current-image"),
+      imageReference: `registry.local/foreign-current@sha256:${sha("foreign-current-manifest")}`,
+      name: "enterprise-control-center-foreign",
+    };
+    for (const [field, value] of Object.entries(drifts)) {
+      const receipt = mutable(reconciledFixture(authoritySha, { noOp: true }));
+      const transition = receipt.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-control-center");
+      transition.current[field] = value;
+      receipt.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(receipt.externalAuthorizedReconciliation.serviceTransitions));
+      const file = writeCanonical(root, `unbound-current-${field}.json`, recanonicalize(receipt));
+      assert.throws(
+        () => verifyV1LocalPrivateControlReceipt({ file, authorityFile }),
+        /Transition current identity differs from runtime/,
+        field,
+      );
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("transition runtime digests remain shape-validated in both domains", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "v1-control-"));
+  try {
+    const authority = authorityFixture();
+    const authorityFile = writeCanonical(root, "authority.json", authority);
+    const authoritySha = sha(`${stableJson(authority)}\n`);
+    for (const [name, mutate] of [
+      ["malformed-previous", (receipt, transition) => { transition.previous.runtimeConfigSha256 = "not-a-sha256"; }],
+      ["malformed-current", (receipt, transition) => { transition.current.runtimeConfigSha256 = "not-a-sha256"; }],
+      ["malformed-runtime", (receipt) => { receipt.runtime.containers.find((item) => item.name === "enterprise-control-center").runtimeConfigSha256 = "not-a-sha256"; }],
+    ]) {
+      const receipt = mutable(reconciledFixture(authoritySha, { noOp: true }));
+      const transition = receipt.externalAuthorizedReconciliation.serviceTransitions.find((item) => item.current?.name === "enterprise-control-center");
+      mutate(receipt, transition);
+      receipt.externalAuthorizedReconciliation.serviceTransitionsSha256 = sha(stableJson(receipt.externalAuthorizedReconciliation.serviceTransitions));
+      const file = writeCanonical(root, `${name}.json`, recanonicalize(receipt));
+      assert.throws(
+        () => verifyV1LocalPrivateControlReceipt({ file, authorityFile }),
+        /runtime config is not one lowercase SHA-256/,
+        name,
+      );
+    }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -474,11 +838,16 @@ test("reconciled verifier rejects legacy dispatcher, scheduler, and preserved le
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("controller and tests contain no V2 or stale symbolic target authority", () => {
+test("controller and tests contain no unapproved V2 or stale symbolic target authority", () => {
   const root = path.resolve(import.meta.dirname, "..");
   const forbidden = ["PINNED_" + "EXACT_MAIN_V1", "/v" + "2", "832bf2baec47055342af" + "7e7f73425444381b91e0"];
   for (const name of ["scripts/v1-local-private-control.py", "scripts/v1-local-private-control-receipt.mjs", "sudoers/platform-v1-local-private-control"]) {
-    const source = fs.readFileSync(path.join(root, name), "utf8");
+    let source = fs.readFileSync(path.join(root, name), "utf8");
+    if (name === "scripts/v1-local-private-control.py") {
+      const validationCheckpointV2 = 'VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v2"';
+      assert.equal(source.split(validationCheckpointV2).length, 2);
+      source = source.replace(validationCheckpointV2, "");
+    }
     for (const token of forbidden) assert.equal(source.includes(token), false);
   }
 });

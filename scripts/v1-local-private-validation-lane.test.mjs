@@ -93,16 +93,13 @@ test("fast prepare validation checkpoint: honest booleans, real provenance, read
   try {
     const localPrivate = path.join(root, "var/lib/platform-infrastructure/v1/local-private");
     const predeploy = path.join(root, "var/lib/platform-infrastructure/v1/predeploy/current");
+    const predecessorAuthorityDocumentId = sha("predecessor-authority-document");
+    const predecessorAuthoritySha256 = sha("predecessor-authority-bytes");
+    const predecessorCommit = "a".repeat(40);
+    const predecessorTree = "7".repeat(40);
+    const predecessorArchive = "6".repeat(64);
     fs.mkdirSync(localPrivate, { recursive: true, mode: 0o700 });
     fs.mkdirSync(predeploy, { recursive: true, mode: 0o700 });
-    const priorCheckpoint = {
-      schema: "platform.v1-local-private-predeploy-checkpoint/v1", candidateCommit: "a".repeat(40),
-      backupCapturedUnixSeconds: PRIOR_CAPTURE,
-      schedulerRecoveryImageExportSha256: sha("export-tar"),
-      schedulerRecoveryImageId: "sha256:" + sha("export-index"),
-      schedulerRunningImageId: "sha256:" + sha("running-image"),
-    };
-    fs.writeFileSync(path.join(predeploy, "local-private-checkpoint.json"), Buffer.from(JSON.stringify(priorCheckpoint, Object.keys(priorCheckpoint).sort(), 0) + "\n"));
     const reused = {};
     for (const [field, name] of [
       ["logicalBackupEvidenceSha256", "logical-backup-evidence.json"],
@@ -111,10 +108,58 @@ test("fast prepare validation checkpoint: honest booleans, real provenance, read
       ["runtimeInventorySha256", "runtime-inventory-evidence.json"],
       ["secretsBackupEvidenceSha256", "secrets-backup-evidence.json"],
     ]) {
-      const bytes = Buffer.from(`{"kind":"${name}","real":true}\n`);
+      const evidenceDocument = {
+        authorityDocumentId: predecessorAuthorityDocumentId,
+        authoritySha256: predecessorAuthoritySha256,
+        candidateCommit: predecessorCommit,
+        candidateTree: predecessorTree,
+        evidencePhase: "PRE",
+        kind: name,
+        real: true,
+        reconciliationSha256: null,
+        sourceArchiveSha256: predecessorArchive,
+        transactionId: null,
+      };
+      const bytes = Buffer.from(JSON.stringify(evidenceDocument, Object.keys(evidenceDocument).sort(), 0) + "\n");
       fs.writeFileSync(path.join(predeploy, name), bytes);
       reused[field] = sha(bytes);
     }
+    const priorCheckpoint = {
+      authoritative: false,
+      backupCapturedUnixSeconds: PRIOR_CAPTURE,
+      candidateCommit: predecessorCommit,
+      candidateTree: predecessorTree,
+      destructiveMutationPlanned: false,
+      generatedAtUnixSeconds: PRIOR_CAPTURE,
+      ...reused,
+      restoreVerified: true,
+      runtimeRecovered: true,
+      schedulerRecoveryImageExportSha256: sha("export-tar"),
+      schedulerRecoveryImageId: "sha256:" + sha("export-index"),
+      schedulerRunningImageId: "sha256:" + sha("running-image"),
+      schema: "platform.v1-local-private-predeploy-checkpoint/v1",
+      sourceArchiveSha256: predecessorArchive,
+    };
+    const priorCheckpointBytes = Buffer.from(JSON.stringify(priorCheckpoint, Object.keys(priorCheckpoint).sort(), 0) + "\n");
+    fs.writeFileSync(path.join(predeploy, "local-private-checkpoint.json"), priorCheckpointBytes);
+    const priorCheckpointSha256 = sha(priorCheckpointBytes);
+    const predecessorState = {
+      candidateCommit: predecessorCommit,
+      candidateTree: predecessorTree,
+      checkpointSha256: priorCheckpointSha256,
+      sourceArchiveSha256: predecessorArchive,
+      status: "ACTIVE",
+    };
+    const predecessorReceipt = {
+      candidateCommit: predecessorCommit,
+      candidateTree: predecessorTree,
+      checkpointSha256: priorCheckpointSha256,
+      schema: "platform.v1-local-private-control-receipt/v1",
+      sourceArchiveSha256: predecessorArchive,
+      status: "ACTIVE",
+    };
+    fs.writeFileSync(path.join(localPrivate, "state.json"), Buffer.from(JSON.stringify(predecessorState, Object.keys(predecessorState).sort(), 0) + "\n"), { mode: 0o600 });
+    fs.writeFileSync(path.join(localPrivate, "active-receipt.json"), Buffer.from(JSON.stringify(predecessorReceipt, Object.keys(predecessorReceipt).sort(), 0) + "\n"), { mode: 0o444 });
     seedLane(root, { schema: "platform.v1-local-private-validation-lane/v1", candidateCommit: CANDIDATE, createdAtUnixSeconds: now - 30, expiresAtUnixSeconds: now + 3600, reason: "fast validation lane" });
 
     const source = `
@@ -134,8 +179,13 @@ m.existing_recovery_binding = lambda: {
     "recoveryImageId": "sha256:" + ${JSON.stringify(sha("export-index"))},
     "runningImageId": "sha256:" + ${JSON.stringify(sha("running-image"))},
 }
-authority = {"candidateCommit": ${JSON.stringify(CANDIDATE)}}
-binding = {"candidateCommit": authority["candidateCommit"], "candidateTree": "9"*40, "sourceArchiveSha256": "8"*64}
+m.read_archived_authority = lambda document_id, authority_sha: ({
+    "candidateCommit": ${JSON.stringify(predecessorCommit)},
+    "candidateTree": ${JSON.stringify(predecessorTree)},
+    "sourceArchiveSha256": ${JSON.stringify(predecessorArchive)},
+}, b"authority") if document_id == ${JSON.stringify(predecessorAuthorityDocumentId)} and authority_sha == ${JSON.stringify(predecessorAuthoritySha256)} else (_ for _ in ()).throw(AssertionError("wrong predecessor authority binding"))
+authority = {"candidateCommit": ${JSON.stringify(CANDIDATE)}, "candidateTree": "9"*40, "sourceArchiveSha256": "8"*64}
+binding = {"candidateCommit": authority["candidateCommit"], "candidateTree": authority["candidateTree"], "sourceArchiveSha256": authority["sourceArchiveSha256"]}
 checkpoint = m.write_validation_checkpoint(authority, binding)
 raw = open(${JSON.stringify(path.join(root, "var/lib/platform-infrastructure/v1/predeploy/current/local-private-checkpoint-validation.json"))}, "rb").read()
 print(json.dumps({"producerCalled": called["producer"], "checkpoint": checkpoint,
@@ -151,7 +201,9 @@ print(json.dumps({"producerCalled": called["producer"], "checkpoint": checkpoint
     assert.equal(verdict.checkpoint.runtimeRecovered, false);
     assert.equal(verdict.checkpoint.backupCapturedUnixSeconds, PRIOR_CAPTURE);
     assert.equal(verdict.checkpoint.logicalBackupEvidenceSha256, reused.logicalBackupEvidenceSha256);
-    assert.equal(verdict.checkpoint.schema, "platform.v1-local-private-predeploy-checkpoint-validation/v1");
+    assert.equal(verdict.checkpoint.predecessorAuthorityDocumentId, predecessorAuthorityDocumentId);
+    assert.equal(verdict.checkpoint.predecessorCandidateCommit, predecessorCommit);
+    assert.equal(verdict.checkpoint.schema, "platform.v1-local-private-predeploy-checkpoint-validation/v2");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -169,7 +221,11 @@ test("control validation branch: validation checkpoint accepted, evidence digest
   const validateBody = source.slice(source.indexOf("def load_validation_lane"), source.indexOf("def command_environment()"));
   assert.match(validateBody, /load_validation_lane\(CANDIDATE_COMMIT\)/);
   assert.match(validateBody, /VALIDATION_CHECKPOINT_SCHEMA/);
+  assert.match(source, /VALIDATION_CHECKPOINT_SCHEMA = "platform\.v1-local-private-predeploy-checkpoint-validation\/v2"/);
   assert.match(validateBody, /validation reused evidence/);
+  assert.match(validateBody, /recorded == "0" \* 64 or not os\.path\.lexists\(pathname\)/);
+  assert.match(validateBody, /any\(predecessor_checkpoint\[key\] != value\[key\] for key in CHECKPOINT_EVIDENCE_PATHS\)/);
+  assert.match(validateBody, /predecessor_state\["checkpointSha256"\] != value\["predecessorCheckpointSha256"\]/);
   assert.match(source, /validation lane forbids the production seal/);
   const productionGate = source.slice(source.indexOf('data = secure_file(CHECKPOINT, "fresh PRE-DEPLOY checkpoint")'), source.indexOf('export_metadata = parse_recovery_export'));
   assert.doesNotMatch(productionGate, /validation/i);
@@ -177,12 +233,36 @@ test("control validation branch: validation checkpoint accepted, evidence digest
 
 test("deploy source contract: validation mode skips CMS and seal, distinct evidence protocol, production default intact", () => {
   const source = fs.readFileSync(deployScript, "utf8");
-  assert.match(source, /REMOTE_VALIDATION_LANE_CAT=/);
-  assert.match(source, /VALIDATION_MODE=0/);
+  assert.match(source, /REMOTE_VALIDATION_MODE=.*validation-mode/);
+  assert.match(source, /capture_remote 3 "controller validation mode"/);
+  assert.match(source, /validation_mode=\$\(validate_protocol_json "\$validation_mode_file" validation-mode\)/);
+  assert.doesNotMatch(source, /validation mode.*capture_remote 1/i);
   assert.match(source, /\[ "\$\{VALIDATION_MODE:-0\}" != 1 \] && capture_remote 1 "controller seal"/);
   assert.match(source, /VALIDATION_MODE" != 1 ]; then\n  fetch_and_verify_cms PRE/);
   assert.match(source, /VALIDATION_MODE" != 1 ]; then\n  fetch_and_verify_cms POST/);
+  assert.match(source, /apply-validation/);
+  assert.match(source, /VALIDATED_NO_MUTATION/);
   assert.match(source, /evidence-validation/);
+  assert.match(source, /runtime-inventory-evidence-validation-\$\{value\.transactionId\}\.json/);
+  assert.match(source, /value\.transactionId !== peer\.transactionId/);
+  assert.match(source, /abort-record-no-data-after-apply/);
+  assert.match(source, /abort-record-no-data-unbound/);
+  assert.match(source, /validation evidence failed; the exact no-mutation transaction was rolled back and finalized/);
+  const validationBranch = source.slice(
+    source.indexOf('if [ "$VALIDATION_MODE" = 1 ]; then', source.indexOf("evidence_response=")),
+    source.indexOf("seal_response="),
+  );
+  assert.match(validationBranch, /production seal is forbidden/);
+  assert.match(validationBranch, /abort_before_commit abort-record-no-data "\$evidence_response"/);
+  assert.match(validationBranch, /validation controller activation/);
+  assert.match(validationBranch, /cmp -s "\$receipt" "\$abort_final_verify"/);
+  assert.match(validationBranch, /validate_protocol_json "\$receipt" aborted-active "\$abort_record"/);
+  assert.match(validationBranch, /REMOTE_ABORTED_RECORD/);
+  assert.match(validationBranch, /REMOTE_RUNTIME_AUTHORITY/);
+  assert.match(validationBranch, /--predecessorAuthorityFile "\$predecessor_authority"/);
+  assert.match(validationBranch, /--abortRecordFile "\$exported_abort_record"/);
+  assert.match(validationBranch, /cat "\$receipt"\n  exit 0/);
+  assert.doesNotMatch(validationBranch, /controller seal/);
   const cmsCount = (source.match(/fetch_and_verify_cms (PRE|POST)/g) ?? []).length;
   assert.equal(cmsCount, 2, "PRE and POST must each keep exactly one guarded invocation");
 });

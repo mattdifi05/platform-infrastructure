@@ -1,9 +1,12 @@
 Defaults:platform_infrastructure env_reset
 Defaults:platform_infrastructure secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control activate
+platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control aborted-record
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control begin-maintenance
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control abort-maintenance
+platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control runtime-authority
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control seal
+platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control validation-mode
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control verify
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-brownfield-install-consumer install
 platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-brownfield-install-consumer install-control-artifacts

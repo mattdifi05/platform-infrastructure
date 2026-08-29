@@ -84,6 +84,24 @@ const RUNTIME_IDENTITY_LABEL_FIELDS = Object.freeze([
   "com.platform.runtime.deployment-id", "com.platform.runtime.source-render-sha256",
   "com.platform.runtime.tree", "com.platform.runtime.workload-lock-sha256",
 ]);
+const TRANSITION_COMPARABLE_IDENTITY_FIELDS = Object.freeze([
+  "configHash", "containerId", "imageId", "imageReference", "runtimeConfigSha256",
+]);
+const TRANSITION_IDENTITY_FIELDS = Object.freeze([
+  ...TRANSITION_COMPARABLE_IDENTITY_FIELDS, "name",
+]);
+const CONTROLLER_IDENTITY_PROJECTION_LEGACY_19 = "LEGACY_19";
+const CONTROLLER_IDENTITY_PROJECTION_FULL_34 = "FULL_34";
+const CURRENT_CONTROLLER_IDENTITY_PROJECTION = CONTROLLER_IDENTITY_PROJECTION_FULL_34;
+const CONTROLLER_IDENTITY_PROJECTION_BY_SHA256 = new Map([
+  ["f60c20fabeaf3f68b2478ebe31018d52d2d9a967a3598c2ac8256bc01dd33f7d", CONTROLLER_IDENTITY_PROJECTION_LEGACY_19],
+]);
+const PREDECESSOR_RUNTIME_PROVENANCE_FIELDS = Object.freeze([
+  "candidateCommit", "candidateTree", "controllerIdentityProjection", "controllerSha256",
+  "profile", "releaseRoot", "sourceArchiveSha256",
+]);
+const ABORTED_RUNTIME_PROFILE_HISTORICAL = "HISTORICAL_V1";
+const ABORTED_RUNTIME_PROFILE_CANONICAL = "CANONICAL_RECONCILED_V1";
 const TOP_FIELDS = Object.freeze([
   "activatedAtUnixSeconds", "authorityMode", "candidateCommit", "candidateTree", "checkpointSha256",
   "containerRecreate", "controller", "dataMutation", "dockerControlPlane", "dockerMutation",
@@ -298,13 +316,39 @@ function verifyRuntime(runtime, reconciled) {
 }
 
 function transitionIdentity(value, label) {
-  exactObject(value, ["configHash", "containerId", "imageId", "imageReference", "name", "runtimeConfigSha256"], label);
+  exactObject(value, TRANSITION_IDENTITY_FIELDS, label);
   sha(value.configHash, `${label} config`); sha(value.containerId, `${label} container`); sha(value.runtimeConfigSha256, `${label} runtime config`);
   if (!IMAGE_ID.test(value.imageId) || typeof value.imageReference !== "string" || !value.imageReference || typeof value.name !== "string" || !value.name) invalid(`${label} is invalid.`);
   return value;
 }
 
-function verifyExternal(external, runtime, authority) {
+function transitionIdentityMatchesAcrossDomains(value, runtimeRecord) {
+  const transition = transitionIdentity(value, "Cross-domain transition identity");
+  const runtimeIdentity = transitionIdentity({
+    configHash: runtimeRecord.configHash,
+    containerId: runtimeRecord.containerId,
+    imageId: runtimeRecord.imageId,
+    imageReference: runtimeRecord.imageReference,
+    name: runtimeRecord.name,
+    runtimeConfigSha256: runtimeRecord.runtimeConfigSha256,
+  }, "Runtime transition identity");
+  return transition.name === runtimeIdentity.name
+    && TRANSITION_COMPARABLE_IDENTITY_FIELDS.every((field) => transition[field] === runtimeIdentity[field]);
+}
+
+function transitionStatus(previous, current) {
+  if (current === null) {
+    if (previous === null) invalid("Service transition has neither a previous nor current identity.");
+    return "REMOVED";
+  }
+  if (previous === null) return "CREATED";
+  if (previous.name !== current.name) return "REPLACED";
+  return TRANSITION_COMPARABLE_IDENTITY_FIELDS.every((field) => previous[field] === current[field])
+    ? "RETAINED"
+    : "RECREATED";
+}
+
+function verifyExternal(external, runtime, authority, projectionTransition = null) {
   exactObject(external, [
     "authority", "beganAtUnixSeconds", "containerRecreate", "controllerDockerMutation", "dataMutation",
     "dataMutations", "dataMutationsSha256", "externalDockerMutation", "legacyNetworkAttachments",
@@ -335,14 +379,22 @@ function verifyExternal(external, runtime, authority) {
   const currentNames = [];
   const removedNames = [];
   let containerRecreate = false;
+  if (projectionTransition !== null && stableJson(projectionTransition) !== stableJson({ from: CONTROLLER_IDENTITY_PROJECTION_LEGACY_19, to: CONTROLLER_IDENTITY_PROJECTION_FULL_34 })) {
+    invalid("External reconciliation runtime identity projection transition is unsupported.");
+  }
   for (const raw of external.serviceTransitions) {
     const transition = exactObject(raw, ["current", "previous", "service", "status"], "Service transition");
     const current = transition.current === null ? null : transitionIdentity(transition.current, "Current transition identity");
     const previous = transition.previous === null ? null : transitionIdentity(transition.previous, "Previous transition identity");
     if (current) {
       const runtimeItem = currentRuntime.get(current.name);
-      const expected = runtimeItem && { configHash: runtimeItem.configHash, containerId: runtimeItem.containerId, imageId: runtimeItem.imageId, imageReference: runtimeItem.imageReference, name: runtimeItem.name, runtimeConfigSha256: runtimeItem.runtimeConfigSha256 };
-      if (!runtimeItem || stableJson(current) !== stableJson(expected) || transition.service !== runtimeItem.service) invalid("Transition current identity differs from runtime.");
+      const exactRuntimeIdentity = runtimeItem && transitionIdentityMatchesAcrossDomains(current, runtimeItem);
+      const projectedCommonIdentity = projectionTransition !== null && runtimeItem
+        && current.name === runtimeItem.name
+        && TRANSITION_COMPARABLE_IDENTITY_FIELDS
+          .filter((field) => field !== "runtimeConfigSha256")
+          .every((field) => current[field] === runtimeItem[field]);
+      if ((!exactRuntimeIdentity && !projectedCommonIdentity) || transition.service !== runtimeItem?.service) invalid("Transition current identity differs from runtime.");
       const managedTarget = managedTargets.get(current.name);
       if (managedTarget && (runtimeItem.configHash !== managedTarget.configHash || runtimeItem.project !== managedTarget.project
         || runtimeItem.service !== managedTarget.service)) {
@@ -350,7 +402,12 @@ function verifyExternal(external, runtime, authority) {
       }
       currentNames.push(current.name);
     }
-    const expectedStatus = current === null && previous ? "REMOVED" : previous === null ? "CREATED" : previous.name !== current.name ? "REPLACED" : stableJson(previous) === stableJson(current) ? "RETAINED" : "RECREATED";
+    if (previous) {
+      const allowedPreviousNames = new Set(current ? [current.name] : ["enterprise-backup-scheduler"]);
+      if (current?.name === "enterprise-platform-alert-dispatcher") allowedPreviousNames.add("enterprise-alert-dispatcher");
+      if (!allowedPreviousNames.has(previous.name)) invalid("Transition previous identity is not a declared predecessor.");
+    }
+    const expectedStatus = transitionStatus(previous, current);
     if (transition.status !== expectedStatus) invalid("Service transition status is false.");
     if (["CREATED", "REMOVED", "REPLACED", "RECREATED"].includes(expectedStatus)) containerRecreate = true;
     if (expectedStatus === "REMOVED") removedNames.push(previous.name);
@@ -363,7 +420,15 @@ function verifyExternal(external, runtime, authority) {
   if (external.containerRecreate !== containerRecreate || external.externalDockerMutation !== dockerMutation) invalid("External Docker mutation truth is false.");
 }
 
-function verifyAborted(binding, authority) {
+function physicalStatePath(logicalPath, stateRoot) {
+  if (stateRoot === undefined) return logicalPath;
+  if (typeof stateRoot !== "string" || !stateRoot.startsWith("/") || stateRoot.endsWith("/") || logicalPath.includes("\0")) {
+    invalid("Offline state root is invalid.");
+  }
+  return `${stateRoot}${logicalPath}`;
+}
+
+function verifyAborted(binding, authority, stateRoot, abortRecordFile) {
   exactObject(binding, [
     "authorityDocumentId", "authoritySha256", "completedAtUnixSeconds", "journalSha256", "recordPath",
     "recordSha256", "residualDataMutations", "residualDataMutationsSha256", "schema", "status", "transactionId",
@@ -386,7 +451,7 @@ function verifyAborted(binding, authority) {
     sha(item.evidenceSha256, "Aborted residual data mutation evidence");
     const expectedPath = `/var/lib/platform-infrastructure/v1/local-private/data-mutation-evidence/${binding.authorityDocumentId}-${item.authorityId}-${item.evidenceSha256}.json`;
     if (!allowed.has(item.authorityId) || seen.has(item.authorityId) || item.evidencePath !== expectedPath) invalid("Aborted residual data mutation exceeds its exact authority or fixed evidence path.");
-    const evidence = readCanonicalFile(item.evidencePath, `Aborted residual data mutation ${item.authorityId} evidence`);
+    const evidence = readCanonicalFile(physicalStatePath(item.evidencePath, stateRoot), `Aborted residual data mutation ${item.authorityId} evidence`);
     if (hashBytes(evidence.raw) !== item.evidenceSha256) invalid("Aborted residual data mutation evidence digest differs.");
     seen.add(item.authorityId);
   }
@@ -399,12 +464,79 @@ function verifyAborted(binding, authority) {
     || binding.recordPath !== `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${binding.transactionId}-${binding.recordSha256}.json`) {
     invalid("Aborted reconciliation immutable record binding is invalid.");
   }
-  const archived = readCanonicalFile(binding.recordPath, "Immutable reconciliation abort record");
+  if (stateRoot !== undefined && abortRecordFile !== undefined) invalid("Use either --abortRecordFile or an offline state root, not both.");
+  const selectedRecordFile = abortRecordFile ?? physicalStatePath(binding.recordPath, stateRoot);
+  const archived = readCanonicalFile(selectedRecordFile, "Immutable reconciliation abort record");
   if (!archived.raw.equals(recordBytes)) invalid("Immutable reconciliation abort record bytes differ from the receipt.");
   return binding;
 }
 
-function verifyRecovery(receipt, reconciled) {
+function controllerProjectionRegistry(currentControllerSha256) {
+  sha(currentControllerSha256, "Current authority controller");
+  const configured = CONTROLLER_IDENTITY_PROJECTION_BY_SHA256.get(currentControllerSha256);
+  if (configured && configured !== CURRENT_CONTROLLER_IDENTITY_PROJECTION) {
+    invalid("Current controller semantic identity projection conflicts with registered history.");
+  }
+  return new Map([
+    ...CONTROLLER_IDENTITY_PROJECTION_BY_SHA256,
+    [currentControllerSha256, CURRENT_CONTROLLER_IDENTITY_PROJECTION],
+  ]);
+}
+
+function verifyPredecessorRuntimeProvenance(receipt, currentAuthority, runtimeAuthority) {
+  const provenance = exactObject(
+    receipt.predecessorRuntimeProvenance,
+    PREDECESSOR_RUNTIME_PROVENANCE_FIELDS,
+    "Predecessor runtime provenance",
+  );
+  commit(provenance.candidateCommit, "Predecessor runtime candidate commit");
+  commit(provenance.candidateTree, "Predecessor runtime candidate tree");
+  sha(provenance.sourceArchiveSha256, "Predecessor runtime source archive");
+  sha(provenance.controllerSha256, "Predecessor runtime controller");
+  if (provenance.releaseRoot !== `/srv/platform-infrastructure/releases/${provenance.candidateCommit}-${provenance.sourceArchiveSha256}`) {
+    invalid("Predecessor runtime release binding is invalid.");
+  }
+  const registry = controllerProjectionRegistry(currentAuthority.value.artifacts.controller.sha256);
+  const sourceProjection = registry.get(provenance.controllerSha256);
+  if (!sourceProjection || sourceProjection !== provenance.controllerIdentityProjection) {
+    invalid("Predecessor runtime controller projection is unregistered.");
+  }
+  const projectionTransition = sourceProjection === CURRENT_CONTROLLER_IDENTITY_PROJECTION
+    ? null
+    : { from: sourceProjection, to: CURRENT_CONTROLLER_IDENTITY_PROJECTION };
+  if (projectionTransition !== null && stableJson(projectionTransition) !== stableJson({ from: CONTROLLER_IDENTITY_PROJECTION_LEGACY_19, to: CONTROLLER_IDENTITY_PROJECTION_FULL_34 })) {
+    invalid("Predecessor-to-current runtime identity projection transition is unsupported.");
+  }
+  const names = receipt.runtime.containers.map((item) => item.name);
+  if (receipt.externalAuthorizedReconciliation) {
+    if (provenance.profile !== ABORTED_RUNTIME_PROFILE_CANONICAL
+      || stableJson(names) !== stableJson(V1_LOCAL_PRIVATE_CANONICAL_CONTAINER_NAMES)
+      || !runtimeAuthority) {
+      invalid("Canonical predecessor runtime provenance profile is invalid.");
+    }
+    const external = receipt.externalAuthorizedReconciliation;
+    const authority = runtimeAuthority.value;
+    if (runtimeAuthority.sha256 !== external.releaseAuthoritySha256
+      || authority.documentId !== external.releaseAuthorityDocumentId
+      || authority.candidateCommit !== provenance.candidateCommit
+      || authority.candidateTree !== provenance.candidateTree
+      || authority.sourceArchiveSha256 !== provenance.sourceArchiveSha256
+      || authority.releaseRoot !== provenance.releaseRoot
+      || authority.artifacts.controller.sha256 !== provenance.controllerSha256
+      || stableJson(authority.runtimeIdentity) !== stableJson(external.runtimeIdentity)
+      || external.runtimeIdentity.commit !== provenance.candidateCommit
+      || external.runtimeIdentity.tree !== provenance.candidateTree) {
+      invalid("Canonical predecessor runtime provenance differs from its exact release authority.");
+    }
+  } else if (provenance.profile !== ABORTED_RUNTIME_PROFILE_HISTORICAL
+    || ![V1_LOCAL_PRIVATE_CONTAINER_NAMES, HISTORIC_WITH_LEGACY_DISPATCHER]
+      .some((profile) => stableJson(profile) === stableJson(names))) {
+    invalid("Historical predecessor runtime provenance profile is invalid.");
+  }
+  return { projectionTransition, recoveryCandidateCommit: provenance.candidateCommit };
+}
+
+function verifyRecovery(receipt, reconciled, recoveryCandidateCommit = receipt.candidateCommit) {
   const trust = exactObject(receipt.localArtifactTrust, ["mode", "schedulerRecovery", "status", "subjects"], "Local artifact trust");
   if (trust.mode !== "LOCAL_DOCKER_IMMUTABLE_IMAGE_ID" || trust.status !== "PASS") invalid("Local artifact trust status is invalid.");
   const subjects = receipt.runtime.containers.map(({ configHash, containerId, imageAvailability, imageId, name }) => ({ configHash, containerId, imageAvailability, imageId, name }));
@@ -413,8 +545,9 @@ function verifyRecovery(receipt, reconciled) {
   if (recovery.containerName !== "enterprise-backup-scheduler" || recovery.status !== "RECOVERY_IMAGE_EXPORT_BOUND" || !IMAGE_ID.test(recovery.runningImageId) || !IMAGE_ID.test(recovery.recoveryImageId) || recovery.runningImageId === recovery.recoveryImageId) invalid("Scheduler recovery identity is invalid.");
   sha(recovery.configHash, "Scheduler recovery config"); sha(recovery.containerId, "Scheduler recovery container"); sha(recovery.exportSha256, "Scheduler recovery export");
   const labels = exactObject(recovery.exportLabels, ["com.platform.v1.local-private.candidate-commit", "com.platform.v1.local-private.scheduler-config-hash", "com.platform.v1.local-private.scheduler-container-id", "com.platform.v1.local-private.scheduler-running-image-id"], "Scheduler recovery labels");
-  if (labels["com.platform.v1.local-private.candidate-commit"] !== receipt.candidateCommit || labels["com.platform.v1.local-private.scheduler-config-hash"] !== recovery.configHash || labels["com.platform.v1.local-private.scheduler-container-id"] !== recovery.containerId || labels["com.platform.v1.local-private.scheduler-running-image-id"] !== recovery.runningImageId) invalid("Scheduler recovery labels are not receipt-bound.");
-  if (recovery.recoveryTag !== `platform/v1-scheduler-recovery:${receipt.candidateCommit}`) invalid("Scheduler recovery tag differs from receipt release.");
+  commit(recoveryCandidateCommit, "Scheduler recovery provenance candidate");
+  if (labels["com.platform.v1.local-private.candidate-commit"] !== recoveryCandidateCommit || labels["com.platform.v1.local-private.scheduler-config-hash"] !== recovery.configHash || labels["com.platform.v1.local-private.scheduler-container-id"] !== recovery.containerId || labels["com.platform.v1.local-private.scheduler-running-image-id"] !== recovery.runningImageId) invalid("Scheduler recovery labels are not runtime-provenance-bound.");
+  if (recovery.recoveryTag !== `platform/v1-scheduler-recovery:${recoveryCandidateCommit}`) invalid("Scheduler recovery tag differs from runtime provenance.");
   if (!reconciled) {
     const live = receipt.runtime.containers.find((item) => item.name === "enterprise-backup-scheduler");
     if (!live || live.containerId !== recovery.containerId || live.configHash !== recovery.configHash || live.imageId !== recovery.runningImageId) invalid("Historical scheduler recovery is not runtime-bound.");
@@ -428,12 +561,17 @@ export function verifyV1LocalPrivateControlReceipt(options) {
   const { value: receipt } = readCanonicalFile(options.file, "V1 LOCAL_PRIVATE receipt");
   const reconciled = receipt?.schema === SCHEMA && Object.hasOwn(receipt, "externalAuthorizedReconciliation");
   const aborted = receipt?.schema === SCHEMA && Object.hasOwn(receipt, "abortedAuthorizedReconciliation");
+  const hasPredecessorProvenance = receipt?.schema === SCHEMA && Object.hasOwn(receipt, "predecessorRuntimeProvenance");
   if (receipt?.schema !== SCHEMA) invalid("V1 LOCAL_PRIVATE receipt schema is invalid.");
   exactObject(receipt, [
     ...TOP_FIELDS,
     ...(reconciled ? ["externalAuthorizedReconciliation"] : []),
     ...(aborted ? ["abortedAuthorizedReconciliation"] : []),
+    ...(hasPredecessorProvenance ? ["predecessorRuntimeProvenance"] : []),
   ], "V1 LOCAL_PRIVATE receipt");
+  if (hasPredecessorProvenance && !aborted) invalid("Predecessor runtime provenance is valid only for an aborted reconciliation.");
+  if (options.stateRoot !== undefined && !aborted) invalid("An offline state root is valid only for an aborted receipt.");
+  if (options.abortRecordFile !== undefined && !aborted) invalid("An abort record file is valid only for an aborted receipt.");
   const authority = options.authorityFile ? loadAuthority(options.authorityFile) : null;
   if ((reconciled || aborted) && !authority) invalid("A reconciled or aborted V1 receipt requires --authorityFile.");
   const expected = authority?.value ?? { candidateCommit: options.candidateCommit, candidateTree: options.candidateTree, sourceArchiveSha256: options.sourceArchiveSha256, releaseRoot: `/srv/platform-infrastructure/releases/${options.candidateCommit}-${options.sourceArchiveSha256}` };
@@ -469,18 +607,47 @@ export function verifyV1LocalPrivateControlReceipt(options) {
     { name: "SIGSTORE_PROMOTION", status: "READY_BUT_DISABLED" }, { name: "PUBLIC_PROVIDER", status: "READY_BUT_DISABLED" },
   ], "External dependencies");
   verifyRuntime(receipt.runtime, reconciled);
+  let runtimeAuthority = authority;
+  const externalUsesCurrentAuthority = reconciled
+    && receipt.externalAuthorizedReconciliation.releaseAuthorityDocumentId === authority?.value.documentId
+    && receipt.externalAuthorizedReconciliation.releaseAuthoritySha256 === authority?.sha256;
+  if (reconciled && !externalUsesCurrentAuthority) {
+    if (!aborted || !hasPredecessorProvenance || !options.predecessorAuthorityFile) {
+      invalid("A mixed-generation aborted receipt requires --predecessorAuthorityFile.");
+    }
+    runtimeAuthority = loadAuthority(options.predecessorAuthorityFile);
+  } else if (options.predecessorAuthorityFile) {
+    if (!aborted || !hasPredecessorProvenance || !reconciled) {
+      invalid("A predecessor authority file is valid only for an aborted reconciled receipt.");
+    }
+    const suppliedRuntimeAuthority = loadAuthority(options.predecessorAuthorityFile);
+    if (suppliedRuntimeAuthority.sha256 !== authority.sha256
+      || suppliedRuntimeAuthority.value.documentId !== authority.value.documentId) {
+      invalid("Same-generation predecessor authority bytes differ from current authority.");
+    }
+    runtimeAuthority = suppliedRuntimeAuthority;
+  }
+  let projectionTransition = null;
+  let recoveryCandidateCommit = receipt.candidateCommit;
+  if (hasPredecessorProvenance) {
+    const verifiedProvenance = verifyPredecessorRuntimeProvenance(receipt, authority, runtimeAuthority);
+    projectionTransition = verifiedProvenance.projectionTransition;
+    recoveryCandidateCommit = verifiedProvenance.recoveryCandidateCommit;
+  }
   if (reconciled) {
-    verifyExternal(receipt.externalAuthorizedReconciliation, receipt.runtime, authority);
+    verifyExternal(receipt.externalAuthorizedReconciliation, receipt.runtime, runtimeAuthority, projectionTransition);
     if (receipt.dockerMutation !== receipt.externalAuthorizedReconciliation.externalDockerMutation || receipt.containerRecreate !== receipt.externalAuthorizedReconciliation.containerRecreate) invalid("Reconciled receipt Docker mutation truth differs from transaction evidence.");
   } else if (receipt.dockerMutation !== false || receipt.containerRecreate !== false) invalid("Historical receipt Docker mutation truth is invalid.");
   let residualDataMutation = false;
   if (aborted) {
-    residualDataMutation = verifyAborted(receipt.abortedAuthorizedReconciliation, authority).residualDataMutations.length > 0;
+    residualDataMutation = verifyAborted(
+      receipt.abortedAuthorizedReconciliation, authority, options.stateRoot, options.abortRecordFile,
+    ).residualDataMutations.length > 0;
     if (receipt.mutationModel !== "ABORTED_EXTERNAL_AUTHORIZED_RECONCILIATION") invalid("Aborted receipt mutation model is invalid.");
   } else if (receipt.mutationModel !== (reconciled ? "EXTERNAL_AUTHORIZED_RECONCILIATION" : "ADDITIVE_ADOPTION")) invalid("Receipt mutation model is invalid.");
   const expectedDataMutation = (reconciled && receipt.externalAuthorizedReconciliation.dataMutation) || residualDataMutation;
   if (receipt.dataMutation !== expectedDataMutation) invalid("Receipt data mutation truth differs from sealed or residual evidence.");
-  verifyPorts(receipt.networkIsolation); verifyRecovery(receipt, reconciled);
+  verifyPorts(receipt.networkIsolation); verifyRecovery(receipt, reconciled, recoveryCandidateCommit);
   exactObject(receipt.supervisor, ["active", "enabled", "service", "status", "type"], "Supervisor");
   if (receipt.supervisor.active !== true || receipt.supervisor.enabled !== true || receipt.supervisor.status !== "ACTIVE" || receipt.supervisor.service !== "platform-v1-local-private-control.service" || receipt.supervisor.type !== "ROOT_SYSTEMD_NOTIFY") invalid("Supervisor is not ACTIVE.");
   const copy = { ...receipt }; delete copy.documentId;
@@ -489,8 +656,8 @@ export function verifyV1LocalPrivateControlReceipt(options) {
 }
 
 function options(args) {
-  if (args[0] !== "verify") invalid("Usage: v1-local-private-control-receipt.mjs verify --file FILE [--authorityFile FILE | historical bindings]");
-  const allowed = new Set(["file", "authorityFile", "candidateCommit", "candidateTree", "sourceArchiveSha256", "controllerSha256", "unitSha256"]);
+  if (args[0] !== "verify") invalid("Usage: v1-local-private-control-receipt.mjs verify --file FILE [--authorityFile FILE [--predecessorAuthorityFile FILE] [--abortRecordFile FILE] | historical bindings]");
+  const allowed = new Set(["file", "authorityFile", "predecessorAuthorityFile", "abortRecordFile", "candidateCommit", "candidateTree", "sourceArchiveSha256", "controllerSha256", "unitSha256"]);
   const result = {};
   for (let index = 1; index < args.length; index += 2) {
     const flag = args[index]; const value = args[index + 1];

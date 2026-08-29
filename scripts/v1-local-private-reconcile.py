@@ -59,11 +59,10 @@ RUNTIME_EVIDENCE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence.json"
 
 VALIDATION_LANE_FILE = f"{STATE_DIR}/validation-lane.json"
 VALIDATION_CHECKPOINT_FILE = f"{PREDEPLOY_DIR}/local-private-checkpoint-validation.json"
-VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
+VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v2"
 VALIDATION_LANE_MAX_BACKUP_AGE = 24 * 3600
 VALIDATION_RUNTIME_EVIDENCE_FILE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence-validation.json"
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
-VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
 VALIDATION_LANE_TTL_SECONDS = 24 * 3600
 MUTATION_EVIDENCE_DIR = f"{STATE_DIR}/data-mutation-evidence"
 SECRET_DIR = "/home/platform_infrastructure/platform-infrastructure/secrets"
@@ -167,6 +166,16 @@ RUNTIME_EVIDENCE_SCHEMA = "platform.v1-local-private-reconciliation-runtime/v1"
 MUTATION_EVIDENCE_SCHEMA = "platform.v1-local-private-reconciliation-data-evidence/v1"
 ROLLBACK_SPEC_SCHEMA = "platform.v1-local-private-container-rollback-spec/v1"
 ABORT_RECORD_SCHEMA = "platform.v1-local-private-reconciliation-abort-record/v1"
+HISTORICAL_CONTROLLER_DIGEST_DIVERGENCE_CANDIDATES = (
+    "e19ba376f6d721134faef170bd618e9bcbcc266a",
+)
+JOURNAL_BASE_FIELDS = (
+    "authorityDocumentId", "authoritySha256", "beganAtUnixSeconds", "createdAtUnixSeconds",
+    "dataMutationEvidence", "dataMutationStatus", "deploymentConfigPreimage", "evidencePreimages",
+    "phase", "reconciliationSha256", "schema", "steps", "transactionId", "updatedAtUnixSeconds",
+)
+JOURNAL_FIELDS = (*JOURNAL_BASE_FIELDS, "validationLaneSha256")
+JOURNAL_CHECKPOINT_ABORT_FIELDS = (*JOURNAL_FIELDS, "abortCheckpointMode", "abortCheckpointSha256")
 DOCKER_SOCKET = "/var/run/docker.sock"
 MAX_JSON = 4 * 1024 * 1024
 MAX_AUTHORITY = 128 * 1024
@@ -346,6 +355,14 @@ AUTHORIZED_DATA_MUTATIONS = (
         "type": "CONFIGURATION_WRITE",
     },
 )
+DATA_MUTATION_ORDER = (
+    "control-center-database-runtime-secret",
+    "control-center-database-bootstrap",
+    "control-center-first-configuration-bootstrap-token",
+    "control-center-first-configuration-keycloak-client",
+)
+if {item["id"] for item in AUTHORIZED_DATA_MUTATIONS} != set(DATA_MUTATION_ORDER):
+    raise RuntimeError("V1 data-mutation execution order is not the exact authorized set.")
 
 LOCAL_IMAGE_BUILDS = (
     ("CONTROL_CENTER_IMAGE", "docker/control-center.Dockerfile", "platform/control-center"),
@@ -387,6 +404,7 @@ OWNER_UID = os.geteuid()
 OWNER_GID = os.getegid()
 SECRET_UID = os.geteuid()
 SECRET_GID = os.getegid()
+UNBOUND_VALIDATION_LANE = object()
 PREVERIFIED_CONTROLLER_RECEIPT: Optional[bytes] = None
 SHARED_LOCK_FD: Optional[int] = None
 EXECUTOR_FD_RESERVED = False
@@ -504,13 +522,13 @@ def configure_secret_anchor() -> None:
 
 
 def configure_secret_identity_readonly() -> None:
-    """Derive the live deployment owner for abort without chmod/create/write."""
+    """Derive the live deployment owner without chmod/create/write."""
     global SECRET_UID, SECRET_GID
     anchor = physical(DEPLOYMENT_REPO)
     no_symlink_chain(anchor, "LOCAL_PRIVATE deployment anchor")
     info = os.stat(anchor, follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid == 0 or stat.S_IMODE(info.st_mode) & 0o002:
-        stop("LOCAL_PRIVATE deployment anchor cannot provide a trusted abort owner.")
+        stop("LOCAL_PRIVATE deployment anchor cannot provide a trusted read-only owner.")
     env_path = physical(DEPLOYMENT_ENV)
     no_symlink_chain(env_path, "live deployment environment")
     env_info = os.stat(env_path, follow_symlinks=False)
@@ -1316,6 +1334,109 @@ def prepare_live_prerequisite_cohort(release: str) -> Dict[str, object]:
         }
     finally:
         remove_secret_stage()
+
+
+def validate_live_prerequisite_cohort_readonly(release: str) -> Dict[str, object]:
+    """Verify an existing V1 cohort without writing any live secret state."""
+    configure_secret_identity_readonly()
+    privileged_uid, privileged_gid = privileged_identity()
+    snapshots: List[Tuple[str, str, int, int, int, Tuple[int, ...], Tuple[bytes, Tuple[int, int, int, int, int, int], int]]] = []
+
+    def capture(
+        pathname: str, label: str, maximum: int, uid: int, gid: int, modes: Tuple[int, ...],
+    ) -> bytes:
+        observed = read_external_regular(pathname, label, maximum, uid, gid, modes)
+        snapshots.append((pathname, label, maximum, uid, gid, modes, observed))
+        return observed[0]
+
+    if os.path.lexists(physical(SECRET_PREP_STAGE)):
+        stop("FAST validation refuses an unfinished secret preparation stage.")
+    store = capture(
+        physical(SECRET_MANAGER_STORE), "FAST live secret-manager encrypted store", MAX_JSON,
+        privileged_uid, privileged_gid, (0o600,),
+    )
+    _, names = manager_store_names(store, "FAST live secret-manager encrypted store")
+    if names != SECRET_MANAGER_COMPLETE:
+        stop("FAST validation requires the already-complete V1 secret-manager cohort.")
+    master = capture(
+        physical(SECRET_MANAGER_MASTER_KEY), "FAST live secret-manager master key", 4096,
+        privileged_uid, privileged_gid, (0o600,),
+    )
+    capture(
+        physical(SECRET_MANAGER_AUDIT_LOG), "FAST live secret-manager audit log", 64 * 1024 * 1024,
+        privileged_uid, privileged_gid, (0o600, 0o640, 0o644),
+    )
+    materialized: Dict[str, bytes] = {}
+    for name in SECRET_MANAGER_COMPLETE:
+        uid, gid, modes = manager_secret_metadata(name)
+        materialized[name] = capture(
+            physical(f"{SECRET_DIR}/{name}.txt"), f"FAST materialized secret {name}", 4096,
+            uid, gid, modes,
+        )
+    for logical in (DATABASE_SECRET, BOOTSTRAP_SECRET, KEYCLOAK_CLIENT_SECRET):
+        data = capture(
+            physical(logical), f"FAST setup secret {os.path.basename(logical)}", 4096,
+            SECRET_UID, SECRET_GID, (0o600,),
+        )
+        validate_setup_secret_bytes(logical, data)
+    # Decrypt and compare the complete store using only a transaction-private
+    # copy.  The candidate verifier's audit sink is private and removed with
+    # the copy; it never opens the live audit log for writing.
+    stage = create_secret_stage()
+    manager_stage = os.path.join(stage, "manager")
+    os.mkdir(manager_stage, 0o700)
+    os.chown(manager_stage, privileged_uid, privileged_gid)
+    try:
+        write_new_private_file(
+            os.path.join(manager_stage, "infra-secret-manager-store.json"),
+            store, privileged_uid, privileged_gid, 0o600,
+        )
+        write_new_private_file(
+            os.path.join(manager_stage, "infra-secret-manager-master.key"),
+            master, privileged_uid, privileged_gid, 0o600,
+        )
+        for name in SECRET_MANAGER_COMPLETE:
+            mode = 0o640 if name in ("alertmanager_webhook_token", "app_db_password") else 0o600
+            write_new_private_file(
+                os.path.join(manager_stage, f"{name}.txt"), materialized[name],
+                privileged_uid, privileged_gid, mode,
+            )
+        empty_environment = os.path.join(stage, "empty.env")
+        write_new_private_file(empty_environment, b"\n", privileged_uid, privileged_gid, 0o600)
+        run_candidate_secret_manager(
+            release, "verify", manager_stage, os.path.join(stage, "readonly-verify-audit.log"),
+        )
+        verified_store, _, _ = read_external_regular(
+            os.path.join(manager_stage, "infra-secret-manager-store.json"),
+            "FAST private verified secret-manager store", MAX_JSON,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        if verified_store != store:
+            stop("FAST private secret-manager verification changed the copied store.")
+        verified_master, _, _ = read_external_regular(
+            os.path.join(manager_stage, "infra-secret-manager-master.key"),
+            "FAST private verified secret-manager master key", 4096,
+            privileged_uid, privileged_gid, (0o600,),
+        )
+        if verified_master != master:
+            stop("FAST private secret-manager verification changed the copied master key.")
+        for name in SECRET_MANAGER_COMPLETE:
+            mode = 0o640 if name in ("alertmanager_webhook_token", "app_db_password") else 0o600
+            verified_leaf, _, _ = read_external_regular(
+                os.path.join(manager_stage, f"{name}.txt"),
+                f"FAST private verified materialized secret {name}", 4096,
+                privileged_uid, privileged_gid, (mode,),
+            )
+            if verified_leaf != materialized[name]:
+                stop("FAST private secret-manager verification changed one copied materialized secret.")
+    finally:
+        remove_secret_stage()
+    for pathname, label, maximum, uid, gid, modes, before in snapshots:
+        if read_external_regular(
+            pathname, f"{label} revalidation", maximum, uid, gid, modes,
+        ) != before:
+            stop("FAST secret prerequisite cohort changed during read-only validation.")
+    return {"managerRecords": len(names), "status": "PASS", "storeState": "V1_COMPLETE"}
 
 
 def secure_file(logical: str, label: str, maximum: int = MAX_JSON, mode: Optional[int] = None) -> bytes:
@@ -2335,6 +2456,21 @@ def provision_confidential_backup_passphrase() -> None:
         stop("confidential backup passphrase changed after atomic publication cleanup.")
 
 
+def validate_existing_confidential_backup_passphrase_readonly() -> None:
+    """FAST admits only one already-published passphrase and no residue cleanup."""
+    pathname = physical(CONFIDENTIAL_BACKUP_PASSPHRASE)
+    temporary = pathname + ".staging"
+    if os.path.lexists(temporary):
+        stop("FAST validation refuses confidential passphrase staging residue.")
+    if not os.path.lexists(pathname):
+        stop("FAST validation requires an existing confidential backup passphrase.")
+    first = read_passphrase_stage(pathname, "FAST confidential backup passphrase", (1,))
+    validate_confidential_passphrase_bytes(first)
+    second = read_passphrase_stage(pathname, "FAST confidential backup passphrase revalidation", (1,))
+    if second != first:
+        stop("FAST confidential backup passphrase changed during read-only validation.")
+
+
 def update_deployment_environment(repo_root: str, replacements: Dict[str, str]) -> None:
     if set(replacements) != set(DEPLOYMENT_LOCAL_IMAGE_ENV) or any(DIGEST_REFERENCE_RE.fullmatch(value) is None for value in replacements.values()):
         stop("deployment environment update differs from the four closed active local image variables.")
@@ -2704,6 +2840,31 @@ def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
     return lane
 
 
+def validation_lane_sha256(lane: Optional[Dict[str, object]]) -> Optional[str]:
+    return None if lane is None else digest(canonical_bytes(lane))
+
+
+def journal_uses_validation_lane(
+    journal: Dict[str, object], candidate_commit: str,
+) -> bool:
+    """Use the transaction's immutable lane, never marker absence as mode.
+
+    Once apply publishes a journal, removing/expiring the operator marker may
+    not turn FAST evidence into production evidence.  The marker must remain
+    present and byte-identical until the reconciliation is closed.
+    """
+    bound = journal.get("validationLaneSha256")
+    if bound is not None and (not isinstance(bound, str) or SHA256_RE.fullmatch(bound) is None):
+        stop("reconciliation journal validation-lane binding is invalid.")
+    current = load_validation_lane(candidate_commit)
+    current_sha = validation_lane_sha256(current)
+    if bound is not None and current is None:
+        stop("validation lane marker disappeared from an open FAST transaction.")
+    if current is not None and current_sha != bound:
+        stop("validation lane marker differs from the reconciliation transaction binding.")
+    return bound is not None
+
+
 def existing_recovery_binding() -> Dict[str, object]:
     """The live scheduler recovery binding reused by the validation checkpoint.
 
@@ -2741,6 +2902,12 @@ def existing_recovery_binding() -> Dict[str, object]:
 
 def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str, object]) -> Dict[str, object]:
     """Honest non-production checkpoint: reuse references, no PASS claims."""
+    if binding != {
+        "candidateCommit": authority["candidateCommit"],
+        "candidateTree": authority["candidateTree"],
+        "sourceArchiveSha256": authority["sourceArchiveSha256"],
+    }:
+        stop("validation checkpoint target binding differs from exact authority.")
     lane = load_validation_lane(authority["candidateCommit"])
     require_lane = lane is not None
     if not require_lane:
@@ -2748,23 +2915,92 @@ def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str,
     recovery = existing_recovery_binding()
     now = int(time.time())
     reused = {}
-    newest_evidence_mtime = 0
+    reused_documents: Dict[str, Dict[str, object]] = {}
     for name, path in CHECKPOINT_EVIDENCE_PATHS.items():
         pathname = physical(path)
-        if os.path.lexists(pathname):
-            reused[name] = digest(secure_file(path, f"reused evidence {name}", MAX_JSON))
-            # Real provenance: the evidence file's own mtime is the moment that
-            # material was captured/written; the newest one bounds reuse age.
-            newest_evidence_mtime = max(newest_evidence_mtime, int(os.stat(pathname).st_mtime))
-    # True capture provenance: the prior production checkpoint records the
-    # moment the producer actually completed the reused backup cycle.
-    reused_capture = newest_evidence_mtime
+        if not os.path.lexists(pathname):
+            stop(f"validation checkpoint requires sealed PRE evidence {name}.")
+        evidence_bytes = secure_file(path, f"reused evidence {name}", MAX_JSON)
+        reused[name] = digest(evidence_bytes)
+        evidence_document = parse_json(evidence_bytes, f"reused evidence {name}", True)
+        if not isinstance(evidence_document, dict):
+            stop(f"reused evidence {name} is not one document.")
+        reused_documents[name] = evidence_document
+    # Only one controller-sealed production checkpoint can establish the true
+    # capture time for the complete reused five-file evidence set.  Individual
+    # mtimes are not interchangeable evidence provenance.
     prior_pathname = physical(LOCAL_CHECKPOINT)
-    if os.path.lexists(prior_pathname):
-        prior = parse_json(secure_file(LOCAL_CHECKPOINT, "prior production checkpoint", MAX_JSON), "prior production checkpoint", True)
-        prior_capture = prior.get("backupCapturedUnixSeconds")
-        if isinstance(prior_capture, int) and not isinstance(prior_capture, bool) and 1700000000 < prior_capture <= now + 60:
-            reused_capture = prior_capture
+    if not os.path.lexists(prior_pathname):
+        stop("validation checkpoint requires one controller-sealed production checkpoint.")
+    prior_bytes = secure_file(LOCAL_CHECKPOINT, "prior production checkpoint", MAX_JSON)
+    prior = exact_keys(
+        parse_json(prior_bytes, "prior production checkpoint", True),
+        (
+            "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
+            "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
+            "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+            "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+            "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
+            "secretsBackupEvidenceSha256", "sourceArchiveSha256",
+        ),
+        "prior production checkpoint",
+    )
+    prior_capture = prior.get("backupCapturedUnixSeconds")
+    state_bytes = secure_file(STATE_FILE, "validation predecessor state", MAX_AUTHORITY, 0o600)
+    state = parse_json(state_bytes, "validation predecessor state", True)
+    receipt_bytes = secure_file(ACTIVE_RECEIPT, "validation predecessor ACTIVE receipt", MAX_AUTHORITY, 0o444)
+    receipt = parse_json(receipt_bytes, "validation predecessor ACTIVE receipt", True)
+    prior_sha = digest(prior_bytes)
+    evidence_reference_keys = (
+        "authorityDocumentId", "authoritySha256", "candidateCommit", "candidateTree",
+        "evidencePhase", "reconciliationSha256", "sourceArchiveSha256", "transactionId",
+    )
+    logical_evidence = reused_documents["logicalBackupEvidenceSha256"]
+    evidence_reference = {key: logical_evidence.get(key) for key in evidence_reference_keys}
+    if any(
+        {key: document.get(key) for key in evidence_reference_keys} != evidence_reference
+        for document in reused_documents.values()
+    ):
+        stop("validation predecessor PRE evidence does not share one authority/candidate binding.")
+    predecessor_authority, _ = read_archived_authority(
+        evidence_reference.get("authorityDocumentId"), evidence_reference.get("authoritySha256"),
+    )
+    if (
+        prior["schema"] != "platform.v1-local-private-predeploy-checkpoint/v1"
+        or prior["authoritative"] is not False
+        or prior["destructiveMutationPlanned"] is not False
+        or prior["restoreVerified"] is not True
+        or prior["runtimeRecovered"] is not True
+        or prior["schedulerRecoveryImageExportSha256"] != recovery["exportSha256"]
+        or prior["schedulerRecoveryImageId"] != recovery["recoveryImageId"]
+        or prior["schedulerRunningImageId"] != recovery["runningImageId"]
+        or any(prior[key] != reused[key] for key in CHECKPOINT_EVIDENCE_PATHS)
+        or isinstance(prior_capture, bool) or not isinstance(prior_capture, int)
+        or not (1700000000 < prior_capture <= now + 60)
+        or not isinstance(state, dict) or state.get("status") != "ACTIVE"
+        or state.get("checkpointSha256") != prior_sha
+        or not isinstance(receipt, dict)
+        or receipt.get("schema") != "platform.v1-local-private-control-receipt/v1"
+        or receipt.get("status") != "ACTIVE"
+        or receipt.get("checkpointSha256") != prior_sha
+        or state.get("candidateCommit") != prior["candidateCommit"]
+        or state.get("candidateTree") != prior["candidateTree"]
+        or state.get("sourceArchiveSha256") != prior["sourceArchiveSha256"]
+        or receipt.get("candidateCommit") != prior["candidateCommit"]
+        or receipt.get("candidateTree") != prior["candidateTree"]
+        or receipt.get("sourceArchiveSha256") != prior["sourceArchiveSha256"]
+        or evidence_reference.get("evidencePhase") != "PRE"
+        or evidence_reference.get("reconciliationSha256") is not None
+        or evidence_reference.get("transactionId") is not None
+        or evidence_reference.get("candidateCommit") != prior["candidateCommit"]
+        or evidence_reference.get("candidateTree") != prior["candidateTree"]
+        or evidence_reference.get("sourceArchiveSha256") != prior["sourceArchiveSha256"]
+        or predecessor_authority["candidateCommit"] != prior["candidateCommit"]
+        or predecessor_authority["candidateTree"] != prior["candidateTree"]
+        or predecessor_authority["sourceArchiveSha256"] != prior["sourceArchiveSha256"]
+    ):
+        stop("validation predecessor checkpoint is not the exact controller-sealed five-file PRE set.")
+    reused_capture = prior_capture
     checkpoint = {
         "authoritative": False,
         "backupCapturedUnixSeconds": reused_capture,
@@ -2772,17 +3008,25 @@ def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str,
         "candidateTree": binding["candidateTree"],
         "destructiveMutationPlanned": False,
         "generatedAtUnixSeconds": now,
-        "logicalBackupEvidenceSha256": reused.get("logicalBackupEvidenceSha256", "0" * 64),
-        "offHostBackupEvidenceSha256": reused.get("offHostBackupEvidenceSha256", "0" * 64),
-        "restoreEvidenceSha256": reused.get("restoreEvidenceSha256", "0" * 64),
+        "logicalBackupEvidenceSha256": reused["logicalBackupEvidenceSha256"],
+        "offHostBackupEvidenceSha256": reused["offHostBackupEvidenceSha256"],
+        "predecessorAuthorityDocumentId": evidence_reference["authorityDocumentId"],
+        "predecessorAuthoritySha256": evidence_reference["authoritySha256"],
+        "predecessorCandidateCommit": prior["candidateCommit"],
+        "predecessorCandidateTree": prior["candidateTree"],
+        "predecessorCheckpointSha256": prior_sha,
+        "predecessorReceiptSha256": digest(receipt_bytes),
+        "predecessorSourceArchiveSha256": prior["sourceArchiveSha256"],
+        "predecessorStateSha256": digest(state_bytes),
+        "restoreEvidenceSha256": reused["restoreEvidenceSha256"],
         "restoreVerified": False,
-        "runtimeInventorySha256": reused.get("runtimeInventorySha256", "0" * 64),
+        "runtimeInventorySha256": reused["runtimeInventorySha256"],
         "runtimeRecovered": False,
         "schedulerRecoveryImageExportSha256": recovery["exportSha256"],
         "schedulerRecoveryImageId": recovery["recoveryImageId"],
         "schedulerRunningImageId": recovery["runningImageId"],
         "schema": VALIDATION_CHECKPOINT_SCHEMA,
-        "secretsBackupEvidenceSha256": reused.get("secretsBackupEvidenceSha256", "0" * 64),
+        "secretsBackupEvidenceSha256": reused["secretsBackupEvidenceSha256"],
         "sourceArchiveSha256": binding["sourceArchiveSha256"],
         "validation": True,
     }
@@ -2793,9 +3037,134 @@ def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str,
         stop("validation checkpoint readback differs from the written bytes.")
     return checkpoint
 
+
+def validation_checkpoint_provenance(
+    reconciliation: Dict[str, object],
+) -> Dict[str, object]:
+    """Return the sealed PRE digest set without executing any live workload."""
+    checkpoint_bytes = secure_file(
+        VALIDATION_CHECKPOINT_FILE, "FAST validation checkpoint provenance", MAX_AUTHORITY,
+    )
+    checkpoint_sha = digest(checkpoint_bytes)
+    if checkpoint_sha != reconciliation.get("rollbackCheckpointSha256"):
+        stop("FAST validation checkpoint provenance differs from controller begin.")
+    checkpoint = parse_json(checkpoint_bytes, "FAST validation checkpoint provenance", True)
+    evidence = []
+    for key, logical in sorted(CHECKPOINT_EVIDENCE_PATHS.items()):
+        data = secure_file(logical, f"FAST sealed PRE provenance {key}", MAX_JSON)
+        evidence_sha = digest(data)
+        if checkpoint.get(key) != evidence_sha:
+            stop(f"FAST sealed PRE provenance {key} differs from its checkpoint digest.")
+        evidence.append({"checkpointField": key, "path": logical, "sha256": evidence_sha})
+    return {
+        "backupCapturedUnixSeconds": checkpoint.get("backupCapturedUnixSeconds"),
+        "checkpointPath": VALIDATION_CHECKPOINT_FILE,
+        "checkpointSha256": checkpoint_sha,
+        "evidence": evidence,
+        "evidenceSha256": digest(canonical(evidence).encode()),
+        "generatedAtUnixSeconds": checkpoint.get("generatedAtUnixSeconds"),
+        "predecessor": {
+            "authorityDocumentId": checkpoint.get("predecessorAuthorityDocumentId"),
+            "authoritySha256": checkpoint.get("predecessorAuthoritySha256"),
+            "candidateCommit": checkpoint.get("predecessorCandidateCommit"),
+            "candidateTree": checkpoint.get("predecessorCandidateTree"),
+            "checkpointSha256": checkpoint.get("predecessorCheckpointSha256"),
+            "receiptSha256": checkpoint.get("predecessorReceiptSha256"),
+            "sourceArchiveSha256": checkpoint.get("predecessorSourceArchiveSha256"),
+            "stateSha256": checkpoint.get("predecessorStateSha256"),
+        },
+        "schema": checkpoint.get("schema"),
+    }
+
+
+def unjournaled_begin_checkpoint_mode(
+    authority: Dict[str, object], reconciliation: Dict[str, object],
+) -> Tuple[str, str]:
+    """Recover begin-time mode from its immutable checkpoint, not a TTL marker.
+
+    The validation-lane marker is intentionally revocable.  Once controller
+    begin has bound exact checkpoint bytes, abort must still be able to close a
+    transaction that crashed before journal publication.  Conversely, marker
+    removal must never reinterpret a FAST begin as a production transaction.
+    Freshness is irrelevant to deletion-free rollback closure, but every
+    authority/candidate/non-destructive field remains exact and fail-closed.
+    """
+    expected_sha = reconciliation.get("rollbackCheckpointSha256")
+    if not isinstance(expected_sha, str) or SHA256_RE.fullmatch(expected_sha) is None:
+        stop("unjournaled abort checkpoint binding is not one canonical digest.")
+    common_fields = (
+        "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
+        "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
+        "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+        "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+        "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
+        "secretsBackupEvidenceSha256", "sourceArchiveSha256",
+    )
+    candidates = (
+        (
+            "FAST", VALIDATION_CHECKPOINT_FILE, VALIDATION_CHECKPOINT_SCHEMA,
+            (
+                *common_fields, "predecessorAuthorityDocumentId", "predecessorAuthoritySha256",
+                "predecessorCandidateCommit", "predecessorCandidateTree", "predecessorCheckpointSha256",
+                "predecessorReceiptSha256", "predecessorSourceArchiveSha256", "predecessorStateSha256",
+                "validation",
+            ), False, 0o400,
+        ),
+        (
+            "PRODUCTION", LOCAL_CHECKPOINT, "platform.v1-local-private-predeploy-checkpoint/v1",
+            common_fields, True, None,
+        ),
+    )
+    matched: List[Tuple[str, bytes, Dict[str, object]]] = []
+    for mode_name, logical, schema, fields, restored, exact_mode in candidates:
+        if not os.path.lexists(physical(logical)):
+            continue
+        checkpoint_identity = fixed_file_identity(logical, f"unjournaled {mode_name} abort checkpoint")
+        if checkpoint_identity[-1] & 0o022:
+            stop(f"unjournaled {mode_name} abort checkpoint is writable by group/other.")
+        data = secure_file(logical, f"unjournaled {mode_name} abort checkpoint", MAX_AUTHORITY, exact_mode)
+        if fixed_file_identity(logical, f"unjournaled {mode_name} abort checkpoint") != checkpoint_identity:
+            stop(f"unjournaled {mode_name} abort checkpoint changed around its stable snapshot.")
+        if digest(data) != expected_sha:
+            continue
+        checkpoint = exact_keys(
+            parse_json(data, f"unjournaled {mode_name} abort checkpoint", True),
+            fields, f"unjournaled {mode_name} abort checkpoint",
+        )
+        if (
+            checkpoint["schema"] != schema
+            or checkpoint["candidateCommit"] != authority["candidateCommit"]
+            or checkpoint["candidateTree"] != authority["candidateTree"]
+            or checkpoint["sourceArchiveSha256"] != authority["sourceArchiveSha256"]
+            or checkpoint["authoritative"] is not False
+            or checkpoint["destructiveMutationPlanned"] is not False
+            or checkpoint["restoreVerified"] is not restored
+            or checkpoint["runtimeRecovered"] is not restored
+            or (mode_name == "FAST" and checkpoint["validation"] is not True)
+            or (
+                mode_name == "FAST" and (
+                    checkpoint["predecessorStateSha256"] != reconciliation.get("previousStateSha256")
+                    or checkpoint["predecessorReceiptSha256"] != reconciliation.get("previousReceiptSha256")
+                    or any(
+                        not isinstance(checkpoint[key], str) or SHA256_RE.fullmatch(checkpoint[key]) is None
+                        for key in (
+                            "predecessorAuthorityDocumentId", "predecessorAuthoritySha256",
+                            "predecessorCheckpointSha256", "predecessorReceiptSha256",
+                            "predecessorStateSha256",
+                        )
+                    )
+                )
+            )
+        ):
+            stop(f"unjournaled {mode_name} abort checkpoint differs from begin authority.")
+        matched.append((mode_name, data, checkpoint))
+    if len(matched) != 1:
+        stop("unjournaled abort cannot recover one exact begin checkpoint mode.")
+    return matched[0][0], expected_sha
+
 def validate_pre_mutation_checkpoint(
     authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]
-) -> None:
+) -> Optional[Dict[str, object]]:
     """Reopen the exact PRE guard immediately before any mutable apply work.
 
     Controller begin is not the mutation boundary: a retry can occur later or
@@ -2810,7 +3179,10 @@ def validate_pre_mutation_checkpoint(
         checkpoint_fields = (
             "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree", "destructiveMutationPlanned",
             "generatedAtUnixSeconds", "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256",
-            "restoreVerified", "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+            "predecessorAuthorityDocumentId", "predecessorAuthoritySha256", "predecessorCandidateCommit",
+            "predecessorCandidateTree", "predecessorCheckpointSha256", "predecessorReceiptSha256",
+            "predecessorSourceArchiveSha256", "predecessorStateSha256", "restoreVerified",
+            "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
             "schedulerRecoveryImageId", "schedulerRunningImageId", "schema", "secretsBackupEvidenceSha256",
             "sourceArchiveSha256", "validation",
         )
@@ -2846,6 +3218,12 @@ def validate_pre_mutation_checkpoint(
         or checkpoint["candidateCommit"] != authority["candidateCommit"]
         or checkpoint["candidateTree"] != authority["candidateTree"]
         or checkpoint["sourceArchiveSha256"] != authority["sourceArchiveSha256"]
+        or (
+            lane is not None and (
+                checkpoint["predecessorStateSha256"] != reconciliation.get("previousStateSha256")
+                or checkpoint["predecessorReceiptSha256"] != reconciliation.get("previousReceiptSha256")
+            )
+        )
         or isinstance(captured, bool) or not isinstance(captured, int)
         or isinstance(generated, bool) or not isinstance(generated, int)
         or captured > generated or generated > now + 60
@@ -2855,6 +3233,73 @@ def validate_pre_mutation_checkpoint(
     for key in CHECKPOINT_EVIDENCE_PATHS:
         if not isinstance(checkpoint[key], str) or SHA256_RE.fullmatch(checkpoint[key]) is None:
             stop(f"pre-mutation LOCAL_PRIVATE checkpoint {key} is not a canonical digest.")
+    evidence_generated_upper_bound = generated
+    if lane is not None:
+        for key in (
+            "predecessorAuthorityDocumentId", "predecessorAuthoritySha256",
+            "predecessorCheckpointSha256", "predecessorReceiptSha256", "predecessorStateSha256",
+        ):
+            if not isinstance(checkpoint[key], str) or SHA256_RE.fullmatch(checkpoint[key]) is None:
+                stop(f"FAST validation checkpoint {key} is not a canonical digest.")
+        if (
+            not isinstance(checkpoint["predecessorCandidateCommit"], str)
+            or COMMIT_RE.fullmatch(checkpoint["predecessorCandidateCommit"]) is None
+            or not isinstance(checkpoint["predecessorCandidateTree"], str)
+            or COMMIT_RE.fullmatch(checkpoint["predecessorCandidateTree"]) is None
+            or not isinstance(checkpoint["predecessorSourceArchiveSha256"], str)
+            or SHA256_RE.fullmatch(checkpoint["predecessorSourceArchiveSha256"]) is None
+        ):
+            stop("FAST validation checkpoint predecessor candidate identity is invalid.")
+        predecessor_checkpoint_bytes = secure_file(
+            LOCAL_CHECKPOINT, "FAST predecessor production checkpoint", MAX_AUTHORITY,
+        )
+        predecessor_checkpoint = exact_keys(
+            parse_json(
+                predecessor_checkpoint_bytes,
+                "FAST predecessor production checkpoint", True,
+            ),
+            (
+                "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
+                "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
+                "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+                "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+                "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
+                "secretsBackupEvidenceSha256", "sourceArchiveSha256",
+            ),
+            "FAST predecessor production checkpoint",
+        )
+        predecessor_captured = predecessor_checkpoint["backupCapturedUnixSeconds"]
+        predecessor_generated = predecessor_checkpoint["generatedAtUnixSeconds"]
+        if (
+            digest(predecessor_checkpoint_bytes) != checkpoint["predecessorCheckpointSha256"]
+            or predecessor_checkpoint["schema"] != "platform.v1-local-private-predeploy-checkpoint/v1"
+            or predecessor_checkpoint["authoritative"] is not False
+            or predecessor_checkpoint["destructiveMutationPlanned"] is not False
+            or predecessor_checkpoint["restoreVerified"] is not True
+            or predecessor_checkpoint["runtimeRecovered"] is not True
+            or predecessor_checkpoint["candidateCommit"] != checkpoint["predecessorCandidateCommit"]
+            or predecessor_checkpoint["candidateTree"] != checkpoint["predecessorCandidateTree"]
+            or predecessor_checkpoint["sourceArchiveSha256"] != checkpoint["predecessorSourceArchiveSha256"]
+            or predecessor_captured != captured
+            or isinstance(predecessor_generated, bool)
+            or not isinstance(predecessor_generated, int)
+            or predecessor_generated < predecessor_captured
+            or predecessor_generated > generated
+            or any(
+                predecessor_checkpoint[key] != checkpoint[key]
+                for key in CHECKPOINT_EVIDENCE_PATHS
+            )
+            or any(
+                predecessor_checkpoint[key] != checkpoint[key]
+                for key in (
+                    "schedulerRecoveryImageExportSha256", "schedulerRecoveryImageId",
+                    "schedulerRunningImageId",
+                )
+            )
+        ):
+            stop("FAST predecessor production checkpoint differs from validation provenance.")
+        evidence_generated_upper_bound = predecessor_generated
+        verify_predecessor_state_receipt_unchanged(reconciliation)
 
     snapshots, snapshot_identities = stable_checkpoint_evidence_snapshots()
     documents = {
@@ -2907,25 +3352,45 @@ def validate_pre_mutation_checkpoint(
     logical = documents["logicalBackupEvidenceSha256"]
     reference = {key: logical.get(key) for key in common_keys}
     evidence_generated = logical.get("generatedAtUnixSeconds")
+    evidence_authority = authority
+    evidence_authority_sha = digest(authority_bytes)
+    evidence_candidate_commit = authority["candidateCommit"]
+    evidence_candidate_tree = authority["candidateTree"]
+    evidence_source_archive = authority["sourceArchiveSha256"]
+    if lane is not None:
+        evidence_authority, evidence_authority_bytes = read_archived_authority(
+            checkpoint["predecessorAuthorityDocumentId"], checkpoint["predecessorAuthoritySha256"],
+        )
+        evidence_authority_sha = digest(evidence_authority_bytes)
+        evidence_candidate_commit = checkpoint["predecessorCandidateCommit"]
+        evidence_candidate_tree = checkpoint["predecessorCandidateTree"]
+        evidence_source_archive = checkpoint["predecessorSourceArchiveSha256"]
+        if (
+            evidence_authority["candidateCommit"] != evidence_candidate_commit
+            or evidence_authority["candidateTree"] != evidence_candidate_tree
+            or evidence_authority["sourceArchiveSha256"] != evidence_source_archive
+        ):
+            stop("FAST predecessor authority differs from validation checkpoint provenance.")
     expected_common = {
-        "authorityDocumentId": authority["documentId"],
-        "authoritySha256": digest(authority_bytes),
-        "backupToolImages": authority["backupToolImages"],
-        "candidateCommit": authority["candidateCommit"],
-        "candidateTree": authority["candidateTree"],
+        "authorityDocumentId": evidence_authority["documentId"],
+        "authoritySha256": evidence_authority_sha,
+        "backupToolImages": evidence_authority["backupToolImages"],
+        "candidateCommit": evidence_candidate_commit,
+        "candidateTree": evidence_candidate_tree,
         "evidencePhase": "PRE",
         "reconciliationSha256": None,
-        "sourceArchiveSha256": authority["sourceArchiveSha256"],
+        "sourceArchiveSha256": evidence_source_archive,
         "transactionId": None,
     }
     if any(reference.get(key) != value for key, value in expected_common.items()):
         stop("pre-mutation evidence authority/candidate/PRE binding is invalid.")
     if not isinstance(reference.get("runId"), str) or RUN_ID_RE.fullmatch(reference["runId"]) is None:
         stop("pre-mutation evidence run identity is invalid.")
+    max_evidence_age = VALIDATION_LANE_MAX_BACKUP_AGE if lane is not None else 900
     if (
         isinstance(evidence_generated, bool) or not isinstance(evidence_generated, int)
-        or evidence_generated < captured or evidence_generated > generated
-        or evidence_generated > now + 60 or now - evidence_generated > 900
+        or evidence_generated < captured or evidence_generated > evidence_generated_upper_bound
+        or evidence_generated > now + 60 or now - evidence_generated > max_evidence_age
     ):
         stop("pre-mutation evidence generation boundary is stale or outside its checkpoint interval.")
     for key in ("artifactSetSha256", "authoritySha256", "backupSetSha256", "sourceArchiveSha256"):
@@ -2962,7 +3427,7 @@ def validate_pre_mutation_checkpoint(
         if isinstance(completed, bool) or not isinstance(completed, int) or completed < captured or completed > evidence_generated:
             stop("pre-mutation evidence completion boundary is invalid.")
     validate_backup_evidence_bundle(
-        authority,
+        evidence_authority,
         {
             key: documents[key]
             for key in (
@@ -3056,6 +3521,7 @@ def validate_pre_mutation_checkpoint(
         or secure_file(checkpoint_file, label, MAX_AUTHORITY) != checkpoint_bytes
     ):
         stop(f"{label} changed before apply mutation.")
+    return lane
 
 
 def require_evidence_sha(value: object, label: str) -> str:
@@ -4914,6 +5380,38 @@ def read_authority(check_artifacts: bool = True, check_source_archive: bool = Tr
     return value, data
 
 
+def read_archived_authority(document_id: str, expected_sha: str) -> Tuple[Dict[str, object], bytes]:
+    """Read an immutable historical authority without projecting it as current."""
+    if (
+        not isinstance(document_id, str) or SHA256_RE.fullmatch(document_id) is None
+        or not isinstance(expected_sha, str) or SHA256_RE.fullmatch(expected_sha) is None
+    ):
+        stop("archived predecessor authority binding is invalid.")
+    data = secure_file(
+        f"{AUTHORITY_ARCHIVE_DIR}/{document_id}.json",
+        "archived predecessor exact release authority", MAX_AUTHORITY, 0o444,
+    )
+    value = exact_keys(parse_json(data, "archived predecessor exact release authority", True), (
+        "activeManagedContainerNames", "artifacts", "authorityMode", "authorizedDataMutations", "backupToolImages", "candidateCommit", "candidateTree",
+        "checkoutProof", "controllerVerificationScope", "disabledComposeServices", "documentId", "evidenceProducer", "expectedContainerNames",
+        "legacyNetworkAttachments", "legacyRouteChecks", "legacyUnmanagedContainers", "preservedLegacyContainerNames", "releaseRoot",
+        "renderEnvironment", "renderSha256", "recoveryEscrowCertificate", "runtimeIdentity", "schema", "serviceTargets",
+        "sourceArchiveSha256", "status",
+    ), "archived predecessor exact release authority")
+    without = dict(value)
+    observed_id = without.pop("documentId", None)
+    if (
+        digest(data) != expected_sha
+        or observed_id != document_id
+        or observed_id != digest(canonical(without).encode())
+        or value["schema"] != AUTHORITY_SCHEMA
+        or value["status"] != "AUTHORIZED"
+        or value["authorityMode"] != "LOCAL_PRIVATE"
+    ):
+        stop("archived predecessor exact release authority identity is invalid.")
+    return value, data
+
+
 AUTHORITY_ARTIFACT_NAMES = ("composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit")
 
 
@@ -5076,6 +5574,17 @@ def authority_candidate_transport_complete(value: Dict[str, object]) -> None:
         stop("transaction candidate install receipt boundary/binding is invalid.")
 
 
+def verify_predecessor_state_receipt_unchanged(reconciliation: Dict[str, object]) -> None:
+    """Reopen the exact controller begin-era state and receipt bytes."""
+    state_bytes = secure_file(STATE_FILE, "LOCAL_PRIVATE state", MAX_AUTHORITY, 0o600)
+    receipt_bytes = secure_file(ACTIVE_RECEIPT, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444)
+    if (
+        digest(state_bytes) != reconciliation["previousStateSha256"]
+        or digest(receipt_bytes) != reconciliation["previousReceiptSha256"]
+    ):
+        stop("abort requires live state/receipt to equal the preserved predecessor evidence.")
+
+
 def verify_superseded_transport_abort_preconditions(authority: Dict[str, object], reconciliation: Dict[str, object]) -> None:
     """Prove apply never started before admitting the zero-step stale abort.
 
@@ -5084,21 +5593,150 @@ def verify_superseded_transport_abort_preconditions(authority: Dict[str, object]
     predecessor runtime identity must match the live capture on the closed
     controller projection, and no data-mutation evidence may exist for this
     transaction authority."""
-    state_bytes = secure_file(STATE_FILE, "LOCAL_PRIVATE state", MAX_AUTHORITY, 0o600)
-    receipt_bytes = secure_file(ACTIVE_RECEIPT, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444)
-    if digest(state_bytes) != reconciliation["previousStateSha256"] or digest(receipt_bytes) != reconciliation["previousReceiptSha256"]:
-        stop("stale abort requires the live state/receipt to equal the preserved predecessor evidence.")
+    verify_predecessor_state_receipt_unchanged(reconciliation)
     for record in reconciliation["predecessorRuntimeIdentities"]:
         if not isinstance(record, dict) or not isinstance(record.get("name"), str):
             stop("stale abort predecessor identity inventory is invalid.")
         source = inspect_one(record["name"])
-        if not controller_predecessor_identity_match(record, source[1]):
+        matches = controller_predecessor_identity_match(record, source[1])
+        if (
+            not matches
+            and authority.get("candidateCommit") in HISTORICAL_CONTROLLER_DIGEST_DIVERGENCE_CANDIDATES
+        ):
+            # e19's controller/reconciler used distinct implementations for
+            # the two semantic digests.  This release-bound ten-field bridge
+            # proves only that stale apply never began; it cannot authorize a
+            # rollback or any live mutation.
+            matches = historical_cleanup_predecessor_identity_match(record, source[1])
+        if not matches:
             stop(f"stale abort requires predecessor container {record['name']} to match the recorded runtime identity.")
     evidence_dir = physical(MUTATION_EVIDENCE_DIR)
     if os.path.isdir(evidence_dir):
         for entry in os.listdir(evidence_dir):
             if entry.startswith(f"{authority['documentId']}-"):
                 stop("stale abort requires no materialized data-mutation evidence for the transaction authority.")
+
+
+def validate_superseded_legacy_never_started_journal(
+    value: object, authority: Dict[str, object], authority_bytes: bytes,
+    reconciliation: Dict[str, object], marker_bytes: bytes,
+) -> Dict[str, object]:
+    """Validate the pre-network-resource journal shape solely for stale abort.
+
+    This compatibility parser cannot resume apply/evidence.  It admits only a
+    completely PENDING pre-patch plan with no mutation evidence, exact
+    deterministic service/remove/attachment order, safe transaction-bound
+    preimages, and rollback specs whose legacy ten-field projection still
+    matches their own immutable Docker inspect snapshot.
+    """
+    journal = exact_keys(value, JOURNAL_BASE_FIELDS, "legacy never-started reconciliation journal")
+    transaction_id = digest(authority_bytes + marker_bytes)
+    if (
+        journal["schema"] != JOURNAL_SCHEMA
+        or journal["phase"] != "APPLYING"
+        or journal["authorityDocumentId"] != authority["documentId"]
+        or journal["authoritySha256"] != digest(authority_bytes)
+        or journal["reconciliationSha256"] != digest(marker_bytes)
+        or journal["beganAtUnixSeconds"] != reconciliation["beganAtUnixSeconds"]
+        or journal["transactionId"] != transaction_id
+        or journal["dataMutationEvidence"] != []
+        or not isinstance(journal["dataMutationStatus"], dict)
+        or set(journal["dataMutationStatus"]) != {
+            item["id"] for item in authority["authorizedDataMutations"]
+        }
+        or any(status != "PENDING" for status in journal["dataMutationStatus"].values())
+    ):
+        stop("legacy superseded journal does not prove one untouched transaction.")
+    for field in ("beganAtUnixSeconds", "createdAtUnixSeconds", "updatedAtUnixSeconds"):
+        if isinstance(journal[field], bool) or not isinstance(journal[field], int):
+            stop("legacy superseded journal timestamp is invalid.")
+    validate_deployment_config_preimage(journal["deploymentConfigPreimage"], transaction_id)
+    validate_evidence_preimages(journal["evidencePreimages"], transaction_id)
+
+    previous = predecessor_map(reconciliation)
+    planned = reconciliation.get("plannedLegacyNetworkAttachments")
+    if not isinstance(planned, list):
+        stop("legacy superseded journal lacks its planned attachments.")
+    validated_attachments = [
+        validate_journal_attachment(item, f"legacy planned attachment {index}")
+        for index, item in enumerate(planned)
+    ]
+    allowed = {canonical(item) for item in authority.get("legacyNetworkAttachments", [])}
+    if (
+        validated_attachments != sorted(
+            validated_attachments, key=lambda item: (item["containerName"], item["networkName"]),
+        )
+        or len({canonical(item) for item in validated_attachments}) != len(validated_attachments)
+        or any(canonical(item) not in allowed for item in validated_attachments)
+    ):
+        stop("legacy superseded journal attachments differ from exact authority.")
+    expected_count = len(ACTIVE_MANAGED) + len(validated_attachments)
+    scheduler = previous.get("enterprise-backup-scheduler")
+    if scheduler is not None:
+        expected_count += 1
+    steps = journal["steps"]
+    if not isinstance(steps, list) or len(steps) != expected_count:
+        stop("legacy superseded journal step cardinality differs from its deterministic plan.")
+
+    index = 0
+    for name in ACTIVE_MANAGED:
+        step = exact_keys(steps[index], JOURNAL_SERVICE_STEP_FIELDS, f"legacy service step {index}")
+        before = previous.get(name)
+        if name == CANONICAL_ALERT_DISPATCHER and before is None:
+            before = previous.get(LEGACY_ALERT_DISPATCHER)
+        if (
+            step["kind"] != "SERVICE"
+            or step["containerName"] != name
+            or step["service"] != ACTIVE_SERVICE_BY_CONTAINER[name]
+            or step["before"] != before
+            or step["after"] is not None
+            or step["restoredByRecreate"] is not False
+            or step["status"] != "PENDING"
+        ):
+            stop(f"legacy superseded service step {index} is not untouched.")
+        if before is None:
+            if any(step[field] is not None for field in (
+                "backupName", "rollbackSpecPath", "rollbackSpecSha256",
+            )):
+                stop(f"legacy superseded service step {index} invents rollback material.")
+        else:
+            validate_journal_identity(before, f"legacy service predecessor {index}", reconciler=False)
+            if (
+                step["backupName"] != f"v1-rollback-{transaction_id[:12]}-{before['name']}"
+                or step["rollbackSpecPath"] != f"{ROLLBACK_SPEC_DIR}/{transaction_id}/{before['name']}.json"
+                or not isinstance(step["rollbackSpecSha256"], str)
+                or SHA256_RE.fullmatch(step["rollbackSpecSha256"]) is None
+            ):
+                stop(f"legacy superseded service step {index} rollback binding is invalid.")
+            load_cleanup_rollback_spec(step, journal, allow_historical_identity=True)
+        index += 1
+
+    if scheduler is not None:
+        step = exact_keys(steps[index], JOURNAL_SERVICE_STEP_FIELDS, "legacy scheduler removal step")
+        validate_journal_identity(scheduler, "legacy scheduler predecessor", reconciler=False)
+        if (
+            step["kind"] != "REMOVE"
+            or step["containerName"] != scheduler["name"]
+            or step["service"] != scheduler["service"]
+            or step["before"] != scheduler
+            or step["after"] is not None
+            or step["restoredByRecreate"] is not False
+            or step["status"] != "PENDING"
+            or step["backupName"] != f"v1-rollback-{transaction_id[:12]}-{scheduler['name']}"
+            or step["rollbackSpecPath"] != f"{ROLLBACK_SPEC_DIR}/{transaction_id}/{scheduler['name']}.json"
+            or not isinstance(step["rollbackSpecSha256"], str)
+            or SHA256_RE.fullmatch(step["rollbackSpecSha256"]) is None
+        ):
+            stop("legacy superseded scheduler removal is not untouched and exactly bound.")
+        load_cleanup_rollback_spec(step, journal, allow_historical_identity=True)
+        index += 1
+
+    for attachment_index, attachment in enumerate(validated_attachments):
+        step = exact_keys(steps[index], JOURNAL_NETWORK_STEP_FIELDS, f"legacy network step {attachment_index}")
+        if step != {"attachment": attachment, "kind": "NETWORK_ATTACH", "status": "PENDING"}:
+            stop(f"legacy superseded network step {attachment_index} is not untouched.")
+        index += 1
+    return journal
 
 
 def superseded_transport_abort_journal(authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
@@ -5110,16 +5748,44 @@ def superseded_transport_abort_journal(authority: Dict[str, object], authority_b
     marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
     transaction_id = digest(authority_bytes + marker_bytes)
     now = int(time.time())
+    existing: Optional[Dict[str, object]] = None
     if os.path.lexists(physical(JOURNAL)):
         existing_bytes = secure_file(JOURNAL, "existing reconciliation journal", MAX_JSON, 0o600)
-        existing = parse_json(existing_bytes, "existing reconciliation journal", True)
-        pending_mutations = existing.get("dataMutationStatus", {})
+        existing_value = parse_json(existing_bytes, "existing reconciliation journal", True)
         if (
-            existing.get("phase") != "APPLYING"
-            or existing.get("dataMutationEvidence") != []
-            or not isinstance(pending_mutations, dict)
-            or any(status != "PENDING" for status in pending_mutations.values())
-            or any(isinstance(step, dict) and step.get("status") not in (None, "PENDING") for step in existing.get("steps", []))
+            isinstance(existing_value, dict)
+            and existing_value.get("phase") == "ABORTED"
+            and existing_value.get("steps") == []
+        ):
+            # Crash-retry after the atomic full-plan -> zero-step replacement:
+            # validate every authority/marker/preimage/mutation binding through
+            # the one explicit exception, then return without another archive,
+            # replacement or private-preimage materialization.
+            return validate_journal(
+                existing_value, authority, authority_bytes, reconciliation,
+                allow_superseded_zero_step=True,
+            )
+        if isinstance(existing_value, dict) and set(existing_value) == set(JOURNAL_BASE_FIELDS):
+            existing = validate_superseded_legacy_never_started_journal(
+                existing_value, authority, authority_bytes, reconciliation, marker_bytes,
+            )
+        else:
+            existing = validate_journal(existing_value, authority, authority_bytes, reconciliation)
+        if (
+            existing["phase"] != "APPLYING"
+            or existing["dataMutationEvidence"] != []
+            or any(status != "PENDING" for status in existing["dataMutationStatus"].values())
+            or any(
+                (
+                    step["status"] not in ("PENDING", "RETAINED")
+                    if step["kind"] == "NETWORK_CREATE"
+                    else step["status"] != "PENDING"
+                )
+                or (step["kind"] in ("SERVICE", "REMOVE") and (
+                    step["after"] is not None or step["restoredByRecreate"] is not False
+                ))
+                for step in existing["steps"]
+            )
         ):
             stop("superseding-transport abort requires one journal that proves apply never mutated.")
         archive = f"{JOURNAL_ARCHIVE_DIR}/{transaction_id}-{digest(existing_bytes)}.json"
@@ -5127,6 +5793,68 @@ def superseded_transport_abort_journal(authority: Dict[str, object], authority_b
         if secure_file(archive, "archived superseded-transport reconciliation journal", MAX_JSON, 0o444) != existing_bytes:
             stop("archived superseded-transport journal differs from the preserved bytes.")
     journal = {
+        "authorityDocumentId": authority["documentId"],
+        "authoritySha256": digest(authority_bytes),
+        "beganAtUnixSeconds": reconciliation["beganAtUnixSeconds"],
+        "createdAtUnixSeconds": now,
+        "dataMutationEvidence": [],
+        "dataMutationStatus": {item["id"]: "PENDING" for item in authority["authorizedDataMutations"]},
+        "deploymentConfigPreimage": (
+            copy.deepcopy(existing["deploymentConfigPreimage"])
+            if existing is not None else materialize_deployment_config_preimage(transaction_id)
+        ),
+        "evidencePreimages": (
+            copy.deepcopy(existing["evidencePreimages"])
+            if existing is not None else materialize_evidence_preimages(transaction_id)
+        ),
+        "phase": "ABORTED",
+        "reconciliationSha256": digest(marker_bytes),
+        "schema": JOURNAL_SCHEMA,
+        "steps": [],
+        "transactionId": transaction_id,
+        "updatedAtUnixSeconds": now,
+        "validationLaneSha256": (
+            existing.get("validationLaneSha256") if existing is not None else None
+        ),
+    }
+    validated = validate_journal(
+        journal, authority, authority_bytes, reconciliation,
+        allow_superseded_zero_step=True,
+    )
+    atomic_json(JOURNAL, validated, 0o600, True)
+    if secure_file(JOURNAL, "superseded zero-step reconciliation journal", MAX_JSON, 0o600) != canonical_bytes(validated):
+        stop("superseded zero-step reconciliation journal changed during replacement.")
+    return validated
+
+
+def checkpoint_bound_zero_step_abort_journal(
+    authority: Dict[str, object], authority_bytes: bytes,
+    reconciliation: Dict[str, object], checkpoint_mode: str, checkpoint_sha: str,
+) -> Dict[str, object]:
+    """Publish a terminal zero-step journal when begin preceded apply.
+
+    JOURNAL is published before every production or FAST live mutator, so its
+    absence plus unchanged state/receipt/runtime proves that no rollback plan
+    ever started.  This path never consults the revocable validation marker or
+    creates a production plan.  Its extra checkpoint fields make the terminal
+    form unambiguous during retry/finalization and keep historical rollback-
+    spec compatibility unavailable to it.
+    """
+    marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
+    transaction_id = digest(authority_bytes + marker_bytes)
+    if os.path.lexists(physical(JOURNAL)):
+        value = parse_json(
+            secure_file(JOURNAL, "checkpoint-bound zero-step abort journal", MAX_JSON, 0o600),
+            "checkpoint-bound zero-step abort journal", True,
+        )
+        return validate_journal(
+            value, authority, authority_bytes, reconciliation,
+            allow_checkpoint_bound_zero_step_abort=True,
+        )
+    now = int(time.time())
+    journal = {
+        "abortCheckpointMode": checkpoint_mode,
+        "abortCheckpointSha256": checkpoint_sha,
         "authorityDocumentId": authority["documentId"],
         "authoritySha256": digest(authority_bytes),
         "beganAtUnixSeconds": reconciliation["beganAtUnixSeconds"],
@@ -5141,9 +5869,87 @@ def superseded_transport_abort_journal(authority: Dict[str, object], authority_b
         "steps": [],
         "transactionId": transaction_id,
         "updatedAtUnixSeconds": now,
+        "validationLaneSha256": None,
     }
-    atomic_json(JOURNAL, journal, 0o600, True)
-    return validate_journal(journal, authority, authority_bytes, reconciliation)
+    validated = validate_journal(
+        journal, authority, authority_bytes, reconciliation,
+        allow_checkpoint_bound_zero_step_abort=True,
+    )
+    atomic_json(JOURNAL, validated, 0o600, True)
+    if secure_file(JOURNAL, "checkpoint-bound zero-step abort journal", MAX_JSON, 0o600) != canonical_bytes(validated):
+        stop("checkpoint-bound zero-step abort journal changed during publication.")
+    return validated
+
+
+def cleanup_receipt_bound_abort_preimages() -> None:
+    """Finish private-artifact cleanup left by an older exact reconciler.
+
+    This path is available only after all current transaction files are gone.
+    The root-owned ACTIVE receipt must bind both immutable abort-record and
+    journal archives byte-for-byte, so cleanup never depends on which release
+    candidate is currently installed.
+    """
+    if any(os.path.lexists(physical(path)) for path in (RECONCILIATION, JOURNAL, ABORT_RECORD)):
+        return
+    if not os.path.lexists(physical(ACTIVE_RECEIPT)):
+        return
+    receipt = parse_json(
+        secure_file(ACTIVE_RECEIPT, "receipt-bound abort cleanup ACTIVE receipt", MAX_AUTHORITY, 0o444),
+        "receipt-bound abort cleanup ACTIVE receipt", True,
+    )
+    binding_raw = receipt.get("abortedAuthorizedReconciliation")
+    if binding_raw is None:
+        return
+    if receipt.get("schema") != "platform.v1-local-private-control-receipt/v1" or receipt.get("status") != "ACTIVE":
+        stop("receipt-bound abort cleanup requires one ACTIVE controller receipt.")
+    binding = exact_keys(binding_raw, (
+        "authorityDocumentId", "authoritySha256", "completedAtUnixSeconds", "journalSha256",
+        "recordPath", "recordSha256", "residualDataMutations", "residualDataMutationsSha256",
+        "schema", "status", "transactionId",
+    ), "receipt-bound aborted reconciliation")
+    transaction_id = binding["transactionId"]
+    journal_sha = binding["journalSha256"]
+    record_sha = binding["recordSha256"]
+    if any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in (
+        transaction_id, journal_sha, record_sha, binding["authorityDocumentId"], binding["authoritySha256"],
+    )):
+        stop("receipt-bound abort cleanup digest identity is invalid.")
+    journal_archive = f"{JOURNAL_ARCHIVE_DIR}/{transaction_id}-{journal_sha}.json"
+    journal_bytes = secure_file(journal_archive, "receipt-bound immutable aborted journal", MAX_JSON, 0o444)
+    if digest(journal_bytes) != journal_sha:
+        stop("receipt-bound aborted journal archive digest changed.")
+    journal = exact_journal_keys(
+        parse_json(journal_bytes, "receipt-bound immutable aborted journal", True),
+        "receipt-bound immutable aborted journal", allow_legacy_zero_step_aborted=True,
+    )
+    record_path = f"{ABORT_RECORD_ARCHIVE_DIR}/{transaction_id}-{record_sha}.json"
+    record_bytes = secure_file(record_path, "receipt-bound immutable abort record", MAX_JSON, 0o444)
+    record = parse_json(record_bytes, "receipt-bound immutable abort record", True)
+    expected_record = {
+        key: value for key, value in binding.items() if key not in ("recordPath", "recordSha256")
+    }
+    if (
+        binding["recordPath"] != record_path
+        or digest(record_bytes) != record_sha
+        or record != expected_record
+        or journal["schema"] != JOURNAL_SCHEMA
+        or journal["phase"] != "ABORTED"
+        or journal["transactionId"] != transaction_id
+        or journal["authorityDocumentId"] != binding["authorityDocumentId"]
+        or journal["authoritySha256"] != binding["authoritySha256"]
+    ):
+        stop("ACTIVE receipt does not exactly bind the archived abort transaction cleanup.")
+    historical_zero_step = (
+        journal.get("steps") == []
+        and journal.get("validationLaneSha256") is None
+        and journal.get("abortCheckpointSha256") is None
+        and journal.get("dataMutationEvidence") == []
+        and isinstance(journal.get("dataMutationStatus"), dict)
+        and all(status == "PENDING" for status in journal["dataMutationStatus"].values())
+    )
+    cleanup_transaction_preimages(
+        journal, allow_historical_identity=historical_zero_step,
+    )
 
 
 def prepare() -> Dict[str, object]:
@@ -5165,6 +5971,7 @@ def prepare() -> Dict[str, object]:
         previous_authority, previous_authority_bytes = read_authority()
         validate_authority_material(previous_authority)
         cleanup_consumed_abort_without_current_journal(previous_authority, previous_authority_bytes)
+    cleanup_receipt_bound_abort_preimages()
     if os.path.lexists(physical(RECONCILIATION)) or os.path.lexists(physical(JOURNAL)):
         stop("prepare refuses to replace exact release material during an unfinished reconciliation.")
     binding = install_binding()
@@ -5178,6 +5985,7 @@ def prepare() -> Dict[str, object]:
     commit, tree = clean_checkout(repo_root)
     if commit != binding["candidateCommit"] or tree != binding["candidateTree"]:
         stop("fixed staging checkout differs from the fresh install checkpoint.")
+    validation_lane = load_validation_lane(commit)
     archive_bytes = git_archive(repo_root)
     post_archive_commit, post_archive_tree = clean_checkout(repo_root)
     if (post_archive_commit, post_archive_tree) != (commit, tree):
@@ -5205,8 +6013,12 @@ def prepare() -> Dict[str, object]:
     # Never create the recovery key until the immutable exact-release public
     # certificate has been parsed and fingerprinted successfully.
     recovery_escrow_certificate_binding(release)
-    prepare_live_prerequisite_cohort(release)
-    provision_confidential_backup_passphrase()
+    if validation_lane is not None:
+        validate_live_prerequisite_cohort_readonly(release)
+        validate_existing_confidential_backup_passphrase_readonly()
+    else:
+        prepare_live_prerequisite_cohort(release)
+        provision_confidential_backup_passphrase()
     source_env_bytes, _ = materialize_environment(
         repo_root, release, local_ops_image, local_restic_image
     )
@@ -5232,8 +6044,10 @@ def prepare() -> Dict[str, object]:
     if archived != authority_bytes:
         stop("exact release authority archive copy is not byte-identical.")
     prepared_authority, _ = read_authority()
-    lane = load_validation_lane(commit)
-    if lane is not None:
+    current_lane = load_validation_lane(commit)
+    if validation_lane_sha256(current_lane) != validation_lane_sha256(validation_lane):
+        stop("validation lane marker changed during exact-release preparation.")
+    if validation_lane is not None:
         validation_checkpoint = write_validation_checkpoint(authority, {
             "candidateCommit": commit, "candidateTree": tree, "sourceArchiveSha256": archive_sha,
         })
@@ -5245,7 +6059,7 @@ def prepare() -> Dict[str, object]:
             "sourceArchiveSha256": archive_sha,
             "status": "PREPARED_VALIDATION",
             "validationCheckpointPath": VALIDATION_CHECKPOINT_FILE,
-            "validationCheckpointSha256": digest(json.dumps(validation_checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+            "validationCheckpointSha256": digest(canonical_bytes(validation_checkpoint)),
         }
     invoke_evidence_producer(prepared_authority, "pre")
     refresh_local_checkpoint(authority)
@@ -5378,6 +6192,7 @@ def inspect_service_semantics(container: Dict[str, object], name: str) -> Dict[s
 
 def runtime_configuration_digest(semantic: Dict[str, object]) -> str:
     value = dict(semantic)
+    value.pop("networkEndpoints", None)
     value.pop("networks", None)
     value.pop("networkMode", None)
     return digest(canonical(value).encode())
@@ -5472,18 +6287,51 @@ def transition_identity(record: Optional[Dict[str, object]]) -> Optional[Dict[st
     )}
 
 
-def identity_matches_predecessor(actual: Dict[str, object], expected: Dict[str, object], *, name_may_differ: bool = False) -> bool:
+TRANSITION_COMPARABLE_IDENTITY_FIELDS = (
+    "configHash", "containerId", "imageId", "imageReference", "runtimeConfigSha256",
+)
+
+
+def transition_status(
+    previous: Optional[Dict[str, object]], current: Optional[Dict[str, object]]
+) -> str:
+    """Classify one transition on the exact shared runtime identity."""
+    if current is None:
+        if previous is None:
+            stop("service transition has neither a previous nor current identity.")
+        return "REMOVED"
+    if previous is None:
+        return "CREATED"
+    if previous["name"] != current["name"]:
+        return "REPLACED"
+    if all(previous[field] == current[field] for field in TRANSITION_COMPARABLE_IDENTITY_FIELDS):
+        return "RETAINED"
+    return "RECREATED"
+
+
+def identity_matches_predecessor(
+    actual: Dict[str, object], expected: Dict[str, object], *,
+    allow_network_change: bool = False, name_may_differ: bool = False,
+) -> bool:
     """Whether one live reconciler identity proves the recorded predecessor
-    unchanged on every implementation-independent field (the two semantic
-    digest fields are implementation-bound and are verified by the controller's
-    own capture; the compose project is reconciler-only bookkeeping)."""
-    fields = (
-        "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
-        "service", "state",
-    )
-    if not name_may_differ and actual.get("name") != expected.get("name"):
+    unchanged on the closed implementation-independent projection.
+
+    Network drift is allowed only for the preserved-legacy validator, which
+    immediately proves the exact predecessor membership plus authority-listed
+    additions.  Both semantic digests belong to the shared closed projection
+    and are compared exactly; only the compose project is reconciler-local
+    bookkeeping.
+    """
+    if not isinstance(expected, dict) or set(expected) != set(CONTROLLER_RECORDED_IDENTITY_FIELDS):
         return False
-    return all(actual.get(field) == expected.get(field) for field in fields)
+    if not isinstance(actual, dict) or set(actual) != set(CONTROLLER_RECORDED_IDENTITY_FIELDS) | {"project"}:
+        return False
+    comparable = tuple(
+        field for field in RECONCILER_COMPARABLE_IDENTITY_FIELDS
+        if (field not in ("networkMembership", "semanticSha256") or not allow_network_change)
+        and (field != "name" or not name_may_differ)
+    )
+    return all(actual[field] == expected[field] for field in comparable)
 
 
 def target_by_name(authority: Dict[str, object]) -> Dict[str, Dict[str, object]]:
@@ -5544,6 +6392,42 @@ def validate_authority_material(authority: Dict[str, object]) -> Dict[str, Dict[
     return targets
 
 
+def validation_static_target_evidence(
+    authority: Dict[str, object], targets: Dict[str, Dict[str, object]],
+) -> Dict[str, object]:
+    """Project the already-validated render/image/route target without running it."""
+    render = parse_json(
+        secure_file(RENDER, "FAST exact release render", MAX_JSON, 0o444),
+        "FAST exact release render", True,
+    )
+    services = []
+    for name in sorted(targets):
+        target = targets[name]
+        semantic = target["semantic"]
+        services.append({
+            "configHash": target["configHash"],
+            "containerName": name,
+            "imageId": semantic["imageId"],
+            "imageReference": semantic["imageReference"],
+            "runtimeConfigSha256": runtime_configuration_digest(semantic),
+            "semanticSha256": digest(canonical(semantic).encode()),
+            "service": target["service"],
+        })
+    networks = render.get("networks")
+    volumes = render.get("volumes")
+    if not isinstance(networks, dict) or not isinstance(volumes, dict):
+        stop("FAST exact render omits its static network or volume model.")
+    routes = authority["legacyRouteChecks"]
+    return {
+        "networksSha256": digest(canonical(networks).encode()),
+        "routes": routes,
+        "routesSha256": digest(canonical(routes).encode()),
+        "services": services,
+        "servicesSha256": digest(canonical(services).encode()),
+        "volumesSha256": digest(canonical(volumes).encode()),
+    }
+
+
 def read_reconciliation(authority: Dict[str, object], authority_bytes: bytes) -> Dict[str, object]:
     data = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
     value = exact_keys(parse_json(data, "controller reconciliation marker", True), (
@@ -5574,10 +6458,14 @@ def read_reconciliation(authority: Dict[str, object], authority_bytes: bytes) ->
     predecessors = value["predecessorRuntimeIdentities"]
     if not isinstance(predecessors, list) or digest(canonical(predecessors).encode()) != value["predecessorRuntimeIdentitiesSha256"]:
         stop("controller reconciliation predecessor identities are digest-mismatched.")
-    names = [item.get("name") for item in predecessors if isinstance(item, dict)]
+    validated_predecessors = [
+        validate_journal_identity(item, f"controller predecessor identity {index}", reconciler=False)
+        for index, item in enumerate(predecessors)
+    ]
+    names = [item["name"] for item in validated_predecessors]
     historic = tuple(sorted(HISTORIC_CONTAINERS))
     legacy = tuple(sorted((*HISTORIC_CONTAINERS, LEGACY_ALERT_DISPATCHER)))
-    if len(names) != len(predecessors) or tuple(sorted(names)) not in (historic, legacy, CANONICAL_CONTAINERS):
+    if tuple(names) not in (historic, legacy, CANONICAL_CONTAINERS):
         stop("controller predecessor identities are not one closed V1 form.")
     planned = value["plannedLegacyNetworkAttachments"]
     if not isinstance(planned, list) or digest(canonical(planned).encode()) != value["plannedLegacyNetworkAttachmentsSha256"]:
@@ -5597,28 +6485,51 @@ def predecessor_map(reconciliation: Dict[str, object]) -> Dict[str, Dict[str, ob
     return result
 
 
+def stable_unchanged_predecessor_inventory(
+    reconciliation: Dict[str, object],
+) -> List[Dict[str, object]]:
+    """Prove the live Docker inventory is the exact begin-era predecessor.
+
+    FAST calls this on both sides of its private journal writes.  Every Docker
+    operation here is observational (ps/inspect), and the double capture also
+    closes drift during the proof itself.
+    """
+    expected = predecessor_map(reconciliation)
+    first, _ = inventory()
+    second, _ = inventory()
+    if first != second:
+        stop("FAST predecessor runtime changed while its read-only proof was captured.")
+    if {item["name"] for item in first} != set(expected):
+        stop("FAST Docker inventory differs from the exact begin-era predecessor set.")
+    current = {item["name"]: item for item in first}
+    for name, before in expected.items():
+        if not controller_predecessor_identity_match(before, current[name]):
+            stop(f"FAST predecessor {name} differs from its exact begin-era identity.")
+    return first
+
+
 CONTROLLER_RECORDED_IDENTITY_FIELDS = (
     "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
     "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state",
 )
+RECONCILER_RECORDED_IDENTITY_FIELDS = (
+    *CONTROLLER_RECORDED_IDENTITY_FIELDS,
+    "project",
+)
 RECONCILER_COMPARABLE_IDENTITY_FIELDS = (
-    "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
-    "name", "networkMembership", "service", "state",
+    *CONTROLLER_RECORDED_IDENTITY_FIELDS,
 )
 
 
 def controller_predecessor_identity_match(before: object, live: object) -> bool:
     """Whether one live reconciler container identity proves the controller-
-    recorded predecessor identity unchanged on every implementation-independent
-    field.
+    recorded predecessor identity unchanged on every shared field.
 
     The controller begin records exactly CONTROLLER_RECORDED_IDENTITY_FIELDS
     and the controller's own capture is the sole authority for the two
-    semantic digest fields (runtimeConfigSha256, semanticSha256): the
-    reconciler's semantic model is a different implementation whose digests
-    are not comparable across modules, so the closed-set projection here
-    compares the ten implementation-independent fields and the controller
-    verifies the full recorded set during abort-maintenance.  The reconciler
+    semantic digest fields (runtimeConfigSha256, semanticSha256).  The current
+    controller and reconciler intentionally share that closed semantic model,
+    so both digests are compared exactly.  The reconciler
     capture additionally carries the compose ``project`` for its own rollback
     purposes; the recorded key set must be exact, the live key set must be
     exactly the recorded set plus ``project``, and any difference on any
@@ -5630,6 +6541,24 @@ def controller_predecessor_identity_match(before: object, live: object) -> bool:
     if not isinstance(live, dict) or set(live) != set(fields) | {"project"}:
         return False
     return all(before[key] == live[key] for key in comparable)
+
+
+def historical_cleanup_predecessor_identity_match(before: object, live: object) -> bool:
+    """Legacy e19 compatibility for receipt-bound private-file deletion only.
+
+    e19 recorded the controller/reconciler semantic digests with different
+    implementations, so its own proven contract compared the remaining ten
+    fields.  This predicate must never authorize rollback or live mutation.
+    """
+    if not isinstance(before, dict) or set(before) != set(CONTROLLER_RECORDED_IDENTITY_FIELDS):
+        return False
+    if not isinstance(live, dict) or set(live) != set(RECONCILER_RECORDED_IDENTITY_FIELDS):
+        return False
+    fields = tuple(
+        field for field in CONTROLLER_RECORDED_IDENTITY_FIELDS
+        if field not in ("runtimeConfigSha256", "semanticSha256")
+    )
+    return all(before[field] == live[field] for field in fields)
 
 
 def materialize_rollback_spec(transaction_id: str, before: Optional[Dict[str, object]]) -> Tuple[Optional[str], Optional[str]]:
@@ -5674,6 +6603,20 @@ def load_rollback_spec(step: Dict[str, object], journal: Dict[str, object]) -> D
     ):
         stop("private rollback specification differs from the exact predecessor identity.")
     return value
+
+
+def rollback_native_identity(step: Dict[str, object], journal: Dict[str, object]) -> Dict[str, object]:
+    """Recover the reconciler-native predecessor identity from bound bytes.
+
+    ``step["before"]`` is deliberately the controller's closed 12-field
+    projection, including both exactly comparable semantic digests.  Only
+    ``project`` is reconciler-local.  The private rollback specification binds
+    the exact original Docker inspect bytes by path and SHA-256; deriving the
+    13-field identity from those bytes gives rollback checks their native
+    baseline without weakening or extending the controller contract.
+    """
+    specification = load_rollback_spec(step, journal)
+    return container_identity(specification["containerInspect"])
 
 
 def stable_preimage_snapshot(
@@ -5754,7 +6697,9 @@ def materialize_evidence_preimages(transaction_id: str) -> List[Dict[str, object
     return entries
 
 
-def validate_evidence_preimages(entries: object, transaction_id: str) -> List[Dict[str, object]]:
+def validate_evidence_preimages(
+    entries: object, transaction_id: str, *, allow_missing: bool = False,
+) -> List[Dict[str, object]]:
     if not isinstance(entries, list) or len(entries) != len(evidence_preimage_sources()):
         stop("reconciliation journal has the wrong rollback evidence-preimage cardinality.")
     expected_sources = list(evidence_preimage_sources())
@@ -5776,9 +6721,12 @@ def validate_evidence_preimages(entries: object, transaction_id: str) -> List[Di
             or SHA256_RE.fullmatch(entry["sha256"]) is None
         ):
             stop("reconciliation journal contains an invalid rollback evidence preimage binding.")
-        data = secure_file(entry["preimagePath"], f"rollback evidence preimage {index}", MAX_JSON, 0o600)
-        if len(data) != entry["sizeBytes"] or digest(data) != entry["sha256"]:
-            stop("rollback evidence preimage bytes differ from their journal binding.")
+        if os.path.lexists(physical(entry["preimagePath"])):
+            data = secure_file(entry["preimagePath"], f"rollback evidence preimage {index}", MAX_JSON, 0o600)
+            if len(data) != entry["sizeBytes"] or digest(data) != entry["sha256"]:
+                stop("rollback evidence preimage bytes differ from their journal binding.")
+        elif not allow_missing:
+            stop("rollback evidence preimage is missing.")
         validated.append(entry)
     return validated
 
@@ -5791,6 +6739,21 @@ def restore_evidence_preimages(journal: Dict[str, object]) -> None:
         observed, mode = stable_preimage_snapshot(entry["logicalPath"], "restored checkpoint/evidence preimage")
         if observed != data or mode != entry["mode"]:
             stop("restored checkpoint/evidence bytes or mode differ from the immutable preimage.")
+
+
+def verify_evidence_preimages_unchanged(journal: Dict[str, object]) -> None:
+    """Read-only proof that FAST never changed checkpoint/evidence sources."""
+    entries = validate_evidence_preimages(journal["evidencePreimages"], journal["transactionId"])
+    for entry in entries:
+        current, mode = stable_preimage_snapshot(
+            entry["logicalPath"], "FAST unchanged checkpoint/evidence source",
+        )
+        if (
+            digest(current) != entry["sha256"]
+            or len(current) != entry["sizeBytes"]
+            or mode != entry["mode"]
+        ):
+            stop("FAST checkpoint/evidence source differs from its immutable preimage.")
 
 
 def materialize_deployment_config_preimage(transaction_id: str) -> Dict[str, object]:
@@ -5814,7 +6777,9 @@ def materialize_deployment_config_preimage(transaction_id: str) -> Dict[str, obj
     }
 
 
-def validate_deployment_config_preimage(raw: object, transaction_id: str) -> Dict[str, object]:
+def validate_deployment_config_preimage(
+    raw: object, transaction_id: str, *, allow_missing: bool = False,
+) -> Dict[str, object]:
     entry = exact_keys(raw, ("logicalPath", "mode", "preimagePath", "sha256", "sizeBytes"), "deployment config preimage")
     if (
         entry["logicalPath"] != DEPLOYMENT_ENV
@@ -5828,9 +6793,12 @@ def validate_deployment_config_preimage(raw: object, transaction_id: str) -> Dic
         or SHA256_RE.fullmatch(entry["sha256"]) is None
     ):
         stop("deployment config preimage binding is invalid.")
-    data = secure_file(entry["preimagePath"], "deployment config preimage", 1024 * 1024, 0o600)
-    if len(data) != entry["sizeBytes"] or digest(data) != entry["sha256"]:
-        stop("deployment config preimage differs from its journal binding.")
+    if os.path.lexists(physical(entry["preimagePath"])):
+        data = secure_file(entry["preimagePath"], "deployment config preimage", 1024 * 1024, 0o600)
+        if len(data) != entry["sizeBytes"] or digest(data) != entry["sha256"]:
+            stop("deployment config preimage differs from its journal binding.")
+    elif not allow_missing:
+        stop("deployment config preimage is missing.")
     return entry
 
 
@@ -5884,51 +6852,617 @@ def restore_deployment_config_preimage(journal: Dict[str, object]) -> None:
     atomic_live_environment(data, entry["mode"])
 
 
-def journal_document(authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
+def verify_deployment_config_preimage_unchanged(journal: Dict[str, object]) -> None:
+    """Read-only proof that FAST never promoted or rewrote the live .env."""
+    entry = validate_deployment_config_preimage(
+        journal["deploymentConfigPreimage"], journal["transactionId"],
+    )
+    current, mode = stable_preimage_snapshot(
+        DEPLOYMENT_ENV, "FAST unchanged live deployment environment", SECRET_UID, SECRET_GID,
+    )
+    if (
+        digest(current) != entry["sha256"]
+        or len(current) != entry["sizeBytes"]
+        or mode != entry["mode"]
+    ):
+        stop("FAST live deployment environment differs from its immutable preimage.")
+
+
+def verify_fast_preimages_unchanged(journal: Dict[str, object]) -> None:
+    verify_deployment_config_preimage_unchanged(journal)
+    verify_evidence_preimages_unchanged(journal)
+
+
+JOURNAL_SERVICE_STEP_FIELDS = (
+    "after", "backupName", "before", "containerName", "kind", "restoredByRecreate",
+    "rollbackSpecPath", "rollbackSpecSha256", "service", "status",
+)
+JOURNAL_NETWORK_RESOURCE_STEP_FIELDS = (
+    "kind", "networkId", "networkName", "preexisting", "status",
+)
+JOURNAL_NETWORK_STEP_FIELDS = ("attachment", "kind", "status")
+JOURNAL_SERVICE_APPLY_STATUSES = frozenset((
+    "PENDING", "RENAMING", "RENAMED", "STOPPING", "BACKED_UP", "RETAINED", "REFRESHING", "APPLIED",
+))
+JOURNAL_NEW_SERVICE_APPLY_STATUSES = frozenset(("PENDING", "REFRESHING", "APPLIED"))
+JOURNAL_REMOVE_APPLY_STATUSES = frozenset(("PENDING", "RENAMING", "RENAMED", "STOPPING", "BACKED_UP"))
+JOURNAL_NETWORK_APPLY_STATUSES = frozenset(("PENDING", "CONNECTING", "CONNECTED"))
+JOURNAL_NETWORK_RESOURCE_APPLY_STATUSES = frozenset(("PENDING", "CREATING", "CREATED", "RETAINED"))
+
+
+def validate_journal_network_membership(value: object, label: str) -> List[Dict[str, object]]:
+    if not isinstance(value, list):
+        stop(f"{label} is not one network-membership list.")
+    result = []
+    for index, raw in enumerate(value):
+        item = exact_keys(raw, ("aliases", "networkName"), f"{label} entry {index}")
+        aliases, network_name = item["aliases"], item["networkName"]
+        if (
+            not isinstance(network_name, str) or not network_name
+            or not isinstance(aliases, list)
+            or any(not isinstance(alias, str) or not alias for alias in aliases)
+            or aliases != sorted(set(aliases))
+        ):
+            stop(f"{label} entry {index} is invalid.")
+        result.append(dict(item))
+    if (
+        result != sorted(result, key=lambda item: item["networkName"])
+        or len({item["networkName"] for item in result}) != len(result)
+    ):
+        stop(f"{label} is duplicated or unordered.")
+    return result
+
+
+def validate_journal_identity(value: object, label: str, *, reconciler: bool) -> Dict[str, object]:
+    fields = RECONCILER_RECORDED_IDENTITY_FIELDS if reconciler else CONTROLLER_RECORDED_IDENTITY_FIELDS
+    identity = exact_keys(value, fields, label)
+    for field in ("configHash", "containerId", "runtimeConfigSha256", "semanticSha256"):
+        if not isinstance(identity[field], str) or SHA256_RE.fullmatch(identity[field]) is None:
+            stop(f"{label} {field} is not one canonical digest.")
+    if (
+        not isinstance(identity["imageId"], str) or IMAGE_ID_RE.fullmatch(identity["imageId"]) is None
+        or not isinstance(identity["imageReference"], str) or not identity["imageReference"]
+        or not isinstance(identity["name"], str) or NAME_RE.fullmatch(identity["name"]) is None
+        or not isinstance(identity["service"], str) or NAME_RE.fullmatch(identity["service"]) is None
+        or isinstance(identity["exitCode"], bool) or not isinstance(identity["exitCode"], int)
+        or identity["health"] not in ("healthy", "none")
+        or identity["state"] not in ("running", "exited")
+        or (
+            reconciler
+            and (
+                not isinstance(identity["project"], str)
+                or NAME_RE.fullmatch(identity["project"]) is None
+            )
+        )
+    ):
+        stop(f"{label} scalar identity is invalid.")
+    validate_journal_network_membership(identity["networkMembership"], f"{label} network membership")
+    return identity
+
+
+def validate_journal_attachment(value: object, label: str) -> Dict[str, object]:
+    item = exact_keys(value, ("aliases", "containerName", "networkName"), label)
+    if (
+        not isinstance(item["containerName"], str) or item["containerName"] not in PRESERVED_LEGACY
+        or not isinstance(item["networkName"], str) or not item["networkName"]
+        or not isinstance(item["aliases"], list)
+        or any(not isinstance(alias, str) or not alias for alias in item["aliases"])
+        or item["aliases"] != sorted(set(item["aliases"]))
+    ):
+        stop(f"{label} is invalid.")
+    return item
+
+
+def journal_network_resource_names(authority: Dict[str, object]) -> List[str]:
+    attachments = authority.get("legacyNetworkAttachments")
+    if not isinstance(attachments, list):
+        stop("exact authority legacy network attachments are invalid.")
+    names = []
+    for index, raw in enumerate(attachments):
+        item = validate_journal_attachment(raw, f"authority legacy network attachment {index}")
+        names.append(item["networkName"])
+    return sorted(set(names))
+
+
+def validate_journal_network_resource_step(
+    value: object, network_name: str, phase: str, label: str,
+) -> Dict[str, object]:
+    step = exact_keys(value, JOURNAL_NETWORK_RESOURCE_STEP_FIELDS, label)
+    network_id = step["networkId"]
+    preexisting = step["preexisting"]
+    status = step["status"]
+    if (
+        step["kind"] != "NETWORK_CREATE"
+        or step["networkName"] != network_name
+        or (preexisting is not None and not isinstance(preexisting, bool))
+        or not isinstance(status, str)
+        or not journal_step_status_allowed(phase, "NETWORK_CREATE", status, has_before=False)
+        or (
+            network_id is not None
+            and (not isinstance(network_id, str) or SHA256_RE.fullmatch(network_id) is None)
+        )
+    ):
+        stop(f"{label} binding/status is invalid.")
+    if status == "PENDING" and (preexisting is not None or network_id is not None):
+        stop(f"{label} pending state already claims a network observation.")
+    if status == "CREATING" and (preexisting is not False or network_id is not None):
+        stop(f"{label} creating state is not one missing-network intent.")
+    if status == "CREATED" and (preexisting is not False or network_id is None):
+        stop(f"{label} created state lacks its transaction network ID.")
+    if status == "RETAINED" and (preexisting is not True or network_id is None):
+        stop(f"{label} retained state lacks its predecessor network ID.")
+    if status == "REMOVING" and (preexisting is not False or network_id is None):
+        stop(f"{label} removing state lacks its transaction network ID.")
+    if status == "ABORTED" and not (
+        (preexisting is None and network_id is None)
+        or (preexisting is True and network_id is not None)
+        or (preexisting is False)
+    ):
+        stop(f"{label} aborted state has an impossible network provenance.")
+    return step
+
+
+def journal_step_status_allowed(phase: str, kind: str, status: str, *, has_before: bool) -> bool:
+    if kind == "SERVICE":
+        apply_statuses = JOURNAL_SERVICE_APPLY_STATUSES if has_before else JOURNAL_NEW_SERVICE_APPLY_STATUSES
+    elif kind == "REMOVE":
+        apply_statuses = JOURNAL_REMOVE_APPLY_STATUSES
+    elif kind == "NETWORK_ATTACH":
+        apply_statuses = JOURNAL_NETWORK_APPLY_STATUSES
+    elif kind == "NETWORK_CREATE":
+        apply_statuses = JOURNAL_NETWORK_RESOURCE_APPLY_STATUSES
+    else:
+        return False
+    if phase == "APPLYING":
+        return status in apply_statuses
+    if phase == "APPLIED":
+        return (
+            (status == "APPLIED" or (has_before and status == "RETAINED")) if kind == "SERVICE"
+            else status == "BACKED_UP" if kind == "REMOVE"
+            else status == "CONNECTED" if kind == "NETWORK_ATTACH"
+            else status in ("CREATED", "RETAINED")
+        )
+    if phase == "COMMITTING":
+        return (
+            status in (("RETAINED", "APPLIED", "PURGING", "PURGED") if has_before else ("APPLIED",))
+            if kind == "SERVICE"
+            else status in ("BACKED_UP", "PURGING", "PURGED") if kind == "REMOVE"
+            else status == "CONNECTED" if kind == "NETWORK_ATTACH"
+            else status in ("CREATED", "RETAINED")
+        )
+    if phase == "EVIDENCED":
+        return (
+            status == ("PURGED" if has_before else "APPLIED")
+            if kind == "SERVICE"
+            else status == "PURGED" if kind == "REMOVE"
+            else status == "CONNECTED" if kind == "NETWORK_ATTACH"
+            else status in ("CREATED", "RETAINED")
+        )
+    if phase == "ABORTING":
+        abort_statuses = (
+            ("ABORTING", "ABORTED") if kind in ("SERVICE", "REMOVE")
+            else ("DISCONNECTING", "ABORTED") if kind == "NETWORK_ATTACH"
+            else ("REMOVING", "ABORTED")
+        )
+        return status in apply_statuses or status in abort_statuses
+    if phase == "ABORTED":
+        return status == "ABORTED"
+    return False
+
+
+def validate_journal_after_identity(
+    value: object, target: Dict[str, object], container_name: str, label: str
+) -> Optional[Dict[str, object]]:
+    if value is None:
+        return None
+    identity = validate_journal_identity(value, label, reconciler=True)
+    semantic = target["semantic"]
+    if (
+        identity["name"] != container_name
+        or identity["service"] != target["service"]
+        or identity["project"] != target["project"]
+        or identity["configHash"] != target["configHash"]
+        or identity["imageId"] != semantic.get("imageId")
+        or identity["imageReference"] != semantic.get("imageReference")
+        or identity["runtimeConfigSha256"] != runtime_configuration_digest(semantic)
+        or identity["semanticSha256"] != digest(canonical(semantic).encode())
+    ):
+        stop(f"{label} differs from the exact authority target.")
+    return identity
+
+
+def validate_journal_rollback_binding(
+    step: Dict[str, object], journal: Dict[str, object], phase: str, label: str
+) -> None:
+    before = step["before"]
+    if before is None:
+        if (
+            step["backupName"] is not None
+            or step["rollbackSpecPath"] is not None
+            or step["rollbackSpecSha256"] is not None
+            or step["restoredByRecreate"] is not False
+        ):
+            stop(f"{label} without a predecessor has rollback material.")
+        return
+    expected_backup = f"v1-rollback-{journal['transactionId'][:12]}-{before['name']}"
+    expected_path = f"{ROLLBACK_SPEC_DIR}/{journal['transactionId']}/{before['name']}.json"
+    if (
+        step["backupName"] != expected_backup
+        or step["rollbackSpecPath"] != expected_path
+        or not isinstance(step["rollbackSpecSha256"], str)
+        or SHA256_RE.fullmatch(step["rollbackSpecSha256"]) is None
+        or not isinstance(step["restoredByRecreate"], bool)
+        or (
+            step["restoredByRecreate"]
+            and (phase not in ("ABORTING", "ABORTED") or step["status"] not in ("ABORTING", "ABORTED"))
+        )
+    ):
+        stop(f"{label} rollback binding is invalid.")
+    # At the evidence commit point the bound private specification can already
+    # have been removed while PURGING/PURGED is durably recorded.  Before that
+    # point its exact bytes are mandatory; if it still exists during commit,
+    # validate it before accepting the journal.
+    purge_state = phase in ("COMMITTING", "EVIDENCED") and step["status"] in ("PURGING", "PURGED")
+    if not purge_state or os.path.lexists(physical(expected_path)):
+        load_rollback_spec(step, journal)
+
+
+def validate_journal_steps(
+    steps: object, journal: Dict[str, object], authority: Dict[str, object], reconciliation: Dict[str, object]
+) -> List[Dict[str, object]]:
+    if not isinstance(steps, list):
+        stop("reconciliation journal steps are not one list.")
+    targets = target_by_name(authority)
+    raw_predecessors = reconciliation.get("predecessorRuntimeIdentities")
+    if not isinstance(raw_predecessors, list):
+        stop("reconciliation journal has no predecessor identity inventory.")
+    for index, record in enumerate(raw_predecessors):
+        validate_journal_identity(record, f"journal predecessor identity {index}", reconciler=False)
+    previous = predecessor_map(reconciliation)
+    planned = reconciliation.get("plannedLegacyNetworkAttachments")
+    if not isinstance(planned, list):
+        stop("reconciliation journal has no planned legacy network attachments.")
+    allowed_attachments = {canonical(item) for item in authority.get("legacyNetworkAttachments", [])}
+    validated_attachments = []
+    seen_attachments = set()
+    for index, raw in enumerate(planned):
+        item = validate_journal_attachment(raw, f"planned journal network attachment {index}")
+        encoded = canonical(item)
+        if encoded not in allowed_attachments or encoded in seen_attachments:
+            stop("planned journal network attachment is duplicated or outside exact authority.")
+        seen_attachments.add(encoded)
+        validated_attachments.append(dict(item))
+    if validated_attachments != sorted(validated_attachments, key=lambda item: (item["containerName"], item["networkName"])):
+        stop("planned journal network attachments are unordered.")
+
+    network_resource_names = journal_network_resource_names(authority)
+    expected_count = len(network_resource_names) + len(ACTIVE_MANAGED) + len(validated_attachments)
+    scheduler = previous.get("enterprise-backup-scheduler")
+    if scheduler is not None:
+        expected_count += 1
+    if len(steps) != expected_count:
+        stop("reconciliation journal step cardinality differs from the deterministic plan.")
+
+    index = 0
+    for network_name in network_resource_names:
+        validate_journal_network_resource_step(
+            steps[index], network_name, journal["phase"],
+            f"reconciliation journal network resource step {index}",
+        )
+        index += 1
+
+    for container_name in ACTIVE_MANAGED:
+        label = f"reconciliation journal service step {index}"
+        step = exact_keys(steps[index], JOURNAL_SERVICE_STEP_FIELDS, label)
+        before = previous.get(container_name)
+        if container_name == CANONICAL_ALERT_DISPATCHER and before is None:
+            before = previous.get(LEGACY_ALERT_DISPATCHER)
+        if before is not None:
+            validate_journal_identity(before, f"{label} expected predecessor", reconciler=False)
+        if (
+            step["kind"] != "SERVICE"
+            or step["containerName"] != container_name
+            or step["service"] != ACTIVE_SERVICE_BY_CONTAINER[container_name]
+            or step["before"] != before
+            or not isinstance(step["status"], str)
+            or not journal_step_status_allowed(journal["phase"], "SERVICE", step["status"], has_before=before is not None)
+        ):
+            stop(f"{label} differs from the deterministic authority/predecessor plan.")
+        if before is not None:
+            validate_journal_identity(step["before"], f"{label} predecessor", reconciler=False)
+        after = validate_journal_after_identity(step["after"], targets[container_name], container_name, f"{label} result")
+        after_required = step["status"] in ("RETAINED", "APPLIED", "PURGING", "PURGED")
+        after_optional = step["status"] in ("ABORTING", "ABORTED")
+        if (after_required and after is None) or (not after_required and not after_optional and after is not None):
+            stop(f"{label} result/status binding is invalid.")
+        if step["status"] == "RETAINED" and (
+            before is None
+            or before["name"] != container_name
+            or after is None
+            or not identity_matches_predecessor(after, before)
+        ):
+            stop(f"{label} retained result differs from its exact predecessor.")
+        validate_journal_rollback_binding(step, journal, journal["phase"], label)
+        index += 1
+
+    if scheduler is not None:
+        label = f"reconciliation journal remove step {index}"
+        step = exact_keys(steps[index], JOURNAL_SERVICE_STEP_FIELDS, label)
+        validate_journal_identity(scheduler, f"{label} expected predecessor", reconciler=False)
+        if (
+            step["kind"] != "REMOVE"
+            or step["containerName"] != "enterprise-backup-scheduler"
+            or step["service"] != scheduler["service"]
+            or step["before"] != scheduler
+            or step["after"] is not None
+            or not isinstance(step["status"], str)
+            or not journal_step_status_allowed(journal["phase"], "REMOVE", step["status"], has_before=True)
+        ):
+            stop(f"{label} differs from the deterministic predecessor-removal plan.")
+        validate_journal_identity(step["before"], f"{label} predecessor", reconciler=False)
+        validate_journal_rollback_binding(step, journal, journal["phase"], label)
+        index += 1
+
+    for attachment_index, attachment in enumerate(validated_attachments):
+        label = f"reconciliation journal network step {index}"
+        step = exact_keys(steps[index], JOURNAL_NETWORK_STEP_FIELDS, label)
+        if (
+            step["kind"] != "NETWORK_ATTACH"
+            or step["attachment"] != attachment
+            or not isinstance(step["status"], str)
+            or not journal_step_status_allowed(journal["phase"], "NETWORK_ATTACH", step["status"], has_before=False)
+        ):
+            stop(f"{label} differs from planned legacy network attachment {attachment_index}.")
+        validate_journal_attachment(step["attachment"], f"{label} attachment")
+        index += 1
+    return steps
+
+
+def journal_apply_execution_frontier(journal: Dict[str, object]) -> List[Tuple[str, str, frozenset, frozenset]]:
+    """Return the one serial mutation order encoded by ``apply``.
+
+    Each entry carries its status plus the terminal/transient sets for the
+    apply state machine.  PENDING is the only never-started state.  Keeping
+    this projection in one helper makes journal validation reject states that
+    are locally plausible per step but impossible for the serial executor.
+    """
+    steps = journal["steps"]
+    resources = [step for step in steps if step["kind"] == "NETWORK_CREATE"]
+    attachments = [step for step in steps if step["kind"] == "NETWORK_ATTACH"]
+    services = {
+        step["containerName"]: step for step in steps if step["kind"] == "SERVICE"
+    }
+    removals = [step for step in steps if step["kind"] == "REMOVE"]
+    result: List[Tuple[str, str, frozenset, frozenset]] = []
+    for step in resources:
+        result.append((
+            f"network resource {step['networkName']}", step["status"],
+            frozenset(("CREATED", "RETAINED")), frozenset(("CREATING",)),
+        ))
+    for step in attachments:
+        attachment = step["attachment"]
+        result.append((
+            f"network attachment {attachment['containerName']}/{attachment['networkName']}",
+            step["status"], frozenset(("CONNECTED",)), frozenset(("CONNECTING",)),
+        ))
+    mutation_ids = [
+        authority_id for authority_id in DATA_MUTATION_ORDER
+        if authority_id in journal["dataMutationStatus"]
+    ]
+    mutation_ids.extend(sorted(set(journal["dataMutationStatus"]) - set(mutation_ids)))
+    for authority_id in mutation_ids:
+        terminal = (
+            frozenset(("NEVER_STARTED",))
+            if journal.get("validationLaneSha256") is not None
+            else frozenset(("APPLIED", "SKIPPED_VERIFIED"))
+        )
+        result.append((
+            f"data mutation {authority_id}", journal["dataMutationStatus"][authority_id],
+            terminal, frozenset() if journal.get("validationLaneSha256") is not None else frozenset(("RUNNING",)),
+        ))
+    if journal.get("validationLaneSha256") is not None:
+        if steps:
+            stop("FAST validation execution frontier unexpectedly contains Docker steps.")
+        return result
+    for name in SERVICE_REFRESH_ORDER:
+        step = services[name]
+        result.append((
+            f"service {name}", step["status"], frozenset(("APPLIED", "RETAINED")),
+            frozenset(("RENAMING", "RENAMED", "STOPPING", "BACKED_UP", "REFRESHING")),
+        ))
+    for step in removals:
+        result.append((
+            f"removal {step['containerName']}", step["status"], frozenset(("BACKED_UP",)),
+            frozenset(("RENAMING", "RENAMED", "STOPPING")),
+        ))
+    return result
+
+
+def validate_linear_apply_frontier(
+    entries: List[Tuple[str, str, frozenset, frozenset]], *, abort_wildcards: bool = False,
+) -> None:
+    """Require terminal prefix, at most one transient, then PENDING suffix.
+
+    During abort, already-aborted/currently-aborting steps are information
+    erasures: they may represent any previously reachable apply state.  The
+    still-visible states nevertheless must embed in one reachable frontier.
+    """
+    transient_seen = False
+    pending_seen = False
+    abort_states = frozenset(("ABORTED", "ABORTING", "DISCONNECTING", "REMOVING"))
+    for label, status, terminal, transient in entries:
+        if abort_wildcards and status in abort_states:
+            continue
+        if status in terminal:
+            if transient_seen or pending_seen:
+                stop(f"reconciliation journal global apply frontier advances unexpectedly at {label}.")
+        elif status in transient:
+            if transient_seen or pending_seen:
+                stop(f"reconciliation journal has more than one reachable apply transient at {label}.")
+            transient_seen = True
+        elif status == "PENDING":
+            pending_seen = True
+        else:
+            stop(f"reconciliation journal status at {label} is outside its apply frontier.")
+
+
+def validate_abort_frontier(journal: Dict[str, object]) -> None:
+    """Require original prefix, optional active rollback, ABORTED suffix."""
+    active_abort_seen = False
+    aborted_seen = False
+    for index, step in enumerate(journal["steps"]):
+        status = step["status"]
+        transient = (
+            "ABORTING" if step["kind"] in ("SERVICE", "REMOVE")
+            else "DISCONNECTING" if step["kind"] == "NETWORK_ATTACH"
+            else "REMOVING"
+        )
+        if status == "ABORTED":
+            aborted_seen = True
+            continue
+        if status == transient:
+            if active_abort_seen or aborted_seen:
+                stop("reconciliation journal abort frontier has an impossible current rollback step.")
+            active_abort_seen = True
+            continue
+        if active_abort_seen or aborted_seen:
+            stop(f"reconciliation journal abort frontier regresses at physical step {index}.")
+    validate_linear_apply_frontier(journal_apply_execution_frontier(journal), abort_wildcards=True)
+
+
+def validate_commit_frontier(journal: Dict[str, object]) -> None:
+    """Require physical-order PURGED prefix, optional PURGING, terminal suffix."""
+    purge_seen = False
+    terminal_suffix_seen = False
+    for step in journal["steps"]:
+        if step["kind"] not in ("SERVICE", "REMOVE") or not step.get("backupName"):
+            continue
+        status = step["status"]
+        terminal = ("RETAINED", "APPLIED") if step["kind"] == "SERVICE" else ("BACKED_UP",)
+        if status == "PURGED":
+            if purge_seen or terminal_suffix_seen:
+                stop("reconciliation journal commit frontier has an out-of-order PURGED step.")
+        elif status == "PURGING":
+            if purge_seen or terminal_suffix_seen:
+                stop("reconciliation journal commit frontier has more than one current purge step.")
+            purge_seen = True
+        elif status in terminal:
+            terminal_suffix_seen = True
+        else:
+            stop("reconciliation journal commit frontier contains an incomplete apply state.")
+
+
+def validate_journal_phase_frontier(journal: Dict[str, object]) -> None:
+    phase = journal["phase"]
+    if phase == "APPLYING":
+        validate_linear_apply_frontier(journal_apply_execution_frontier(journal))
+    elif phase == "ABORTING":
+        if any(status == "RUNNING" for status in journal["dataMutationStatus"].values()):
+            stop("aborting reconciliation journal has an indeterminate data mutation.")
+        validate_abort_frontier(journal)
+    elif phase == "COMMITTING":
+        validate_commit_frontier(journal)
+
+
+def validate_mutation_evidence_entry(
+    raw: object, authority: Dict[str, object], began_at: int, label: str,
+) -> Dict[str, str]:
+    item = exact_keys(raw, ("authorityId", "evidencePath", "evidenceSha256"), label)
+    allowed = {entry["id"] for entry in authority["authorizedDataMutations"]}
+    authority_id = item["authorityId"]
+    evidence_sha = item["evidenceSha256"]
+    if (
+        authority_id not in allowed
+        or not isinstance(evidence_sha, str)
+        or SHA256_RE.fullmatch(evidence_sha) is None
+        or not isinstance(began_at, int)
+        or isinstance(began_at, bool)
+    ):
+        stop(f"{label} identity/digest is invalid.")
+    expected_path = f"{MUTATION_EVIDENCE_DIR}/{authority['documentId']}-{authority_id}-{evidence_sha}.json"
+    if item["evidencePath"] != expected_path:
+        stop(f"{label} path is not the exact authority/id/digest binding.")
+    data = secure_file(expected_path, label, MAX_JSON, 0o444)
+    if digest(data) != evidence_sha:
+        stop(f"{label} bytes differ from their journal digest.")
+    document = exact_keys(parse_json(data, label, True), (
+        "authorityId", "capturedAtUnixSeconds", "detailsSha256", "schema", "status",
+    ), label)
+    captured = document["capturedAtUnixSeconds"]
+    if (
+        document["schema"] != MUTATION_EVIDENCE_SCHEMA
+        or document["authorityId"] != authority_id
+        or document["status"] != "PASS"
+        or not isinstance(document["detailsSha256"], str)
+        or SHA256_RE.fullmatch(document["detailsSha256"]) is None
+        or isinstance(captured, bool)
+        or not isinstance(captured, int)
+        or captured < began_at
+        or captured > int(time.time()) + 60
+    ):
+        stop(f"{label} document is not exact PASS evidence for this transaction.")
+    return item
+
+
+def journal_document(
+    authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object],
+    validation_lane: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
     transaction_id = digest(authority_bytes + marker_bytes)
     evidence_preimages = materialize_evidence_preimages(transaction_id)
     deployment_config_preimage = materialize_deployment_config_preimage(transaction_id)
     previous = predecessor_map(reconciliation)
-    steps = []
-    for name in ACTIVE_MANAGED:
-        before = previous.get(name)
-        if name == CANONICAL_ALERT_DISPATCHER and before is None:
-            before = previous.get(LEGACY_ALERT_DISPATCHER)
-        rollback_path, rollback_sha = materialize_rollback_spec(transaction_id, before)
-        steps.append({
-            "after": None,
-            "backupName": f"v1-rollback-{transaction_id[:12]}-{before['name']}" if before is not None else None,
-            "before": before,
-            "containerName": name,
-            "kind": "SERVICE",
-            "restoredByRecreate": False,
-            "rollbackSpecPath": rollback_path,
-            "rollbackSpecSha256": rollback_sha,
-            "service": ACTIVE_SERVICE_BY_CONTAINER[name],
+    # FAST is an observational transaction, not a shortened production plan.
+    # Its immutable lane digest is the sole authority for the zero-step shape;
+    # no rollback specs are captured because no Docker resource may be touched.
+    steps: List[Dict[str, object]] = []
+    if validation_lane is None:
+        steps = [{
+            "kind": "NETWORK_CREATE",
+            "networkId": None,
+            "networkName": name,
+            "preexisting": None,
             "status": "PENDING",
-        })
-    scheduler = previous.get("enterprise-backup-scheduler")
-    if scheduler is not None:
-        rollback_path, rollback_sha = materialize_rollback_spec(transaction_id, scheduler)
-        steps.append({
-            "after": None,
-            "backupName": f"v1-rollback-{transaction_id[:12]}-enterprise-backup-scheduler",
-            "before": scheduler,
-            "containerName": "enterprise-backup-scheduler",
-            "kind": "REMOVE",
-            "restoredByRecreate": False,
-            "rollbackSpecPath": rollback_path,
-            "rollbackSpecSha256": rollback_sha,
-            "service": scheduler["service"],
-            "status": "PENDING",
-        })
-    for attachment in reconciliation["plannedLegacyNetworkAttachments"]:
-        steps.append({
-            "attachment": attachment,
-            "kind": "NETWORK_ATTACH",
-            "status": "PENDING",
-        })
+        } for name in journal_network_resource_names(authority)]
+        for name in ACTIVE_MANAGED:
+            before = previous.get(name)
+            if name == CANONICAL_ALERT_DISPATCHER and before is None:
+                before = previous.get(LEGACY_ALERT_DISPATCHER)
+            rollback_path, rollback_sha = materialize_rollback_spec(transaction_id, before)
+            steps.append({
+                "after": None,
+                "backupName": f"v1-rollback-{transaction_id[:12]}-{before['name']}" if before is not None else None,
+                "before": before,
+                "containerName": name,
+                "kind": "SERVICE",
+                "restoredByRecreate": False,
+                "rollbackSpecPath": rollback_path,
+                "rollbackSpecSha256": rollback_sha,
+                "service": ACTIVE_SERVICE_BY_CONTAINER[name],
+                "status": "PENDING",
+            })
+        scheduler = previous.get("enterprise-backup-scheduler")
+        if scheduler is not None:
+            rollback_path, rollback_sha = materialize_rollback_spec(transaction_id, scheduler)
+            steps.append({
+                "after": None,
+                "backupName": f"v1-rollback-{transaction_id[:12]}-enterprise-backup-scheduler",
+                "before": scheduler,
+                "containerName": "enterprise-backup-scheduler",
+                "kind": "REMOVE",
+                "restoredByRecreate": False,
+                "rollbackSpecPath": rollback_path,
+                "rollbackSpecSha256": rollback_sha,
+                "service": scheduler["service"],
+                "status": "PENDING",
+            })
+        for attachment in reconciliation["plannedLegacyNetworkAttachments"]:
+            steps.append({
+                "attachment": attachment,
+                "kind": "NETWORK_ATTACH",
+                "status": "PENDING",
+            })
     return {
         "authorityDocumentId": authority["documentId"],
         "authoritySha256": digest(authority_bytes),
@@ -5944,6 +7478,7 @@ def journal_document(authority: Dict[str, object], authority_bytes: bytes, recon
         "steps": steps,
         "transactionId": transaction_id,
         "updatedAtUnixSeconds": int(time.time()),
+        "validationLaneSha256": validation_lane_sha256(validation_lane),
     }
 
 
@@ -5952,11 +7487,48 @@ def save_journal(value: Dict[str, object]) -> None:
     atomic_json(JOURNAL, value, 0o600)
 
 
-def validate_journal(value: Dict[str, object], authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
-    exact_keys(value, (
-        "authorityDocumentId", "authoritySha256", "beganAtUnixSeconds", "createdAtUnixSeconds", "dataMutationEvidence",
-        "dataMutationStatus", "deploymentConfigPreimage", "evidencePreimages", "phase", "reconciliationSha256", "schema", "steps", "transactionId", "updatedAtUnixSeconds",
-    ), "reconciliation journal")
+def exact_journal_keys(
+    value: object, label: str, *, allow_legacy_zero_step_aborted: bool = False,
+) -> Dict[str, object]:
+    if isinstance(value, dict) and set(value) == set(JOURNAL_FIELDS):
+        return value
+    if (
+        isinstance(value, dict)
+        and set(value) == set(JOURNAL_CHECKPOINT_ABORT_FIELDS)
+        and value.get("phase") == "ABORTED"
+        and value.get("steps") == []
+        and value.get("validationLaneSha256") is None
+        and value.get("abortCheckpointMode") in ("FAST", "PRODUCTION")
+        and isinstance(value.get("abortCheckpointSha256"), str)
+        and SHA256_RE.fullmatch(value["abortCheckpointSha256"]) is not None
+    ):
+        # This closed shape is terminal-only.  It records the immutable FAST
+        # checkpoint that proves mode when begin crashed before JOURNAL, while
+        # remaining distinguishable from the historical superseded-abort form.
+        return value
+    if (
+        allow_legacy_zero_step_aborted
+        and isinstance(value, dict)
+        and set(value) == set(JOURNAL_BASE_FIELDS)
+        and value.get("phase") == "ABORTED"
+        and value.get("steps") == []
+    ):
+        # Compatibility is intentionally limited to the already-materialized
+        # stale-abort terminal form.  Such a journal can only be finalized;
+        # apply/evidence never accept an unbound operational transaction.
+        return value
+    stop(f"{label} keys differ from the closed journal schema.")
+
+
+def validate_journal(
+    value: Dict[str, object], authority: Dict[str, object], authority_bytes: bytes,
+    reconciliation: Dict[str, object], *, allow_superseded_zero_step: bool = False,
+    allow_checkpoint_bound_zero_step_abort: bool = False,
+) -> Dict[str, object]:
+    exact_journal_keys(
+        value, "reconciliation journal",
+        allow_legacy_zero_step_aborted=allow_superseded_zero_step,
+    )
     marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
     if (
         value["schema"] != JOURNAL_SCHEMA
@@ -5965,54 +7537,130 @@ def validate_journal(value: Dict[str, object], authority: Dict[str, object], aut
         or value["reconciliationSha256"] != digest(marker_bytes)
         or value["beganAtUnixSeconds"] != reconciliation["beganAtUnixSeconds"]
         or value["transactionId"] != digest(authority_bytes + marker_bytes)
-        or value["phase"] not in ("APPLYING", "APPLIED", "COMMITTING", "EVIDENCED", "ABORTING", "ABORTED")
+        or value["phase"] not in (
+            "APPLYING", "APPLIED", "VALIDATED_NO_MUTATION", "COMMITTING",
+            "EVIDENCED", "ABORTING", "ABORTED",
+        )
         or not isinstance(value["steps"], list)
         or not isinstance(value["dataMutationEvidence"], list)
         or not isinstance(value["dataMutationStatus"], dict)
     ):
         stop("reconciliation journal binding/status is invalid.")
+    lane_sha = value.get("validationLaneSha256")
+    if lane_sha is not None and (not isinstance(lane_sha, str) or SHA256_RE.fullmatch(lane_sha) is None):
+        stop("reconciliation journal validation-lane binding is invalid.")
+    for field in ("beganAtUnixSeconds", "createdAtUnixSeconds", "updatedAtUnixSeconds"):
+        if isinstance(value[field], bool) or not isinstance(value[field], int):
+            stop("reconciliation journal timestamp is invalid.")
+    checkpoint_abort_mode = value.get("abortCheckpointMode")
+    checkpoint_abort_sha = value.get("abortCheckpointSha256")
+    checkpoint_bound_zero_step_abort = (
+        allow_checkpoint_bound_zero_step_abort
+        and set(value) == set(JOURNAL_CHECKPOINT_ABORT_FIELDS)
+        and value["phase"] == "ABORTED"
+        and value["steps"] == []
+        and lane_sha is None
+        and checkpoint_abort_mode in ("FAST", "PRODUCTION")
+        and isinstance(checkpoint_abort_sha, str)
+        and SHA256_RE.fullmatch(checkpoint_abort_sha) is not None
+    )
+    if set(value) == set(JOURNAL_CHECKPOINT_ABORT_FIELDS) and not checkpoint_bound_zero_step_abort:
+        stop("checkpoint-bound FAST abort journal is admitted only by its terminal recovery path.")
+    if checkpoint_bound_zero_step_abort:
+        bound_mode, bound_sha = unjournaled_begin_checkpoint_mode(authority, reconciliation)
+        if checkpoint_abort_mode != bound_mode or checkpoint_abort_sha != bound_sha:
+            stop("checkpoint-bound zero-step abort journal differs from its immutable begin checkpoint.")
+    superseded_zero_step = (
+        allow_superseded_zero_step
+        and value["phase"] == "ABORTED"
+        and value["steps"] == []
+        and lane_sha is None
+        and checkpoint_abort_sha is None
+    )
+    validation_zero_step = lane_sha is not None and value["steps"] == []
+    if superseded_zero_step or checkpoint_bound_zero_step_abort:
+        if (
+            value["dataMutationEvidence"] != []
+            or any(status != "PENDING" for status in value["dataMutationStatus"].values())
+        ):
+            stop("terminal zero-step journal does not prove a never-started transaction.")
+    elif validation_zero_step:
+        if (
+            value["phase"] in ("COMMITTING", "EVIDENCED")
+            or value["dataMutationEvidence"] != []
+            or any(
+                status not in ("PENDING", "NEVER_STARTED")
+                for status in value["dataMutationStatus"].values()
+            )
+        ):
+            stop("FAST validation journal exceeds its observational zero-step plan.")
+    else:
+        if lane_sha is not None:
+            stop("FAST validation journal is not the immutable zero-step plan.")
+        validate_journal_steps(value["steps"], value, authority, reconciliation)
     validate_deployment_config_preimage(value["deploymentConfigPreimage"], value["transactionId"])
     validate_evidence_preimages(value["evidencePreimages"], value["transactionId"])
     expected_mutations = {item["id"] for item in authority["authorizedDataMutations"]}
     if set(value["dataMutationStatus"]) != expected_mutations or any(
-        status not in ("PENDING", "RUNNING", "APPLIED", "SKIPPED_VERIFIED") for status in value["dataMutationStatus"].values()
+        status not in ("PENDING", "RUNNING", "APPLIED", "SKIPPED_VERIFIED", "NEVER_STARTED")
+        for status in value["dataMutationStatus"].values()
     ):
         stop("reconciliation journal data-mutation state is invalid.")
+    if not validation_zero_step and any(
+        status == "NEVER_STARTED" for status in value["dataMutationStatus"].values()
+    ):
+        stop("production reconciliation journal contains a FAST-only mutation state.")
     evidence_ids = []
-    for raw in value["dataMutationEvidence"]:
-        item = exact_keys(raw, ("authorityId", "evidencePath", "evidenceSha256"), "journal data-mutation evidence")
-        if item["authorityId"] not in expected_mutations or not isinstance(item["evidencePath"], str) or SHA256_RE.fullmatch(str(item["evidenceSha256"])) is None:
-            stop("reconciliation journal data-mutation evidence is invalid.")
+    for index, raw in enumerate(value["dataMutationEvidence"]):
+        item = validate_mutation_evidence_entry(
+            raw, authority, reconciliation["beganAtUnixSeconds"],
+            f"journal data-mutation evidence {index}",
+        )
         evidence_ids.append(item["authorityId"])
     if evidence_ids != sorted(set(evidence_ids)):
         stop("reconciliation journal data-mutation evidence is duplicated or unordered.")
     for authority_id, status in value["dataMutationStatus"].items():
         if (status == "APPLIED") != (authority_id in evidence_ids):
             stop("reconciliation journal mutation status/evidence truth differs.")
-    for step in value["steps"]:
-        if not isinstance(step, dict) or step.get("kind") not in ("SERVICE", "REMOVE", "NETWORK_ATTACH"):
-            stop("reconciliation journal contains an invalid step kind.")
-        if step["kind"] in ("SERVICE", "REMOVE"):
-            before = step.get("before")
-            if before is None:
-                if step.get("rollbackSpecPath") is not None or step.get("rollbackSpecSha256") is not None:
-                    stop("new-service journal step unexpectedly has rollback specification bytes.")
-            elif step.get("status") not in ("PURGED", "ABORTED"):
-                load_rollback_spec(step, value)
+    if value["phase"] in ("APPLIED", "COMMITTING", "EVIDENCED") and any(
+        status not in ("APPLIED", "SKIPPED_VERIFIED") for status in value["dataMutationStatus"].values()
+    ):
+        stop("completed reconciliation phase has an incomplete data-mutation state.")
+    if value["phase"] == "VALIDATED_NO_MUTATION" and (
+        not validation_zero_step
+        or any(status != "NEVER_STARTED" for status in value["dataMutationStatus"].values())
+    ):
+        stop("FAST validated phase does not prove every mutation remained never started.")
+    if value["phase"] == "ABORTED" and not (superseded_zero_step or checkpoint_bound_zero_step_abort) and any(
+        status == "RUNNING" for status in value["dataMutationStatus"].values()
+    ):
+        stop("aborted reconciliation phase has an indeterminate data mutation.")
+    if not (superseded_zero_step or checkpoint_bound_zero_step_abort):
+        validate_journal_phase_frontier(value)
     return value
 
 
-def read_or_create_journal(authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
+def read_or_create_journal(
+    authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object],
+    validation_lane: object = UNBOUND_VALIDATION_LANE,
+) -> Dict[str, object]:
     if os.path.lexists(physical(JOURNAL)):
         value = parse_json(secure_file(JOURNAL, "reconciliation journal", MAX_JSON, 0o600), "reconciliation journal", True)
-        return validate_journal(value, authority, authority_bytes, reconciliation)
-    value = journal_document(authority, authority_bytes, reconciliation)
+        validated = validate_journal(value, authority, authority_bytes, reconciliation)
+        if (
+            validation_lane is not UNBOUND_VALIDATION_LANE
+            and validated["validationLaneSha256"] != validation_lane_sha256(validation_lane)
+        ):
+            stop("current validation lane differs from the existing reconciliation transaction.")
+        return validated
+    if validation_lane is UNBOUND_VALIDATION_LANE:
+        validation_lane = load_validation_lane(authority["candidateCommit"])
+    value = journal_document(authority, authority_bytes, reconciliation, validation_lane)
     atomic_json(JOURNAL, value, 0o600, False)
     return validate_journal(value, authority, authority_bytes, reconciliation)
 
 
-def read_secret(logical: str, label: str, minimum: int = 32) -> str:
-    data = secure_secret_file(logical, label, 4096)
+def parse_secret_bytes(data: bytes, label: str, minimum: int = 32) -> str:
     try:
         value = data.decode("ascii", errors="strict").removesuffix("\n")
     except UnicodeDecodeError:
@@ -6020,6 +7668,29 @@ def read_secret(logical: str, label: str, minimum: int = 32) -> str:
     if len(value) < minimum or len(value) > 1024 or "\n" in value or "\r" in value or "\x00" in value:
         stop(f"{label} has invalid length or delimiters.")
     return value
+
+
+def read_secret(logical: str, label: str, minimum: int = 32) -> str:
+    return parse_secret_bytes(secure_secret_file(logical, label, 4096), label, minimum)
+
+
+def parse_database_secret_bytes(data: bytes) -> str:
+    """Parse one already-opened database secret without a creator fallback."""
+    dsn = parse_secret_bytes(data, "Control Center database URL", 40)
+    parsed = urllib.parse.urlsplit(dsn)
+    if (
+        parsed.scheme not in ("postgres", "postgresql")
+        or parsed.username != "control_center_runtime"
+        or parsed.hostname != "postgres"
+        or parsed.port != 5432
+        or parsed.path != "/control_center"
+        or not parsed.password
+    ):
+        stop("existing Control Center database URL has the wrong bounded runtime identity.")
+    password = urllib.parse.unquote(parsed.password)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", password):
+        stop("Control Center runtime password is not safely representable in bounded bootstrap SQL.")
+    return password
 
 
 def ensure_token_secret(logical: str, label: str, minimum: int = 32) -> Tuple[str, bool]:
@@ -6145,15 +7816,9 @@ def database_prerequisites_ready(password: str) -> bool:
 
 def database_secret() -> Tuple[str, bool]:
     if os.path.lexists(physical(DATABASE_SECRET)):
-        dsn = read_secret(DATABASE_SECRET, "Control Center database URL", 40)
-        parsed = urllib.parse.urlsplit(dsn)
-        if (
-            parsed.scheme not in ("postgres", "postgresql") or parsed.username != "control_center_runtime"
-            or parsed.hostname != "postgres" or parsed.port != 5432 or parsed.path != "/control_center"
-            or not parsed.password
-        ):
-            stop("existing Control Center database URL has the wrong bounded runtime identity.")
-        return urllib.parse.unquote(parsed.password), False
+        return parse_database_secret_bytes(
+            secure_secret_file(DATABASE_SECRET, "Control Center database URL", 4096),
+        ), False
     password = secrets.token_urlsafe(36)
     encoded = urllib.parse.quote(password, safe="")
     dsn = f"postgresql://control_center_runtime:{encoded}@postgres:5432/control_center"
@@ -6350,8 +8015,24 @@ def apply_data_prerequisites(
     apply_keycloak_prerequisite(authority, reconciliation, journal)
 
 
-def backup_matches(actual: Dict[str, object], expected: Dict[str, object]) -> bool:
-    return all(actual.get(key) == expected.get(key) for key in (
+def mark_fast_mutations_never_started(journal: Dict[str, object]) -> None:
+    """Durably attest that FAST did not enter any data mutation executor."""
+    if journal["dataMutationEvidence"] != []:
+        stop("FAST validation journal unexpectedly contains data-mutation evidence.")
+    for authority_id in DATA_MUTATION_ORDER:
+        status = journal["dataMutationStatus"][authority_id]
+        if status == "PENDING":
+            journal["dataMutationStatus"][authority_id] = "NEVER_STARTED"
+            save_journal(journal)
+        elif status != "NEVER_STARTED":
+            stop("FAST validation cannot resume a data mutation executor that was entered.")
+
+
+def backup_matches(actual: Dict[str, object], step: Dict[str, object], journal: Dict[str, object]) -> bool:
+    expected = rollback_native_identity(step, journal)
+    if not isinstance(actual, dict) or set(actual) != set(expected):
+        return False
+    return all(actual[key] == expected[key] for key in (
         "configHash", "containerId", "imageId", "imageReference", "project",
         "runtimeConfigSha256", "semanticSha256", "service",
     ))
@@ -6423,7 +8104,7 @@ def backup_source(step: Dict[str, object], journal: Dict[str, object]) -> None:
     source = inspect_one(source_name, missing_ok=True)
     backup = inspect_one(backup_name, missing_ok=True)
     if status == "RENAMING":
-        if backup is not None and backup_matches(backup[1], before) and source is None:
+        if backup is not None and backup_matches(backup[1], step, journal) and source is None:
             step["status"] = "RENAMED"
             save_journal(journal)
             status = "RENAMED"
@@ -6440,21 +8121,21 @@ def backup_source(step: Dict[str, object], journal: Dict[str, object]) -> None:
         save_journal(journal)
         run([docker_binary(), "rename", source_name, backup_name], f"rename predecessor {source_name}", timeout=30)
         backup = inspect_one(backup_name)
-        if not backup_matches(backup[1], before) or inspect_one(source_name, missing_ok=True) is not None:
+        if not backup_matches(backup[1], step, journal) or inspect_one(source_name, missing_ok=True) is not None:
             stop(f"predecessor {source_name} rename did not verify.")
         step["status"] = "RENAMED"
         save_journal(journal)
         status = "RENAMED"
     if status in ("RENAMED", "STOPPING"):
         backup = inspect_one(backup_name)
-        if not backup_matches(backup[1], before):
+        if not backup_matches(backup[1], step, journal):
             stop(f"renamed predecessor {source_name} identity drifted.")
         if backup[1]["state"] == "running":
             step["status"] = "STOPPING"
             save_journal(journal)
             run([docker_binary(), "stop", "--time", "30", backup_name], f"stop predecessor {source_name}", timeout=60)
         stopped = inspect_one(backup_name)
-        if not backup_matches(stopped[1], before) or stopped[1]["state"] == "running":
+        if not backup_matches(stopped[1], step, journal) or stopped[1]["state"] == "running":
             stop(f"predecessor backup {source_name} did not stop exactly.")
         step["status"] = "BACKED_UP"
         save_journal(journal)
@@ -6467,7 +8148,7 @@ def apply_service_step(
     before = step.get("before")
     if step["status"] in ("RETAINED", "APPLIED", "PURGING", "PURGED"):
         current = wait_for_target(name, target)
-        if step["status"] == "RETAINED" and (before is None or current != before):
+        if step["status"] == "RETAINED" and (before is None or not identity_matches_predecessor(current, before)):
             stop(f"retained service {name} no longer equals its predecessor identity.")
         step["after"] = current
         save_journal(journal)
@@ -6506,7 +8187,7 @@ def apply_remove_step(step: Dict[str, object], journal: Dict[str, object]) -> No
     if step["status"] in ("BACKED_UP", "PURGING", "PURGED"):
         if step["status"] != "PURGED":
             backup = inspect_one(step["backupName"], missing_ok=True)
-            if backup is None or not backup_matches(backup[1], step["before"]) or backup[1]["state"] == "running":
+            if backup is None or not backup_matches(backup[1], step, journal) or backup[1]["state"] == "running":
                 stop("quarantined legacy scheduler backup identity drifted.")
         if inspect_one(step["containerName"], missing_ok=True) is not None:
             stop("legacy scheduler canonical name still exists after quarantine.")
@@ -6567,14 +8248,16 @@ def apply_network_step(step: Dict[str, object], journal: Dict[str, object]) -> N
     save_journal(journal)
 
 
-def ensure_exact_attachment_networks(authority: Dict[str, object]) -> None:
+def exact_attachment_network_bindings(authority: Dict[str, object]) -> Dict[str, Tuple[str, Dict[str, object]]]:
     render = parse_json(secure_file(RENDER, "exact release render", MAX_JSON, 0o444), "exact release render", True)
     definitions = render.get("networks")
     if not isinstance(definitions, dict):
         stop("exact release render has no network definitions.")
     by_physical: Dict[str, Tuple[str, Dict[str, object]]] = {}
     for key, raw in definitions.items():
-        if not isinstance(key, str) or raw is None:
+        if not isinstance(key, str) or not key:
+            stop("exact release network key is invalid.")
+        if raw is None:
             raw = {}
         if not isinstance(raw, dict):
             stop("exact release network definition is invalid.")
@@ -6584,61 +8267,149 @@ def ensure_exact_attachment_networks(authority: Dict[str, object]) -> None:
         by_physical[name] = (key, raw)
     needed = sorted({item["networkName"] for item in authority["legacyNetworkAttachments"]})
     for name in needed:
-        binding = by_physical.get(name)
-        if binding is None:
+        if name not in by_physical:
             stop("legacy attachment references a network outside the exact render.")
-        key, definition = binding
-        result = run_result([docker_binary(), "network", "inspect", name], f"inspect exact network {name}", timeout=30)
-        if result.returncode != 0:
-            if definition.get("external") is True:
-                stop(f"exact external network {name} is missing.")
-            command = [docker_binary(), "network", "create"]
-            driver = definition.get("driver", "bridge")
-            if not isinstance(driver, str) or not driver:
-                stop("exact release network driver is invalid.")
-            command.extend(["--driver", driver])
-            if definition.get("internal") is True:
-                command.append("--internal")
-            if definition.get("attachable") is True:
-                command.append("--attachable")
-            if definition.get("enable_ipv6") is True:
-                command.append("--ipv6")
-            options = definition.get("driver_opts") or {}
-            labels = definition.get("labels") or {}
-            if not isinstance(options, dict) or not isinstance(labels, dict):
-                stop("exact release network options/labels are invalid.")
-            for option, value in sorted(options.items()):
-                command.extend(["--opt", f"{option}={value}"])
-            for label, value in sorted(labels.items()):
-                command.extend(["--label", f"{label}={value}"])
-            command.extend([
-                "--label", f"com.docker.compose.network={key}",
-                "--label", "com.docker.compose.project=platform_infra_vps",
-                name,
-            ])
-            run(command, f"create exact network {name}", timeout=30)
-            result = run_result([docker_binary(), "network", "inspect", name], f"reinspect exact network {name}", timeout=30)
-        if result.returncode != 0:
-            stop(f"exact network {name} is unavailable after bounded reconciliation.")
-        try:
-            objects = json.loads(result.stdout.decode("utf-8", errors="strict"), object_pairs_hook=duplicate_safe)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            stop(f"exact network {name} inspection is invalid: {error}.")
-        if not isinstance(objects, list) or len(objects) != 1 or not isinstance(objects[0], dict):
-            stop(f"exact network {name} inspection has wrong cardinality.")
-        observed = objects[0]
-        labels = observed.get("Labels") or {}
-        expected_labels = definition.get("labels") or {}
-        if (
-            observed.get("Name") != name
-            or observed.get("Driver") != definition.get("driver", "bridge")
-            or observed.get("Internal") is not (definition.get("internal") is True)
-            or observed.get("Attachable") is not (definition.get("attachable") is True)
-            or observed.get("EnableIPv6") is not (definition.get("enable_ipv6") is True)
-            or not isinstance(labels, dict)
-            or any(str(labels.get(label)) != str(value) for label, value in expected_labels.items())
-        ):
-            stop(f"existing exact network {name} differs from the authority-bound render.")
+    return {name: by_physical[name] for name in needed}
+
+
+def inspect_exact_network(name: str, *, missing_ok: bool) -> Optional[Dict[str, object]]:
+    result = run_result([docker_binary(), "network", "inspect", name], f"inspect exact network {name}", timeout=30)
+    if result.returncode != 0:
+        failure = (result.stdout + result.stderr).decode("utf-8", errors="replace").lower()
+        if missing_ok and "no such network" in failure:
+            return None
+        stop(f"exact network {name} inspection failed closed.")
+    try:
+        objects = json.loads(result.stdout.decode("utf-8", errors="strict"), object_pairs_hook=duplicate_safe)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        stop(f"exact network {name} inspection is invalid: {error}.")
+    if not isinstance(objects, list) or len(objects) != 1 or not isinstance(objects[0], dict):
+        stop(f"exact network {name} inspection has wrong cardinality.")
+    return objects[0]
+
+
+def validate_exact_network_observation(
+    observed: Dict[str, object], name: str, definition: Dict[str, object], *,
+    expected_id: Optional[str] = None, transaction_id: Optional[str] = None,
+) -> str:
+    identifier = observed.get("Id")
+    labels = observed.get("Labels") or {}
+    options = observed.get("Options") or {}
+    expected_labels = definition.get("labels") or {}
+    expected_options = definition.get("driver_opts") or {}
+    allowed_label_keys = (set(expected_labels) if isinstance(expected_labels, dict) else set()) | {
+        "com.docker.compose.config-hash",
+        "com.docker.compose.network",
+        "com.docker.compose.project",
+        "com.docker.compose.version",
+        "com.platform.reconciliation.transaction-id",
+    }
+    if (
+        not isinstance(identifier, str) or SHA256_RE.fullmatch(identifier) is None
+        or (expected_id is not None and identifier != expected_id)
+        or observed.get("Name") != name
+        or observed.get("Driver") != definition.get("driver", "bridge")
+        or observed.get("Internal") is not (definition.get("internal") is True)
+        or observed.get("Attachable") is not (definition.get("attachable") is True)
+        or observed.get("EnableIPv6") is not (definition.get("enable_ipv6") is True)
+        or not isinstance(labels, dict)
+        or not isinstance(options, dict)
+        or not isinstance(expected_labels, dict)
+        or not isinstance(expected_options, dict)
+        or set(labels) - allowed_label_keys
+        or any(str(labels.get(label)) != str(value) for label, value in expected_labels.items())
+        or {str(option): str(value) for option, value in options.items()}
+        != {str(option): str(value) for option, value in expected_options.items()}
+        or (
+            transaction_id is not None
+            and labels.get("com.platform.reconciliation.transaction-id") != transaction_id
+        )
+    ):
+        stop(f"existing exact network {name} differs from the authority-bound render/provenance.")
+    return identifier
+
+
+def create_exact_network(
+    name: str, key: str, definition: Dict[str, object], transaction_id: str,
+) -> None:
+    if definition.get("external") is True:
+        stop(f"exact external network {name} is missing.")
+    command = [docker_binary(), "network", "create"]
+    driver = definition.get("driver", "bridge")
+    if not isinstance(driver, str) or not driver:
+        stop("exact release network driver is invalid.")
+    command.extend(["--driver", driver])
+    if definition.get("internal") is True:
+        command.append("--internal")
+    if definition.get("attachable") is True:
+        command.append("--attachable")
+    if definition.get("enable_ipv6") is True:
+        command.append("--ipv6")
+    options = definition.get("driver_opts") or {}
+    labels = definition.get("labels") or {}
+    if not isinstance(options, dict) or not isinstance(labels, dict):
+        stop("exact release network options/labels are invalid.")
+    for option, value in sorted(options.items()):
+        command.extend(["--opt", f"{option}={value}"])
+    for label, value in sorted(labels.items()):
+        command.extend(["--label", f"{label}={value}"])
+    command.extend([
+        "--label", f"com.docker.compose.network={key}",
+        "--label", "com.docker.compose.project=platform_infra_vps",
+        "--label", f"com.platform.reconciliation.transaction-id={transaction_id}",
+        name,
+    ])
+    run(command, f"create exact network {name}", timeout=30)
+
+
+def apply_network_resource_step(
+    step: Dict[str, object], binding: Tuple[str, Dict[str, object]], journal: Dict[str, object],
+) -> None:
+    name = step["networkName"]
+    key, definition = binding
+    status = step["status"]
+    if status == "PENDING":
+        observed = inspect_exact_network(name, missing_ok=True)
+        if observed is not None:
+            step["networkId"] = validate_exact_network_observation(observed, name, definition)
+            step["preexisting"] = True
+            step["status"] = "RETAINED"
+            save_journal(journal)
+            return
+        if definition.get("external") is True:
+            stop(f"exact external network {name} is missing.")
+        step["preexisting"] = False
+        step["status"] = "CREATING"
+        save_journal(journal)
+        status = "CREATING"
+    if status == "CREATING":
+        observed = inspect_exact_network(name, missing_ok=True)
+        if observed is None:
+            create_exact_network(name, key, definition, journal["transactionId"])
+            observed = inspect_exact_network(name, missing_ok=False)
+        step["networkId"] = validate_exact_network_observation(
+            observed, name, definition, transaction_id=journal["transactionId"],
+        )
+        step["status"] = "CREATED"
+        save_journal(journal)
+        return
+    if status in ("CREATED", "RETAINED"):
+        observed = inspect_exact_network(name, missing_ok=False)
+        validate_exact_network_observation(
+            observed, name, definition, expected_id=step["networkId"],
+            transaction_id=journal["transactionId"] if status == "CREATED" else None,
+        )
+        return
+    stop(f"network resource {name} has an invalid apply state {status}.")
+
+
+def apply_network_resource_steps(authority: Dict[str, object], journal: Dict[str, object]) -> None:
+    bindings = exact_attachment_network_bindings(authority)
+    steps = {step["networkName"]: step for step in journal["steps"] if step["kind"] == "NETWORK_CREATE"}
+    if set(steps) != set(bindings):
+        stop("reconciliation journal network resources differ from the exact render plan.")
+    for name in sorted(bindings):
+        apply_network_resource_step(steps[name], bindings[name], journal)
 
 
 def validate_preserved_legacy(
@@ -6653,7 +8424,7 @@ def validate_preserved_legacy(
         if before is None:
             stop(f"preserved legacy container {name} is absent from predecessor evidence.")
         current = inspect_one(name)
-        if not identity_matches_predecessor(current[1], before):
+        if not identity_matches_predecessor(current[1], before, allow_network_change=True):
             stop(f"preserved legacy container {name} non-network identity changed.")
         baseline = before.get("networkMembership")
         if not isinstance(baseline, list) or not any(item.get("networkName") == "enterprise_net" for item in baseline if isinstance(item, dict)):
@@ -6685,18 +8456,69 @@ def apply() -> Dict[str, object]:
     authority, authority_bytes = read_authority()
     targets = validate_authority_material(authority)
     reconciliation = read_reconciliation(authority, authority_bytes)
-    validate_pre_mutation_checkpoint(authority, authority_bytes, reconciliation)
+    # Bind the immutable transaction mode before the first live mutator.  The
+    # read-only owner derivation is sufficient for private preimage capture;
+    # neither a pre-existing journal nor a marker switch may be interpreted by
+    # falling through to the other execution plan.
+    configure_secret_identity_readonly()
+    if os.path.lexists(physical(JOURNAL)):
+        journal = read_or_create_journal(authority, authority_bytes, reconciliation)
+    else:
+        begin_mode, _ = unjournaled_begin_checkpoint_mode(authority, reconciliation)
+        current_lane = load_validation_lane(authority["candidateCommit"])
+        if (begin_mode == "FAST") != (current_lane is not None):
+            stop("current validation marker differs from the begin-bound checkpoint mode.")
+        journal = read_or_create_journal(
+            authority, authority_bytes, reconciliation, current_lane,
+        )
+    journal_validation_mode = journal_uses_validation_lane(
+        journal, authority["candidateCommit"],
+    )
+    validation_lane = validate_pre_mutation_checkpoint(authority, authority_bytes, reconciliation)
+    if journal_validation_mode != (validation_lane is not None):
+        stop("checkpoint mode differs from the immutable reconciliation journal mode.")
+    journal = read_or_create_journal(
+        authority, authority_bytes, reconciliation, validation_lane,
+    )
+    if journal_validation_mode:
+        # FAST is a distinct, journal-bound observational plan.  It may create
+        # only transaction-private journal/preimage files; it never reaches
+        # any live .env, Docker, database, Keycloak or secret mutator.
+        stable_unchanged_predecessor_inventory(reconciliation)
+        if journal["phase"] in ("APPLIED", "EVIDENCED", "ABORTING", "ABORTED", "COMMITTING"):
+            stop(f"apply cannot continue transaction phase {journal['phase']}.")
+        verify_fast_preimages_unchanged(journal)
+        if journal["phase"] == "VALIDATED_NO_MUTATION":
+            stable_unchanged_predecessor_inventory(reconciliation)
+            return {
+                "authorityDocumentId": authority["documentId"],
+                "status": "VALIDATED_NO_MUTATION",
+                "transactionId": journal["transactionId"],
+            }
+        mark_fast_mutations_never_started(journal)
+        stable_unchanged_predecessor_inventory(reconciliation)
+        verify_fast_preimages_unchanged(journal)
+        journal["phase"] = "VALIDATED_NO_MUTATION"
+        save_journal(journal)
+        return {
+            "authorityDocumentId": authority["documentId"],
+            "status": "VALIDATED_NO_MUTATION",
+            "transactionId": journal["transactionId"],
+        }
     # Live ownership/mode narrowing and .env promotion are maintenance-only;
     # prepare remains strictly staging/state materialization.
+    # Recheck the still-present production marker state immediately before
+    # narrowing any live ownership/mode.
+    if journal_uses_validation_lane(journal, authority["candidateCommit"]):
+        stop("production reconciliation journal switched into validation mode.")
     configure_secret_anchor()
-    journal = read_or_create_journal(authority, authority_bytes, reconciliation)
     promote_live_environment()
     if journal["phase"] in ("EVIDENCED", "ABORTING", "ABORTED", "COMMITTING"):
         stop(f"apply cannot continue transaction phase {journal['phase']}.")
     if journal["phase"] == "APPLIED":
         validate_apply_target(authority, reconciliation, journal, targets)
         return {"authorityDocumentId": authority["documentId"], "status": "APPLIED", "transactionId": journal["transactionId"]}
-    ensure_exact_attachment_networks(authority)
+    apply_network_resource_steps(authority, journal)
     for step in journal["steps"]:
         if step.get("kind") == "NETWORK_ATTACH":
             apply_network_step(step, journal)
@@ -6807,21 +8629,90 @@ def rollback_create_payload(raw: Dict[str, object], before: Dict[str, object]) -
     return create_config, primary, additional
 
 
+def validate_partial_recreated_predecessor(
+    raw: Dict[str, object], actual: Dict[str, object], step: Dict[str, object], journal: Dict[str, object],
+) -> None:
+    """Accept only the exact raw-spec container at an intermediate recreate cut."""
+    expected = rollback_native_identity(step, journal)
+    derived = container_identity(raw) if isinstance(raw, dict) else None
+    static_fields = (
+        "configHash", "imageId", "imageReference", "name", "project",
+        "runtimeConfigSha256", "service",
+    )
+    if (
+        not isinstance(raw, dict)
+        or not isinstance(actual, dict)
+        or derived != actual
+        or set(actual) != set(expected)
+        or any(actual[field] != expected[field] for field in static_fields)
+        or actual["state"] not in ("created", "running", "exited")
+    ):
+        stop("partial rollback recreation differs from its immutable raw/static specification.")
+    expected_memberships = {
+        item["networkName"]: item for item in expected["networkMembership"]
+        if isinstance(item, dict) and isinstance(item.get("networkName"), str)
+    }
+    actual_memberships = {
+        item["networkName"]: item for item in actual["networkMembership"]
+        if isinstance(item, dict) and isinstance(item.get("networkName"), str)
+    }
+    if (
+        len(expected_memberships) != len(expected["networkMembership"])
+        or len(actual_memberships) != len(actual["networkMembership"])
+        or not set(actual_memberships).issubset(expected_memberships)
+        or any(actual_memberships[name] != expected_memberships[name] for name in actual_memberships)
+    ):
+        stop("partial rollback recreation has a foreign or drifted network attachment.")
+
+
 def recreate_predecessor(step: Dict[str, object], journal: Dict[str, object]) -> None:
     spec = load_rollback_spec(step, journal)
     before = step["before"]
     if image_id_for(before["imageReference"]) != before["imageId"]:
         stop("rollback predecessor image reference no longer resolves to its exact local image ID.")
     payload, _, additional = rollback_create_payload(spec["containerInspect"], before)
-    response = docker_engine_request(
-        "POST",
-        f"/containers/create?name={urllib.parse.quote(before['name'], safe='')}",
-        payload,
-    )
-    identifier = response.get("Id")
-    if not isinstance(identifier, str) or SHA256_RE.fullmatch(identifier) is None:
-        stop("Docker Engine rollback recreation did not return one full container ID.")
+    current = inspect_one(before["name"], missing_ok=True)
+    if not step.get("restoredByRecreate"):
+        if current is not None:
+            stop("rollback recreation cannot adopt an unjournaled same-name container.")
+        # Persist intent before the first Docker mutation.  A retry may adopt
+        # only an object that still matches the immutable raw/static spec.
+        step["restoredByRecreate"] = True
+        save_journal(journal)
+        test_fault("AFTER_RECREATE_INTENT")
+    elif current is not None:
+        validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+
+    if current is None:
+        response = docker_engine_request(
+            "POST",
+            f"/containers/create?name={urllib.parse.quote(before['name'], safe='')}",
+            payload,
+        )
+        identifier = response.get("Id")
+        if not isinstance(identifier, str) or SHA256_RE.fullmatch(identifier) is None:
+            stop("Docker Engine rollback recreation did not return one full container ID.")
+        test_fault("AFTER_RECREATE_CREATE")
+        current = inspect_one(before["name"])
+        if current[1]["containerId"] != identifier:
+            stop("Docker Engine rollback recreation identity changed after create.")
+        validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+
     for membership in additional:
+        current = inspect_one(before["name"])
+        validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+        present = next((
+            item for item in current[1]["networkMembership"]
+            if item["networkName"] == membership["networkName"]
+        ), None)
+        desired = {
+            "aliases": membership["aliases"],
+            "networkName": membership["networkName"],
+        }
+        if present is not None:
+            if present != desired:
+                stop("partial rollback recreation network aliases drifted.")
+            continue
         command = [docker_binary(), "network", "connect"]
         if membership["ipv4Address"]:
             command.extend(["--ip", membership["ipv4Address"]])
@@ -6831,19 +8722,45 @@ def recreate_predecessor(step: Dict[str, object], journal: Dict[str, object]) ->
             command.extend(["--alias", alias])
         command.extend([membership["networkName"], before["name"]])
         run(command, f"restore predecessor network {membership['networkName']}", timeout=30, sensitive=True)
-    # A recreated stopped/exited predecessor must execute once to recover its
-    # exact terminal state; all managed one-shots in the V1 form are idempotent.
-    run([docker_binary(), "start", before["name"]], f"restart recreated predecessor {before['name']}", timeout=60, sensitive=True)
-    step["restoredByRecreate"] = True
-    save_journal(journal)
+        test_fault("AFTER_RECREATE_CONNECT")
+
+    current = inspect_one(before["name"])
+    validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+    if recreated_identity_matches(current[1], step, journal):
+        return
+    expected_state = rollback_native_identity(step, journal)["state"]
+    if expected_state not in ("running", "exited"):
+        stop("rollback recreation cannot safely reproduce the predecessor runtime state.")
+    if current[1]["state"] == "created" or (
+        expected_state == "running" and current[1]["state"] == "exited"
+    ):
+        run(
+            [docker_binary(), "start", before["name"]],
+            f"restart recreated predecessor {before['name']}", timeout=60, sensitive=True,
+        )
+        test_fault("AFTER_RECREATE_START")
+    elif current[1]["state"] == "exited":
+        stop("recreated predecessor exited with a state different from its immutable specification.")
+
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        current = inspect_one(before["name"])
+        if recreated_identity_matches(current[1], step, journal):
+            return
+        validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+        time.sleep(2)
+    stop(f"recreated predecessor {before['name']} did not recover its exact runtime state.")
 
 
-def recreated_identity_matches(actual: Dict[str, object], expected: Dict[str, object]) -> bool:
+def recreated_identity_matches(actual: Dict[str, object], step: Dict[str, object], journal: Dict[str, object]) -> bool:
+    expected = rollback_native_identity(step, journal)
+    if not isinstance(actual, dict) or set(actual) != set(expected):
+        return False
     fields = (
         "configHash", "exitCode", "health", "imageId", "imageReference", "networkMembership",
         "project", "runtimeConfigSha256", "semanticSha256", "service", "state",
     )
-    return actual.get("name") == expected.get("name") and all(actual.get(field) == expected.get(field) for field in fields)
+    return actual["name"] == expected["name"] and all(actual[field] == expected[field] for field in fields)
 
 
 def restore_predecessor_step(step: Dict[str, object], journal: Dict[str, object]) -> None:
@@ -6855,7 +8772,7 @@ def restore_predecessor_step(step: Dict[str, object], journal: Dict[str, object]
             source = inspect_one(before["name"], missing_ok=True)
             if source is None or (
                 not identity_matches_predecessor(source[1], before)
-                and not recreated_identity_matches(source[1], before)
+                and not recreated_identity_matches(source[1], step, journal)
             ):
                 stop(f"unmutated predecessor {before['name']} drifted during abort.")
         step["status"] = "ABORTED"
@@ -6867,9 +8784,17 @@ def restore_predecessor_step(step: Dict[str, object], journal: Dict[str, object]
     save_journal(journal)
     current = inspect_one(target_name, missing_ok=True)
     if current is not None and (before is None or current[1]["containerId"] != before["containerId"]):
-        run([docker_binary(), "rm", "--force", target_name], f"remove target {target_name} during abort", timeout=60)
-        if inspect_one(target_name, missing_ok=True) is not None:
-            stop(f"target {target_name} remained after abort removal.")
+        partial_recreate = (
+            isinstance(before, dict)
+            and target_name == before["name"]
+            and step.get("restoredByRecreate") is True
+        )
+        if partial_recreate:
+            validate_partial_recreated_predecessor(current[0], current[1], step, journal)
+        else:
+            run([docker_binary(), "rm", "--force", target_name], f"remove target {target_name} during abort", timeout=60)
+            if inspect_one(target_name, missing_ok=True) is not None:
+                stop(f"target {target_name} remained after abort removal.")
     if before is not None:
         backup = inspect_one(backup_name, missing_ok=True)
         original = inspect_one(before["name"], missing_ok=True)
@@ -6877,14 +8802,18 @@ def restore_predecessor_step(step: Dict[str, object], journal: Dict[str, object]
             if original is None:
                 recreate_predecessor(step, journal)
                 original = inspect_one(before["name"])
-            elif not identity_matches_predecessor(original[1], before) and not recreated_identity_matches(original[1], before):
-                stop(f"abort cannot locate or recreate exact predecessor {before['name']}.")
+            elif not identity_matches_predecessor(original[1], before) and not recreated_identity_matches(original[1], step, journal):
+                if step.get("restoredByRecreate") is not True:
+                    stop(f"abort cannot locate or recreate exact predecessor {before['name']}.")
+                validate_partial_recreated_predecessor(original[0], original[1], step, journal)
+                recreate_predecessor(step, journal)
+                original = inspect_one(before["name"])
         else:
-            if not backup_matches(backup[1], before) or original is not None:
+            if not backup_matches(backup[1], step, journal) or original is not None:
                 stop(f"abort predecessor backup {before['name']} has an ambiguous identity.")
             run([docker_binary(), "rename", backup_name, before["name"]], f"restore predecessor name {before['name']}", timeout=30)
             restored = inspect_one(before["name"])
-            if not backup_matches(restored[1], before):
+            if not backup_matches(restored[1], step, journal):
                 stop(f"restored predecessor {before['name']} static identity differs.")
         restored = inspect_one(before["name"])
         if before["state"] == "running" and restored[1]["state"] != "running":
@@ -6892,9 +8821,9 @@ def restore_predecessor_step(step: Dict[str, object], journal: Dict[str, object]
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             restored = inspect_one(before["name"])
-            if identity_matches_predecessor(restored[1], before) or recreated_identity_matches(restored[1], before):
+            if identity_matches_predecessor(restored[1], before) or recreated_identity_matches(restored[1], step, journal):
                 break
-            if not backup_matches(restored[1], before) and not step.get("restoredByRecreate"):
+            if not backup_matches(restored[1], step, journal) and not step.get("restoredByRecreate"):
                 stop(f"restored predecessor {before['name']} configuration identity drifted.")
             time.sleep(2)
         else:
@@ -6931,38 +8860,98 @@ def disconnect_network_step(step: Dict[str, object], journal: Dict[str, object])
     save_journal(journal)
 
 
-def validated_residual_mutations(journal: Dict[str, object]) -> List[Dict[str, str]]:
+def abort_network_resource_step(
+    step: Dict[str, object], binding: Tuple[str, Dict[str, object]], journal: Dict[str, object],
+) -> None:
+    name = step["networkName"]
+    _, definition = binding
+    status = step["status"]
+    if status == "ABORTED":
+        return
+    if status == "PENDING":
+        step["status"] = "ABORTED"
+        save_journal(journal)
+        return
+    if status == "RETAINED":
+        observed = inspect_exact_network(name, missing_ok=False)
+        validate_exact_network_observation(
+            observed, name, definition, expected_id=step["networkId"],
+        )
+        step["status"] = "ABORTED"
+        save_journal(journal)
+        return
+    if status == "CREATING":
+        observed = inspect_exact_network(name, missing_ok=True)
+        if observed is None:
+            step["status"] = "ABORTED"
+            save_journal(journal)
+            return
+        step["networkId"] = validate_exact_network_observation(
+            observed, name, definition, transaction_id=journal["transactionId"],
+        )
+        step["status"] = "REMOVING"
+        save_journal(journal)
+    elif status == "CREATED":
+        observed = inspect_exact_network(name, missing_ok=False)
+        validate_exact_network_observation(
+            observed, name, definition, expected_id=step["networkId"],
+            transaction_id=journal["transactionId"],
+        )
+        step["status"] = "REMOVING"
+        save_journal(journal)
+    elif status == "REMOVING":
+        observed = inspect_exact_network(name, missing_ok=True)
+        if observed is None:
+            step["status"] = "ABORTED"
+            save_journal(journal)
+            return
+        validate_exact_network_observation(
+            observed, name, definition, expected_id=step["networkId"],
+            transaction_id=journal["transactionId"],
+        )
+    else:
+        stop(f"network resource {name} has an invalid abort state {status}.")
+    # Delete by the journal-bound immutable ID, never by the reusable network
+    # name: a same-name replacement between inspect and rm must remain intact.
+    run(
+        [docker_binary(), "network", "rm", step["networkId"]],
+        f"remove transaction-created network {name}", timeout=30,
+    )
+    after = inspect_exact_network(name, missing_ok=True)
+    if after is not None:
+        after_id = after.get("Id")
+        if after_id == step["networkId"]:
+            stop(f"transaction-created network {name} remained after abort removal.")
+        stop(f"network name {name} was replaced concurrently during abort; foreign replacement was preserved.")
+    step["status"] = "ABORTED"
+    save_journal(journal)
+
+
+def validated_residual_mutations(
+    journal: Dict[str, object], authority: Dict[str, object],
+) -> List[Dict[str, str]]:
     if any(status == "RUNNING" for status in journal["dataMutationStatus"].values()):
         stop("abort cannot truthfully classify an interrupted data mutation; resume apply verification first.")
     residual = sorted(journal["dataMutationEvidence"], key=lambda item: item["authorityId"])
-    for item in residual:
-        data = secure_file(item["evidencePath"], f"residual mutation evidence {item['authorityId']}", MAX_JSON, 0o444)
-        if digest(data) != item["evidenceSha256"]:
-            stop("residual mutation evidence differs from its reconciliation journal binding.")
-    return residual
+    return [
+        validate_mutation_evidence_entry(
+            item, authority, journal["beganAtUnixSeconds"],
+            f"residual mutation evidence {item['authorityId']}",
+        )
+        for item in residual
+    ]
 
 
-def validate_abort_residual_entries(raw: object, authority: Dict[str, object]) -> List[Dict[str, str]]:
+def validate_abort_residual_entries(
+    raw: object, authority: Dict[str, object], began_at: int,
+) -> List[Dict[str, str]]:
     if not isinstance(raw, list):
         stop("reconciliation abort record residual mutations are not one list.")
-    allowed = {item["id"] for item in authority["authorizedDataMutations"]}
     result = []
     for index, item_raw in enumerate(raw):
-        item = exact_keys(item_raw, ("authorityId", "evidencePath", "evidenceSha256"), f"abort residual mutation {index}")
-        prefix = f"{MUTATION_EVIDENCE_DIR}/{authority['documentId']}-{item['authorityId']}-"
-        if (
-            item["authorityId"] not in allowed
-            or not isinstance(item["evidencePath"], str)
-            or not item["evidencePath"].startswith(prefix)
-            or not item["evidencePath"].endswith(f"-{item['evidenceSha256']}.json")
-            or not isinstance(item["evidenceSha256"], str)
-            or SHA256_RE.fullmatch(item["evidenceSha256"]) is None
-        ):
-            stop("reconciliation abort record has an invalid residual mutation binding.")
-        evidence = secure_file(item["evidencePath"], f"abort residual mutation {item['authorityId']}", MAX_JSON, 0o444)
-        if digest(evidence) != item["evidenceSha256"]:
-            stop("reconciliation abort residual mutation evidence bytes changed.")
-        result.append(item)
+        result.append(validate_mutation_evidence_entry(
+            item_raw, authority, began_at, f"abort residual mutation {index}",
+        ))
     if result != sorted(result, key=lambda item: item["authorityId"]) or len({item["authorityId"] for item in result}) != len(result):
         stop("reconciliation abort residual mutations are not uniquely sorted.")
     return result
@@ -6972,7 +8961,7 @@ def materialize_abort_record(authority: Dict[str, object], authority_bytes: byte
     journal_bytes = secure_file(JOURNAL, "aborted reconciliation journal", MAX_JSON, 0o600)
     if os.path.lexists(physical(ABORT_RECORD)):
         return validate_abort_record(authority, authority_bytes, journal_bytes)
-    residual = validated_residual_mutations(journal)
+    residual = validated_residual_mutations(journal, authority)
     record = {
         "authorityDocumentId": authority["documentId"],
         "authoritySha256": digest(authority_bytes),
@@ -7015,7 +9004,7 @@ def validate_abort_record(authority: Dict[str, object], authority_bytes: bytes, 
     ), "current reconciliation abort record")
     journal_value = parse_json(journal_bytes, "aborted reconciliation journal binding", True)
     journal_began = journal_value.get("beganAtUnixSeconds")
-    residual = validate_abort_residual_entries(record["residualDataMutations"], authority)
+    residual = validate_abort_residual_entries(record["residualDataMutations"], authority, journal_began)
     if (
         record["schema"] != ABORT_RECORD_SCHEMA
         or record["authorityDocumentId"] != authority["documentId"]
@@ -7082,8 +9071,113 @@ def archive_journal_bytes(journal: Dict[str, object], journal_bytes: bytes) -> s
     return archive
 
 
-def cleanup_transaction_preimages(journal: Dict[str, object]) -> None:
-    bound = [journal.get("deploymentConfigPreimage"), *(journal.get("evidencePreimages") or [])]
+def load_cleanup_rollback_spec(
+    step: Dict[str, object], journal: Dict[str, object], *, allow_historical_identity: bool,
+) -> Dict[str, object]:
+    if not allow_historical_identity:
+        return load_rollback_spec(step, journal)
+    logical, expected_sha = step.get("rollbackSpecPath"), step.get("rollbackSpecSha256")
+    if not isinstance(logical, str) or not isinstance(expected_sha, str) or SHA256_RE.fullmatch(expected_sha) is None:
+        stop("legacy cleanup step lacks its immutable rollback specification binding.")
+    expected_prefix = f"{ROLLBACK_SPEC_DIR}/{journal['transactionId']}/"
+    if not logical.startswith(expected_prefix) or "/" in logical.removeprefix(expected_prefix):
+        stop("legacy cleanup rollback specification path escaped its transaction directory.")
+    data = secure_file(logical, "legacy cleanup rollback specification", MAX_JSON, 0o600)
+    if digest(data) != expected_sha:
+        stop("legacy cleanup rollback specification bytes differ from the journal binding.")
+    value = exact_keys(parse_json(data, "legacy cleanup rollback specification", True), (
+        "containerInspect", "predecessorIdentity", "schema", "transactionId",
+    ), "legacy cleanup rollback specification")
+    live = container_identity(value["containerInspect"]) if isinstance(value["containerInspect"], dict) else None
+    if (
+        value["schema"] != ROLLBACK_SPEC_SCHEMA
+        or value["transactionId"] != journal["transactionId"]
+        or value["predecessorIdentity"] != step.get("before")
+        or not (
+            controller_predecessor_identity_match(step.get("before"), live)
+            or historical_cleanup_predecessor_identity_match(step.get("before"), live)
+        )
+    ):
+        stop("legacy cleanup rollback specification differs from its exact archived predecessor.")
+    return value
+
+
+def cleanup_transaction_preimages(
+    journal: Dict[str, object], *, allow_historical_identity: bool = False,
+) -> None:
+    steps = journal.get("steps")
+    transaction_id = journal.get("transactionId")
+    if not isinstance(steps, list) or not isinstance(transaction_id, str) or SHA256_RE.fullmatch(transaction_id) is None:
+        stop("transaction rollback cleanup found an invalid journal identity.")
+    for step in steps:
+        if not isinstance(step, dict) or step.get("kind") not in ("SERVICE", "REMOVE"):
+            continue
+        before = step.get("before")
+        if before is None:
+            continue
+        if not isinstance(before, dict) or not isinstance(before.get("name"), str):
+            stop("transaction rollback cleanup found an invalid predecessor binding.")
+        logical = step.get("rollbackSpecPath")
+        expected = f"{ROLLBACK_SPEC_DIR}/{transaction_id}/{before['name']}.json"
+        if logical != expected:
+            stop("transaction rollback cleanup path differs from its exact predecessor binding.")
+        if os.path.lexists(physical(expected)):
+            load_cleanup_rollback_spec(
+                step, journal, allow_historical_identity=allow_historical_identity,
+            )
+            os.unlink(physical(expected))
+    # A superseding-transport conversion intentionally replaces the full plan
+    # with a zero-step ABORTED journal.  Specs may also predate JOURNAL publish
+    # if journal_document crashed mid-materialization.  At finalization the
+    # controller has already bound the immutable abort record, so remove only
+    # self-validating specs inside this exact transaction directory.
+    deployment_preimage = validate_deployment_config_preimage(
+        journal.get("deploymentConfigPreimage"), transaction_id, allow_missing=True,
+    )
+    evidence_preimages = validate_evidence_preimages(
+        journal.get("evidencePreimages"), transaction_id, allow_missing=True,
+    )
+    bound = [deployment_preimage, *evidence_preimages]
+    bound_logical_paths = {
+        raw.get("preimagePath") for raw in bound if isinstance(raw, dict)
+    }
+    root_logical = f"{ROLLBACK_SPEC_DIR}/{transaction_id}"
+    root = physical(root_logical)
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            if entry == "evidence-preimages":
+                continue
+            logical = f"{root_logical}/{entry}"
+            if logical in bound_logical_paths:
+                continue
+            if not entry.endswith(".json") or NAME_RE.fullmatch(entry[:-5]) is None:
+                stop("transaction rollback cleanup found an unexpected private artifact.")
+            data = secure_file(logical, "orphaned transaction rollback specification", MAX_JSON, 0o600)
+            value = exact_keys(parse_json(data, "orphaned transaction rollback specification", True), (
+                "containerInspect", "predecessorIdentity", "schema", "transactionId",
+            ), "orphaned transaction rollback specification")
+            before = validate_journal_identity(
+                value["predecessorIdentity"], "orphaned rollback predecessor", reconciler=False,
+            )
+            if (
+                value["schema"] != ROLLBACK_SPEC_SCHEMA
+                or value["transactionId"] != transaction_id
+                or entry != f"{before['name']}.json"
+                or not isinstance(value["containerInspect"], dict)
+                or not (
+                    controller_predecessor_identity_match(
+                        before, container_identity(value["containerInspect"]),
+                    )
+                    or (
+                        allow_historical_identity
+                        and historical_cleanup_predecessor_identity_match(
+                            before, container_identity(value["containerInspect"]),
+                        )
+                    )
+                )
+            ):
+                stop("orphaned transaction rollback specification is not self-consistent.")
+            os.unlink(physical(logical))
     for raw in bound:
         if not isinstance(raw, dict):
             stop("transaction preimage cleanup found an invalid journal binding.")
@@ -7096,23 +9190,21 @@ def cleanup_transaction_preimages(journal: Dict[str, object]) -> None:
             if digest(data) != expected_sha:
                 stop("transaction private preimage changed before cleanup.")
             os.unlink(physical(logical))
-    root = physical(f"{ROLLBACK_SPEC_DIR}/{journal['transactionId']}")
     for candidate in (os.path.join(root, "evidence-preimages"), root):
         try:
             os.rmdir(candidate)
         except FileNotFoundError:
             pass
         except OSError as error:
-            if error.errno not in (39, 66):  # ENOTEMPTY on Linux/macOS
-                stop(f"transaction private preimage directory cleanup failed: {error}.")
+            stop(f"transaction private preimage directory cleanup failed: {error}.")
 
 
 def finalize_evidenced_journal(authority: Dict[str, object], authority_bytes: bytes) -> Dict[str, object]:
     journal_bytes = secure_file(JOURNAL, "evidenced reconciliation journal", MAX_JSON, 0o600)
-    journal = exact_keys(parse_json(journal_bytes, "evidenced reconciliation journal", True), (
-        "authorityDocumentId", "authoritySha256", "beganAtUnixSeconds", "createdAtUnixSeconds", "dataMutationEvidence",
-        "dataMutationStatus", "deploymentConfigPreimage", "evidencePreimages", "phase", "reconciliationSha256", "schema", "steps", "transactionId", "updatedAtUnixSeconds",
-    ), "evidenced reconciliation journal")
+    journal = exact_journal_keys(
+        parse_json(journal_bytes, "evidenced reconciliation journal", True),
+        "evidenced reconciliation journal",
+    )
     if (
         journal["schema"] != JOURNAL_SCHEMA
         or journal["phase"] != "EVIDENCED"
@@ -7165,10 +9257,10 @@ def preverify_consumed_abort_before_shared_lock(operation: str) -> None:
 
 def finalize_consumed_abort(authority: Dict[str, object], authority_bytes: bytes) -> Dict[str, object]:
     journal_bytes = secure_file(JOURNAL, "aborted reconciliation journal", MAX_JSON, 0o600)
-    journal = exact_keys(parse_json(journal_bytes, "aborted reconciliation journal", True), (
-        "authorityDocumentId", "authoritySha256", "beganAtUnixSeconds", "createdAtUnixSeconds", "dataMutationEvidence",
-        "dataMutationStatus", "deploymentConfigPreimage", "evidencePreimages", "phase", "reconciliationSha256", "schema", "steps", "transactionId", "updatedAtUnixSeconds",
-    ), "aborted reconciliation journal")
+    journal = exact_journal_keys(
+        parse_json(journal_bytes, "aborted reconciliation journal", True),
+        "aborted reconciliation journal", allow_legacy_zero_step_aborted=True,
+    )
     if (
         journal["schema"] != JOURNAL_SCHEMA
         or journal["phase"] != "ABORTED"
@@ -7192,6 +9284,20 @@ def finalize_consumed_abort(authority: Dict[str, object], authority_bytes: bytes
         atomic_bytes(journal_archive, journal_bytes, 0o444, False)
     # Current journal is the retry blocker and is removed only after controller
     # verify proved its exact abort record was consumed into ACTIVE state.
+    superseded_zero_step = (
+        journal.get("steps") == []
+        and journal.get("validationLaneSha256") is None
+        and journal.get("abortCheckpointSha256") is None
+        and journal.get("dataMutationEvidence") == []
+        and isinstance(journal.get("dataMutationStatus"), dict)
+        and all(status == "PENDING" for status in journal["dataMutationStatus"].values())
+    )
+    # The e19 ten-field compatibility predicate is admitted only here, after
+    # the controller receipt bound this terminal zero-step abort, and only to
+    # delete transaction-private files.  It never authorizes live rollback.
+    cleanup_transaction_preimages(
+        journal, allow_historical_identity=superseded_zero_step,
+    )
     if secure_file(JOURNAL, "aborted reconciliation journal", MAX_JSON, 0o600) != journal_bytes:
         stop("aborted reconciliation journal changed before finalization.")
     os.unlink(physical(JOURNAL))
@@ -7277,6 +9383,8 @@ def abort() -> Dict[str, object]:
         verify_superseded_transport_abort_preconditions(authority, reconciliation)
         configure_secret_identity_readonly()
         journal = superseded_transport_abort_journal(authority, authority_bytes, reconciliation)
+        restore_deployment_config_preimage(journal)
+        restore_evidence_preimages(journal)
         record, data, archive = materialize_abort_record(authority, authority_bytes, journal)
         return {
             "abortRecordPath": archive,
@@ -7287,7 +9395,80 @@ def abort() -> Dict[str, object]:
         }
     reconciliation = read_reconciliation(authority, authority_bytes)
     configure_secret_identity_readonly()
-    journal = read_or_create_journal(authority, authority_bytes, reconciliation)
+    if journal_exists:
+        journal_data = secure_file(JOURNAL, "reconciliation journal", MAX_JSON, 0o600)
+        journal_value = parse_json(journal_data, "reconciliation journal", True)
+        if isinstance(journal_value, dict) and set(journal_value) == set(JOURNAL_CHECKPOINT_ABORT_FIELDS):
+            journal = validate_journal(
+                journal_value, authority, authority_bytes, reconciliation,
+                allow_checkpoint_bound_zero_step_abort=True,
+            )
+        else:
+            journal = read_or_create_journal(authority, authority_bytes, reconciliation)
+    else:
+        checkpoint_mode, checkpoint_sha = unjournaled_begin_checkpoint_mode(authority, reconciliation)
+        # JOURNAL is the durable before-first-mutation frontier for both modes.
+        # Its absence plus these closed state/receipt/runtime proofs authorizes
+        # only a terminal zero-step abort, never production-plan synthesis or
+        # source restoration.  The begin-bound checkpoint selects FAST versus
+        # production without consulting a newly removed/expired/added marker.
+        verify_predecessor_state_receipt_unchanged(reconciliation)
+        stable_unchanged_predecessor_inventory(reconciliation)
+        journal = checkpoint_bound_zero_step_abort_journal(
+            authority, authority_bytes, reconciliation, checkpoint_mode, checkpoint_sha,
+        )
+        mode_after, sha_after = unjournaled_begin_checkpoint_mode(authority, reconciliation)
+        if mode_after != checkpoint_mode or sha_after != checkpoint_sha:
+            stop("begin-bound checkpoint changed during zero-step abort journal publication.")
+        stable_unchanged_predecessor_inventory(reconciliation)
+        verify_fast_preimages_unchanged(journal)
+    # Abort derives FAST mode from the immutable journal, not the revocable
+    # operator marker.  Expiry/removal must not strand a proven zero-step
+    # transaction in maintenance.
+    checkpoint_bound_abort = journal.get("abortCheckpointSha256") is not None
+    validation_mode = journal.get("validationLaneSha256") is not None or checkpoint_bound_abort
+    if validation_mode:
+        if checkpoint_bound_abort:
+            checkpoint_mode, checkpoint_sha = unjournaled_begin_checkpoint_mode(authority, reconciliation)
+            if (
+                checkpoint_mode != journal["abortCheckpointMode"]
+                or checkpoint_sha != journal["abortCheckpointSha256"]
+            ):
+                stop("checkpoint-bound zero-step abort lost its immutable begin binding.")
+            verify_predecessor_state_receipt_unchanged(reconciliation)
+        if journal["phase"] in ("APPLIED", "COMMITTING", "EVIDENCED"):
+            stop("FAST abort found a phase outside the no-mutation validation protocol.")
+        if any(
+            status not in ("PENDING", "NEVER_STARTED")
+            for status in journal["dataMutationStatus"].values()
+        ) or journal["dataMutationEvidence"]:
+            stop("FAST abort cannot prove every data mutation remained never started.")
+        stable_unchanged_predecessor_inventory(reconciliation)
+        verify_fast_preimages_unchanged(journal)
+        if journal["phase"] != "ABORTED":
+            if journal["phase"] not in ("APPLYING", "VALIDATED_NO_MUTATION", "ABORTING"):
+                stop("FAST abort found an invalid no-mutation journal phase.")
+            if journal["phase"] != "ABORTING":
+                journal["phase"] = "ABORTING"
+                save_journal(journal)
+            stable_unchanged_predecessor_inventory(reconciliation)
+            verify_fast_preimages_unchanged(journal)
+            journal["phase"] = "ABORTED"
+            save_journal(journal)
+        # FAST never restores source paths: unchanged bytes/modes are the
+        # required proof, and rewriting an equal file would still be mutation.
+        stable_unchanged_predecessor_inventory(reconciliation)
+        verify_fast_preimages_unchanged(journal)
+        record, data, archive = materialize_abort_record(authority, authority_bytes, journal)
+        if record["status"] != "ABORTED_NO_DATA_MUTATION":
+            stop("FAST abort record does not prove zero residual data mutation.")
+        return {
+            "abortRecordPath": archive,
+            "abortRecordSha256": digest(data),
+            "authorityDocumentId": authority["documentId"],
+            "status": record["status"],
+            "transactionId": journal["transactionId"],
+        }
     if journal["phase"] == "EVIDENCED" or journal["phase"] == "COMMITTING":
         stop("abort is closed after the evidence commit point; use receipt-bound recovery artifacts.")
     if journal["phase"] == "ABORTED":
@@ -7301,13 +9482,25 @@ def abort() -> Dict[str, object]:
             "status": record["status"],
             "transactionId": journal["transactionId"],
         }
+    if any(status == "RUNNING" for status in journal["dataMutationStatus"].values()):
+        stop("abort cannot start with an indeterminate data mutation; resume apply verification first.")
     journal["phase"] = "ABORTING"
     save_journal(journal)
+    network_bindings = (
+        exact_attachment_network_bindings(authority)
+        if any(step.get("kind") == "NETWORK_CREATE" for step in journal["steps"])
+        else {}
+    )
     for step in reversed(journal["steps"]):
         if step.get("kind") == "NETWORK_ATTACH":
             disconnect_network_step(step, journal)
         elif step.get("kind") in ("SERVICE", "REMOVE"):
             restore_predecessor_step(step, journal)
+        elif step.get("kind") == "NETWORK_CREATE":
+            name = step["networkName"]
+            if name not in network_bindings:
+                stop("reconciliation journal network resource is outside the exact render plan.")
+            abort_network_resource_step(step, network_bindings[name], journal)
         else:
             stop("reconciliation journal contains an unknown step kind.")
     expected = predecessor_map(reconciliation)
@@ -7315,12 +9508,16 @@ def abort() -> Dict[str, object]:
     if {item["name"] for item in identities} != set(expected):
         stop("aborted Docker inventory does not equal the exact predecessor closed form.")
     current = {item["name"]: item for item in identities}
-    recreated_names = {
-        step["before"]["name"] for step in journal["steps"]
+    recreated_steps = {
+        step["before"]["name"]: step for step in journal["steps"]
         if step.get("restoredByRecreate") is True and isinstance(step.get("before"), dict)
     }
     for name, before in expected.items():
-        matched = recreated_identity_matches(current[name], before) if name in recreated_names else identity_matches_predecessor(current[name], before)
+        matched = (
+            recreated_identity_matches(current[name], recreated_steps[name], journal)
+            if name in recreated_steps
+            else identity_matches_predecessor(current[name], before)
+        )
         if not matched:
             stop(f"aborted predecessor {name} does not equal frozen identity.")
     # Evidence refresh may already have atomically replaced any subset of the
@@ -7357,6 +9554,9 @@ def purge_predecessor_backups(journal: Dict[str, object]) -> None:
         if step.get("kind") == "SERVICE" and inspect_one(backup_name, missing_ok=True) is None:
             if step["status"] not in ("RETAINED", "APPLIED", "PURGING"):
                 stop("Compose-discovered predecessor vanished outside one completed/retained service refresh.")
+            if step["status"] != "PURGING":
+                step["status"] = "PURGING"
+                save_journal(journal)
             if isinstance(rollback_path, str) and os.path.lexists(physical(rollback_path)):
                 load_rollback_spec(step, journal)
                 os.unlink(physical(rollback_path))
@@ -7374,7 +9574,7 @@ def purge_predecessor_backups(journal: Dict[str, object]) -> None:
         if step["status"] not in ("APPLIED", "BACKED_UP", "PURGING"):
             stop("evidence commit found an incomplete predecessor backup step.")
         backup = inspect_one(backup_name, missing_ok=True)
-        if backup is None or not backup_matches(backup[1], step["before"]):
+        if backup is None or not backup_matches(backup[1], step, journal):
             stop("predecessor backup identity drifted before evidence commit.")
         step["status"] = "PURGING"
         save_journal(journal)
@@ -7469,16 +9669,12 @@ def service_transitions(reconciliation: Dict[str, object], current: Dict[str, Di
             previous_record = previous.get(LEGACY_ALERT_DISPATCHER)
         current_id = transition_identity(current_record)
         previous_id = transition_identity(previous_record)
-        status = (
-            "CREATED" if previous_id is None
-            else "REPLACED" if previous_id["name"] != current_id["name"]
-            else "RETAINED" if previous_id == current_id
-            else "RECREATED"
-        )
+        status = transition_status(previous_id, current_id)
         transitions.append({"current": current_id, "previous": previous_id, "service": current_record["service"], "status": status})
     scheduler = previous.get("enterprise-backup-scheduler")
     if scheduler is not None:
-        transitions.append({"current": None, "previous": transition_identity(scheduler), "service": scheduler["service"], "status": "REMOVED"})
+        previous_id = transition_identity(scheduler)
+        transitions.append({"current": None, "previous": previous_id, "service": scheduler["service"], "status": transition_status(previous_id, None)})
     return sorted(transitions, key=lambda item: (item["current"] or item["previous"])["name"])
 
 
@@ -7495,7 +9691,7 @@ def stable_canonical_inventory(journal: Dict[str, object]) -> Tuple[List[Dict[st
         backup = next((item for item in first if item["name"] == backup_name), None)
         if backup is not None and (
             not isinstance(step.get("before"), dict)
-            or not backup_matches(backup, step["before"])
+            or not backup_matches(backup, step, journal)
             or backup["state"] == "running"
         ):
             stop("reversible predecessor backup drifted before evidence commit.")
@@ -7544,6 +9740,74 @@ def evidence() -> Dict[str, object]:
     targets = validate_authority_material(authority)
     reconciliation = read_reconciliation(authority, authority_bytes)
     journal = read_or_create_journal(authority, authority_bytes, reconciliation)
+    validation_mode = journal_uses_validation_lane(journal, authority["candidateCommit"])
+    if validation_mode:
+        if journal["phase"] != "VALIDATED_NO_MUTATION":
+            stop("FAST runtime evidence requires the completed no-mutation validation phase.")
+        lane = validate_pre_mutation_checkpoint(authority, authority_bytes, reconciliation)
+        if lane is None or validation_lane_sha256(lane) != journal["validationLaneSha256"]:
+            stop("FAST evidence lane differs from its immutable journal binding.")
+        configure_secret_identity_readonly()
+        verify_fast_preimages_unchanged(journal)
+        predecessor = stable_unchanged_predecessor_inventory(reconciliation)
+        provenance = validation_checkpoint_provenance(reconciliation)
+        static_target = validation_static_target_evidence(authority, targets)
+        marker_bytes = secure_file(RECONCILIATION, "FAST reconciliation evidence marker", MAX_JSON, 0o600)
+        journal_bytes = secure_file(JOURNAL, "FAST no-mutation journal evidence", MAX_JSON, 0o600)
+        if parse_json(journal_bytes, "FAST no-mutation journal evidence", True) != journal:
+            stop("FAST no-mutation journal changed before evidence publication.")
+        predecessor_sha = digest(canonical(predecessor).encode())
+        document = {
+            "authorityDocumentId": authority["documentId"],
+            "authoritySha256": digest(authority_bytes),
+            "candidateCommit": authority["candidateCommit"],
+            "candidateTree": authority["candidateTree"],
+            # Deterministic across evidence retries; the immutable journal's
+            # transition timestamp is already bounded by validate_journal.
+            "capturedAtUnixSeconds": journal["updatedAtUnixSeconds"],
+            "applicationDataMutation": False,
+            "evidenceScope": "RECONCILIATION_BEGIN_TO_EVIDENCE",
+            "journalSha256": digest(journal_bytes),
+            "preBeginImagePreparationExcluded": True,
+            "predecessorRuntimeIdentities": predecessor,
+            "predecessorRuntimeIdentitiesSha256": predecessor_sha,
+            "preMutationProvenance": provenance,
+            "preMutationProvenanceSha256": digest(canonical(provenance).encode()),
+            "reconciliationSha256": digest(marker_bytes),
+            "releaseRenderSha256": authority["renderSha256"],
+            "runtimeContainerMutation": False,
+            "runtimeExecution": False,
+            "runtimeNetworkMutation": False,
+            "runtimeVolumeMutation": False,
+            "schema": "platform.v1-local-private-reconciliation-runtime-validation/v2",
+            "sourceArchiveSha256": authority["sourceArchiveSha256"],
+            "staticTarget": static_target,
+            "staticTargetSha256": digest(canonical(static_target).encode()),
+            "status": "VALIDATION",
+            "transactionId": journal["transactionId"],
+            "validationLaneSha256": journal["validationLaneSha256"],
+        }
+        logical = VALIDATION_RUNTIME_EVIDENCE_FILE.removesuffix(".json") + f"-{journal['transactionId']}.json"
+        written = preserve_json(logical, document, "immutable FAST no-mutation runtime evidence")
+        test_fault("AFTER_FAST_EVIDENCE_WRITE")
+        if stable_unchanged_predecessor_inventory(reconciliation) != predecessor:
+            stop("FAST predecessor runtime changed around evidence publication.")
+        final_lane = validate_pre_mutation_checkpoint(authority, authority_bytes, reconciliation)
+        if (
+            final_lane is None
+            or validation_lane_sha256(final_lane) != journal["validationLaneSha256"]
+            or validation_checkpoint_provenance(reconciliation) != provenance
+        ):
+            stop("FAST sealed PRE provenance changed around evidence publication.")
+        verify_fast_preimages_unchanged(journal)
+        if secure_file(JOURNAL, "FAST no-mutation journal evidence", MAX_JSON, 0o600) != journal_bytes:
+            stop("FAST no-mutation journal changed around evidence publication.")
+        return {
+            "evidencePath": logical,
+            "evidenceSha256": digest(written),
+            "status": "VALIDATION",
+            "transactionId": journal["transactionId"],
+        }
     if journal["phase"] not in ("APPLIED", "COMMITTING", "EVIDENCED"):
         stop("runtime evidence requires a completely applied reconciliation transaction.")
     if journal["phase"] == "EVIDENCED":
@@ -7551,46 +9815,14 @@ def evidence() -> Dict[str, object]:
         value = parse_json(existing, "runtime reconciliation evidence", True)
         return {"evidencePath": RUNTIME_EVIDENCE, "evidenceSha256": digest(existing), "status": value.get("status", "PASS")}
     validate_apply_target(authority, reconciliation, journal, targets)
-    lane = load_validation_lane(authority["candidateCommit"])
     # Route proof is intentionally obtained before the irreversible commit.
     # A failure therefore leaves every predecessor backup available to abort.
     route_checks(authority, reconciliation)
     # The exact-release producer refreshes logical/off-host/isolated-restore/
     # secrets proof under this same inherited shared transaction lease. It
     # cannot select paths, retention actions or a different release.
-    if journal["phase"] == "APPLIED" and lane is None:
+    if journal["phase"] == "APPLIED":
         invoke_evidence_producer(authority, "post")
-    identities, _ = stable_canonical_inventory(journal)
-    current = {item["name"]: item for item in identities}
-    for name, target in targets.items():
-        inspected = inspect_one(name)
-        if not target_semantics(name, target, inspected[0], inspected[1]):
-            stop(f"evidence target {name} differs from exact authority.")
-    validate_preserved_legacy(reconciliation, authority, require_all_attachments=True)
-    additions, memberships = legacy_network_evidence(authority, reconciliation, current)
-    transitions = service_transitions(reconciliation, current)
-    checks = route_checks(authority, reconciliation)
-    if lane is not None:
-        runtime_document = {
-            "capturedAtUnixSeconds": int(time.time()),
-            "containers": [
-                {"containerId": item.get("containerId", ""), "name": item.get("name", ""), "state": item.get("state", "")}
-                for item in identities
-            ],
-            "candidateCommit": authority["candidateCommit"],
-            "schema": "platform.v1-local-private-reconciliation-runtime-validation/v1",
-            "validation": True,
-        }
-        payload = (canonical(runtime_document) + "\n").encode("utf-8")
-        atomic_bytes(VALIDATION_RUNTIME_EVIDENCE_FILE, payload, 0o444)
-        written = secure_file(VALIDATION_RUNTIME_EVIDENCE_FILE, "validation runtime evidence", MAX_JSON)
-        if digest(written) != digest(payload) or written != payload:
-            stop("validation runtime evidence readback differs from the written bytes.")
-        return {
-            "evidencePath": VALIDATION_RUNTIME_EVIDENCE_FILE,
-            "evidenceSha256": digest(payload),
-            "status": "VALIDATION",
-        }
     identities, _ = stable_canonical_inventory(journal)
     current = {item["name"]: item for item in identities}
     for name, target in targets.items():
