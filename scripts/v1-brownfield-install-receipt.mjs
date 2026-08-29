@@ -48,6 +48,11 @@ const EXACT_PREPARE_RECEIPT_FIELDS = Object.freeze([
   "authorityDocumentId", "authorityPath", "authoritySha256", "renderSha256",
   "sourceArchiveSha256", "status",
 ]);
+const EXACT_PREPARE_VALIDATION_RECEIPT_FIELDS = Object.freeze([
+  "authorityDocumentId", "authorityPath", "authoritySha256", "renderSha256",
+  "sourceArchiveSha256", "status", "validationCheckpointPath", "validationCheckpointSha256",
+]);
+const V1_VALIDATION_CHECKPOINT_PATH = "/var/lib/platform-infrastructure/v1/predeploy/current/local-private-checkpoint-validation.json";
 const EXACT_NODE_RUNTIME_PREREQUISITE_FIELDS = Object.freeze([
   "activationAuthorized", "binaryPath", "binarySha256", "candidateCommit", "candidateTree",
   "dataMutation", "dockerMutation", "documentId", "helperSha256", "hostControlMutation",
@@ -578,15 +583,27 @@ export function verifyV1BootstrapBridgeReceipt(options_) {
 export function verifyV1PrepareReceipt({ file, authorityFile }) {
   const authority = verifyV1ExactReleaseAuthority({ file: authorityFile });
   const { value: receipt } = readCanonicalObject(file, "V1 LOCAL_PRIVATE prepare receipt", MAX_RECEIPT_BYTES);
-  exactObject(receipt, EXACT_PREPARE_RECEIPT_FIELDS, "V1 LOCAL_PRIVATE prepare receipt");
-  const expected = {
+  const bindings = {
     authorityDocumentId: authority.documentId,
     authorityPath: V1_EXACT_RELEASE_AUTHORITY_PATH,
     authoritySha256: authority.authoritySha256,
     renderSha256: authority.renderSha256,
     sourceArchiveSha256: authority.sourceArchiveSha256,
-    status: "PREPARED",
   };
+  if (receipt && typeof receipt === "object" && !Array.isArray(receipt) && receipt.status === "PREPARED_VALIDATION") {
+    exactObject(receipt, EXACT_PREPARE_VALIDATION_RECEIPT_FIELDS, "V1 LOCAL_PRIVATE prepare receipt");
+    const expected = {
+      ...bindings,
+      status: "PREPARED_VALIDATION",
+      validationCheckpointPath: V1_VALIDATION_CHECKPOINT_PATH,
+    };
+    lowercaseSha256(receipt.validationCheckpointSha256, "V1 LOCAL_PRIVATE validation checkpoint digest");
+    expected.validationCheckpointSha256 = receipt.validationCheckpointSha256;
+    if (stableJson(receipt) !== stableJson(expected)) invalid("V1 LOCAL_PRIVATE validation prepare receipt differs from its immutable exact release authority.");
+    return Object.freeze({ ...receipt });
+  }
+  exactObject(receipt, EXACT_PREPARE_RECEIPT_FIELDS, "V1 LOCAL_PRIVATE prepare receipt");
+  const expected = { ...bindings, status: "PREPARED" };
   if (stableJson(receipt) !== stableJson(expected)) invalid("V1 LOCAL_PRIVATE prepare receipt differs from its immutable exact release authority.");
   return Object.freeze({ ...receipt });
 }

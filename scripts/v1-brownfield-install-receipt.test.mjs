@@ -333,6 +333,22 @@ test("binds the closed prepare result to the exact immutable authority", (t) => 
   assert.throws(() => verifyV1PrepareReceipt({ file: bad.receiptFile, authorityFile: bad.authorityFile }), /differs/);
 });
 
+test("accepts the closed PREPARED_VALIDATION prepare result with its checkpoint binding", (t) => {
+  const authority = validAuthority();
+  const validationReceipt = {
+    ...validPrepareReceipt(authority),
+    status: "PREPARED_VALIDATION",
+    validationCheckpointPath: "/var/lib/platform-infrastructure/v1/predeploy/current/local-private-checkpoint-validation.json",
+    validationCheckpointSha256: "a".repeat(64),
+  };
+  const current = fixture(t, { authority, receipt: validationReceipt });
+  assert.equal(verifyV1PrepareReceipt({ file: current.receiptFile, authorityFile: current.authorityFile }).status, "PREPARED_VALIDATION");
+  const placeholder = fixture(t, { authority, receipt: { ...validationReceipt, validationCheckpointSha256: "0".repeat(64) } });
+  assert.throws(() => verifyV1PrepareReceipt({ file: placeholder.receiptFile, authorityFile: placeholder.authorityFile }), /digest/);
+  const driftedPath = fixture(t, { authority, receipt: { ...validationReceipt, validationCheckpointPath: "/tmp/checkpoint.json" } });
+  assert.throws(() => verifyV1PrepareReceipt({ file: driftedPath.receiptFile, authorityFile: driftedPath.authorityFile }), /differs/);
+});
+
 test("binds the exact Ubuntu Node runtime prerequisite and its mutation truth", (t) => {
   let current = fixture(t, { receipt: validNodeRuntimeReceipt() });
   let receipt = verifyV1NodeRuntimePrerequisiteReceipt({
