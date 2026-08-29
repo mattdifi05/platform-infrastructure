@@ -53,6 +53,13 @@ SCHEDULER_RECOVERY_EXPORT = f"{PREDEPLOY_DIR}/scheduler-recovery-image.tar"
 RECONCILIATION = f"{STATE_DIR}/reconciliation.json"
 JOURNAL = f"{STATE_DIR}/reconcile-journal.json"
 RUNTIME_EVIDENCE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence.json"
+
+VALIDATION_LANE_FILE = f"{STATE_DIR}/validation-lane.json"
+VALIDATION_CHECKPOINT_FILE = f"{PREDEPLOY_DIR}/local-private-checkpoint-validation.json"
+VALIDATION_RUNTIME_EVIDENCE_FILE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence-validation.json"
+VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
+VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
+VALIDATION_LANE_TTL_SECONDS = 24 * 3600
 MUTATION_EVIDENCE_DIR = f"{STATE_DIR}/data-mutation-evidence"
 SECRET_DIR = "/home/platform_infrastructure/platform-infrastructure/secrets"
 DEPLOYMENT_REPO = "/home/platform_infrastructure/platform-infrastructure"
@@ -2657,6 +2664,94 @@ def stable_recovery_export_snapshot() -> Dict[str, object]:
         os.close(fd)
 
 
+def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
+    """Return the operator validation-lane marker when present and valid.
+
+    Absence of the file means production mode.  A present marker must be one
+    root-owned 0400 canonical document bound to the current candidate and
+    unexpired; anything else fails closed.
+    """
+    pathname = physical(VALIDATION_LANE_FILE)
+    if not os.path.lexists(pathname):
+        return None
+    metadata = os.lstat(pathname)
+    if (
+        not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != OWNER_UID or metadata.st_gid != OWNER_GID
+        or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o400
+    ):
+        stop("validation lane marker identity/mode is unsafe.")
+    lane = parse_json(secure_file(VALIDATION_LANE_FILE, "validation lane marker", 4096), "validation lane marker", True)
+    if set(lane.keys()) != {"schema", "candidateCommit", "createdAtUnixSeconds", "expiresAtUnixSeconds", "reason"}:
+        stop("validation lane marker is not one exact closed object.")
+    if (
+        lane.get("schema") != VALIDATION_LANE_SCHEMA
+        or lane.get("candidateCommit") != candidate_commit
+        or isinstance(lane.get("createdAtUnixSeconds"), bool) or not isinstance(lane.get("createdAtUnixSeconds"), int)
+        or isinstance(lane.get("expiresAtUnixSeconds"), bool) or not isinstance(lane.get("expiresAtUnixSeconds"), int)
+        or not isinstance(lane.get("reason"), str) or len(lane["reason"]) < 8
+        or lane["expiresAtUnixSeconds"] - lane["createdAtUnixSeconds"] > VALIDATION_LANE_TTL_SECONDS
+    ):
+        stop("validation lane marker fields are invalid.")
+    now = int(time.time())
+    if lane["createdAtUnixSeconds"] > now + 60 or now >= lane["expiresAtUnixSeconds"]:
+        stop("validation lane marker is expired or future-dated.")
+    return lane
+
+
+def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str, object]) -> Dict[str, object]:
+    """Honest non-production checkpoint: reuse references, no PASS claims."""
+    lane = load_validation_lane(authority["candidateCommit"])
+    require_lane = lane is not None
+    if not require_lane:
+        stop("validation checkpoint requested without an active validation lane.")
+    recovery = existing_recovery_binding()
+    now = int(time.time())
+    reused = {}
+    newest_evidence_mtime = 0
+    for name, path in CHECKPOINT_EVIDENCE_PATHS.items():
+        pathname = physical(path)
+        if os.path.lexists(pathname):
+            reused[name] = digest(secure_file(path, f"reused evidence {name}", MAX_JSON))
+            # Real provenance: the evidence file's own mtime is the moment that
+            # material was captured/written; the newest one bounds reuse age.
+            newest_evidence_mtime = max(newest_evidence_mtime, int(os.stat(pathname).st_mtime))
+    # True capture provenance: the prior production checkpoint records the
+    # moment the producer actually completed the reused backup cycle.
+    reused_capture = newest_evidence_mtime
+    prior_pathname = physical(LOCAL_CHECKPOINT)
+    if os.path.lexists(prior_pathname):
+        prior = parse_json(secure_file(LOCAL_CHECKPOINT, "prior production checkpoint", MAX_JSON), "prior production checkpoint", True)
+        prior_capture = prior.get("backupCapturedUnixSeconds")
+        if isinstance(prior_capture, int) and not isinstance(prior_capture, bool) and 1700000000 < prior_capture <= now + 60:
+            reused_capture = prior_capture
+    checkpoint = {
+        "authoritative": False,
+        "backupCapturedUnixSeconds": reused_capture,
+        "candidateCommit": binding["candidateCommit"],
+        "candidateTree": binding["candidateTree"],
+        "destructiveMutationPlanned": False,
+        "generatedAtUnixSeconds": now,
+        "logicalBackupEvidenceSha256": reused.get("logicalBackupEvidenceSha256", "0" * 64),
+        "offHostBackupEvidenceSha256": reused.get("offHostBackupEvidenceSha256", "0" * 64),
+        "restoreEvidenceSha256": reused.get("restoreEvidenceSha256", "0" * 64),
+        "restoreVerified": False,
+        "runtimeInventorySha256": reused.get("runtimeInventorySha256", "0" * 64),
+        "runtimeRecovered": False,
+        "schedulerRecoveryImageExportSha256": recovery["exportSha256"],
+        "schedulerRecoveryImageId": recovery["recoveryImageId"],
+        "schedulerRunningImageId": recovery["runningImageId"],
+        "schema": VALIDATION_CHECKPOINT_SCHEMA,
+        "secretsBackupEvidenceSha256": reused.get("secretsBackupEvidenceSha256", "0" * 64),
+        "sourceArchiveSha256": binding["sourceArchiveSha256"],
+        "validation": True,
+    }
+    payload = (json.dumps(checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    atomic_bytes(VALIDATION_CHECKPOINT_FILE, payload, 0o400)
+    written = secure_file(VALIDATION_CHECKPOINT_FILE, "validation checkpoint readback", MAX_JSON)
+    if written != payload:
+        stop("validation checkpoint readback differs from the written bytes.")
+    return checkpoint
+
 def validate_pre_mutation_checkpoint(
     authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]
 ) -> None:
@@ -4840,6 +4935,21 @@ def prepare() -> Dict[str, object]:
     if archived != authority_bytes:
         stop("exact release authority archive copy is not byte-identical.")
     prepared_authority, _ = read_authority()
+    lane = load_validation_lane(commit)
+    if lane is not None:
+        validation_checkpoint = write_validation_checkpoint(authority, {
+            "candidateCommit": commit, "candidateTree": tree, "sourceArchiveSha256": archive_sha,
+        })
+        return {
+            "authorityDocumentId": authority["documentId"],
+            "authorityPath": AUTHORITY,
+            "authoritySha256": digest(authority_bytes),
+            "renderSha256": authority["renderSha256"],
+            "sourceArchiveSha256": archive_sha,
+            "status": "PREPARED_VALIDATION",
+            "validationCheckpointPath": VALIDATION_CHECKPOINT_FILE,
+            "validationCheckpointSha256": digest(json.dumps(validation_checkpoint, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+        }
     invoke_evidence_producer(prepared_authority, "pre")
     refresh_local_checkpoint(authority)
     return {
@@ -7080,14 +7190,46 @@ def evidence() -> Dict[str, object]:
         value = parse_json(existing, "runtime reconciliation evidence", True)
         return {"evidencePath": RUNTIME_EVIDENCE, "evidenceSha256": digest(existing), "status": value.get("status", "PASS")}
     validate_apply_target(authority, reconciliation, journal, targets)
+    lane = load_validation_lane(authority["candidateCommit"])
     # Route proof is intentionally obtained before the irreversible commit.
     # A failure therefore leaves every predecessor backup available to abort.
     route_checks(authority, reconciliation)
     # The exact-release producer refreshes logical/off-host/isolated-restore/
     # secrets proof under this same inherited shared transaction lease. It
     # cannot select paths, retention actions or a different release.
-    if journal["phase"] == "APPLIED":
+    if journal["phase"] == "APPLIED" and lane is None:
         invoke_evidence_producer(authority, "post")
+    identities, _ = stable_canonical_inventory(journal)
+    current = {item["name"]: item for item in identities}
+    for name, target in targets.items():
+        inspected = inspect_one(name)
+        if not target_semantics(name, target, inspected[0], inspected[1]):
+            stop(f"evidence target {name} differs from exact authority.")
+    validate_preserved_legacy(reconciliation, authority, require_all_attachments=True)
+    additions, memberships = legacy_network_evidence(authority, reconciliation, current)
+    transitions = service_transitions(reconciliation, current)
+    checks = route_checks(authority, reconciliation)
+    if lane is not None:
+        runtime_document = {
+            "capturedAtUnixSeconds": int(time.time()),
+            "containers": [
+                {"containerId": item.get("containerId", ""), "name": item.get("name", ""), "state": item.get("state", "")}
+                for item in identities
+            ],
+            "candidateCommit": authority["candidateCommit"],
+            "schema": "platform.v1-local-private-reconciliation-runtime-validation/v1",
+            "validation": True,
+        }
+        payload = (canonical(runtime_document) + "\n").encode("utf-8")
+        atomic_bytes(VALIDATION_RUNTIME_EVIDENCE_FILE, payload, 0o444)
+        written = secure_file(VALIDATION_RUNTIME_EVIDENCE_FILE, "validation runtime evidence", MAX_JSON)
+        if digest(written) != digest(payload) or written != payload:
+            stop("validation runtime evidence readback differs from the written bytes.")
+        return {
+            "evidencePath": VALIDATION_RUNTIME_EVIDENCE_FILE,
+            "evidenceSha256": digest(payload),
+            "status": "VALIDATION",
+        }
     identities, _ = stable_canonical_inventory(journal)
     current = {item["name"]: item for item in identities}
     for name, target in targets.items():

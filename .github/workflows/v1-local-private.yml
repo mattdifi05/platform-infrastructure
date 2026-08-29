@@ -48,6 +48,7 @@ jobs:
           node --test --test-concurrency=1 \
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-control.e2e.test.mjs \
+            scripts/v1-local-private-control.begin-retry-apply.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
             scripts/v1-local-private-recovery-refresh.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs

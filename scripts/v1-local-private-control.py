@@ -89,6 +89,11 @@ MAX_CHECKPOINT_AGE = 900
 # host, so the activate-side bound matches the measured 6h cycle while
 # generatedAtUnixSeconds keeps the tight 900s publish-freshness anchor.
 MAX_BACKUP_AGE = 6 * 3600
+
+VALIDATION_LANE_FILE = f"{STATE_DIR}/validation-lane.json"
+VALIDATION_CHECKPOINT_FILE = "/var/lib/platform-infrastructure/v1/predeploy/current/local-private-checkpoint-validation.json"
+VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
+VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 ID_RE = re.compile(r"^[a-f0-9]{64}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -1742,7 +1747,108 @@ def validate_release_and_install(binding: Optional[Dict[str, object]] = None) ->
     return digest(data)
 
 
+def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
+    """Return the operator validation-lane marker when present and valid.
+
+    Absence means production mode.  A present marker must be one root-owned
+    0400 canonical document bound to the current candidate and unexpired;
+    anything else fails closed.
+    """
+    pathname = physical(VALIDATION_LANE_FILE)
+    if not os.path.lexists(pathname):
+        return None
+    metadata = os.lstat(pathname)
+    if (
+        not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != OWNER_UID or metadata.st_gid != OWNER_GID
+        or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o400
+    ):
+        stop("validation lane marker identity/mode is unsafe.")
+    lane = parse_json(secure_file(VALIDATION_LANE_FILE, "validation lane marker", 4096), "validation lane marker", True)
+    if set(lane.keys()) != {"schema", "candidateCommit", "createdAtUnixSeconds", "expiresAtUnixSeconds", "reason"}:
+        stop("validation lane marker is not one exact closed object.")
+    if (
+        lane.get("schema") != VALIDATION_LANE_SCHEMA
+        or lane.get("candidateCommit") != candidate_commit
+        or isinstance(lane.get("createdAtUnixSeconds"), bool) or not isinstance(lane.get("createdAtUnixSeconds"), int)
+        or isinstance(lane.get("expiresAtUnixSeconds"), bool) or not isinstance(lane.get("expiresAtUnixSeconds"), int)
+        or not isinstance(lane.get("reason"), str) or len(lane["reason"]) < 8
+        or lane["expiresAtUnixSeconds"] - lane["createdAtUnixSeconds"] > 24 * 3600
+    ):
+        stop("validation lane marker fields are invalid.")
+    now = int(time.time())
+    if lane["createdAtUnixSeconds"] > now + 60 or now >= lane["expiresAtUnixSeconds"]:
+        stop("validation lane marker is expired or future-dated.")
+    return lane
+
+
+def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes, Dict[str, object], Dict[str, object]]:
+    """Validation-lane checkpoint: recovery pair is production-grade, the
+    evidence digests are reused references verified by readback, and the
+    non-production booleans are mandatory."""
+    data = secure_file(VALIDATION_CHECKPOINT_FILE, "validation PRE-DEPLOY checkpoint")
+    value = exact_keys(parse_json(data, "validation PRE-DEPLOY checkpoint"), (
+        "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
+        "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
+        "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+        "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+        "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
+        "secretsBackupEvidenceSha256", "sourceArchiveSha256", "validation",
+    ), "validation PRE-DEPLOY checkpoint")
+    if (
+        value["schema"] != VALIDATION_CHECKPOINT_SCHEMA or value["validation"] is not True
+        or value["authoritative"] is not False or value["destructiveMutationPlanned"] is not False
+        or value["restoreVerified"] is not False or value["runtimeRecovered"] is not False
+        or value["candidateCommit"] != CANDIDATE_COMMIT or value["candidateTree"] != CANDIDATE_TREE
+        or value["sourceArchiveSha256"] != SOURCE_ARCHIVE_SHA256
+    ):
+        stop("validation PRE-DEPLOY checkpoint is not one explicit non-production candidate-bound document.")
+    for key in ("logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "runtimeInventorySha256", "schedulerRecoveryImageExportSha256", "secretsBackupEvidenceSha256"):
+        sha256_value(value[key], key)
+    # Reused-evidence readback: every referenced evidence file must still exist
+    # with the exact recorded digest (absent files are only tolerated when the
+    # recorded digest is the explicit zero placeholder).
+    for key, logical in CHECKPOINT_EVIDENCE_PATHS.items():
+        recorded = value[key]
+        pathname = physical(logical)
+        if not os.path.lexists(pathname):
+            if recorded != "0" * 64:
+                stop(f"validation reuse reference {key} points at missing evidence.")
+            continue
+        observed = digest(secure_file(logical, f"validation reused {key}", MAX_JSON))
+        if observed != recorded:
+            stop(f"validation reused evidence {key} differs from its recorded digest.")
+    running_image_id = value["schedulerRunningImageId"]
+    recovery_image_id = value["schedulerRecoveryImageId"]
+    if any(not isinstance(item, str) or re.fullmatch(r"sha256:[a-f0-9]{64}", item) is None for item in (running_image_id, recovery_image_id)) or running_image_id == recovery_image_id:
+        stop("validation scheduler running/recovery image IDs are invalid or not distinct.")
+    now = int(time.time())
+    if value["generatedAtUnixSeconds"] > now + 60 or now - value["generatedAtUnixSeconds"] > MAX_CHECKPOINT_AGE:
+        stop("validation PRE-DEPLOY checkpoint is stale or future-dated.")
+    if value["backupCapturedUnixSeconds"] > now + 60 or now - value["backupCapturedUnixSeconds"] > MAX_BACKUP_AGE:
+        stop("validation reused backup reference is stale or future-dated.")
+    export_snapshot = stream_snapshot(SCHEDULER_RECOVERY_EXPORT, "scheduler recovery image export")
+    if export_snapshot["sha256"] != value["schedulerRecoveryImageExportSha256"]:
+        stop("scheduler recovery image export bytes differ from the validation checkpoint.")
+    export_metadata = parse_recovery_export(export_snapshot, recovery_image_id)
+    recovery: Dict[str, object] = {
+        "exportIdentity": export_snapshot["identity"],
+        "exportPath": SCHEDULER_RECOVERY_EXPORT,
+        "exportSha256": value["schedulerRecoveryImageExportSha256"],
+        "exportSizeBytes": export_snapshot["sizeBytes"],
+        "recoveryImageId": recovery_image_id,
+        "runningImageId": running_image_id,
+        **export_metadata,
+    }
+    recovery["configHash"] = export_metadata["exportLabels"][RECOVERY_LABELS["configHash"]]
+    recovery["containerId"] = export_metadata["exportLabels"][RECOVERY_LABELS["containerId"]]
+    return digest(data), data, recovery, export_snapshot
+
+
 def validate_checkpoint() -> Tuple[str, bytes, Dict[str, object], Dict[str, object], Dict[str, bytes]]:
+    lane = load_validation_lane(CANDIDATE_COMMIT)
+    if lane is not None:
+        validation_sha, validation_bytes, validation_recovery, validation_export = validate_validation_checkpoint(lane)
+        return validation_sha, validation_bytes, validation_recovery, validation_export, {}
     data = secure_file(CHECKPOINT, "fresh PRE-DEPLOY checkpoint")
     value = exact_keys(parse_json(data, "fresh PRE-DEPLOY checkpoint"), (
         "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
@@ -1775,6 +1881,14 @@ def validate_checkpoint() -> Tuple[str, bytes, Dict[str, object], Dict[str, obje
     if export_snapshot["sha256"] != value["schedulerRecoveryImageExportSha256"]:
         stop("scheduler recovery image export bytes differ from the fresh checkpoint.")
     export_metadata = parse_recovery_export(export_snapshot, recovery_image_id)
+    for key, label in (("configHash", RECOVERY_LABELS["configHash"]), ("containerId", RECOVERY_LABELS["containerId"])):
+        value_sha = export_metadata["exportLabels"].get(label)
+        if key == "configHash":
+            if not isinstance(value_sha, str) or SHA256_RE.fullmatch(value_sha) is None:
+                stop("scheduler recovery export config-hash label is missing or invalid.")
+        else:
+            if not isinstance(value_sha, str) or ID_RE.fullmatch(value_sha) is None:
+                stop("scheduler recovery export container-id label is missing or invalid.")
     recovery: Dict[str, object] = {
         "exportIdentity": export_snapshot["identity"],
         "exportPath": SCHEDULER_RECOVERY_EXPORT,
@@ -1784,6 +1898,11 @@ def validate_checkpoint() -> Tuple[str, bytes, Dict[str, object], Dict[str, obje
         "runningImageId": running_image_id,
         **export_metadata,
     }
+    # Single centralized promotion of the live scheduler identity: every
+    # consumer (begin first path, begin retry, reconciliation apply) must see
+    # the exact same closed 16-key recovery object.
+    recovery["configHash"] = export_metadata["exportLabels"][RECOVERY_LABELS["configHash"]]
+    recovery["containerId"] = export_metadata["exportLabels"][RECOVERY_LABELS["containerId"]]
     return digest(data), data, recovery, export_snapshot, evidence_snapshots
 
 
@@ -3561,6 +3680,8 @@ def seal_with_fresh_evidence(
 
 
 def seal() -> Dict[str, object]:
+    if load_validation_lane(CANDIDATE_COMMIT) is not None:
+        stop("validation lane forbids the production seal; run the full production chain.")
     reconciliation = reconciliation_status()
     install_sha = validate_release_and_install()
     if install_sha != reconciliation["installReceiptSha256"]:

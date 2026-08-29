@@ -553,6 +553,7 @@ test("pins host trust and runs the fixed begin/apply/evidence/seal/verify sequen
     const commands = fs.readFileSync(current.commandsFile, "utf8").trim().split("\n");
     assert.deepEqual(commands, [
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
+      "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/validation-lane.json",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json",
       "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control begin-maintenance",
