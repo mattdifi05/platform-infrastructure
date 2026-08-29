@@ -176,9 +176,12 @@ SUDOERS_EXACT_LINES = (
     "Defaults:platform_infrastructure env_reset",
     "Defaults:platform_infrastructure secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control activate",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control aborted-record",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control begin-maintenance",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control abort-maintenance",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control runtime-authority",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control seal",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control validation-mode",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control verify",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-brownfield-install-consumer install",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-brownfield-install-consumer install-control-artifacts",
@@ -186,6 +189,8 @@ SUDOERS_EXACT_LINES = (
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile apply",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile abort",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile evidence",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile validation-open",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile validation-close",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
@@ -964,13 +969,13 @@ def validate_sudoers_bytes(data: bytes) -> None:
     """Reject every sudoers language extension outside the closed V1 grant set.
 
     ``visudo`` proves syntax only.  The byte equality below is the authority
-    boundary: exactly sixteen ordered, newline-terminated records and no alias,
+    boundary: exactly nineteen ordered, newline-terminated records and no alias,
     include, wildcard, negation, continuation, environment assignment, extra
     command, or duplicate can be interpreted by sudo.
     """
 
     if data != SUDOERS_EXACT_BYTES:
-        stop("frozen V1 sudoers artifact differs from the exact closed sixteen-line grant set.")
+        stop("frozen V1 sudoers artifact differs from the exact closed twenty-one-line grant set.")
 
 
 def validate_sudoers(pathname: str, expected_data: Optional[bytes] = None) -> None:

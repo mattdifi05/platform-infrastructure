@@ -21,13 +21,16 @@ WORKLOAD_LOCK_SOURCE="$REPOSITORY_ROOT/config/no-hosted-workloads.local-private.
 REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate'
 REMOTE_CONTROLLER='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control'
 REMOTE_RECONCILER='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile'
-REMOTE_VALIDATION_LANE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/validation-lane.json'
+REMOTE_ABORTED_RECORD='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record'
+REMOTE_RUNTIME_AUTHORITY='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control runtime-authority'
+REMOTE_VALIDATION_MODE='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control validation-mode'
+REMOTE_VALIDATION_CLOSE='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-close'
 REMOTE_AUTHORITY_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 REMOTE_OFFHOST_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json'
 REMOTE_SECRETS_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json'
 SSH=/usr/bin/ssh
 GIT=/usr/bin/git
-OPENSSL=${PLATFORM_V1_LOCAL_PRIVATE_TEST_OPENSSL:-/usr/bin/openssl}
+OPENSSL=${PLATFORM_V1_LOCAL_PRIVATE_TEST_OPENSSL:-${DEPLOY_OPENSSL_PATH:-/usr/bin/openssl}}
 SYSTEM_NAME=$(/usr/bin/uname -s)
 if [ "$SYSTEM_NAME" != Linux ]; then
   SSH=${PLATFORM_V1_LOCAL_PRIVATE_TEST_SSH:-$SSH}
@@ -566,31 +569,60 @@ const parse = (pathname, label) => { const raw = fs.readFileSync(pathname); cons
 const authority = parse(authorityPath, "authority");
 const value = parse(filename, kind);
 const sha = /^[a-f0-9]{64}$/;
-if (kind === "begin") {
+if (kind === "validation-mode") {
+  if (stable(Object.keys(value).sort()) !== stable(["candidateCommit", "schema", "status"].sort())
+    || value.schema !== "platform.v1-local-private-validation-mode/v1"
+    || value.candidateCommit !== authority.candidateCommit
+    || !["PRODUCTION", "VALIDATION"].includes(value.status)) throw new Error("controller validation mode is not exact-authority-bound.");
+  process.stdout.write(`${value.status}\n`);
+} else if (kind === "begin") {
   if (value.schema !== "platform.v1-local-private-reconciliation/v1" || value.status !== "RECONCILING"
     || value.candidateCommit !== authority.candidateCommit || value.candidateTree !== authority.candidateTree
     || value.sourceArchiveSha256 !== authority.sourceArchiveSha256 || value.releaseRoot !== authority.releaseRoot
     || value.releaseAuthorityDocumentId !== authority.documentId || value.releaseAuthoritySha256 !== authoritySha) throw new Error("begin-maintenance is not authority-bound.");
-} else if (kind === "apply") {
+} else if (kind === "apply" || kind === "apply-validation") {
+  const expectedStatus = kind === "apply-validation" ? "VALIDATED_NO_MUTATION" : "APPLIED";
   if (stable(Object.keys(value).sort()) !== stable(["authorityDocumentId", "status", "transactionId"].sort())
-    || value.authorityDocumentId !== authority.documentId || value.status !== "APPLIED" || !sha.test(value.transactionId)) throw new Error("apply response is not transaction-bound.");
+    || value.authorityDocumentId !== authority.documentId || value.status !== expectedStatus || !sha.test(value.transactionId)) throw new Error("apply response is not transaction-bound.");
 } else if (kind === "evidence") {
   if (stable(Object.keys(value).sort()) !== stable(["evidencePath", "evidenceSha256", "status"].sort())
     || value.evidencePath !== "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence.json"
     || value.status !== "PASS" || !sha.test(value.evidenceSha256)) throw new Error("evidence response is not canonical PASS evidence.");
 } else if (kind === "evidence-validation") {
-  if (stable(Object.keys(value).sort()) !== stable(["evidencePath", "evidenceSha256", "status"].sort())
-    || value.evidencePath !== "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation.json"
-    || value.status !== "VALIDATION" || !sha.test(value.evidenceSha256)) throw new Error("validation evidence response is not canonical VALIDATION evidence.");
-} else if (kind === "abort-record") {
-  if (value.authorityDocumentId !== authority.documentId || !sha.test(value.transactionId)
+  const peer = parse(peerPath, "validation apply response");
+  if (stable(Object.keys(peer).sort()) !== stable(["authorityDocumentId", "status", "transactionId"].sort())
+    || peer.authorityDocumentId !== authority.documentId || peer.status !== "VALIDATED_NO_MUTATION" || !sha.test(peer.transactionId)
+    || stable(Object.keys(value).sort()) !== stable(["evidencePath", "evidenceSha256", "status", "transactionId"].sort())
+    || value.transactionId !== peer.transactionId
+    || value.evidencePath !== `/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation-${value.transactionId}.json`
+    || value.status !== "VALIDATION" || !sha.test(value.evidenceSha256)) throw new Error("validation evidence response is not canonical transaction-bound VALIDATION evidence.");
+} else if (kind === "abort-record" || kind === "abort-record-no-data" || kind === "abort-record-no-data-after-apply" || kind === "abort-record-no-data-unbound") {
+  if (stable(Object.keys(value).sort()) !== stable(["abortRecordPath", "abortRecordSha256", "authorityDocumentId", "status", "transactionId"].sort())
+    || value.authorityDocumentId !== authority.documentId || !sha.test(value.transactionId)
     || !["ABORTED_NO_DATA_MUTATION", "ABORTED_WITH_RESIDUAL_DATA_MUTATIONS"].includes(value.status)
     || !sha.test(value.abortRecordSha256)
     || value.abortRecordPath !== `/var/lib/platform-infrastructure/v1/local-private/aborted-reconciliations/${value.transactionId}-${value.abortRecordSha256}.json`) throw new Error("abort response is not record-bound.");
+  if (kind === "abort-record-no-data") {
+    const peer = parse(peerPath, "validation evidence response");
+    if (value.status !== "ABORTED_NO_DATA_MUTATION"
+      || stable(Object.keys(peer).sort()) !== stable(["evidencePath", "evidenceSha256", "status", "transactionId"].sort())
+      || peer.status !== "VALIDATION" || !sha.test(peer.evidenceSha256) || !sha.test(peer.transactionId)
+      || peer.evidencePath !== `/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation-${peer.transactionId}.json`
+      || value.transactionId !== peer.transactionId) throw new Error("validation abort is not bound to its no-mutation evidence transaction.");
+  } else if (kind === "abort-record-no-data-after-apply") {
+    const peer = parse(peerPath, "validation apply response");
+    if (value.status !== "ABORTED_NO_DATA_MUTATION"
+      || stable(Object.keys(peer).sort()) !== stable(["authorityDocumentId", "status", "transactionId"].sort())
+      || peer.authorityDocumentId !== authority.documentId || peer.status !== "VALIDATED_NO_MUTATION" || !sha.test(peer.transactionId)
+      || value.transactionId !== peer.transactionId) throw new Error("validation abort is not bound to its no-mutation apply transaction.");
+  } else if (kind === "abort-record-no-data-unbound" && value.status !== "ABORTED_NO_DATA_MUTATION") {
+    throw new Error("validation abort without a trusted apply response retained a data mutation.");
+  }
 } else if (kind === "aborted-active") {
   const aborted = value.abortedAuthorizedReconciliation;
   const peer = parse(peerPath, "abort record response");
-  if (value.status !== "ACTIVE" || value.candidateCommit !== authority.candidateCommit || value.candidateTree !== authority.candidateTree
+  if (value.schema !== "platform.v1-local-private-control-receipt/v1" || value.status !== "ACTIVE"
+    || value.candidateCommit !== authority.candidateCommit || value.candidateTree !== authority.candidateTree
     || !aborted || aborted.authorityDocumentId !== authority.documentId || aborted.authoritySha256 !== authoritySha
     || aborted.transactionId !== peer.transactionId || aborted.recordSha256 !== peer.abortRecordSha256
     || aborted.recordPath !== peer.abortRecordPath || aborted.status !== peer.status) throw new Error("post-abort ACTIVE receipt is not authority/record-bound.");
@@ -604,6 +636,20 @@ if (kind === "begin") {
   const alreadyClean = stable(Object.keys(value).sort()) === stable(["authorityDocumentId", "status", "transactionId"].sort())
     && value.authorityDocumentId === authority.documentId && value.status === "ABORTED" && value.transactionId === null;
   if (!finalized && !alreadyClean) throw new Error("second abort did not finalize the exact transaction.");
+} else if (kind === "validation-close") {
+  const peer = parse(peerPath, "validation abort response");
+  if (stable(Object.keys(value).sort()) !== stable([
+      "authorityDocumentId", "authoritySha256", "candidateCommit", "schema", "status",
+      "transactionId", "validationLaneSha256",
+    ].sort())
+    || value.schema !== "platform.v1-local-private-validation-lane-close-result/v1"
+    || value.status !== "VALIDATION_LANE_CLOSED"
+    || value.authorityDocumentId !== authority.documentId
+    || value.authoritySha256 !== authoritySha
+    || value.candidateCommit !== authority.candidateCommit
+    || value.transactionId !== peer.transactionId
+    || peer.status !== "ABORTED_NO_DATA_MUTATION"
+    || !sha.test(value.validationLaneSha256)) throw new Error("validation lane closure is not authority/abort-bound.");
 } else if (kind === "reconciling-or-active") {
   if (value.status === "ACTIVE") {
     const external = value.externalAuthorizedReconciliation;
@@ -800,13 +846,15 @@ fetch_and_verify_cms() {
 }
 
 abort_before_commit() {
+  abort_record_kind=${1:-abort-record}
+  abort_record_peer=${2:-/dev/null}
   abort_record="$work/abort-record-response.json"
   abort_active="$work/abort-active-receipt.json"
   abort_verify="$work/abort-verify-receipt.json"
   abort_finalized="$work/abort-finalized-response.json"
   abort_final_verify="$work/abort-final-verify-receipt.json"
   capture_remote 3 "reconciliation abort" "$REMOTE_RECONCILER abort" "$abort_record" 131072 || return 1
-  validate_protocol_json "$abort_record" abort-record || return 1
+  validate_protocol_json "$abort_record" "$abort_record_kind" "$abort_record_peer" || return 1
   capture_remote 3 "controller abort-maintenance" "$REMOTE_CONTROLLER abort-maintenance" "$abort_active" 131072 || return 1
   validate_protocol_json "$abort_active" aborted-active "$abort_record" || return 1
   capture_remote 3 "controller post-abort verify" "$REMOTE_CONTROLLER verify" "$abort_verify" 131072 || return 1
@@ -826,21 +874,23 @@ cmp -s "$remote_authority" "$authority_snapshot" \
   || fail "The remote exact release authority differs byte-for-byte from the local clean-main authority." 65
 
 # PRE is the last backup/restore/off-site gate before maintenance begins.
-VALIDATION_MODE=0
-validation_lane_file="$work/validation-lane.json"
-if capture_remote 1 "validation lane marker" "$REMOTE_VALIDATION_LANE_CAT" "$validation_lane_file" 4096; then
+validation_mode_file="$work/validation-mode.json"
+capture_remote 3 "controller validation mode" "$REMOTE_VALIDATION_MODE" "$validation_mode_file" 4096 \
+  || fail "The controller validation mode could not be determined after bounded retries." 75
+validation_mode=$(validate_protocol_json "$validation_mode_file" validation-mode) \
+  || fail "The controller validation mode is not bound to the exact authority." 65
+if [ "$validation_mode" = VALIDATION ]; then
   VALIDATION_MODE=1
   echo "VALIDATION LANE ACTIVE: production seal and CMS escrow verification are disabled for this run." >&2
 else
-  rm -f "$validation_lane_file"
+  [ "$validation_mode" = PRODUCTION ] || fail "The controller returned an unknown validation mode." 65
+  VALIDATION_MODE=0
 fi
 if [ "$VALIDATION_MODE" != 1 ]; then
   fetch_and_verify_cms PRE
 else
-  echo "VALIDATION MODE: PRE CMS escrow verification skipped (no fresh escrow upload)."
+  echo "VALIDATION MODE: PRE CMS escrow verification skipped (no fresh escrow upload)." >&2
 fi
-
-validation_lane_file="$work/validation-lane.json"
 
 begin_response="$work/begin-maintenance-response.json"
 if ! capture_remote 3 "begin-maintenance" "$REMOTE_CONTROLLER begin-maintenance" "$begin_response" 131072; then
@@ -849,19 +899,29 @@ fi
 validate_protocol_json "$begin_response" begin
 
 apply_response="$work/reconcile-apply-response.json"
+apply_protocol_kind=$([ "$VALIDATION_MODE" = 1 ] && echo apply-validation || echo apply)
 if ! capture_remote 3 "reconcile apply" "$REMOTE_RECONCILER apply" "$apply_response" 131072 \
-  || ! validate_protocol_json "$apply_response" apply; then
-  if abort_before_commit; then
+  || ! validate_protocol_json "$apply_response" "$apply_protocol_kind"; then
+  apply_abort_kind=abort-record
+  [ "$VALIDATION_MODE" != 1 ] || apply_abort_kind=abort-record-no-data-unbound
+  if abort_before_commit "$apply_abort_kind"; then
     fail "reconcile apply failed; the exact pre-commit transaction was rolled back and finalized." 70
   fi
   fail "reconcile apply failed and the pre-commit abort could not be fully verified." 65
 fi
 
-# From the first evidence invocation onward the remote may already have crossed
-# APPLIED -> COMMITTING. Never issue abort after this point.
+# Production evidence may cross APPLIED -> COMMITTING, so an uncertain or
+# invalid response closes the abort path. A canonical validation response is
+# distinct: it proves the FAST lane remained pre-commit and may be aborted.
 evidence_response="$work/reconcile-evidence-response.json"
 if ! capture_remote 3 "reconcile evidence" "$REMOTE_RECONCILER evidence" "$evidence_response" 131072 \
-  || ! validate_protocol_json "$evidence_response" "$([ "${VALIDATION_MODE:-0}" = 1 ] && echo evidence-validation || echo evidence)"; then
+  || ! validate_protocol_json "$evidence_response" "$([ "${VALIDATION_MODE:-0}" = 1 ] && echo evidence-validation || echo evidence)" "$apply_response"; then
+  if [ "$VALIDATION_MODE" = 1 ]; then
+    if abort_before_commit abort-record-no-data-after-apply "$apply_response"; then
+      fail "validation evidence failed; the exact no-mutation transaction was rolled back and finalized." 70
+    fi
+    fail "validation evidence failed and the exact no-mutation transaction could not be fully finalized." 65
+  fi
   fail "reconcile evidence remained unverifiable after bounded idempotent retries; abort is closed after possible COMMITTING." 65
 fi
 
@@ -870,11 +930,56 @@ fi
 if [ "$VALIDATION_MODE" != 1 ]; then
   fetch_and_verify_cms POST
 else
-  echo "VALIDATION MODE: POST CMS escrow verification skipped (no fresh escrow upload)."
+  echo "VALIDATION MODE: POST CMS escrow verification skipped (no fresh escrow upload)." >&2
 fi
 
 if [ "$VALIDATION_MODE" = 1 ]; then
-  echo "VALIDATION MODE: production seal is forbidden; stopping before seal."
+  echo "VALIDATION MODE: production seal is forbidden; closing the pre-commit reconciliation before activation." >&2
+  abort_before_commit abort-record-no-data "$evidence_response" \
+    || fail "validation reconciliation could not be rolled back, verified, and finalized without a production seal." 65
+  capture_remote 3 "validation controller activation" "$REMOTE_COMMAND" "$receipt" 131072 \
+    || fail "The post-validation ACTIVE controller receipt could not be retrieved." 75
+  cmp -s "$receipt" "$abort_final_verify" \
+    || fail "validation activation differs from the verified post-abort ACTIVE receipt." 65
+  validate_protocol_json "$receipt" aborted-active "$abort_record" \
+    || fail "validation activation is not bound to the finalized abort record." 65
+  exported_abort_record="$work/exported-abort-record.json"
+  capture_remote 3 "verified immutable abort record" "$REMOTE_ABORTED_RECORD" "$exported_abort_record" 131072 \
+    || fail "The immutable validation abort record could not be exported." 75
+  runtime_provenance=$(
+    "$NODE" --input-type=module - "$receipt" <<'NODE'
+import fs from "node:fs";
+const receipt = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!receipt || receipt.status !== "ACTIVE" || !receipt.abortedAuthorizedReconciliation) throw new Error("validation receipt is not aborted ACTIVE.");
+process.stdout.write(receipt.externalAuthorizedReconciliation ? "EXTERNAL\n" : "HISTORICAL\n");
+NODE
+  ) || fail "The validation runtime provenance could not be classified." 65
+  if [ "$runtime_provenance" = EXTERNAL ]; then
+    predecessor_authority="$work/predecessor-runtime-authority.json"
+    capture_remote 3 "verified predecessor runtime authority" "$REMOTE_RUNTIME_AUTHORITY" "$predecessor_authority" 131072 \
+      || fail "The predecessor runtime authority could not be exported." 75
+    "$NODE" "$SCRIPT_ROOT/v1-local-private-control-receipt.mjs" verify \
+      --file "$receipt" \
+      --authorityFile "$authority_snapshot" \
+      --predecessorAuthorityFile "$predecessor_authority" \
+      --abortRecordFile "$exported_abort_record" >/dev/null \
+      || fail "The post-validation ACTIVE receipt failed canonical mixed-provenance verification." 65
+  elif [ "$runtime_provenance" = HISTORICAL ]; then
+    "$NODE" "$SCRIPT_ROOT/v1-local-private-control-receipt.mjs" verify \
+      --file "$receipt" \
+      --authorityFile "$authority_snapshot" \
+      --abortRecordFile "$exported_abort_record" >/dev/null \
+      || fail "The post-validation ACTIVE receipt failed canonical historical-provenance verification." 65
+  else
+    fail "The validation runtime provenance classification is invalid." 65
+  fi
+  validation_close_response="$work/validation-close-response.json"
+  capture_remote 3 "validation lane closure" "$REMOTE_VALIDATION_CLOSE" "$validation_close_response" 4096 \
+    || fail "The finalized FAST validation lane could not be closed after bounded retries." 75
+  validate_protocol_json "$validation_close_response" validation-close "$abort_record" \
+    || fail "The finalized FAST validation lane closure is not authority/abort-bound." 65
+  cat "$receipt"
+  exit 0
 fi
 seal_response="$work/seal-response.json"
 seal_observed=0

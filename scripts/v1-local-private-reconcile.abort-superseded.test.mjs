@@ -100,7 +100,7 @@ def put(logical, data, mode):
     if os.path.exists(p): os.chmod(p, 0o600)
     open(p, 'wb').write(data); os.chmod(p, mode)
 identities = ${JSON.stringify(seedRecordedIdentities())}
-authority = {'documentId': 'd' * 64, 'authorizedDataMutations': [{'id': 'mutation-one'}]}
+authority = {'candidateCommit': '1' * 40, 'documentId': 'd' * 64, 'authorizedDataMutations': [{'id': 'mutation-one'}]}
 state_bytes = b'predecessor-state-bytes'
 receipt_bytes = b'predecessor-receipt-bytes'
 reconciliation = {
@@ -121,14 +121,28 @@ except m['Stop']:
     drift_stopped = True
 g['inspect_one'] = lambda name: ({'Id': live_by_name[name]['containerId']}, live_by_name[name])
 m['verify_superseded_transport_abort_preconditions'](authority, reconciliation)
+historical_live = {
+    name: dict(item, runtimeConfigSha256='7' * 64, semanticSha256='8' * 64)
+    for name, item in live_by_name.items()
+}
+g['inspect_one'] = lambda name: ({'Id': historical_live[name]['containerId']}, historical_live[name])
+historical_authority = dict(authority, candidateCommit=m['HISTORICAL_CONTROLLER_DIGEST_DIVERGENCE_CANDIDATES'][0])
+m['verify_superseded_transport_abort_preconditions'](historical_authority, reconciliation)
+try:
+    m['verify_superseded_transport_abort_preconditions'](authority, reconciliation)
+    unregistered_stopped = False
+except m['Stop']:
+    unregistered_stopped = True
+g['inspect_one'] = lambda name: ({'Id': live_by_name[name]['containerId']}, live_by_name[name])
 put(f"{m['MUTATION_EVIDENCE_DIR']}/{authority['documentId']}-mutation-one-{'e' * 64}.json", b'{}', 0o444)
 try:
     m['verify_superseded_transport_abort_preconditions'](authority, reconciliation)
     evidence_stopped = False
 except m['Stop']:
     evidence_stopped = True
-print(json.dumps({'preconditionsPass': True, 'driftStopped': drift_stopped, 'evidenceStopped': evidence_stopped}))`);
-  assert.deepEqual(value, { preconditionsPass: true, driftStopped: true, evidenceStopped: true });
+print(json.dumps({'preconditionsPass': True, 'driftStopped': drift_stopped, 'evidenceStopped': evidence_stopped,
+ 'historicalPass': True, 'unregisteredStopped': unregistered_stopped}))`);
+  assert.deepEqual(value, { driftStopped: true, evidenceStopped: true, historicalPass: true, preconditionsPass: true, unregisteredStopped: true });
 });
 
 test("latest transport tooling coherence binds installed artifacts to the receipt chain", () => {
@@ -179,14 +193,50 @@ without = dict(bridge); without.pop('documentId')
 bridge['documentId'] = m['digest'](m['canonical'](without).encode())
 put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
 proven = m['latest_transport_tooling_coherence']()
+signed = {
+    'candidateCommit': commit, 'candidateTree': tree, 'checkpointSha256': bridge['checkpointAfterSha256'],
+    'createdAtUnixSeconds': 1800000000,
+    'greenfieldPreimagePath': '/home/platform_infrastructure/greenfield-live/render/preimage/greenfield-deployment.env',
+    'greenfieldPreimageSha256': bridge['stagingEnvironmentSha256'],
+    'greenfieldProvenancePath': '/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json',
+    'greenfieldProvenanceReleaseCommit': 'd' * 40, 'greenfieldProvenanceSha256': 'd' * 64,
+    'priorCandidateCommit': 'd' * 40, 'priorCandidateTree': 'e' * 40,
+    'priorCheckpointAfterSha256': 'e' * 64, 'priorReceiptDocumentId': 'f' * 64,
+    'priorStagingEnvironmentSha256': bridge['stagingEnvironmentSha256'],
+    'reasonCode': m['BOOTSTRAP_SUCCESSOR_SANCTION_REASON'],
+    'runtimeActiveReceiptSha256': '1' * 64, 'runtimeAuthorityDocumentId': '2' * 64,
+    'runtimeAuthoritySha256': '3' * 64, 'runtimeCandidateCommit': 'f' * 40,
+    'runtimeCandidateTree': '1' * 40, 'runtimeSourceArchiveSha256': '4' * 64,
+    'schema': m['BOOTSTRAP_SUCCESSOR_SANCTION_SCHEMA'],
+    'signatureBase64': 'c2ln', 'sourceArchiveSha256': archive,
+}
+bridge['transportSanction'] = {
+    **signed, 'present': True, 'sanctionDigest': sha(m['canonical_bytes'](signed)),
+    'signerCertSha256': m['BOOTSTRAP_SANCTION_TRUST_CERT_SHA256'],
+}
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
+successor_proven = m['latest_transport_tooling_coherence']()
+bridge['transportSanction']['unexpected'] = True
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
+try:
+    m['latest_transport_tooling_coherence']()
+    successor_extra_stopped = False
+except m['Stop']:
+    successor_extra_stopped = True
+del bridge['transportSanction']['unexpected']
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
 put(m['RECONCILER'], b'replaced-reconciler-bytes', 0o555)
 try:
     m['latest_transport_tooling_coherence']()
     drift_stopped = False
 except m['Stop']:
     drift_stopped = True
-print(json.dumps({'proven': proven == commit, 'driftStopped': drift_stopped}))`);
-  assert.deepEqual(value, { proven: true, driftStopped: true });
+print(json.dumps({'proven': proven == commit, 'successorProven': successor_proven == commit,
+ 'successorExtraStopped': successor_extra_stopped, 'driftStopped': drift_stopped}))`);
+  assert.deepEqual(value, { proven: true, successorProven: true, successorExtraStopped: true, driftStopped: true });
 });
 
 test("superseded transport abort journal is one zero-step ABORTED transaction", () => {
@@ -229,10 +279,15 @@ test("abort source keeps both closure routes and their exact guards", () => {
   assert.match(abortSource, /authority_candidate_transport_complete\(authority\)/);
   assert.match(abortSource, /verify_superseded_transport_abort_preconditions\(authority, reconciliation\)/);
   assert.match(abortSource, /superseded_transport_abort_journal\(authority, authority_bytes, reconciliation\)/);
+  const superseded = abortSource.indexOf("superseded_transport_abort_journal(authority, authority_bytes, reconciliation)");
+  const restoreDeployment = abortSource.indexOf("restore_deployment_config_preimage(journal)", superseded);
+  const restoreEvidence = abortSource.indexOf("restore_evidence_preimages(journal)", restoreDeployment);
+  const abortRecord = abortSource.indexOf("materialize_abort_record(authority, authority_bytes, journal)", restoreEvidence);
+  assert.ok(superseded >= 0 && superseded < restoreDeployment && restoreDeployment < restoreEvidence && restoreEvidence < abortRecord);
   assert.match(abortSource, /read_or_create_journal\(authority, authority_bytes, reconciliation\)/);
   assert.match(abortSource, /finalize_consumed_abort\(authority, authority_bytes\)/);
   assert.match(abortSource, /cleanup_consumed_abort_without_current_journal\(authority, authority_bytes\)/);
-  const preconditions = runPython("import inspect; print(inspect.getsource(m['verify_superseded_transport_abort_preconditions']))");
+  const preconditions = runPython("import inspect; print(inspect.getsource(m['verify_predecessor_state_receipt_unchanged'])+inspect.getsource(m['verify_superseded_transport_abort_preconditions']))");
   assert.match(preconditions, /previousStateSha256/);
   assert.match(preconditions, /previousReceiptSha256/);
   assert.match(preconditions, /controller_predecessor_identity_match\(record, source\[1\]\)/);
@@ -308,14 +363,23 @@ def scenario(kind):
     now = int(time.time()); generated = now - 5
     captured = now - 7200 if kind == 'validation' else now - 20
     commit = '1' * 40; tree = '2' * 40; archive = '3' * 64; doc = '4' * 64
-    old_commit = '9' * 40
+    old_commit = '9' * 40; old_tree = '8' * 40; old_archive = '7' * 64; old_doc = '6' * 64
     tools = {name: {'imageId': 'sha256:' + '5' * 64, 'imageReference': 'registry.invalid/' + name + '@sha256:' + '6' * 64} for name in ('mariadbRestore', 'minioRestore', 'nodeUtility', 'postgresRestore', 'resticRclone')}
     authority = {'backupToolImages': tools, 'candidateCommit': commit, 'candidateTree': tree, 'documentId': doc, 'sourceArchiveSha256': archive}
     authority_bytes = m['canonical_bytes'](authority)
-    common = {'artifactSetSha256': '7' * 64, 'authorityDocumentId': doc,
-              'authoritySha256': m['digest'](authority_bytes), 'backupSetSha256': '8' * 64, 'backupToolImages': tools,
-              'candidateCommit': commit, 'candidateTree': tree, 'evidencePhase': 'PRE', 'reconciliationSha256': None,
-              'runId': '20260824T120000Z-abcdef12', 'sourceArchiveSha256': archive, 'transactionId': None}
+    validation_kind = kind in ('validation', 'validation_no_receipt')
+    old_authority = {'backupToolImages': tools, 'candidateCommit': old_commit, 'candidateTree': old_tree,
+                     'documentId': old_doc, 'sourceArchiveSha256': old_archive}
+    old_authority_bytes = m['canonical_bytes'](old_authority)
+    g['read_archived_authority'] = lambda document_id, expected_sha: (old_authority, old_authority_bytes)
+    g['verify_predecessor_state_receipt_unchanged'] = lambda reconciliation: None
+    common = {'artifactSetSha256': '7' * 64, 'authorityDocumentId': old_doc if validation_kind else doc,
+              'authoritySha256': m['digest'](old_authority_bytes) if validation_kind else m['digest'](authority_bytes),
+              'backupSetSha256': '8' * 64, 'backupToolImages': tools,
+              'candidateCommit': old_commit if validation_kind else commit,
+              'candidateTree': old_tree if validation_kind else tree, 'evidencePhase': 'PRE', 'reconciliationSha256': None,
+              'runId': '20260824T120000Z-abcdef12',
+              'sourceArchiveSha256': old_archive if validation_kind else archive, 'transactionId': None}
     rows = [{'logicalKey': key} for key in m['EVIDENCE_LOGICAL_KEYS']]
     logical = {**common, 'artifactCount': 14, 'artifactManifestSha256': '9' * 64, 'artifacts': copy.deepcopy(rows), 'backupCompletedUnixSeconds': captured,
                'capturedAtUnixSeconds': captured, 'checksumVerifiedCount': 14, 'freshArtifactStreamHashCount': 14,
@@ -343,8 +407,22 @@ def scenario(kind):
                  'restoreEvidenceSha256': restore, 'runtimeInventorySha256': runtime, 'secretsBackupEvidenceSha256': secret}
     digests = {key: m['digest'](put(m['CHECKPOINT_EVIDENCE_PATHS'][key], document)) for key, document in documents.items()}
     if kind in ('validation', 'validation_no_receipt'):
+        predecessor_checkpoint = {'authoritative': False, 'backupCapturedUnixSeconds': captured,
+                      'candidateCommit': old_commit, 'candidateTree': old_tree,
+                      'destructiveMutationPlanned': False, 'generatedAtUnixSeconds': generated, **digests,
+                      'restoreVerified': True, 'runtimeRecovered': True,
+                      'schedulerRecoveryImageExportSha256': export_snapshot['sha256'],
+                      'schedulerRecoveryImageId': recovery_id, 'schedulerRunningImageId': running_id,
+                      'schema': 'platform.v1-local-private-predeploy-checkpoint/v1',
+                      'sourceArchiveSha256': old_archive}
+        predecessor_checkpoint_bytes = put(m['LOCAL_CHECKPOINT'], predecessor_checkpoint)
         checkpoint = {'authoritative': False, 'backupCapturedUnixSeconds': captured, 'candidateCommit': commit, 'candidateTree': tree,
                       'destructiveMutationPlanned': False, 'generatedAtUnixSeconds': generated, **digests, 'restoreVerified': False, 'runtimeRecovered': False,
+                      'predecessorAuthorityDocumentId': old_doc, 'predecessorAuthoritySha256': m['digest'](old_authority_bytes),
+                      'predecessorCandidateCommit': old_commit, 'predecessorCandidateTree': old_tree,
+                      'predecessorCheckpointSha256': m['digest'](predecessor_checkpoint_bytes),
+                      'predecessorReceiptSha256': 'a' * 64, 'predecessorSourceArchiveSha256': old_archive,
+                      'predecessorStateSha256': 'b' * 64,
                       'schedulerRecoveryImageExportSha256': export_snapshot['sha256'], 'schedulerRecoveryImageId': recovery_id,
                       'schedulerRunningImageId': running_id, 'schema': m['VALIDATION_CHECKPOINT_SCHEMA'], 'sourceArchiveSha256': archive, 'validation': True}
         checkpoint_bytes = put(m['VALIDATION_CHECKPOINT_FILE'], checkpoint)
@@ -366,7 +444,8 @@ def scenario(kind):
                 'imageIndexPath': 'blobs/sha256/' + recovery_id.removeprefix('sha256:'), 'imageManifestDigest': 'sha256:' + '5' * 64,
                 'manifestConfig': 'blobs/sha256/' + config.removeprefix('sha256:'), 'recoveryImageId': recovery_id,
                 'recoveryTag': 'platform/v1-scheduler-recovery:' + tag_candidate, 'runningImageId': running_id}
-    reconciliation = {'rollbackCheckpointSha256': m['digest'](checkpoint_bytes), 'rollbackSchedulerRecovery': recovery,
+    reconciliation = {'previousReceiptSha256': 'a' * 64, 'previousStateSha256': 'b' * 64,
+                      'rollbackCheckpointSha256': m['digest'](checkpoint_bytes), 'rollbackSchedulerRecovery': recovery,
                       'rollbackSchedulerRecoverySha256': m['digest'](m['canonical'](recovery).encode())}
     if kind == 'validation':
         receipt = {'localArtifactTrust': {'mode': 'LOCAL_DOCKER_IMMUTABLE_IMAGE_ID', 'status': 'PASS',
@@ -393,7 +472,7 @@ print(json.dumps(results))`);
   assert.deepEqual(value, { production: true, production_old_tag: false, validation: true, validation_no_receipt: false });
 });
 
-test("rollback specification and predecessor identity comparisons use the implementation-independent projection", () => {
+test("rollback comparisons separate the controller projection from the SHA-bound native identity", () => {
   const value = jsonPython(`
 import json, os, tempfile
 root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700)
@@ -424,6 +503,9 @@ live = m['container_identity'](inspect)
 recorded_fields = ("configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
                    "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state")
 before = {field: live[field] for field in recorded_fields}
+# The current controller and reconciler share the full semantic contract.  The
+# native rollback baseline still comes from the SHA-bound inspect bytes so the
+# reconciler-only project field is never invented from the controller record.
 transaction_id = 'a' * 64
 spec = {'containerInspect': inspect, 'predecessorIdentity': before, 'schema': m['ROLLBACK_SPEC_SCHEMA'], 'transactionId': transaction_id}
 spec_path = m['ROLLBACK_SPEC_DIR'] + '/' + transaction_id + '/enterprise-control-center.json'
@@ -431,24 +513,187 @@ put(spec_path, spec)
 journal = {'transactionId': transaction_id}
 step = {'before': before, 'rollbackSpecPath': spec_path, 'rollbackSpecSha256': m['digest'](m['canonical_bytes'](spec))}
 loaded = m['load_rollback_spec'](step, journal)
+native = m['rollback_native_identity'](step, journal)
+backup = dict(native, name='v1-rollback-' + name, state='exited', health='none')
+backup_fields = ('configHash', 'containerId', 'imageId', 'imageReference', 'project',
+                 'runtimeConfigSha256', 'semanticSha256', 'service')
+def changed(value):
+    if isinstance(value, list): return []
+    if isinstance(value, int): return value + 1
+    return str(value) + '-drift'
+backup_drift_stopped = all(
+    not m['backup_matches'](dict(backup, **{field: changed(backup[field])}), step, journal)
+    for field in backup_fields
+)
+backup_shape_stopped = (
+    not m['backup_matches'](dict(backup, unexpected='x'), step, journal)
+    and not m['backup_matches']({key: value for key, value in backup.items() if key != 'project'}, step, journal)
+)
+recreated = dict(native, containerId='e' * 64)
+recreated_drift_stopped = all(
+    not m['recreated_identity_matches'](dict(recreated, **{field: changed(recreated[field])}), step, journal)
+    for field in native if field != 'containerId'
+)
+recreated_shape_stopped = (
+    not m['recreated_identity_matches'](dict(recreated, unexpected='x'), step, journal)
+    and not m['recreated_identity_matches']({key: value for key, value in recreated.items() if key != 'project'}, step, journal)
+)
 drifted_inspect = dict(inspect); drifted_inspect['Id'] = 'c' * 64
 drifted_spec = dict(spec, containerInspect=drifted_inspect)
 put(spec_path, drifted_spec)
+try:
+    m['rollback_native_identity'](step, journal)
+    hash_drift_stopped = False
+except m['Stop']:
+    hash_drift_stopped = True
 step['rollbackSpecSha256'] = m['digest'](m['canonical_bytes'](drifted_spec))
 try:
     m['load_rollback_spec'](step, journal)
+    projection_drift_stopped = False
+except m['Stop']:
+    projection_drift_stopped = True
+put(spec_path, spec)
+step['rollbackSpecSha256'] = m['digest'](m['canonical_bytes'](spec))
+backup_name = 'v1-rollback-' + name
+flow_step = {
+    'backupName': backup_name, 'before': before, 'containerName': name,
+    'rollbackSpecPath': spec_path, 'rollbackSpecSha256': step['rollbackSpecSha256'],
+    'status': 'PENDING',
+}
+flow = {'renamed': False, 'stopped': False}
+def flow_inspect(container_name, missing_ok=False):
+    if container_name == name:
+        return None if flow['renamed'] else (inspect, native)
+    if container_name == backup_name:
+        if not flow['renamed']:
+            return None
+        state = 'exited' if flow['stopped'] else native['state']
+        health = 'none' if flow['stopped'] else native['health']
+        return inspect, dict(native, name=backup_name, state=state, health=health)
+    raise AssertionError(container_name)
+commands = []
+def flow_run(command, label, **kwargs):
+    commands.append(command[1])
+    if command[1] == 'rename': flow['renamed'] = True
+    if command[1] == 'stop': flow['stopped'] = True
+    return b''
+g['inspect_one'] = flow_inspect
+g['docker_binary'] = lambda: '/usr/bin/docker'
+g['run'] = flow_run
+g['save_journal'] = lambda value: None
+m['backup_source'](flow_step, {'transactionId': transaction_id})
+live_drift = dict(live, containerId='e' * 64)
+semantic_drift = dict(live, semanticSha256='d' * 64, runtimeConfigSha256='d' * 64, project='other_project')
+network_drift = dict(live, networkMembership=[])
+print(json.dumps({
+  'loaded': loaded['predecessorIdentity'] == before,
+  'controllerFieldCount': len(before),
+  'nativeFieldCount': len(native),
+  'nativeFromBoundInspect': native == live,
+  'backupMatches': m['backup_matches'](backup, step, journal),
+  'backupDriftStopped': backup_drift_stopped,
+  'backupShapeStopped': backup_shape_stopped,
+  'recreatedMatches': m['recreated_identity_matches'](recreated, step, journal),
+  'recreatedDriftStopped': recreated_drift_stopped,
+  'recreatedShapeStopped': recreated_shape_stopped,
+  'hashDriftStopped': hash_drift_stopped,
+  'projectionDriftStopped': projection_drift_stopped,
+  'backupFlowStatus': flow_step['status'],
+  'backupFlowCommands': commands,
+  'identityProjectionStopsSemanticDrift': not m['identity_matches_predecessor'](semantic_drift, before),
+  'identityProjectionStopsRealDrift': not m['identity_matches_predecessor'](live_drift, before),
+  'identityProjectionStopsNetworkDrift': not m['identity_matches_predecessor'](network_drift, before),
+  'networkChangeRequiresExplicitContext': m['identity_matches_predecessor'](network_drift, before, allow_network_change=True),
+}))`);
+  assert.deepEqual(value, {
+    loaded: true,
+    controllerFieldCount: 12,
+    nativeFieldCount: 13,
+    nativeFromBoundInspect: true,
+    backupMatches: true,
+    backupDriftStopped: true,
+    backupShapeStopped: true,
+    recreatedMatches: true,
+    recreatedDriftStopped: true,
+    recreatedShapeStopped: true,
+    hashDriftStopped: true,
+    projectionDriftStopped: true,
+    backupFlowStatus: "BACKED_UP",
+    backupFlowCommands: ["rename", "stop"],
+    identityProjectionStopsSemanticDrift: true,
+    identityProjectionStopsRealDrift: true,
+    identityProjectionStopsNetworkDrift: true,
+    networkChangeRequiresExplicitContext: true,
+  });
+});
+
+test("RETAINED resume reuses the cross-module predecessor predicate", () => {
+  const recorded = seedRecordedIdentities()[0];
+  const value = jsonPython(`
+import json
+before = json.loads(${JSON.stringify(JSON.stringify(recorded))})
+live = dict(before, project='platform_infra_vps')
+g = m['apply_service_step'].__globals__
+g['wait_for_target'] = lambda name, target: live
+saved = []
+g['save_journal'] = lambda journal: saved.append(dict(journal))
+step = {'after': None, 'before': before, 'containerName': before['name'], 'status': 'RETAINED'}
+journal = {'steps': [step]}
+m['apply_service_step'](step, {}, {}, journal)
+accepted = step['after'] == live and len(saved) == 1
+drifted = dict(live, containerId='c' * 64)
+g['wait_for_target'] = lambda name, target: drifted
+step = {'after': None, 'before': before, 'containerName': before['name'], 'status': 'RETAINED'}
+try:
+    m['apply_service_step'](step, {}, {}, {'steps': [step]})
     drift_stopped = False
 except m['Stop']:
     drift_stopped = True
-live_drift = dict(live, containerId='e' * 64)
-semantic_drift = dict(live, semanticSha256='d' * 64, runtimeConfigSha256='d' * 64, project='other_project')
-print(json.dumps({
-  'loaded': loaded['predecessorIdentity'] == before,
-  'driftStopped': drift_stopped,
-  'identityProjectionToleratesBoundFields': m['identity_matches_predecessor'](semantic_drift, before),
-  'identityProjectionStopsRealDrift': not m['identity_matches_predecessor'](live_drift, before),
-}))`);
-  assert.deepEqual(value, { loaded: true, driftStopped: true, identityProjectionToleratesBoundFields: true, identityProjectionStopsRealDrift: true });
+print(json.dumps({'accepted': accepted, 'driftStopped': drift_stopped, 'rawShapesDiffer': live != before}))`);
+  assert.deepEqual(value, { accepted: true, driftStopped: true, rawShapesDiffer: true });
+});
+
+test("abort final inventory routes recreated predecessors through their bound journal step", () => {
+  const recorded = seedRecordedIdentities()[0];
+  const value = jsonPython(`
+import json, os, tempfile
+root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700)
+g = m['abort'].__globals__; g['TEST_ROOT'] = root; g['OWNER_UID'] = os.geteuid(); g['OWNER_GID'] = os.stat(root).st_gid
+for logical in (m['RECONCILIATION'], m['JOURNAL']):
+    pathname = m['physical'](logical); os.makedirs(os.path.dirname(pathname), mode=0o700, exist_ok=True); open(pathname, 'wb').write(b'present')
+before = json.loads(${JSON.stringify(JSON.stringify(recorded))})
+authority = {'candidateCommit': '1' * 40, 'documentId': 'd' * 64}
+authority_bytes = b'authority-bytes'
+reconciliation = {'predecessorRuntimeIdentities': [before]}
+step = {'before': before, 'kind': 'SERVICE', 'restoredByRecreate': True, 'status': 'ABORTING'}
+journal = {'dataMutationStatus': {}, 'phase': 'ABORTING', 'steps': [step], 'transactionId': 'a' * 64}
+with open(m['physical'](m['JOURNAL']), 'wb') as stream: stream.write(m['canonical_bytes'](journal))
+os.chmod(m['physical'](m['JOURNAL']), 0o600)
+g['read_authority'] = lambda **kwargs: (authority, authority_bytes)
+g['validate_authority_material'] = lambda value: {}
+g['installed_artifacts_match_authority'] = lambda value: True
+g['installed_source_archive_matches_authority'] = lambda value: True
+g['read_reconciliation'] = lambda value, data: reconciliation
+g['configure_secret_identity_readonly'] = lambda: None
+g['read_or_create_journal'] = lambda value, data, marker: journal
+g['restore_predecessor_step'] = lambda value, transaction: value.update(status='ABORTED')
+g['inventory'] = lambda: ([{'name': before['name']}], {})
+calls = []
+def recreated(actual, bound_step, bound_journal):
+    calls.append({'sameStep': bound_step is step, 'sameJournal': bound_journal is journal})
+    return True
+g['recreated_identity_matches'] = recreated
+g['restore_deployment_config_preimage'] = lambda value: None
+g['restore_evidence_preimages'] = lambda value: None
+g['save_journal'] = lambda value: None
+g['materialize_abort_record'] = lambda value, data, transaction: ({'status': 'ABORTED_NO_DATA_MUTATION'}, b'record', '/archive')
+result = m['abort']()
+print(json.dumps({'calls': calls, 'journalPhase': journal['phase'], 'status': result['status']}))`);
+  assert.deepEqual(value, {
+    calls: [{ sameStep: true, sameJournal: true }],
+    journalPhase: "ABORTED",
+    status: "ABORTED_NO_DATA_MUTATION",
+  });
 });
 
 test("superseding-transport abort verifies an existing journal proves apply never mutated", () => {
@@ -462,24 +707,81 @@ def put(logical, value, mode=0o600, raw=False):
     data = value if raw else m['canonical_bytes'](value)
     with open(p, 'wb') as stream: stream.write(data)
     os.chmod(p, mode); os.chown(p, os.geteuid(), os.getegid()); return data
-authority = {'documentId': 'd' * 64, 'authorizedDataMutations': [{'id': 'mutation-one'}]}
+def sha(value): return m['digest'](value.encode())
+def identity(name, service):
+    return {
+      'configHash': sha('config-' + name), 'containerId': sha('container-' + name),
+      'exitCode': 0, 'health': 'healthy', 'imageId': 'sha256:' + sha('image-' + name),
+      'imageReference': 'fixture/' + name + '@sha256:' + sha('manifest-' + name),
+      'name': name, 'networkMembership': [{'aliases': [name], 'networkName': 'enterprise_net'}],
+      'runtimeConfigSha256': sha('runtime-' + name), 'semanticSha256': sha('semantic-' + name),
+      'service': service, 'state': 'running',
+    }
+predecessors = [identity(name, m['ACTIVE_SERVICE_BY_CONTAINER'][name]) for name in m['ACTIVE_MANAGED']]
+scheduler = identity('enterprise-backup-scheduler', 'backup-scheduler'); predecessors.append(scheduler)
+targets = [{
+  'configHash': sha('target-config-' + name), 'containerName': name,
+  'project': m['PROJECT_BY_NAME'][name],
+  'semantic': {'imageId': 'sha256:' + sha('target-image-' + name),
+               'imageReference': 'fixture/target-' + name + '@sha256:' + sha('target-manifest-' + name)},
+  'service': m['ACTIVE_SERVICE_BY_CONTAINER'][name],
+} for name in m['ACTIVE_MANAGED']]
+authority = {'documentId': 'd' * 64, 'authorizedDataMutations': [{'id': 'mutation-one'}],
+             'legacyNetworkAttachments': [], 'serviceTargets': targets}
 authority_bytes = m['canonical_bytes'](authority)
 marker = {'schema': 'platform.v1-local-private-reconciliation/v1', 'status': 'RECONCILING', 'beganAtUnixSeconds': 1787000000}
 marker_bytes = put(m['RECONCILIATION'], marker)
 transaction_id = m['digest'](authority_bytes + marker_bytes)
-executed = {'authorityDocumentId': authority['documentId'], 'authoritySha256': m['digest'](authority_bytes),
-  'beganAtUnixSeconds': 1787000000, 'createdAtUnixSeconds': 1787000060, 'dataMutationEvidence': [],
-  'dataMutationStatus': {'mutation-one': 'PENDING'}, 'deploymentConfigPreimage': {}, 'evidencePreimages': [],
-  'phase': 'APPLYING', 'reconciliationSha256': m['digest'](marker_bytes), 'schema': m['JOURNAL_SCHEMA'],
-  'steps': [{'kind': 'SERVICE', 'status': 'PENDING', 'containerName': 'enterprise-postgres'}],
-  'transactionId': transaction_id, 'updatedAtUnixSeconds': 1787000060}
-put(m['JOURNAL'], executed)
+steps = []
+legacy_live = {}
+for name in m['ACTIVE_MANAGED']:
+    before = next(item for item in predecessors if item['name'] == name)
+    rollback_path = f"{m['ROLLBACK_SPEC_DIR']}/{transaction_id}/{name}.json"
+    legacy_live[name] = {**before, 'project': m['PROJECT_BY_NAME'][name],
+                         'runtimeConfigSha256': sha('legacy-live-runtime-' + name),
+                         'semanticSha256': sha('legacy-live-semantic-' + name)}
+    rollback = {'containerInspect': {'fixtureName': name}, 'predecessorIdentity': before,
+                'schema': m['ROLLBACK_SPEC_SCHEMA'], 'transactionId': transaction_id}
+    rollback_bytes = put(rollback_path, rollback)
+    steps.append({
+      'after': None, 'backupName': f"v1-rollback-{transaction_id[:12]}-{name}", 'before': before,
+      'containerName': name, 'kind': 'SERVICE', 'restoredByRecreate': False,
+      'rollbackSpecPath': rollback_path,
+      'rollbackSpecSha256': m['digest'](rollback_bytes), 'service': before['service'], 'status': 'PENDING',
+    })
+rollback_path = f"{m['ROLLBACK_SPEC_DIR']}/{transaction_id}/{scheduler['name']}.json"
+legacy_live[scheduler['name']] = {**scheduler, 'project': 'platform_infra_vps',
+                                  'runtimeConfigSha256': sha('legacy-live-runtime-' + scheduler['name']),
+                                  'semanticSha256': sha('legacy-live-semantic-' + scheduler['name'])}
+rollback = {'containerInspect': {'fixtureName': scheduler['name']}, 'predecessorIdentity': scheduler,
+            'schema': m['ROLLBACK_SPEC_SCHEMA'], 'transactionId': transaction_id}
+rollback_bytes = put(rollback_path, rollback)
+steps.append({
+  'after': None, 'backupName': f"v1-rollback-{transaction_id[:12]}-{scheduler['name']}", 'before': scheduler,
+  'containerName': scheduler['name'], 'kind': 'REMOVE', 'restoredByRecreate': False,
+  'rollbackSpecPath': rollback_path,
+  'rollbackSpecSha256': m['digest'](rollback_bytes), 'service': scheduler['service'], 'status': 'PENDING',
+})
 put(m['DEPLOYMENT_ENV'], b'deployment-env-preimage-bytes', 0o600, raw=True)
 for index, source in enumerate(m['evidence_preimage_sources']()):
     put(source, f'preimage-{index:02d}'.encode(), 0o400 if index % 2 else 0o600, raw=True)
-reconciliation = {'beganAtUnixSeconds': 1787000000}
+deployment_preimage = m['materialize_deployment_config_preimage'](transaction_id)
+evidence_preimages = m['materialize_evidence_preimages'](transaction_id)
+executed = {'authorityDocumentId': authority['documentId'], 'authoritySha256': m['digest'](authority_bytes),
+  'beganAtUnixSeconds': 1787000000, 'createdAtUnixSeconds': 1787000060, 'dataMutationEvidence': [],
+  'dataMutationStatus': {'mutation-one': 'PENDING'}, 'deploymentConfigPreimage': deployment_preimage,
+  'evidencePreimages': evidence_preimages,
+  'phase': 'APPLYING', 'reconciliationSha256': m['digest'](marker_bytes), 'schema': m['JOURNAL_SCHEMA'],
+  'steps': steps,
+  'transactionId': transaction_id, 'updatedAtUnixSeconds': 1787000060}
+put(m['JOURNAL'], executed)
+reconciliation = {'beganAtUnixSeconds': 1787000000, 'plannedLegacyNetworkAttachments': [],
+                  'predecessorRuntimeIdentities': predecessors}
+g['container_identity'] = lambda raw: legacy_live[raw['fixtureName']]
+g['materialize_deployment_config_preimage'] = lambda transaction: (_ for _ in ()).throw(AssertionError('rematerialized deployment preimage'))
+g['materialize_evidence_preimages'] = lambda transaction: (_ for _ in ()).throw(AssertionError('rematerialized evidence preimages'))
 journal = m['superseded_transport_abort_journal'](authority, authority_bytes, reconciliation)
 stored = json.loads(open(m['physical'](m['JOURNAL'])).read())
-print(json.dumps({'phase': journal['phase'], 'stepsReplaced': journal['steps'] == [], 'storedIdentical': m['canonical_bytes'](journal) == m['canonical_bytes'](stored)}))`);
-  assert.deepEqual(value, { phase: "ABORTED", stepsReplaced: true, storedIdentical: true });
+print(json.dumps({'historicalRollback': all(not m['controller_predecessor_identity_match'](item, legacy_live[item['name']]) and m['historical_cleanup_predecessor_identity_match'](item, legacy_live[item['name']]) for item in predecessors), 'phase': journal['phase'], 'preimagesReused': journal['deploymentConfigPreimage'] == executed['deploymentConfigPreimage'] and journal['evidencePreimages'] == executed['evidencePreimages'], 'stepsReplaced': journal['steps'] == [], 'storedIdentical': m['canonical_bytes'](journal) == m['canonical_bytes'](stored)}))`);
+  assert.deepEqual(value, { historicalRollback: true, phase: "ABORTED", preimagesReused: true, stepsReplaced: true, storedIdentical: true });
 });

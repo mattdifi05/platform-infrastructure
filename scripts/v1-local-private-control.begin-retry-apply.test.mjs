@@ -84,15 +84,21 @@ for idx, name in enumerate(m.HISTORIC_CONTAINERS):
     seed = ("img" + str(idx)).encode()
     if name == "enterprise-backup-scheduler":
         records.append({"name": name, "state": "running", "imageId": running_image,
+                        "imageReference": "registry.invalid/backup-scheduler@" + running_image,
                         "configHash": config_hash, "containerId": container_id,
                         "exitCode": 0, "health": "none", "service": "backup-scheduler",
+                        "runtimeConfigSha256": hashlib.sha256(b"scheduler-runtime").hexdigest(),
+                        "semanticSha256": hashlib.sha256(b"scheduler-semantic").hexdigest(),
                         "networkMembership": network})
     else:
         records.append({"name": name, "state": "running",
                         "imageId": "sha256:" + hashlib.sha256(seed).hexdigest(),
+                        "imageReference": "registry.invalid/" + name + "@sha256:" + hashlib.sha256(seed).hexdigest(),
                         "configHash": hashlib.sha256(b"cfg" + seed).hexdigest(),
                         "containerId": hashlib.sha256(b"cid" + seed).hexdigest(),
                         "exitCode": 0, "health": "none", "service": "svc" + str(idx),
+                        "runtimeConfigSha256": hashlib.sha256(b"runtime" + seed).hexdigest(),
+                        "semanticSha256": hashlib.sha256(b"semantic" + seed).hexdigest(),
                         "networkMembership": network})
 observation = {"containers": records,
                "schedulerRecovery": {"configHash": config_hash, "containerId": container_id}}

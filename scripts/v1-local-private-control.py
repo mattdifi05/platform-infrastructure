@@ -100,10 +100,11 @@ CHECKPOINT_EVIDENCE_PATHS = {
     "secretsBackupEvidenceSha256": "/var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
 }
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
-VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
+VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v2"
 VALIDATION_LANE_MAX_BACKUP_AGE = 24 * 3600
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 ID_RE = re.compile(r"^[a-f0-9]{64}$")
+IMAGE_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 HISTORIC_CONTAINERS = (
@@ -200,6 +201,10 @@ RUNTIME_IDENTITY_LABELS = (
     "com.platform.runtime.candidate-id", "com.platform.runtime.commit",
     "com.platform.runtime.deployment-id", "com.platform.runtime.source-render-sha256",
     "com.platform.runtime.tree", "com.platform.runtime.workload-lock-sha256",
+)
+CONTROLLER_RECORDED_IDENTITY_FIELDS = (
+    "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
+    "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state",
 )
 NO_HEALTHCHECK = frozenset(("enterprise-local-dns", "enterprise-local-registry", "phpmyadmin"))
 HISTORIC_EXITED = "phppgadmin"
@@ -1098,6 +1103,18 @@ def render_tmpfs(service: Dict[str, object], label: str) -> List[Dict[str, objec
     return sorted(result, key=lambda item: item["target"])
 
 
+def inspect_tmpfs(host: Dict[str, object], label: str) -> List[Dict[str, object]]:
+    raw = host.get("Tmpfs") or {}
+    if not isinstance(raw, dict):
+        stop(f"{label} tmpfs is invalid.")
+    result = []
+    for target, options in raw.items():
+        if not isinstance(target, str) or not target.startswith("/") or not isinstance(options, str):
+            stop(f"{label} tmpfs entry is invalid.")
+        result.append({"options": normalize_tmpfs_options(options, f"{label} tmpfs {target}"), "target": target})
+    return sorted(result, key=lambda item: item["target"])
+
+
 def render_ulimits(service: Dict[str, object], label: str) -> List[Dict[str, object]]:
     raw = service.get("ulimits", {})
     if not isinstance(raw, dict):
@@ -1115,7 +1132,28 @@ def render_ulimits(service: Dict[str, object], label: str) -> List[Dict[str, obj
     return sorted(result, key=lambda item: item["name"])
 
 
-def normalize_extra_hosts(raw: object, label: str) -> List[Dict[str, str]]:
+def inspect_ulimits(host: Dict[str, object], label: str) -> List[Dict[str, object]]:
+    raw = host.get("Ulimits") or []
+    if not isinstance(raw, list):
+        stop(f"{label} ulimits are invalid.")
+    result = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"Name", "Soft", "Hard"}:
+            stop(f"{label} ulimit entry is invalid.")
+        name = item["Name"]
+        if not isinstance(name, str) or SERVICE_RE.fullmatch(name) is None:
+            stop(f"{label} ulimit name is invalid.")
+        result.append({
+            "hard": nonnegative_integer(item["Hard"], f"{label} {name} hard ulimit"),
+            "name": name,
+            "soft": nonnegative_integer(item["Soft"], f"{label} {name} soft ulimit"),
+        })
+    if len({item["name"] for item in result}) != len(result):
+        stop(f"{label} ulimits are duplicated.")
+    return sorted(result, key=lambda item: item["name"])
+
+
+def normalize_extra_hosts(raw: object, label: str, *, rendered: bool) -> List[Dict[str, str]]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -1124,7 +1162,10 @@ def normalize_extra_hosts(raw: object, label: str) -> List[Dict[str, str]]:
     for item in raw:
         if not isinstance(item, str):
             stop(f"{label} extra-host entry is invalid.")
-        host, separator, address = item.partition("=")
+        if rendered:
+            host, separator, address = item.partition("=")
+        else:
+            host, separator, address = item.partition(":")
         if not separator or not host or not address:
             stop(f"{label} extra-host entry is malformed.")
         result.append({"address": address, "host": host})
@@ -1136,9 +1177,9 @@ def normalize_extra_hosts(raw: object, label: str) -> List[Dict[str, str]]:
 def runtime_label_subset(labels: object, label: str) -> Dict[str, str]:
     if not isinstance(labels, dict):
         stop(f"{label} labels are invalid.")
-    result = {name: labels[name] for name in RUNTIME_IDENTITY_LABELS if name in labels}
-    if set(result) != set(RUNTIME_IDENTITY_LABELS) or any(not isinstance(value, str) or not value for value in result.values()):
-        stop(f"{label} runtime identity labels are incomplete or invalid.")
+    result = {name: labels[name] for name in sorted(RUNTIME_IDENTITY_LABELS) if name in labels}
+    if any(not isinstance(value, str) or not value for value in result.values()):
+        stop(f"{label} runtime identity label is invalid.")
     return result
 
 
@@ -1157,6 +1198,18 @@ def render_logging(service: Dict[str, object], label: str) -> Dict[str, object]:
         return {"driver": "json-file", "options": {}}
     value = exact_keys(raw, ("driver", "options"), f"{label} logging")
     driver, options = value["driver"], value["options"]
+    if not isinstance(driver, str) or not driver or not isinstance(options, dict):
+        stop(f"{label} logging configuration is invalid.")
+    if any(not isinstance(name, str) or not name or not isinstance(option, str) for name, option in options.items()):
+        stop(f"{label} logging option is invalid.")
+    return {"driver": driver, "options": {name: options[name] for name in sorted(options)}}
+
+
+def inspect_logging(host: Dict[str, object], label: str) -> Dict[str, object]:
+    raw = host.get("LogConfig")
+    if not isinstance(raw, dict) or set(raw) != {"Type", "Config"}:
+        stop(f"{label} logging configuration is invalid.")
+    driver, options = raw["Type"], raw["Config"]
     if not isinstance(driver, str) or not driver or not isinstance(options, dict):
         stop(f"{label} logging configuration is invalid.")
     if any(not isinstance(name, str) or not name or not isinstance(option, str) for name, option in options.items()):
@@ -1190,7 +1243,7 @@ def render_service_semantics(render: Dict[str, object], service_name: str, image
         "cpuShares": nonnegative_integer(service.get("cpu_shares"), f"{label} CPU shares"),
         "entrypoint": string_list(service.get("entrypoint"), f"{label} entrypoint"),
         "environment": environment_fingerprints(service.get("environment"), f"{label} environment"),
-        "extraHosts": normalize_extra_hosts(service.get("extra_hosts"), label),
+        "extraHosts": normalize_extra_hosts(service.get("extra_hosts"), label, rendered=True),
         "groupAdd": sorted(string_list(service.get("group_add"), f"{label} group_add")),
         "healthcheck": normalized_health(service.get("healthcheck"), label),
         "imageId": image_id,
@@ -1789,6 +1842,15 @@ def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
     return lane
 
 
+def validation_mode() -> Dict[str, object]:
+    lane = load_validation_lane(CANDIDATE_COMMIT)
+    return {
+        "candidateCommit": CANDIDATE_COMMIT,
+        "schema": "platform.v1-local-private-validation-mode/v1",
+        "status": "VALIDATION" if lane is not None else "PRODUCTION",
+    }
+
+
 def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes, Dict[str, object], Dict[str, object]]:
     """Validation-lane checkpoint: recovery pair is production-grade, the
     evidence digests are reused references verified by readback, and the
@@ -1797,7 +1859,10 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
     value = exact_keys(parse_json(data, "validation PRE-DEPLOY checkpoint"), (
         "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
         "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
-        "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+        "offHostBackupEvidenceSha256", "predecessorAuthorityDocumentId", "predecessorAuthoritySha256",
+        "predecessorCandidateCommit", "predecessorCandidateTree", "predecessorCheckpointSha256",
+        "predecessorReceiptSha256", "predecessorSourceArchiveSha256", "predecessorStateSha256",
+        "restoreEvidenceSha256", "restoreVerified",
         "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
         "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
         "secretsBackupEvidenceSha256", "sourceArchiveSha256", "validation",
@@ -1812,16 +1877,76 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
         stop("validation PRE-DEPLOY checkpoint is not one explicit non-production candidate-bound document.")
     for key in ("logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "runtimeInventorySha256", "schedulerRecoveryImageExportSha256", "secretsBackupEvidenceSha256"):
         sha256_value(value[key], key)
-    # Reused-evidence readback: every referenced evidence file must still exist
-    # with the exact recorded digest (absent files are only tolerated when the
-    # recorded digest is the explicit zero placeholder).
+    for key in (
+        "predecessorAuthorityDocumentId", "predecessorAuthoritySha256", "predecessorCheckpointSha256",
+        "predecessorReceiptSha256", "predecessorStateSha256",
+    ):
+        sha256_value(value[key], f"validation {key}")
+    predecessor_authority = authority_for_external({
+        "releaseAuthorityDocumentId": value["predecessorAuthorityDocumentId"],
+        "releaseAuthoritySha256": value["predecessorAuthoritySha256"],
+    })
+    predecessor_state_data = secure_file(STATE_FILE, "validation predecessor state", exact_mode=0o600)
+    predecessor_state = validate_state(
+        parse_json(predecessor_state_data, "validation predecessor state", True), False,
+    )
+    predecessor_receipt_data = secure_file(RECEIPT_FILE, "validation predecessor receipt", exact_mode=0o444)
+    predecessor_receipt = validate_receipt_document(
+        parse_json(predecessor_receipt_data, "validation predecessor receipt", True),
+    )
+    predecessor_checkpoint_data = secure_file(CHECKPOINT, "validation predecessor production checkpoint")
+    predecessor_checkpoint = exact_keys(
+        parse_json(predecessor_checkpoint_data, "validation predecessor production checkpoint", True),
+        (
+            "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree",
+            "destructiveMutationPlanned", "generatedAtUnixSeconds", "logicalBackupEvidenceSha256",
+            "offHostBackupEvidenceSha256", "restoreEvidenceSha256", "restoreVerified",
+            "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+            "schedulerRecoveryImageId", "schedulerRunningImageId", "schema",
+            "secretsBackupEvidenceSha256", "sourceArchiveSha256",
+        ),
+        "validation predecessor production checkpoint",
+    )
+    if (
+        digest(predecessor_state_data) != value["predecessorStateSha256"]
+        or digest(predecessor_receipt_data) != value["predecessorReceiptSha256"]
+        or digest(predecessor_checkpoint_data) != value["predecessorCheckpointSha256"]
+        or predecessor_checkpoint["schema"] != "platform.v1-local-private-predeploy-checkpoint/v1"
+        or predecessor_checkpoint["authoritative"] is not False
+        or predecessor_checkpoint["destructiveMutationPlanned"] is not False
+        or predecessor_checkpoint["restoreVerified"] is not True
+        or predecessor_checkpoint["runtimeRecovered"] is not True
+        or predecessor_checkpoint["backupCapturedUnixSeconds"] != value["backupCapturedUnixSeconds"]
+        or any(predecessor_checkpoint[key] != value[key] for key in CHECKPOINT_EVIDENCE_PATHS)
+        or predecessor_checkpoint["schedulerRecoveryImageExportSha256"] != value["schedulerRecoveryImageExportSha256"]
+        or predecessor_checkpoint["schedulerRecoveryImageId"] != value["schedulerRecoveryImageId"]
+        or predecessor_checkpoint["schedulerRunningImageId"] != value["schedulerRunningImageId"]
+        or predecessor_checkpoint["candidateCommit"] != value["predecessorCandidateCommit"]
+        or predecessor_checkpoint["candidateTree"] != value["predecessorCandidateTree"]
+        or predecessor_checkpoint["sourceArchiveSha256"] != value["predecessorSourceArchiveSha256"]
+        or predecessor_state["checkpointSha256"] != value["predecessorCheckpointSha256"]
+        or predecessor_receipt.get("checkpointSha256") != value["predecessorCheckpointSha256"]
+        or predecessor_state["candidateCommit"] != value["predecessorCandidateCommit"]
+        or predecessor_state["candidateTree"] != value["predecessorCandidateTree"]
+        or predecessor_state["sourceArchiveSha256"] != value["predecessorSourceArchiveSha256"]
+        or predecessor_receipt.get("candidateCommit") != value["predecessorCandidateCommit"]
+        or predecessor_receipt.get("candidateTree") != value["predecessorCandidateTree"]
+        or predecessor_receipt.get("sourceArchiveSha256") != value["predecessorSourceArchiveSha256"]
+        or predecessor_authority["documentId"] != value["predecessorAuthorityDocumentId"]
+        or predecessor_authority["candidateCommit"] != value["predecessorCandidateCommit"]
+        or predecessor_authority["candidateTree"] != value["predecessorCandidateTree"]
+        or predecessor_authority["sourceArchiveSha256"] != value["predecessorSourceArchiveSha256"]
+    ):
+        stop("validation predecessor state/receipt/checkpoint/authority provenance differs.")
+    # Reused-evidence readback: FAST is allowed only when every member of the
+    # sealed PRE evidence set still exists with its exact non-zero digest.
+    # Accepting an absent/zero placeholder here would let begin-maintenance
+    # succeed for a transaction that the reconciler can never evidence.
     for key, logical in CHECKPOINT_EVIDENCE_PATHS.items():
         recorded = value[key]
         pathname = physical(logical)
-        if not os.path.lexists(pathname):
-            if recorded != "0" * 64:
-                stop(f"validation reuse reference {key} points at missing evidence.")
-            continue
+        if recorded == "0" * 64 or not os.path.lexists(pathname):
+            stop(f"validation reuse reference {key} is missing or zero-bound.")
         observed = digest(secure_file(logical, f"validation reused {key}", MAX_JSON))
         if observed != recorded:
             stop(f"validation reused evidence {key} differs from its recorded digest.")
@@ -2047,70 +2172,147 @@ def inspect_network_membership(container: Dict[str, object], name: str) -> List[
 def inspect_service_semantics(container: Dict[str, object], name: str) -> Dict[str, object]:
     config = container.get("Config")
     host = container.get("HostConfig")
-    if not isinstance(config, dict) or not isinstance(host, dict):
-        stop(f"container {name} runtime configuration is incomplete.")
     mounts = container.get("Mounts")
-    if not isinstance(mounts, list):
-        stop(f"container {name} mount inventory is invalid.")
+    if not isinstance(config, dict) or not isinstance(host, dict) or not isinstance(mounts, list):
+        stop(f"container {name} runtime configuration is incomplete.")
     normalized_mounts = []
     for index, mount in enumerate(mounts):
         if not isinstance(mount, dict):
             stop(f"container {name} mount {index} is invalid.")
-        mount_type = mount.get("Type")
-        source = mount.get("Source", "")
-        target = mount.get("Destination")
+        mount_type, source, target = mount.get("Type"), mount.get("Source", ""), mount.get("Destination")
         if mount_type not in ("bind", "volume", "tmpfs") or not isinstance(source, str) or not isinstance(target, str):
             stop(f"container {name} mount {index} identity is invalid.")
         normalized_mounts.append({"readOnly": mount.get("RW") is False, "source": source, "target": target, "type": mount_type})
     restart = host.get("RestartPolicy")
     restart_name = restart.get("Name", "no") if isinstance(restart, dict) else "no"
     network_mode = host.get("NetworkMode", "")
-    if network_mode in ("none", "host"):
-        semantic_network_mode = network_mode
-    else:
-        semantic_network_mode = "managed"
+    semantic_network_mode = network_mode if network_mode in ("none", "host") else "managed"
     health = config.get("Healthcheck")
     if isinstance(health, dict) and not health.get("Test"):
         health = None
-    ports = [
-        {key: port[key] for key in ("containerPort", "hostIp", "hostPort", "protocol")}
-        for port in normalize_ports(container, name)
-    ]
-    networks = [item["networkName"] for item in inspect_network_membership(container, name)]
-    image_reference = config.get("Image")
-    image_id = container.get("Image")
-    if not isinstance(image_reference, str) or not image_reference or not isinstance(image_id, str):
+    image_reference, image_id = config.get("Image"), container.get("Image")
+    if not isinstance(image_reference, str) or not image_reference or not isinstance(image_id, str) or IMAGE_ID_RE.fullmatch(image_id) is None:
         stop(f"container {name} image declaration is invalid.")
     pids_limit = host.get("PidsLimit")
     if pids_limit in (None, 0):
         pids_limit = 0
+    labels = config.get("Labels")
+    network_endpoints = inspect_network_membership(container, name)
+    ports = [
+        {key: port[key] for key in ("containerPort", "hostIp", "hostPort", "protocol")}
+        for port in normalize_ports(container, name)
+    ]
     return {
+        "blkioWeight": nonnegative_integer(host.get("BlkioWeight"), f"container {name} blkio weight"),
         "capAdd": sorted(string_list(host.get("CapAdd"), f"container {name} cap-add")),
         "capDrop": sorted(string_list(host.get("CapDrop"), f"container {name} cap-drop")),
         "command": string_list(config.get("Cmd"), f"container {name} command"),
+        "cpuShares": nonnegative_integer(host.get("CpuShares"), f"container {name} CPU shares"),
         "entrypoint": string_list(config.get("Entrypoint"), f"container {name} entrypoint"),
         "environment": environment_fingerprints(config.get("Env"), f"container {name} environment"),
+        "extraHosts": normalize_extra_hosts(host.get("ExtraHosts"), f"container {name}", rendered=False),
+        "groupAdd": sorted(string_list(host.get("GroupAdd"), f"container {name} group-add")),
         "healthcheck": normalized_health(health, f"container {name}", inspect=True),
         "imageId": image_id,
         "imageReference": image_reference,
         "init": host.get("Init") is True,
+        "memoryBytes": nonnegative_integer(host.get("Memory"), f"container {name} memory limit"),
+        "memoryReservationBytes": nonnegative_integer(host.get("MemoryReservation"), f"container {name} memory reservation"),
+        "logging": inspect_logging(host, f"container {name}"),
         "mounts": sorted(normalized_mounts, key=lambda item: (item["target"], item["type"], item["source"], item["readOnly"])),
+        "nanoCpus": nonnegative_integer(host.get("NanoCpus"), f"container {name} NanoCPUs"),
         "networkMode": semantic_network_mode,
-        "networks": sorted(networks),
+        "networkEndpoints": network_endpoints,
+        "networks": sorted(item["networkName"] for item in network_endpoints),
+        "pidMode": str(host.get("PidMode") or ""),
         "pidsLimit": pids_limit,
         "ports": sorted(ports, key=lambda item: (item["hostIp"], item["hostPort"], item["protocol"], item["containerPort"])),
         "privileged": host.get("Privileged") is True,
         "readOnlyRootfs": host.get("ReadonlyRootfs") is True,
         "restartPolicy": restart_name,
+        "routingLabels": routing_label_subset(labels, f"container {name}"),
+        "runtimeIdentityLabels": runtime_label_subset(labels, f"container {name}"),
         "securityOpt": sorted(string_list(host.get("SecurityOpt"), f"container {name} security-opt")),
+        "tmpfs": inspect_tmpfs(host, f"container {name}"),
+        "ulimits": inspect_ulimits(host, f"container {name}"),
         "user": str(config.get("User", "")),
+        "workingDirectory": str(config.get("WorkingDir") or ""),
     }
+
+
+CONTROLLER_RECORDED_SEMANTIC_FIELDS = (
+    "capAdd", "capDrop", "command", "entrypoint", "environment", "healthcheck",
+    "imageId", "imageReference", "init", "mounts", "networkMode", "networks",
+    "pidsLimit", "ports", "privileged", "readOnlyRootfs", "restartPolicy",
+    "securityOpt", "user",
+)
+CONTROLLER_IDENTITY_PROJECTION_LEGACY_19 = "LEGACY_19"
+CONTROLLER_IDENTITY_PROJECTION_FULL_34 = "FULL_34"
+CURRENT_CONTROLLER_IDENTITY_PROJECTION = CONTROLLER_IDENTITY_PROJECTION_FULL_34
+CONTROLLER_IDENTITY_PROJECTION_BY_SHA256 = {
+    "f60c20fabeaf3f68b2478ebe31018d52d2d9a967a3598c2ac8256bc01dd33f7d":
+        CONTROLLER_IDENTITY_PROJECTION_LEGACY_19,
+}
+ABORTED_RUNTIME_PROFILE_HISTORICAL = "HISTORICAL_V1"
+ABORTED_RUNTIME_PROFILE_CANONICAL = "CANONICAL_RECONCILED_V1"
+PREDECESSOR_RUNTIME_PROVENANCE_FIELDS = (
+    "candidateCommit", "candidateTree", "controllerIdentityProjection",
+    "controllerSha256", "profile", "releaseRoot", "sourceArchiveSha256",
+)
+
+
+def controller_recorded_semantics(semantic: Dict[str, object]) -> Dict[str, object]:
+    """Stable v1 controller identity projection.
+
+    Runtime enforcement uses the complete current semantic contract.  These
+    historical identity digests deliberately retain the original v1 19-field
+    projection so an installed controller upgrade can verify and preserve an
+    already ACTIVE receipt without silently rebaselining it.
+    """
+    if not isinstance(semantic, dict) or any(field not in semantic for field in CONTROLLER_RECORDED_SEMANTIC_FIELDS):
+        stop("runtime semantic identity lacks the stable controller projection.")
+    return {field: semantic[field] for field in CONTROLLER_RECORDED_SEMANTIC_FIELDS}
+
+
+def controller_recorded_runtime_digest(semantic: Dict[str, object]) -> str:
+    value = controller_recorded_semantics(semantic)
+    value.pop("networks", None)
+    value.pop("networkMode", None)
+    return digest(canonical(value).encode())
+
+
+def controller_recorded_semantic_digest(semantic: Dict[str, object]) -> str:
+    return digest(canonical(controller_recorded_semantics(semantic)).encode())
+
+
+def validate_controller_identity_projection(value: object) -> str:
+    if value not in (
+        CONTROLLER_IDENTITY_PROJECTION_LEGACY_19,
+        CONTROLLER_IDENTITY_PROJECTION_FULL_34,
+    ):
+        stop("controller semantic identity projection is unsupported.")
+    return value
+
+
+def projected_runtime_configuration_digest(semantic: Dict[str, object], projection: str) -> str:
+    projection = validate_controller_identity_projection(projection)
+    if projection == CONTROLLER_IDENTITY_PROJECTION_LEGACY_19:
+        return controller_recorded_runtime_digest(semantic)
+    return runtime_configuration_digest(semantic)
+
+
+def projected_semantic_digest(semantic: Dict[str, object], projection: str) -> str:
+    projection = validate_controller_identity_projection(projection)
+    if projection == CONTROLLER_IDENTITY_PROJECTION_LEGACY_19:
+        return controller_recorded_semantic_digest(semantic)
+    return digest(canonical(semantic).encode())
 
 
 def runtime_configuration_digest(semantic: Dict[str, object]) -> str:
     # Network membership is authorized and evidenced independently because
     # legacy bridge attachments are allowed without recreating a container.
     value = dict(semantic)
+    value.pop("networkEndpoints", None)
     value.pop("networks", None)
     value.pop("networkMode", None)
     return digest(canonical(value).encode())
@@ -2133,7 +2335,9 @@ def observe(
     scheduler_recovery: Dict[str, str],
     expected_names: Iterable[str] = EXPECTED_NAMES,
     enforce_current_authority: bool = True,
+    controller_identity_projection: str = CURRENT_CONTROLLER_IDENTITY_PROJECTION,
 ) -> Dict[str, object]:
+    projection = validate_controller_identity_projection(controller_identity_projection)
     expected = closed_expected_names(expected_names)
     reconciled_profile = expected == CANONICAL_EXPECTED_NAMES
     expected_count = len(expected)
@@ -2211,11 +2415,13 @@ def observe(
         if reconciled_profile:
             semantic = inspect_service_semantics(container, name)
             membership = inspect_network_membership(container, name)
+            runtime_digest = projected_runtime_configuration_digest(semantic, projection)
+            semantic_digest = projected_semantic_digest(semantic, projection)
             record.update({
                 "imageReference": semantic["imageReference"],
                 "networkMembership": membership,
-                "runtimeConfigSha256": runtime_configuration_digest(semantic),
-                "semanticSha256": digest(canonical(semantic).encode()),
+                "runtimeConfigSha256": runtime_digest,
+                "semanticSha256": semantic_digest,
             })
             if enforce_current_authority and name in ACTIVE_MANAGED_CONTAINERS:
                 if EXACT_AUTHORITY is None:
@@ -2326,16 +2532,22 @@ def stable_observation(
     scheduler_recovery: Dict[str, str],
     expected_names: Iterable[str] = EXPECTED_NAMES,
     enforce_current_authority: bool = True,
+    controller_identity_projection: str = CURRENT_CONTROLLER_IDENTITY_PROJECTION,
 ) -> Dict[str, object]:
     expected = closed_expected_names(expected_names)
-    first = observe(scheduler_recovery, expected, enforce_current_authority)
-    second = observe(scheduler_recovery, expected, enforce_current_authority)
+    projection = validate_controller_identity_projection(controller_identity_projection)
+    first = observe(scheduler_recovery, expected, enforce_current_authority, projection)
+    second = observe(scheduler_recovery, expected, enforce_current_authority, projection)
     if canonical(first) != canonical(second):
         stop("Docker runtime changed during LOCAL_PRIVATE adoption.")
     return first
 
 
-def capture_runtime_identities(expected_names: Iterable[str]) -> List[Dict[str, object]]:
+def capture_runtime_identities(
+    expected_names: Iterable[str],
+    controller_identity_projection: str = CURRENT_CONTROLLER_IDENTITY_PROJECTION,
+) -> List[Dict[str, object]]:
+    projection = validate_controller_identity_projection(controller_identity_projection)
     expected = closed_expected_names(expected_names)
     ids_output = run([DOCKER, "ps", "-aq", "--no-trunc"], "Docker semantic identity inventory", 30).decode("ascii", errors="strict")
     ids = [line for line in ids_output.splitlines() if line]
@@ -2365,6 +2577,8 @@ def capture_runtime_identities(expected_names: Iterable[str]) -> List[Dict[str, 
             stop(f"container {name} semantic runtime state is invalid.")
         health_object = state.get("Health")
         health = health_object.get("Status") if isinstance(health_object, dict) else "none"
+        runtime_digest = projected_runtime_configuration_digest(semantic, projection)
+        semantic_digest = projected_semantic_digest(semantic, projection)
         result.append({
             "configHash": config_hash,
             "containerId": identifier,
@@ -2374,8 +2588,8 @@ def capture_runtime_identities(expected_names: Iterable[str]) -> List[Dict[str, 
             "networkMembership": inspect_network_membership(container, name),
             "exitCode": state["ExitCode"],
             "health": health,
-            "runtimeConfigSha256": runtime_configuration_digest(semantic),
-            "semanticSha256": digest(canonical(semantic).encode()),
+            "runtimeConfigSha256": runtime_digest,
+            "semanticSha256": semantic_digest,
             "service": service,
             "state": state.get("Status"),
         })
@@ -2385,12 +2599,55 @@ def capture_runtime_identities(expected_names: Iterable[str]) -> List[Dict[str, 
     return result
 
 
-def stable_runtime_identities(expected_names: Iterable[str]) -> List[Dict[str, object]]:
-    first = capture_runtime_identities(expected_names)
-    second = capture_runtime_identities(expected_names)
+def stable_runtime_identities(
+    expected_names: Iterable[str],
+    controller_identity_projection: str = CURRENT_CONTROLLER_IDENTITY_PROJECTION,
+) -> List[Dict[str, object]]:
+    projection = validate_controller_identity_projection(controller_identity_projection)
+    first = capture_runtime_identities(expected_names, projection)
+    second = capture_runtime_identities(expected_names, projection)
     if first != second:
         stop("Docker semantic identities changed while establishing reconciliation rollback evidence.")
     return first
+
+
+def validate_recorded_predecessor_identity(value: object, label: str) -> Dict[str, object]:
+    identity = exact_keys(value, CONTROLLER_RECORDED_IDENTITY_FIELDS, label)
+    for field in ("configHash", "containerId", "runtimeConfigSha256", "semanticSha256"):
+        sha256_value(identity[field], f"{label} {field}")
+    if (
+        not isinstance(identity["imageId"], str)
+        or IMAGE_ID_RE.fullmatch(identity["imageId"]) is None
+        or not isinstance(identity["imageReference"], str)
+        or not identity["imageReference"]
+        or not isinstance(identity["name"], str)
+        or SERVICE_RE.fullmatch(identity["name"]) is None
+        or not isinstance(identity["service"], str)
+        or SERVICE_RE.fullmatch(identity["service"]) is None
+        or isinstance(identity["exitCode"], bool)
+        or not isinstance(identity["exitCode"], int)
+        or identity["health"] not in ("healthy", "none")
+        or identity["state"] not in ("running", "exited")
+    ):
+        stop(f"{label} scalar identity is invalid.")
+    memberships = identity["networkMembership"]
+    if not isinstance(memberships, list):
+        stop(f"{label} network membership is invalid.")
+    normalized = []
+    for index, raw in enumerate(memberships):
+        item = exact_keys(raw, ("aliases", "networkName"), f"{label} network membership {index}")
+        aliases, network_name = item["aliases"], item["networkName"]
+        if (
+            not isinstance(network_name, str) or not network_name
+            or not isinstance(aliases, list)
+            or any(not isinstance(alias, str) or not alias for alias in aliases)
+            or aliases != sorted(set(aliases))
+        ):
+            stop(f"{label} network membership {index} is invalid.")
+        normalized.append({"aliases": aliases, "networkName": network_name})
+    if normalized != sorted(normalized, key=lambda item: item["networkName"]) or len({item["networkName"] for item in normalized}) != len(normalized):
+        stop(f"{label} network membership is duplicated or unordered.")
+    return identity
 
 
 def validate_predecessor_runtime_snapshot(
@@ -2466,10 +2723,119 @@ def reconciliation_container_identities(observation: Dict[str, object]) -> List[
     return [{key: record[key] for key in fields} for record in observation["containers"]]
 
 
+RUNTIME_EVIDENCE_IDENTITY_FIELDS = (
+    "configHash", "containerId", "exitCode", "health", "imageAvailability",
+    "imageId", "imageReference", "name", "networkMembership", "project",
+    "runtimeConfigSha256", "semanticSha256", "service", "state",
+)
+RUNTIME_EVIDENCE_COMPARABLE_IDENTITY_FIELDS = RUNTIME_EVIDENCE_IDENTITY_FIELDS
+
+
+def validate_cross_implementation_identity_inventory(
+    value: object, controller_identities: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    if not isinstance(value, list) or len(value) != len(controller_identities):
+        stop("reconciliation runtime identity evidence has invalid cardinality.")
+    result = []
+    for index, (raw, expected) in enumerate(zip(value, controller_identities)):
+        item = exact_keys(raw, RUNTIME_EVIDENCE_IDENTITY_FIELDS, f"reconciliation runtime identity {index}")
+        for field in ("configHash", "containerId", "runtimeConfigSha256", "semanticSha256"):
+            sha256_value(item[field], f"reconciliation runtime identity {index} {field}")
+        if (
+            not isinstance(item["imageId"], str) or IMAGE_ID_RE.fullmatch(item["imageId"]) is None
+            or not isinstance(item["imageReference"], str) or not item["imageReference"]
+            or any(item[field] != expected[field] for field in RUNTIME_EVIDENCE_COMPARABLE_IDENTITY_FIELDS)
+        ):
+            stop("reconciliation runtime identity differs across controller/reconciler domains.")
+        result.append(dict(item))
+    return result
+
+
 def transition_identity(record: Dict[str, object]) -> Dict[str, object]:
     return {key: record[key] for key in (
         "configHash", "containerId", "imageId", "imageReference", "name", "runtimeConfigSha256",
     )}
+
+
+TRANSITION_COMPARABLE_IDENTITY_FIELDS = (
+    "configHash", "containerId", "imageId", "imageReference", "runtimeConfigSha256",
+)
+TRANSITION_IDENTITY_FIELDS = (
+    "configHash", "containerId", "imageId", "imageReference", "name", "runtimeConfigSha256",
+)
+
+
+def transition_status(
+    previous: Optional[Dict[str, object]], current: Optional[Dict[str, object]],
+) -> str:
+    """Classify a transition using the exact shared runtime identity.
+
+    Upgrade compatibility for a historical controller digest is confined to
+    validating the pre-upgrade ACTIVE state.  A new reconciliation marker is
+    always captured by the installed controller, so its digest must match the
+    reconciler and remains a transition discriminator.
+    """
+    if current is None:
+        if previous is None:
+            stop("service transition has neither a previous nor current identity.")
+        return "REMOVED"
+    if previous is None:
+        return "CREATED"
+    if previous["name"] != current["name"]:
+        return "REPLACED"
+    if all(previous[field] == current[field] for field in TRANSITION_COMPARABLE_IDENTITY_FIELDS):
+        return "RETAINED"
+    return "RECREATED"
+
+
+def validate_transition_identity(value: object, label: str) -> Dict[str, object]:
+    identity = exact_keys(value, TRANSITION_IDENTITY_FIELDS, label)
+    for field in ("configHash", "containerId", "runtimeConfigSha256"):
+        sha256_value(identity[field], f"{label} {field}")
+    if (
+        not isinstance(identity["imageId"], str) or IMAGE_ID_RE.fullmatch(identity["imageId"]) is None
+        or not isinstance(identity["imageReference"], str) or not identity["imageReference"]
+        or not isinstance(identity["name"], str) or SERVICE_RE.fullmatch(identity["name"]) is None
+    ):
+        stop(f"{label} image/name identity is invalid.")
+    return identity
+
+
+def transition_identity_matches_runtime(identity: Dict[str, object], runtime: Dict[str, object]) -> bool:
+    return (
+        identity["name"] == runtime["name"]
+        and all(identity[field] == runtime[field] for field in TRANSITION_COMPARABLE_IDENTITY_FIELDS)
+    )
+
+
+def validate_cross_implementation_transitions(
+    value: object, expected: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    if not isinstance(value, list) or len(value) != len(expected):
+        stop("reconciliation service transition evidence has invalid cardinality.")
+    result = []
+    for index, (raw, baseline) in enumerate(zip(value, expected)):
+        item = exact_keys(raw, ("current", "previous", "service", "status"), f"reconciliation service transition {index}")
+        if item["service"] != baseline["service"] or item["status"] != baseline["status"]:
+            stop("reconciliation service transition order/status differs across implementations.")
+        current = item["current"]
+        expected_current = baseline["current"]
+        if (current is None) != (expected_current is None):
+            stop("reconciliation current transition presence differs across implementations.")
+        if current is not None:
+            current = validate_transition_identity(current, f"reconciliation current transition {index}")
+            if not transition_identity_matches_runtime(current, expected_current):
+                stop("reconciliation current transition identity differs across implementations.")
+        previous = item["previous"]
+        expected_previous = baseline["previous"]
+        if (previous is None) != (expected_previous is None):
+            stop("reconciliation previous transition presence differs across implementations.")
+        if previous is not None:
+            previous = validate_transition_identity(previous, f"reconciliation previous transition {index}")
+            if previous != expected_previous:
+                stop("reconciliation previous transition identity differs from its controller marker.")
+        result.append({"current": current, "previous": previous, "service": item["service"], "status": item["status"]})
+    return result
 
 
 def reconciliation_service_transitions(
@@ -2485,14 +2851,7 @@ def reconciliation_service_transitions(
             previous_record = previous.get(LEGACY_ALERT_DISPATCHER)
         current_identity = transition_identity(current_record)
         previous_identity = transition_identity(previous_record) if previous_record is not None else None
-        if previous_identity is None:
-            status = "CREATED"
-        elif previous_identity["name"] != current_identity["name"]:
-            status = "REPLACED"
-        elif previous_identity == current_identity:
-            status = "RETAINED"
-        else:
-            status = "RECREATED"
+        status = transition_status(previous_identity, current_identity)
         transitions.append({
             "current": current_identity,
             "previous": previous_identity,
@@ -2501,11 +2860,12 @@ def reconciliation_service_transitions(
         })
     scheduler = previous.get("enterprise-backup-scheduler")
     if scheduler is not None:
+        previous_identity = transition_identity(scheduler)
         transitions.append({
             "current": None,
-            "previous": transition_identity(scheduler),
+            "previous": previous_identity,
             "service": scheduler["service"],
-            "status": "REMOVED",
+            "status": transition_status(previous_identity, None),
         })
     return sorted(transitions, key=lambda item: (item["current"] or item["previous"])["name"])
 
@@ -2608,7 +2968,11 @@ def external_reconciliation_document(
     }
 
 
-def validate_external_reconciliation(value: object, observation: Dict[str, object]) -> Dict[str, object]:
+def validate_external_reconciliation(
+    value: object,
+    observation: Dict[str, object],
+    projection_transition: Optional[Tuple[str, str]] = None,
+) -> Dict[str, object]:
     external = exact_keys(value, (
         "authority", "beganAtUnixSeconds", "containerRecreate", "controllerDockerMutation",
         "dataMutation", "dataMutations", "dataMutationsSha256", "externalDockerMutation",
@@ -2640,34 +3004,43 @@ def validate_external_reconciliation(value: object, observation: Dict[str, objec
     current_records = {record["name"]: record for record in observation["containers"]}
     current_names = []
     removed_names = []
+    if projection_transition is not None and projection_transition != (
+        CONTROLLER_IDENTITY_PROJECTION_LEGACY_19,
+        CONTROLLER_IDENTITY_PROJECTION_FULL_34,
+    ):
+        stop("external reconciliation runtime identity projection transition is unsupported.")
     for index, transition in enumerate(transitions):
         transition = exact_keys(transition, ("current", "previous", "service", "status"), f"external reconciliation transition {index}")
         current = transition["current"]
         if current is not None:
-            current = exact_keys(current, ("configHash", "containerId", "imageId", "imageReference", "name", "runtimeConfigSha256"), f"external reconciliation current identity {index}")
+            current = validate_transition_identity(current, f"external reconciliation current identity {index}")
             expected_record = current_records.get(current["name"])
-            if expected_record is None or current != transition_identity(expected_record) or transition["service"] != expected_record["service"]:
+            exact_runtime_identity = expected_record is not None and transition_identity_matches_runtime(current, expected_record)
+            projected_common_identity = (
+                projection_transition is not None
+                and expected_record is not None
+                and current["name"] == expected_record["name"]
+                and all(
+                    current[field] == expected_record[field]
+                    for field in TRANSITION_COMPARABLE_IDENTITY_FIELDS
+                    if field != "runtimeConfigSha256"
+                )
+            )
+            if (
+                (not exact_runtime_identity and not projected_common_identity)
+                or transition["service"] != expected_record["service"]
+            ):
                 stop("external reconciliation current service identity differs from the ACTIVE observation.")
             current_names.append(current["name"])
         previous = transition["previous"]
         if previous is not None:
-            previous = exact_keys(previous, ("configHash", "containerId", "imageId", "imageReference", "name", "runtimeConfigSha256"), f"external reconciliation previous identity {index}")
-            for key in ("configHash", "containerId", "runtimeConfigSha256"):
-                sha256_value(previous[key], f"external reconciliation previous {key}")
-            if not isinstance(previous["imageId"], str) or re.fullmatch(r"sha256:[a-f0-9]{64}", previous["imageId"]) is None or not isinstance(previous["imageReference"], str) or not previous["imageReference"]:
-                stop("external reconciliation previous image ID is invalid.")
+            previous = validate_transition_identity(previous, f"external reconciliation previous identity {index}")
             allowed_previous_name = {current["name"]} if current is not None else {"enterprise-backup-scheduler"}
             if current is not None and current["name"] == CANONICAL_ALERT_DISPATCHER:
                 allowed_previous_name.add(LEGACY_ALERT_DISPATCHER)
             if previous["name"] not in allowed_previous_name:
                 stop("external reconciliation previous service name is not a declared predecessor.")
-        expected_status = (
-            "REMOVED" if current is None and previous is not None
-            else "CREATED" if previous is None
-            else "REPLACED" if previous["name"] != current["name"]
-            else "RETAINED" if previous == current
-            else "RECREATED"
-        )
+        expected_status = transition_status(previous, current)
         if transition["status"] != expected_status:
             stop("external reconciliation service transition status is false.")
         if expected_status == "REMOVED":
@@ -2737,6 +3110,8 @@ def validate_reconciliation_runtime_evidence(
     captured = value["capturedAtUnixSeconds"]
     identities = reconciliation_container_identities(observation)
     transitions = reconciliation_service_transitions(reconciliation["predecessorRuntimeIdentities"], observation)
+    evidence_identities = validate_cross_implementation_identity_inventory(value["containerIdentities"], identities)
+    evidence_transitions = validate_cross_implementation_transitions(value["serviceTransitions"], transitions)
     attachments, memberships = validate_legacy_network_target(reconciliation["predecessorRuntimeIdentities"], observation)
     data_mutations = validate_data_mutation_evidence(value["dataMutations"], began_at=reconciliation["beganAtUnixSeconds"])
     if EXACT_AUTHORITY is None or not isinstance(value["legacyRouteChecks"], list):
@@ -2778,10 +3153,10 @@ def validate_reconciliation_runtime_evidence(
         or value["legacyUnmanagedContainers"] != [dict(item) for item in LEGACY_UNMANAGED_CONTAINERS]
         or EXACT_AUTHORITY is None
         or value["runtimeIdentity"] != EXACT_AUTHORITY["runtimeIdentity"]
-        or value["containerIdentities"] != identities
-        or value["containerIdentitiesSha256"] != digest(canonical(identities).encode())
-        or value["serviceTransitions"] != transitions
-        or value["serviceTransitionsSha256"] != digest(canonical(transitions).encode())
+        or value["containerIdentities"] != evidence_identities
+        or value["containerIdentitiesSha256"] != digest(canonical(evidence_identities).encode())
+        or value["serviceTransitions"] != evidence_transitions
+        or value["serviceTransitionsSha256"] != digest(canonical(evidence_transitions).encode())
         or value["legacyNetworkAttachments"] != attachments
         or value["legacyNetworkAttachmentsSha256"] != digest(canonical(attachments).encode())
         or value["legacyNetworkMemberships"] != memberships
@@ -2796,7 +3171,7 @@ def validate_reconciliation_runtime_evidence(
         or int(time.time()) - captured > MAX_CHECKPOINT_AGE
     ):
         stop("reconciliation runtime identity evidence is not exact, post-maintenance, and target-bound.")
-    external = external_reconciliation_document(reconciliation, digest(data), transitions, attachments, data_mutations)
+    external = external_reconciliation_document(reconciliation, digest(data), evidence_transitions, attachments, data_mutations)
     return validate_external_reconciliation(external, observation)
 
 
@@ -2822,12 +3197,14 @@ def state_document(
     created: int,
     external_reconciliation: Optional[Dict[str, object]] = None,
     aborted_reconciliation: Optional[Dict[str, object]] = None,
+    predecessor_runtime_provenance: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
+    current_controller = controller_identity()
     result = {
         "candidateCommit": CANDIDATE_COMMIT,
         "candidateTree": CANDIDATE_TREE,
         "checkpointSha256": checkpoint_sha,
-        "controller": controller_identity(),
+        "controller": current_controller,
         "createdAtUnixSeconds": created,
         "installReceiptSha256": install_sha,
         "observation": observation,
@@ -2836,10 +3213,20 @@ def state_document(
         "sourceArchiveSha256": SOURCE_ARCHIVE_SHA256,
         "status": status,
     }
-    if external_reconciliation is not None:
-        result["externalAuthorizedReconciliation"] = validate_external_reconciliation(external_reconciliation, observation)
     if aborted_reconciliation is not None:
         result["abortedAuthorizedReconciliation"] = validate_aborted_reconciliation_binding(aborted_reconciliation)
+    if predecessor_runtime_provenance is not None:
+        if aborted_reconciliation is None:
+            stop("predecessor runtime provenance is valid only for an aborted reconciliation.")
+        result["predecessorRuntimeProvenance"] = validate_predecessor_runtime_provenance(
+            predecessor_runtime_provenance, observation, external_reconciliation, current_controller,
+        )
+    if external_reconciliation is not None:
+        result["externalAuthorizedReconciliation"] = validate_external_reconciliation(
+            external_reconciliation,
+            observation,
+            aborted_projection_transition(result.get("predecessorRuntimeProvenance")),
+        )
     return result
 
 
@@ -2848,12 +3235,43 @@ def validate_state(value: Dict[str, object], allow_activating: bool) -> Dict[str
     if not isinstance(value, dict) or value.get("schema") != STATE_SCHEMA:
         stop("LOCAL_PRIVATE state schema is invalid.")
     optional = []
-    if "externalAuthorizedReconciliation" in value:
-        optional.append("externalAuthorizedReconciliation")
-        validate_external_reconciliation(value["externalAuthorizedReconciliation"], value["observation"])
     if "abortedAuthorizedReconciliation" in value:
         optional.append("abortedAuthorizedReconciliation")
         validate_aborted_reconciliation_binding(value["abortedAuthorizedReconciliation"])
+    provenance = value.get("predecessorRuntimeProvenance")
+    if provenance is not None:
+        if "abortedAuthorizedReconciliation" not in value:
+            stop("predecessor runtime provenance is valid only for an aborted reconciliation.")
+        optional.append("predecessorRuntimeProvenance")
+        provenance = validate_predecessor_runtime_provenance(
+            provenance,
+            value["observation"],
+            value.get("externalAuthorizedReconciliation"),
+            value.get("controller"),
+        )
+    elif "abortedAuthorizedReconciliation" in value:
+        recovery = value.get("observation", {}).get("schedulerRecovery") if isinstance(value.get("observation"), dict) else None
+        labels = recovery.get("exportLabels") if isinstance(recovery, dict) else None
+        external = value.get("externalAuthorizedReconciliation")
+        external_authority = authority_for_external(external) if isinstance(external, dict) else None
+        if (
+            not isinstance(labels, dict)
+            or labels.get(RECOVERY_LABELS["candidateCommit"]) != value.get("candidateCommit")
+            or recovery.get("recoveryTag") != f"platform/v1-scheduler-recovery:{value.get('candidateCommit')}"
+            or (
+                external_authority is not None
+                and document_binding(external_authority, "same-generation abort authority")
+                != document_binding(value, "same-generation aborted state")
+            )
+        ):
+            stop("legacy aborted state has mixed runtime provenance without an explicit binding.")
+    if "externalAuthorizedReconciliation" in value:
+        optional.append("externalAuthorizedReconciliation")
+        validate_external_reconciliation(
+            value["externalAuthorizedReconciliation"],
+            value["observation"],
+            aborted_projection_transition(provenance),
+        )
     exact_keys(value, (*base_keys, *optional), "LOCAL_PRIVATE state")
     allowed = ("ACTIVATING", "ACTIVE") if allow_activating else ("ACTIVE",)
     document_binding(value, "LOCAL_PRIVATE state")
@@ -2985,8 +3403,12 @@ def validate_reconciliation(value: Dict[str, object]) -> Dict[str, object]:
     predecessor_identities = value["predecessorRuntimeIdentities"]
     if not isinstance(predecessor_identities, list) or value["predecessorRuntimeIdentitiesSha256"] != digest(canonical(predecessor_identities).encode()):
         stop("LOCAL_PRIVATE reconciliation predecessor runtime identities are invalid.")
-    identity_names = [item.get("name") for item in predecessor_identities if isinstance(item, dict)]
-    if len(identity_names) != len(predecessor_identities) or tuple(sorted(identity_names)) not in CLOSED_CONTAINER_SEQUENCES:
+    validated_identities = [
+        validate_recorded_predecessor_identity(item, f"LOCAL_PRIVATE predecessor identity {index}")
+        for index, item in enumerate(predecessor_identities)
+    ]
+    identity_names = [item["name"] for item in validated_identities]
+    if tuple(identity_names) not in CLOSED_CONTAINER_SEQUENCES:
         stop("LOCAL_PRIVATE reconciliation predecessor semantic inventory is not one closed V1 profile.")
     planned = validate_actual_legacy_attachments(value["plannedLegacyNetworkAttachments"])
     if value["plannedLegacyNetworkAttachmentsSha256"] != digest(canonical(planned).encode()):
@@ -3156,9 +3578,18 @@ def receipt_from_state(state: Dict[str, object], activated_at: int) -> Dict[str,
     exited_count = sum(1 for item in containers if item.get("state") == "exited")
     external = state.get("externalAuthorizedReconciliation")
     aborted = state.get("abortedAuthorizedReconciliation")
+    provenance = state.get("predecessorRuntimeProvenance")
     is_external_reconciliation = external is not None
+    if provenance is not None:
+        if aborted is None:
+            stop("predecessor runtime provenance is valid only for an aborted reconciliation receipt.")
+        provenance = validate_predecessor_runtime_provenance(
+            provenance, observation, external, state["controller"],
+        )
     if is_external_reconciliation:
-        external = validate_external_reconciliation(external, observation)
+        external = validate_external_reconciliation(
+            external, observation, aborted_projection_transition(provenance),
+        )
     if aborted is not None:
         aborted = validate_aborted_reconciliation_binding(aborted)
     residual_data_mutation = aborted is not None and bool(aborted["residualDataMutations"])
@@ -3202,6 +3633,8 @@ def receipt_from_state(state: Dict[str, object], activated_at: int) -> Dict[str,
         base["externalAuthorizedReconciliation"] = external
     if aborted is not None:
         base["abortedAuthorizedReconciliation"] = aborted
+    if provenance is not None:
+        base["predecessorRuntimeProvenance"] = provenance
     return with_document_id(base)
 
 
@@ -3312,6 +3745,135 @@ def validate_predecessor_controller(value: object) -> None:
         sha256_value(controller["sudoersSha256"], "predecessor controller sudoers")
 
 
+def controller_identity_projection_by_sha256() -> Dict[str, str]:
+    current_sha = controller_identity()["sha256"]
+    sha256_value(current_sha, "installed controller")
+    configured = CONTROLLER_IDENTITY_PROJECTION_BY_SHA256.get(current_sha)
+    if configured is not None and configured != CURRENT_CONTROLLER_IDENTITY_PROJECTION:
+        stop("installed controller semantic identity projection conflicts with its registered history.")
+    return {
+        **CONTROLLER_IDENTITY_PROJECTION_BY_SHA256,
+        current_sha: CURRENT_CONTROLLER_IDENTITY_PROJECTION,
+    }
+
+
+def predecessor_controller_identity_projection(state: Dict[str, object]) -> str:
+    controller = state.get("controller")
+    validate_predecessor_controller(controller)
+    predecessor_sha = controller["sha256"]
+    projection = controller_identity_projection_by_sha256().get(predecessor_sha)
+    if projection is None:
+        stop("predecessor controller semantic identity version is unsupported.")
+    return validate_controller_identity_projection(projection)
+
+
+def authority_controller_sha256(authority: Dict[str, object]) -> str:
+    artifacts = exact_keys(
+        authority.get("artifacts"),
+        ("composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit"),
+        "runtime provenance authority artifacts",
+    )
+    controller = exact_keys(
+        artifacts["controller"], ("path", "sha256"),
+        "runtime provenance authority controller",
+    )
+    if controller["path"] != CONTROLLER_PATH:
+        stop("runtime provenance authority controller path is invalid.")
+    return sha256_value(controller["sha256"], "runtime provenance authority controller")
+
+
+def runtime_profile_for_provenance(
+    observation: Dict[str, object], external_reconciliation: Optional[Dict[str, object]],
+) -> str:
+    names = tuple(sorted(observation_names(observation, "predecessor runtime provenance")))
+    if external_reconciliation is not None and names == CANONICAL_CONTAINERS:
+        return ABORTED_RUNTIME_PROFILE_CANONICAL
+    if external_reconciliation is None and names in (tuple(sorted(HISTORIC_CONTAINERS)), LEGACY_CONTAINERS):
+        return ABORTED_RUNTIME_PROFILE_HISTORICAL
+    stop("predecessor runtime provenance is not one closed external or historical V1 profile.")
+
+
+def predecessor_runtime_provenance_document(previous_state: Dict[str, object]) -> Dict[str, object]:
+    existing = previous_state.get("predecessorRuntimeProvenance")
+    if existing is not None:
+        return dict(validate_predecessor_runtime_provenance(
+            existing,
+            previous_state["observation"],
+            previous_state.get("externalAuthorizedReconciliation"),
+            previous_state["controller"],
+        ))
+    binding = document_binding(previous_state, "abort predecessor state")
+    controller = previous_state.get("controller")
+    validate_predecessor_controller(controller)
+    return {
+        **binding,
+        "controllerIdentityProjection": predecessor_controller_identity_projection(previous_state),
+        "controllerSha256": controller["sha256"],
+        "profile": runtime_profile_for_provenance(
+            previous_state["observation"], previous_state.get("externalAuthorizedReconciliation"),
+        ),
+    }
+
+
+def validate_predecessor_runtime_provenance(
+    value: object,
+    observation: Dict[str, object],
+    external_reconciliation: Optional[Dict[str, object]],
+    current_controller: Dict[str, object],
+) -> Dict[str, object]:
+    provenance = exact_keys(value, PREDECESSOR_RUNTIME_PROVENANCE_FIELDS, "predecessor runtime provenance")
+    binding = document_binding(provenance, "predecessor runtime provenance")
+    controller_sha = sha256_value(provenance["controllerSha256"], "predecessor runtime provenance controller")
+    source_projection = validate_controller_identity_projection(provenance["controllerIdentityProjection"])
+    validate_predecessor_controller(current_controller)
+    current_controller = dict(current_controller)
+    projection_registry = controller_identity_projection_by_sha256()
+    if projection_registry.get(controller_sha) != source_projection:
+        stop("predecessor runtime provenance controller projection is unregistered.")
+    current_projection = projection_registry.get(current_controller["sha256"])
+    if current_projection != CURRENT_CONTROLLER_IDENTITY_PROJECTION:
+        stop("current controller runtime identity projection is unregistered.")
+    if source_projection != current_projection and (
+        source_projection, current_projection
+    ) != (CONTROLLER_IDENTITY_PROJECTION_LEGACY_19, CONTROLLER_IDENTITY_PROJECTION_FULL_34):
+        stop("predecessor-to-current runtime identity projection transition is unsupported.")
+    expected_profile = runtime_profile_for_provenance(observation, external_reconciliation)
+    if provenance["profile"] != expected_profile:
+        stop("predecessor runtime provenance profile differs from the ACTIVE observation.")
+    recovery = observation.get("schedulerRecovery") if isinstance(observation, dict) else None
+    labels = recovery.get("exportLabels") if isinstance(recovery, dict) else None
+    recovery_commit = labels.get(RECOVERY_LABELS["candidateCommit"]) if isinstance(labels, dict) else None
+    if (
+        recovery_commit != binding["candidateCommit"]
+        or recovery.get("recoveryTag") != f"platform/v1-scheduler-recovery:{binding['candidateCommit']}"
+    ):
+        stop("scheduler recovery artifact is not bound to predecessor runtime provenance.")
+    if external_reconciliation is not None:
+        authority = authority_for_external(external_reconciliation)
+        authority_binding = document_binding(authority, "predecessor runtime authority")
+        runtime_identity = authority.get("runtimeIdentity")
+        if (
+            expected_profile != ABORTED_RUNTIME_PROFILE_CANONICAL
+            or authority_binding != binding
+            or authority_controller_sha256(authority) != controller_sha
+            or external_reconciliation.get("releaseAuthorityDocumentId") != authority.get("documentId")
+            or external_reconciliation.get("runtimeIdentity") != runtime_identity
+            or not isinstance(runtime_identity, dict)
+            or runtime_identity.get("commit") != binding["candidateCommit"]
+            or runtime_identity.get("tree") != binding["candidateTree"]
+        ):
+            stop("canonical predecessor runtime provenance differs from its archived release authority.")
+    return provenance
+
+
+def aborted_projection_transition(provenance: Optional[Dict[str, object]]) -> Optional[Tuple[str, str]]:
+    if provenance is None:
+        return None
+    source = validate_controller_identity_projection(provenance["controllerIdentityProjection"])
+    target = CURRENT_CONTROLLER_IDENTITY_PROJECTION
+    return (source, target) if source != target else None
+
+
 def active_baseline_for_reconciliation() -> Tuple[str, Dict[str, object], Dict[str, object]]:
     state = read_state(False)
     predecessor_install_sha = validate_release_and_install(state)
@@ -3328,7 +3890,14 @@ def active_baseline_for_reconciliation() -> Tuple[str, Dict[str, object], Dict[s
     ))
     if receipt_from_state(state, receipt.get("activatedAtUnixSeconds")) != receipt:
         stop("LOCAL_PRIVATE predecessor receipt differs from its root state.")
-    validate_predecessor_runtime_snapshot(state["observation"], stable_runtime_identities(expected_names))
+    current_identities = (
+        stable_runtime_identities(expected_names, predecessor_controller_identity_projection(state))
+        if expected_names == CANONICAL_EXPECTED_NAMES
+        else stable_runtime_identities(expected_names)
+    )
+    validate_predecessor_runtime_snapshot(
+        state["observation"], current_identities,
+    )
     if not supervisor_is_enabled_and_active():
         stop("LOCAL_PRIVATE predecessor supervisor is not enabled and active.")
     target_install_sha = validate_release_and_install()
@@ -3457,6 +4026,9 @@ def abort_maintenance() -> Dict[str, object]:
     if not os.path.lexists(physical(RECONCILIATION_FILE)):
         return verify_active()
     reconciliation = read_reconciliation()
+    current_install_sha = validate_release_and_install()
+    if current_install_sha != reconciliation["installReceiptSha256"]:
+        stop("LOCAL_PRIVATE reconciliation install evidence drifted before abort rebaseline.")
     aborted_reconciliation = consume_current_abort_record(reconciliation)
     previous_state, previous_receipt = validate_reconciliation_rollback(reconciliation)
     previous_names = observation_names(previous_state["observation"], "LOCAL_PRIVATE abort predecessor")
@@ -3466,14 +4038,25 @@ def abort_maintenance() -> Dict[str, object]:
     if not supervisor_is_disabled_and_inactive():
         disable_supervisor()
     if previous_names == CANONICAL_EXPECTED_NAMES:
+        projection = predecessor_controller_identity_projection(previous_state)
+        predecessor_provenance = predecessor_runtime_provenance_document(previous_state)
+        predecessor_observation = stable_observation(
+            previous_state["observation"]["schedulerRecovery"], previous_names, False, projection,
+        )
+        if canonical(predecessor_observation) != canonical(previous_state["observation"]):
+            stop("reconciled predecessor changed before abort rebaseline.")
+        observation = stable_observation(
+            previous_state["observation"]["schedulerRecovery"], previous_names, False,
+        )
         abort_state = state_document(
             "ACTIVE",
-            previous_state["observation"],
-            previous_state["installReceiptSha256"],
+            observation,
+            current_install_sha,
             previous_state["checkpointSha256"],
             int(time.time()),
             previous_state.get("externalAuthorizedReconciliation"),
             aborted_reconciliation,
+            predecessor_provenance,
         )
         atomic_write(STATE_FILE, abort_state, 0o600, True)
         test_abort_fault("AFTER_STATE_REBASELINE")
@@ -3482,23 +4065,25 @@ def abort_maintenance() -> Dict[str, object]:
         test_abort_fault("AFTER_RECEIPT_REBASELINE")
         ensure_supervisor_active()
         test_abort_fault("AFTER_SUPERVISOR_ACTIVATION")
-        if canonical(stable_observation(previous_state["observation"]["schedulerRecovery"], previous_names, False)) != canonical(previous_state["observation"]):
+        if canonical(stable_observation(observation["schedulerRecovery"], previous_names, False)) != canonical(observation):
             stop("reconciled predecessor changed before abort transaction closure.")
         test_abort_fault("BEFORE_MARKER_REMOVAL")
         remove_exact_document(RECONCILIATION_FILE, reconciliation, "LOCAL_PRIVATE reconciliation")
         return verify_active()
     if tuple(sorted(previous_names)) not in (tuple(sorted(HISTORIC_CONTAINERS)), LEGACY_CONTAINERS):
         stop("abort predecessor is not one closed V1 profile.")
+    predecessor_provenance = predecessor_runtime_provenance_document(previous_state)
     observation = stable_observation(reconciliation["rollbackSchedulerRecovery"], previous_names, False)
     validate_predecessor_runtime_snapshot(previous_state["observation"], current_identities)
     abort_state = state_document(
         "ACTIVE",
         observation,
-        reconciliation["installReceiptSha256"],
+        current_install_sha,
         reconciliation["rollbackCheckpointSha256"],
         int(time.time()),
         None,
         aborted_reconciliation,
+        predecessor_provenance,
     )
     atomic_write(STATE_FILE, abort_state, 0o600, True)
     test_abort_fault("AFTER_STATE_REBASELINE")
@@ -3516,7 +4101,11 @@ def abort_maintenance() -> Dict[str, object]:
 
 def active_profile_names(state: Dict[str, object], label: str) -> frozenset[str]:
     names = observation_names(state["observation"], label)
-    if state["schema"] == STATE_SCHEMA and "externalAuthorizedReconciliation" not in state and names == EXPECTED_NAMES:
+    if (
+        state["schema"] == STATE_SCHEMA
+        and "externalAuthorizedReconciliation" not in state
+        and tuple(sorted(names)) in (tuple(sorted(HISTORIC_CONTAINERS)), LEGACY_CONTAINERS)
+    ):
         return names
     if state["schema"] == STATE_SCHEMA and "externalAuthorizedReconciliation" in state and names == CANONICAL_EXPECTED_NAMES:
         return names
@@ -3537,7 +4126,14 @@ def verify_active() -> Dict[str, object]:
     expected_names = active_profile_names(state, "LOCAL_PRIVATE active state")
     external = state.get("externalAuthorizedReconciliation")
     enforce_current = external is None or external.get("releaseAuthorityDocumentId") == (EXACT_AUTHORITY or {}).get("documentId")
-    if canonical(stable_observation(state["observation"]["schedulerRecovery"], expected_names, enforce_current)) != canonical(state["observation"]):
+    projection = (
+        predecessor_controller_identity_projection(state)
+        if expected_names == CANONICAL_EXPECTED_NAMES
+        else CURRENT_CONTROLLER_IDENTITY_PROJECTION
+    )
+    if canonical(stable_observation(
+        state["observation"]["schedulerRecovery"], expected_names, enforce_current, projection,
+    )) != canonical(state["observation"]):
         stop("LOCAL_PRIVATE live runtime drifted from the frozen receipt.")
     if systemctl(["is-enabled", UNIT_NAME], "is-enabled") != "enabled" or systemctl(["is-active", UNIT_NAME], "is-active") != "active":
         stop("LOCAL_PRIVATE supervisor is not enabled and active.")
@@ -3548,6 +4144,51 @@ def verify() -> Dict[str, object]:
     if os.path.lexists(physical(RECONCILIATION_FILE)):
         return reconciliation_status()
     return verify_active()
+
+
+def runtime_authority() -> Dict[str, object]:
+    """Emit the immutable authority for the currently preserved runtime.
+
+    This is intentionally downstream of a complete ACTIVE state/receipt/live
+    verification.  A mixed-generation abort may bind the control plane to the
+    current authority while its canonical runtime provenance remains bound to
+    an archived predecessor authority; callers never choose that archive path.
+    """
+    if os.path.lexists(physical(RECONCILIATION_FILE)):
+        # The command runs under the controller lock, so this marker check and
+        # the complete ACTIVE verification form one atomic read-only snapshot
+        # with respect to begin/seal/abort.  Never export a predecessor
+        # authority while any reconciliation is open.
+        reconciliation_status()
+        stop("ACTIVE runtime authority cannot be exported while a reconciliation is open.")
+    verify_active()
+    state = read_state(False)
+    external = state.get("externalAuthorizedReconciliation")
+    if not isinstance(external, dict):
+        stop("ACTIVE runtime has no external release authority to export.")
+    provenance = state.get("predecessorRuntimeProvenance")
+    if provenance is not None:
+        validate_predecessor_runtime_provenance(
+            provenance, state["observation"], external, state["controller"],
+        )
+    return authority_for_external(external)
+
+
+def aborted_record() -> Dict[str, object]:
+    """Emit the immutable abort record selected by the verified ACTIVE state."""
+    if os.path.lexists(physical(RECONCILIATION_FILE)):
+        reconciliation_status()
+        stop("ACTIVE abort record cannot be exported while a reconciliation is open.")
+    verify_active()
+    state = read_state(False)
+    binding = state.get("abortedAuthorizedReconciliation")
+    if binding is None:
+        stop("ACTIVE state has no aborted reconciliation record to export.")
+    binding = validate_aborted_reconciliation_binding(binding)
+    record = {key: binding[key] for key in ABORT_RECORD_FIELDS}
+    if secure_file(binding["recordPath"], "immutable reconciliation abort record", MAX_JSON, 0o444) != canonical_bytes(record):
+        stop("immutable reconciliation abort record changed after ACTIVE verification.")
+    return record
 
 
 def activate() -> Dict[str, object]:
@@ -3760,13 +4401,21 @@ def notify(message: str) -> None:
         client.close()
 
 
-def wait_for_expected_runtime(expected: Dict[str, object], enforce_current_authority: bool, timeout_seconds: int = 90) -> None:
+def wait_for_expected_runtime(
+    expected: Dict[str, object], enforce_current_authority: bool,
+    controller_identity_projection: str = CURRENT_CONTROLLER_IDENTITY_PROJECTION,
+    timeout_seconds: int = 90,
+) -> None:
+    projection = validate_controller_identity_projection(controller_identity_projection)
     expected_names = observation_names(expected, "supervisor expected runtime")
     deadline = time.monotonic() + timeout_seconds
     last_error = "runtime has not reached the frozen healthy identity"
     while True:
         try:
-            current = stable_observation(expected["schedulerRecovery"], expected_names, enforce_current_authority)
+            current = stable_observation(
+                expected["schedulerRecovery"], expected_names,
+                enforce_current_authority, projection,
+            )
             if canonical(current) == canonical(expected):
                 return
             last_error = "runtime identity differs from the frozen activation state"
@@ -3793,7 +4442,13 @@ def supervise() -> None:
     validate_bound_recovery_export(state["observation"]["schedulerRecovery"], True)
     external = state.get("externalAuthorizedReconciliation")
     enforce_current = external is None or external.get("releaseAuthorityDocumentId") == (EXACT_AUTHORITY or {}).get("documentId")
-    wait_for_expected_runtime(state["observation"], enforce_current)
+    expected_names = observation_names(state["observation"], "LOCAL_PRIVATE supervisor state")
+    projection = (
+        predecessor_controller_identity_projection(state)
+        if expected_names == CANONICAL_EXPECTED_NAMES
+        else CURRENT_CONTROLLER_IDENTITY_PROJECTION
+    )
+    wait_for_expected_runtime(state["observation"], enforce_current, projection)
     notify("READY=1\nSTATUS=V1 LOCAL_PRIVATE runtime verified")
     interval = 10.0
     watchdog = os.environ.get("WATCHDOG_USEC")
@@ -3815,15 +4470,22 @@ def supervise() -> None:
         expected_names = observation_names(state["observation"], "LOCAL_PRIVATE supervisor state")
         external = state.get("externalAuthorizedReconciliation")
         enforce_current = external is None or external.get("releaseAuthorityDocumentId") == (EXACT_AUTHORITY or {}).get("documentId")
-        if canonical(observe(state["observation"]["schedulerRecovery"], expected_names, enforce_current)) != canonical(state["observation"]):
+        projection = (
+            predecessor_controller_identity_projection(state)
+            if expected_names == CANONICAL_EXPECTED_NAMES
+            else CURRENT_CONTROLLER_IDENTITY_PROJECTION
+        )
+        if canonical(observe(
+            state["observation"]["schedulerRecovery"], expected_names, enforce_current, projection,
+        )) != canonical(state["observation"]):
             stop("LOCAL_PRIVATE supervisor detected runtime drift.")
         validate_bound_recovery_export(state["observation"]["schedulerRecovery"], False)
         notify("WATCHDOG=1\nSTATUS=V1 LOCAL_PRIVATE runtime verified")
 
 
 def main(arguments: List[str]) -> int:
-    if len(arguments) != 1 or arguments[0] not in ("abort-maintenance", "activate", "begin-maintenance", "seal", "verify", "supervise"):
-        sys.stderr.write("platform-v1-local-private-control: usage: platform-v1-local-private-control abort-maintenance|activate|begin-maintenance|seal|verify|supervise\n")
+    if len(arguments) != 1 or arguments[0] not in ("abort-maintenance", "aborted-record", "activate", "begin-maintenance", "runtime-authority", "seal", "validation-mode", "verify", "supervise"):
+        sys.stderr.write("platform-v1-local-private-control: usage: platform-v1-local-private-control abort-maintenance|aborted-record|activate|begin-maintenance|runtime-authority|seal|validation-mode|verify|supervise\n")
         return 64
     try:
         check_no_stdin()
@@ -3834,7 +4496,10 @@ def main(arguments: List[str]) -> int:
             return 0
         transaction_lock: Optional[int] = None
         try:
-            if arguments[0] in ("abort-maintenance", "activate", "begin-maintenance", "seal"):
+            if arguments[0] in (
+                "abort-maintenance", "aborted-record", "activate", "begin-maintenance",
+                "runtime-authority", "seal", "validation-mode", "verify",
+            ):
                 transaction_lock = acquire_transaction_lock()
             lock = acquire_lock()
             try:
@@ -3846,10 +4511,16 @@ def main(arguments: List[str]) -> int:
                     receipt = activate()
                 elif arguments[0] == "abort-maintenance":
                     receipt = abort_maintenance()
+                elif arguments[0] == "aborted-record":
+                    receipt = aborted_record()
                 elif arguments[0] == "begin-maintenance":
                     receipt = begin_maintenance()
                 elif arguments[0] == "seal":
                     receipt = seal()
+                elif arguments[0] == "runtime-authority":
+                    receipt = runtime_authority()
+                elif arguments[0] == "validation-mode":
+                    receipt = validation_mode()
                 else:
                     receipt = verify()
             finally:

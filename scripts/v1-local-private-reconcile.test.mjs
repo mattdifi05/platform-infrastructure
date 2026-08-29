@@ -874,14 +874,18 @@ results={kind:scenario(kind) for kind in (
 )}
 calls=[]
 g=m['apply'].__globals__
-spy_authority={'documentId':'4'*64}; spy_authority_bytes=m['canonical_bytes'](spy_authority); spy_reconciliation={}
+spy_authority={'candidateCommit':'1'*40,'documentId':'4'*64}; spy_authority_bytes=m['canonical_bytes'](spy_authority); spy_reconciliation={}
+g['os'].path.lexists=lambda pathname: pathname == m['physical'](m['JOURNAL'])
 g['require_maintenance_ready']=lambda:calls.append('maintenance')
 g['read_authority']=lambda:(spy_authority,spy_authority_bytes)
 g['validate_authority_material']=lambda value:{}
 g['read_reconciliation']=lambda value,data:spy_reconciliation
+g['configure_secret_identity_readonly']=lambda:calls.append('identity-readonly')
+g['read_or_create_journal']=lambda *args:{'validationLaneSha256':None}
+g['load_validation_lane']=lambda commit:None
 def reject_guard(*args): calls.append('guard'); raise m['Stop']('rejected')
 g['validate_pre_mutation_checkpoint']=reject_guard
-for name in ('configure_secret_anchor','read_or_create_journal','promote_live_environment'):
+for name in ('configure_secret_anchor','promote_live_environment'):
  g[name]=lambda *args,n=name:calls.append(n)
 try: m['apply']()
 except m['Stop']: pass
@@ -899,13 +903,73 @@ print(json.dumps({'calls':calls,'results':results,'semanticCalls':semantic_calls
     stale: false,
     unorderedBundle: false,
   });
-  assert.deepEqual(value.calls, ["maintenance", "guard"]);
+  assert.deepEqual(value.calls, ["maintenance", "identity-readonly", "guard"]);
   assert.ok(value.semanticCalls.length > 0);
   assert.ok(value.semanticCalls.every((call) => call.phase === "PRE" && call.artifacts === 14 && call.proofs === 14 && call.results === 14));
   const applySource = runPython("import inspect; print(inspect.getsource(m['apply']))");
   const preGuardSource = runPython("import inspect; print(inspect.getsource(m['validate_pre_mutation_checkpoint']))");
-  assert.match(applySource, /validate_pre_mutation_checkpoint[\s\S]*configure_secret_anchor[\s\S]*read_or_create_journal[\s\S]*promote_live_environment/);
+  assert.match(applySource, /read_or_create_journal[\s\S]*validate_pre_mutation_checkpoint[\s\S]*configure_secret_anchor[\s\S]*promote_live_environment/);
   assert.match(preGuardSource, /validate_backup_evidence_bundle\([\s\S]*"PRE"/);
+});
+
+test("FAST pre-mutation validation rejects a predecessor checkpoint cross-bundled with another evidence set", () => {
+  const value = jsonPython(`
+import os,tempfile,time
+g=m['validate_pre_mutation_checkpoint'].__globals__; g['OWNER_UID']=os.geteuid()
+class ReachedEvidenceSnapshots(Exception): pass
+g['load_validation_lane']=lambda commit:{'validationLaneSha256':'a'*64}
+g['verify_predecessor_state_receipt_unchanged']=lambda reconciliation:None
+g['stable_checkpoint_evidence_snapshots']=lambda:(_ for _ in ()).throw(ReachedEvidenceSnapshots())
+def put(logical,value):
+ pathname=m['physical'](logical); os.makedirs(os.path.dirname(pathname),mode=0o700,exist_ok=True)
+ data=m['canonical_bytes'](value)
+ with open(pathname,'wb') as stream: stream.write(data)
+ os.chmod(pathname,0o400); return data
+def scenario(cross_bundled):
+ root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+ g['TEST_ROOT']=root; g['OWNER_GID']=os.stat(root).st_gid
+ now=int(time.time()); captured=now-60
+ target_commit='1'*40; target_tree='2'*40; target_archive='3'*64
+ predecessor_commit='4'*40; predecessor_tree='5'*40; predecessor_archive='6'*64
+ evidence={
+  'logicalBackupEvidenceSha256':'7'*64,'offHostBackupEvidenceSha256':'8'*64,
+  'restoreEvidenceSha256':'9'*64,'runtimeInventorySha256':'a'*64,
+  'secretsBackupEvidenceSha256':'b'*64,
+ }
+ predecessor_evidence=dict(evidence)
+ if cross_bundled: predecessor_evidence['restoreEvidenceSha256']='c'*64
+ recovery={'schedulerRecoveryImageExportSha256':'d'*64,
+  'schedulerRecoveryImageId':'sha256:'+'e'*64,'schedulerRunningImageId':'sha256:'+'f'*64}
+ predecessor_checkpoint={'authoritative':False,'backupCapturedUnixSeconds':captured,
+  'candidateCommit':predecessor_commit,'candidateTree':predecessor_tree,
+  'destructiveMutationPlanned':False,'generatedAtUnixSeconds':now-20,**predecessor_evidence,
+  'restoreVerified':True,'runtimeRecovered':True,**recovery,
+  'schema':'platform.v1-local-private-predeploy-checkpoint/v1','sourceArchiveSha256':predecessor_archive}
+ predecessor_bytes=put(m['LOCAL_CHECKPOINT'],predecessor_checkpoint)
+ checkpoint={'authoritative':False,'backupCapturedUnixSeconds':captured,
+  'candidateCommit':target_commit,'candidateTree':target_tree,'destructiveMutationPlanned':False,
+  'generatedAtUnixSeconds':now-5,**evidence,
+  'predecessorAuthorityDocumentId':'0'*64,'predecessorAuthoritySha256':'1'*64,
+  'predecessorCandidateCommit':predecessor_commit,'predecessorCandidateTree':predecessor_tree,
+  'predecessorCheckpointSha256':m['digest'](predecessor_bytes),'predecessorReceiptSha256':'2'*64,
+  'predecessorSourceArchiveSha256':predecessor_archive,'predecessorStateSha256':'3'*64,
+  'restoreVerified':False,'runtimeRecovered':False,**recovery,
+  'schema':m['VALIDATION_CHECKPOINT_SCHEMA'],'sourceArchiveSha256':target_archive,'validation':True}
+ checkpoint_bytes=put(m['VALIDATION_CHECKPOINT_FILE'],checkpoint)
+ authority={'candidateCommit':target_commit,'candidateTree':target_tree,
+  'sourceArchiveSha256':target_archive}
+ reconciliation={'previousReceiptSha256':'2'*64,'previousStateSha256':'3'*64,
+  'rollbackCheckpointSha256':m['digest'](checkpoint_bytes)}
+ try:
+  m['validate_pre_mutation_checkpoint'](authority,m['canonical_bytes'](authority),reconciliation)
+ except ReachedEvidenceSnapshots: return 'reached-evidence-snapshots'
+ except m['Stop']: return 'rejected-before-evidence-snapshots'
+ return 'unexpected-return'
+print(json.dumps({'bound':scenario(False),'crossBundled':scenario(True)},sort_keys=True))`);
+  assert.deepEqual(value, {
+    bound: "reached-evidence-snapshots",
+    crossBundled: "rejected-before-evidence-snapshots",
+  });
 });
 
 test("legacy compatibility authority is the proven routing/dependency matrix", () => {
@@ -988,7 +1052,28 @@ test("prepare is checkpoint/staging-bound and Git cannot execute caller or repos
   assert.match(envSource, /stat\.S_IMODE\(info\.st_mode\) not in \(0o400, 0o600\)/);
   assert.match(envSource, /current\.st_dev, current\.st_ino, current\.st_size, current\.st_mtime_ns/);
   assert.match(envSource, /set\(replacements\).*DEPLOYMENT_LOCAL_IMAGE_ENV/);
-  assert.match(prepareSource, /recovery_escrow_certificate_binding\(release\)[\s\S]*prepare_live_prerequisite_cohort\(release\)[\s\S]*provision_confidential_backup_passphrase\(\)[\s\S]*materialize_environment/);
+  assert.match(prepareSource, /validation_lane = load_validation_lane\(commit\)[\s\S]*recovery_escrow_certificate_binding\(release\)/);
+  assert.match(prepareSource, /if validation_lane is not None:[\s\S]*validate_live_prerequisite_cohort_readonly\(release\)[\s\S]*validate_existing_confidential_backup_passphrase_readonly\(\)[\s\S]*else:[\s\S]*prepare_live_prerequisite_cohort\(release\)[\s\S]*provision_confidential_backup_passphrase\(\)/);
+});
+
+test("FAST prepare verifies existing secrets privately and never invokes live prerequisite writers", () => {
+  const prepareSource = runPython("import inspect; print(inspect.getsource(m['prepare']))");
+  const cohortSource = runPython("import inspect; print(inspect.getsource(m['validate_live_prerequisite_cohort_readonly']))");
+  const passphraseSource = runPython("import inspect; print(inspect.getsource(m['validate_existing_confidential_backup_passphrase_readonly']))");
+  const checkpointSource = runPython("import inspect; print(inspect.getsource(m['write_validation_checkpoint']))");
+  assert.ok(prepareSource.indexOf("validation_lane = load_validation_lane(commit)") < prepareSource.indexOf("prepare_live_prerequisite_cohort(release)"));
+  assert.match(cohortSource, /manager_store_names[\s\S]*SECRET_MANAGER_COMPLETE/);
+  assert.match(cohortSource, /run_candidate_secret_manager[\s\S]*"verify"[\s\S]*manager_stage/);
+  assert.match(cohortSource, /FAST private verified secret-manager master key/);
+  assert.match(cohortSource, /for name in SECRET_MANAGER_COMPLETE:[\s\S]*FAST private verified materialized secret/);
+  assert.match(cohortSource, /finally:[\s\S]*remove_secret_stage/);
+  assert.doesNotMatch(cohortSource, /publish_secret_leaf|replace_manager_store|generate_setup_secret_bytes|prepare_external_path_authority/);
+  assert.match(passphraseSource, /requires an existing confidential backup passphrase|read_passphrase_stage/);
+  assert.doesNotMatch(passphraseSource, /ensure_directory|os\.unlink|os\.link|os\.open|secrets\./);
+  assert.match(checkpointSource, /any\(prior\[key\] != reused\[key\] for key in CHECKPOINT_EVIDENCE_PATHS\)/);
+  assert.match(checkpointSource, /validation predecessor ACTIVE receipt[\s\S]*checkpointSha256/);
+  assert.match(checkpointSource, /validation checkpoint readback differs from the written bytes/);
+  assert.match(prepareSource, /validationCheckpointSha256["']:\s*digest\(canonical_bytes\(validation_checkpoint\)\)/);
 });
 
 test("one simulated prepare crosses the real path/secret cohort, both renders and the exact PRE boundary without workload or database mutation", { timeout: 120_000 }, () => {
@@ -1746,7 +1831,7 @@ print(json.dumps({'calls':calls,'renderFailures':render_failures,'results':resul
 test("apply attaches legacy bridges before data and fixed-order one-service refresh", () => {
   const applySource = runPython("import inspect; print(inspect.getsource(m['apply']))");
   const refreshSource = runPython("import inspect; print(inspect.getsource(m['compose_refresh']))");
-  const network = applySource.indexOf("ensure_exact_attachment_networks(authority)");
+  const network = applySource.indexOf("apply_network_resource_steps(authority, journal)");
   const attach = applySource.indexOf("apply_network_step(step, journal)");
   const data = applySource.indexOf("apply_data_prerequisites");
   const services = applySource.indexOf("for name in SERVICE_REFRESH_ORDER");
@@ -1785,9 +1870,348 @@ print(json.dumps({'calls':calls,'stopped':stopped}))`);
   assert.match(runPython("import inspect; print(inspect.getdoc(m['abort']))"), /abort-maintenance[\s\S]*verify/);
 });
 
+test("abort rejects RUNNING mutation state before its first durable write", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['abort'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+for logical in (m['RECONCILIATION'],m['JOURNAL']):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(b'present')
+authority={'candidateCommit':'1'*40,'documentId':'d'*64}; journal={'dataMutationStatus':{'mutation-one':'RUNNING'},'phase':'APPLYING','steps':[],'transactionId':'a'*64,'validationLaneSha256':None}
+g['read_authority']=lambda **kwargs:(authority,b'authority')
+g['validate_authority_material']=lambda value:{}
+g['installed_artifacts_match_authority']=lambda value:True
+g['installed_source_archive_matches_authority']=lambda value:True
+g['read_reconciliation']=lambda value,data:{}
+g['configure_secret_identity_readonly']=lambda:None
+g['read_or_create_journal']=lambda value,data,reconciliation:journal
+events=[]
+g['save_journal']=lambda value:events.append('save')
+g['restore_deployment_config_preimage']=lambda value:events.append('restore-deployment')
+g['restore_evidence_preimages']=lambda value:events.append('restore-evidence')
+g['materialize_abort_record']=lambda *args:events.append('record')
+try: m['abort'](); stopped=False
+except m['Stop']: stopped=True
+print(json.dumps({'events':events,'phase':journal['phase'],'stopped':stopped}))`);
+  assert.deepEqual(value, { events: [], phase: "APPLYING", stopped: true });
+});
+
+test("FAST abort closes from immutable journal binding after validation marker removal", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['abort'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+for logical in (m['RECONCILIATION'],m['JOURNAL']):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(b'present'); os.chmod(p,0o600)
+authority={'candidateCommit':'1'*40,'documentId':'d'*64}; journal={
+ 'dataMutationEvidence':[], 'dataMutationStatus':{'mutation-one':'NEVER_STARTED'},
+ 'phase':'VALIDATED_NO_MUTATION','steps':[],'transactionId':'a'*64,
+ 'validationLaneSha256':'b'*64,
+}
+with open(m['physical'](m['JOURNAL']),'wb') as stream: stream.write(m['canonical_bytes'](journal))
+g['read_authority']=lambda **kwargs:(authority,b'authority')
+g['validate_authority_material']=lambda value:{}
+g['installed_artifacts_match_authority']=lambda value:True
+g['installed_source_archive_matches_authority']=lambda value:True
+g['read_reconciliation']=lambda value,data:{}
+g['configure_secret_identity_readonly']=lambda:None
+g['read_or_create_journal']=lambda value,data,reconciliation:journal
+g['load_validation_lane']=lambda commit:(_ for _ in ()).throw(AssertionError('revocable marker must not select FAST abort'))
+events=[]
+g['stable_unchanged_predecessor_inventory']=lambda reconciliation:events.append('inspect') or []
+g['verify_fast_preimages_unchanged']=lambda value:events.append('preimages')
+g['save_journal']=lambda value:events.append('save:'+value['phase'])
+record={'status':'ABORTED_NO_DATA_MUTATION'}
+g['materialize_abort_record']=lambda *args:(record,b'record','/archive/record.json')
+result=m['abort']()
+print(json.dumps({'events':events,'phase':journal['phase'],'result':result}))`);
+  assert.equal(value.phase, "ABORTED");
+  assert.equal(value.result.status, "ABORTED_NO_DATA_MUTATION");
+  assert.equal(value.result.transactionId, "a".repeat(64));
+  assert.deepEqual(value.events, [
+    "inspect", "preimages", "save:ABORTING", "inspect", "preimages",
+    "save:ABORTED", "inspect", "preimages",
+  ]);
+});
+
+test("abort without a journal derives FAST from begin checkpoint after lane removal or expiry", () => {
+  const value = jsonPython(`
+import os,tempfile,time
+g=m['abort'].__globals__
+authority={'authorizedDataMutations':[{'id':'mutation-one'}],'candidateCommit':'1'*40,
+ 'candidateTree':'2'*40,'documentId':'d'*64,'sourceArchiveSha256':'3'*64}
+authority_bytes=m['canonical_bytes'](authority); began=int(time.time())-60
+checkpoint={
+ 'authoritative':False,'backupCapturedUnixSeconds':began-60,'candidateCommit':authority['candidateCommit'],
+ 'candidateTree':authority['candidateTree'],'destructiveMutationPlanned':False,'generatedAtUnixSeconds':began-30,
+ 'logicalBackupEvidenceSha256':'4'*64,'offHostBackupEvidenceSha256':'5'*64,
+ 'predecessorAuthorityDocumentId':'c'*64,'predecessorAuthoritySha256':'d'*64,
+ 'predecessorCandidateCommit':'e'*40,'predecessorCandidateTree':'f'*40,
+ 'predecessorCheckpointSha256':'0'*64,'predecessorReceiptSha256':'1'*64,
+ 'predecessorSourceArchiveSha256':'2'*64,'predecessorStateSha256':'3'*64,
+ 'restoreEvidenceSha256':'6'*64,'restoreVerified':False,'runtimeInventorySha256':'7'*64,
+ 'runtimeRecovered':False,'schedulerRecoveryImageExportSha256':'8'*64,
+ 'schedulerRecoveryImageId':'sha256:'+'9'*64,'schedulerRunningImageId':'sha256:'+'a'*64,
+ 'schema':m['VALIDATION_CHECKPOINT_SCHEMA'],'secretsBackupEvidenceSha256':'b'*64,
+ 'sourceArchiveSha256':authority['sourceArchiveSha256'],'validation':True,
+}
+checkpoint_bytes=m['canonical_bytes'](checkpoint)
+reconciliation={'beganAtUnixSeconds':began,'previousReceiptSha256':'1'*64,'previousStateSha256':'3'*64,
+ 'rollbackCheckpointSha256':m['digest'](checkpoint_bytes)}
+def scenario(expired):
+ root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+ g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+ def put(logical,data,mode):
+  pathname=m['physical'](logical); os.makedirs(os.path.dirname(pathname),mode=0o700,exist_ok=True)
+  with open(pathname,'wb') as stream: stream.write(data)
+  os.chmod(pathname,mode)
+ marker_bytes=m['canonical_bytes']({'status':'RECONCILING'})
+ put(m['RECONCILIATION'],marker_bytes,0o600); put(m['VALIDATION_CHECKPOINT_FILE'],checkpoint_bytes,0o400)
+ if expired:
+  put(m['VALIDATION_LANE_FILE'],m['canonical_bytes']({'expired':True}),0o400)
+ events=[]
+ g['read_authority']=lambda **kwargs:(authority,authority_bytes)
+ g['validate_authority_material']=lambda value:{}
+ g['installed_artifacts_match_authority']=lambda value:True
+ g['installed_source_archive_matches_authority']=lambda value:True
+ g['read_reconciliation']=lambda value,data:reconciliation
+ g['configure_secret_identity_readonly']=lambda:events.append('identity-readonly')
+ g['read_or_create_journal']=lambda *args:(_ for _ in ()).throw(AssertionError('must not synthesize an apply plan'))
+ g['load_validation_lane']=lambda commit:(_ for _ in ()).throw(AssertionError('must not read revocable lane marker'))
+ g['verify_predecessor_state_receipt_unchanged']=lambda *args:events.append('state-receipt')
+ g['stable_unchanged_predecessor_inventory']=lambda value:events.append('inventory') or []
+ g['materialize_deployment_config_preimage']=lambda tx:{'bound':'deployment'}
+ g['materialize_evidence_preimages']=lambda tx:[]
+ g['validate_deployment_config_preimage']=lambda raw,tx,**kwargs:raw
+ g['validate_evidence_preimages']=lambda raw,tx,**kwargs:raw
+ g['verify_fast_preimages_unchanged']=lambda value:events.append('preimages')
+ g['materialize_abort_record']=lambda *args:({'status':'ABORTED_NO_DATA_MUTATION'},b'record','/archive/record.json')
+ result=m['abort'](); journal=json.loads(open(m['physical'](m['JOURNAL'])).read())
+ return {'checkpoint':journal['abortCheckpointSha256']==m['digest'](checkpoint_bytes),
+  'events':events,'mode':journal['abortCheckpointMode'],'phase':journal['phase'],
+  'status':result['status'],'steps':journal['steps']}
+print(json.dumps({'expired':scenario(True),'removed':scenario(False)}))`);
+  for (const result of [value.expired, value.removed]) {
+    assert.equal(result.checkpoint, true);
+    assert.equal(result.mode, "FAST");
+    assert.equal(result.phase, "ABORTED");
+    assert.equal(result.status, "ABORTED_NO_DATA_MUTATION");
+    assert.deepEqual(result.steps, []);
+    assert.ok(result.events.includes("state-receipt"));
+    assert.ok(result.events.includes("inventory"));
+    assert.ok(result.events.includes("preimages"));
+  }
+});
+
+test("FAST apply is a zero-step no-mutation plan and never calls live executors", () => {
+  const value = jsonPython(`
+g=m['apply'].__globals__; events=[]
+authority={'candidateCommit':'1'*40,'documentId':'d'*64}; lane={'status':'VALIDATION'}
+lane_sha=m['validation_lane_sha256'](lane)
+journal={'dataMutationEvidence':[],'dataMutationStatus':{authority_id:'PENDING' for authority_id in m['DATA_MUTATION_ORDER']},
+ 'phase':'APPLYING','steps':[],'transactionId':'a'*64,'validationLaneSha256':lane_sha}
+verification_journal={'dataMutationEvidence':[],'dataMutationStatus':{authority_id:'PENDING' for authority_id in m['DATA_MUTATION_ORDER']}}
+g['save_journal']=lambda value:events.append('save')
+m['mark_fast_mutations_never_started'](verification_journal)
+never_started=all(status=='NEVER_STARTED' for status in verification_journal['dataMutationStatus'].values()) and events==['save']*len(m['DATA_MUTATION_ORDER'])
+events.clear()
+g['require_maintenance_ready']=lambda:None
+g['read_authority']=lambda:(authority,b'authority')
+g['validate_authority_material']=lambda value:{}
+g['read_reconciliation']=lambda value,data:{}
+g['validate_pre_mutation_checkpoint']=lambda *args:lane
+g['configure_secret_identity_readonly']=lambda:events.append('derive-secret-owner-readonly')
+g['configure_secret_anchor']=lambda:events.append('FORBIDDEN:configure-secret')
+g['read_or_create_journal']=lambda *args:journal
+g['unjournaled_begin_checkpoint_mode']=lambda *args:('FAST','c'*64)
+g['promote_live_environment']=lambda:events.append('FORBIDDEN:promote-env')
+g['apply_network_resource_steps']=lambda *args:events.append('FORBIDDEN:docker-network')
+g['apply_data_prerequisites']=lambda *args:events.append('FORBIDDEN:data-mutation')
+g['stable_unchanged_predecessor_inventory']=lambda value:events.append('inspect-predecessor') or []
+g['verify_fast_preimages_unchanged']=lambda value:events.append('verify-preimages')
+g['load_validation_lane']=lambda commit:lane
+result=m['apply']()
+success=list(events)
+bound={'validationLaneSha256':lane_sha}
+g['load_validation_lane']=lambda commit:None
+try: m['journal_uses_validation_lane'](bound,authority['candidateCommit']); removed_rejected=False
+except m['Stop']: removed_rejected=True
+g['load_validation_lane']=lambda commit:lane
+try: m['journal_uses_validation_lane']({'validationLaneSha256':None},authority['candidateCommit']); production_rejects_added_marker=False
+except m['Stop']: production_rejects_added_marker=True
+print(json.dumps({'neverStarted':never_started,'productionRejectsAddedMarker':production_rejects_added_marker,
+ 'removedRejected':removed_rejected,'result':result,'success':success}))`);
+  assert.equal(value.result.status, "VALIDATED_NO_MUTATION");
+  assert.equal(value.success.some((item) => item.startsWith("FORBIDDEN:")), false);
+  assert.equal(value.removedRejected, true);
+  assert.equal(value.productionRejectsAddedMarker, true);
+  assert.equal(value.neverStarted, true);
+});
+
+test("existing journal mode switches fail read-only before every live mutator", () => {
+  const value = jsonPython(`
+g=m['apply'].__globals__
+authority={'candidateCommit':'1'*40,'documentId':'d'*64}; lane={'status':'VALIDATION'}
+def scenario(bound,current):
+ events=[]
+ journal={'validationLaneSha256':bound}
+ g['require_maintenance_ready']=lambda:events.append('maintenance')
+ g['read_authority']=lambda:(authority,b'authority')
+ g['validate_authority_material']=lambda value:{}
+ g['read_reconciliation']=lambda value,data:{}
+ g['configure_secret_identity_readonly']=lambda:events.append('identity-readonly')
+ g['read_or_create_journal']=lambda *args:events.append('journal-read') or journal
+ g['os'].path.lexists=lambda path:True
+ g['load_validation_lane']=lambda commit:current
+ g['validate_pre_mutation_checkpoint']=lambda *args:events.append('checkpoint')
+ for name in ('configure_secret_anchor','promote_live_environment','apply_network_resource_steps','apply_data_prerequisites'):
+  g[name]=lambda *args,n=name:events.append('FORBIDDEN:'+n)
+ try: m['apply'](); stopped=False
+ except m['Stop']: stopped=True
+ return {'events':events,'stopped':stopped}
+fast_removed=scenario(m['validation_lane_sha256'](lane),None)
+production_added=scenario(None,lane)
+print(json.dumps({'fastRemoved':fast_removed,'productionAdded':production_added}))`);
+  for (const result of [value.fastRemoved, value.productionAdded]) {
+    assert.equal(result.stopped, true);
+    assert.equal(result.events.includes("checkpoint"), false);
+    assert.equal(result.events.some((item) => item.startsWith("FORBIDDEN:")), false);
+  }
+});
+
+test("unjournaled begin mode drift stops before journal publication or live mutation", () => {
+  const value = jsonPython(`
+g=m['apply'].__globals__; authority={'candidateCommit':'1'*40,'documentId':'d'*64}; lane={'status':'VALIDATION'}
+def scenario(begin_mode,current):
+ events=[]
+ g['require_maintenance_ready']=lambda:None
+ g['read_authority']=lambda:(authority,b'authority')
+ g['validate_authority_material']=lambda value:{}
+ g['read_reconciliation']=lambda value,data:{}
+ g['configure_secret_identity_readonly']=lambda:events.append('identity-readonly')
+ g['os'].path.lexists=lambda path:False
+ g['unjournaled_begin_checkpoint_mode']=lambda *args:(begin_mode,'a'*64)
+ g['load_validation_lane']=lambda commit:current
+ g['read_or_create_journal']=lambda *args:events.append('FORBIDDEN:journal')
+ for name in ('configure_secret_anchor','promote_live_environment','apply_network_resource_steps','apply_data_prerequisites'):
+  g[name]=lambda *args,n=name:events.append('FORBIDDEN:'+n)
+ try: m['apply'](); stopped=False
+ except m['Stop']: stopped=True
+ return {'events':events,'stopped':stopped}
+print(json.dumps({'fastRemoved':scenario('FAST',None),'productionAdded':scenario('PRODUCTION',lane)}))`);
+  for (const result of [value.fastRemoved, value.productionAdded]) {
+    assert.equal(result.stopped, true);
+    assert.deepEqual(result.events, ["identity-readonly"]);
+  }
+});
+
+test("FAST read-only owner derivation touches neither secret bytes nor metadata", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['configure_secret_identity_readonly'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.getegid()
+def put(logical,data,mode):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(data); os.chmod(p,mode)
+os.makedirs(m['physical'](m['DEPLOYMENT_REPO']),mode=0o700,exist_ok=True)
+deployment_owner=os.stat(m['physical'](m['DEPLOYMENT_REPO']))
+put(m['DEPLOYMENT_ENV'],b'fixture=true\\n',0o600)
+put(m['DATABASE_SECRET'],b'postgresql://control_center_runtime:abcdefghijklmnopqrstuvwxyz0123456789@postgres:5432/control_center\\n',0o600)
+put(m['BOOTSTRAP_SECRET'],b'b'*48+b'\\n',0o600)
+put(m['KEYCLOAK_CLIENT_SECRET'],b'k'*40+b'\\n',0o600)
+paths=[m['physical'](logical) for logical in (m['DATABASE_SECRET'],m['BOOTSTRAP_SECRET'],m['KEYCLOAK_CLIENT_SECRET'])]
+before=[(os.stat(path).st_dev,os.stat(path).st_ino,os.stat(path).st_mode,os.stat(path).st_size,os.stat(path).st_mtime_ns,open(path,'rb').read()) for path in paths]
+g['SECRET_UID']=-1; g['SECRET_GID']=-1
+m['configure_secret_identity_readonly']()
+after=[(os.stat(path).st_dev,os.stat(path).st_ino,os.stat(path).st_mode,os.stat(path).st_size,os.stat(path).st_mtime_ns,open(path,'rb').read()) for path in paths]
+print(json.dumps({'derived':g['SECRET_UID']==deployment_owner.st_uid and g['SECRET_GID']==deployment_owner.st_gid,'unchanged':before==after,
+ 'fastApplyNoExec':'database_prerequisites_ready' not in m['apply'].__code__.co_names and 'keycloak_staged_ready' not in m['apply'].__code__.co_names}))`);
+  assert.deepEqual(value, { derived: true, fastApplyNoExec: true, unchanged: true });
+});
+
+test("FAST evidence is immutable, retryable, transaction-bound and bypasses live execution", () => {
+  const value = jsonPython(`
+import os,tempfile,time
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['evidence'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+def put(logical,data,mode):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(data); os.chmod(p,mode)
+lane={'status':'VALIDATION'}; lane_sha=m['validation_lane_sha256'](lane); tx='a'*64
+authority={'candidateCommit':'1'*40,'candidateTree':'2'*40,'documentId':'d'*64,'legacyRouteChecks':[],
+ 'renderSha256':'3'*64,'sourceArchiveSha256':'4'*64}
+authority_bytes=m['canonical_bytes'](authority); marker_bytes=m['canonical_bytes']({'status':'RECONCILING'})
+journal={'phase':'VALIDATED_NO_MUTATION','transactionId':tx,'updatedAtUnixSeconds':int(time.time()),'validationLaneSha256':lane_sha}
+journal_bytes=m['canonical_bytes'](journal); put(m['RECONCILIATION'],marker_bytes,0o600); put(m['JOURNAL'],journal_bytes,0o600)
+events=[]; predecessor=[{'name':'enterprise-postgres','containerId':'5'*64}]
+g['require_maintenance_ready']=lambda:events.append('maintenance')
+g['read_authority']=lambda:(authority,authority_bytes)
+g['validate_authority_material']=lambda value:{}
+g['read_reconciliation']=lambda value,data:{'beganAtUnixSeconds':journal['updatedAtUnixSeconds']-1}
+g['read_or_create_journal']=lambda *args:journal
+g['load_validation_lane']=lambda commit:lane
+g['validate_pre_mutation_checkpoint']=lambda *args:lane
+g['configure_secret_identity_readonly']=lambda:events.append('identity-readonly')
+g['verify_fast_preimages_unchanged']=lambda value:events.append('preimages-readonly')
+g['stable_unchanged_predecessor_inventory']=lambda value:list(predecessor)
+provenance={'checkpointSha256':'6'*64}; target={'servicesSha256':'7'*64}
+g['validation_checkpoint_provenance']=lambda value:dict(provenance)
+g['validation_static_target_evidence']=lambda value,targets:dict(target)
+for name in ('route_checks','invoke_evidence_producer','stable_canonical_inventory','purge_predecessor_backups'):
+ g[name]=lambda *args,n=name:events.append('FORBIDDEN:'+n)
+os.environ['PLATFORM_V1_RECONCILE_TEST_FAULT']='AFTER_FAST_EVIDENCE_WRITE'
+try: m['evidence'](); faulted=False
+except m['Stop'] as error: faulted=error.code==75
+del os.environ['PLATFORM_V1_RECONCILE_TEST_FAULT']
+result=m['evidence'](); document=json.loads(open(m['physical'](result['evidencePath'])).read())
+print(json.dumps({'faulted':faulted,'flags':[document[key] for key in ('runtimeExecution','runtimeContainerMutation','runtimeNetworkMutation','runtimeVolumeMutation','applicationDataMutation')],
+ 'immutableName':result['evidencePath'].endswith('-'+tx+'.json'),'journal':document['journalSha256']==m['digest'](journal_bytes),
+ 'marker':document['reconciliationSha256']==m['digest'](marker_bytes),'noForbidden':not any(item.startswith('FORBIDDEN:') for item in events),
+ 'scope':document['evidenceScope'],'excluded':document['preBeginImagePreparationExcluded'],
+ 'status':result['status'],'transaction':result['transactionId']==tx and document['transactionId']==tx,'lane':document['validationLaneSha256']==lane_sha}))`);
+  assert.deepEqual(value, {
+    faulted: true,
+    flags: [false, false, false, false, false],
+    immutableName: true,
+    journal: true,
+    lane: true,
+    marker: true,
+    noForbidden: true,
+    excluded: true,
+    scope: "RECONCILIATION_BEGIN_TO_EVIDENCE",
+    status: "VALIDATION",
+    transaction: true,
+  });
+});
+
+test("backup purge persists PURGING before deleting a no-backup rollback spec", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['purge_predecessor_backups'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+rollback=f"{m['ROLLBACK_SPEC_DIR']}/{'a'*64}/enterprise-postgres.json"
+pathname=m['physical'](rollback); os.makedirs(os.path.dirname(pathname),mode=0o700,exist_ok=True); open(pathname,'wb').write(b'spec'); os.chmod(pathname,0o600)
+step={'backupName':'v1-rollback-fixture','containerName':'enterprise-postgres','kind':'SERVICE','rollbackSpecPath':rollback,'status':'RETAINED'}
+journal={'phase':'APPLIED','steps':[step]}; events=[]
+g['inspect_one']=lambda name,missing_ok=False:None
+g['save_journal']=lambda value:events.append('save:'+step['status'])
+g['load_rollback_spec']=lambda value,transaction:events.append('load') or {}
+original_unlink=g['os'].unlink
+def unlink(path): events.append('unlink'); original_unlink(path)
+g['os'].unlink=unlink
+try: m['purge_predecessor_backups'](journal)
+finally: g['os'].unlink=original_unlink
+first=list(events); events.clear(); step['status']='PURGING'
+m['purge_predecessor_backups'](journal)
+print(json.dumps({'first':first,'retry':events,'status':step['status']}))`);
+  assert.deepEqual(value, {
+    first: ["save:RETAINED", "save:PURGING", "load", "unlink", "save:PURGED"],
+    retry: ["save:PURGING", "save:PURGED"],
+    status: "PURGED",
+  });
+});
+
 test("already-correct prerequisites are truthfully skipped and evidence remains a mutation subset", () => {
   assert.match(source, /SKIPPED_VERIFIED/);
-  assert.match(source, /status not in \("PENDING", "RUNNING", "APPLIED", "SKIPPED_VERIFIED"\)/);
+  assert.match(source, /"PENDING", "RUNNING", "APPLIED", "SKIPPED_VERIFIED", "NEVER_STARTED"/);
   assert.match(source, /value not in \("APPLIED", "SKIPPED_VERIFIED"\)/);
   assert.match(source, /\.issubset\(expected_mutations\)/);
   assert.match(source, /status == "APPLIED"\) != \(authority_id in evidence_ids\)/);
@@ -2071,23 +2495,130 @@ evidence_doc={'authorityId':'mutation-one','capturedAtUnixSeconds':int(time.time
 evidence_bytes=m['canonical_bytes'](evidence_doc); evidence_sha=m['digest'](evidence_bytes)
 evidence_path=f"{m['MUTATION_EVIDENCE_DIR']}/{doc}-mutation-one-{evidence_sha}.json"; put(evidence_path,evidence_bytes,0o444)
 entry={'authorityId':'mutation-one','evidencePath':evidence_path,'evidenceSha256':evidence_sha}; tx='a'*64; now=int(time.time())
+deployment_data=b'deployment-private'; deployment_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/deployment-env.bin"; put(deployment_path,deployment_data,0o600)
+deployment={'logicalPath':m['DEPLOYMENT_ENV'],'mode':0o600,'preimagePath':deployment_path,'sha256':m['digest'](deployment_data),'sizeBytes':len(deployment_data)}
+evidence_preimages=[]
+for index,source in enumerate(m['evidence_preimage_sources']()):
+ logical=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/evidence-preimages/{index:02d}.bin"; data=f'private-{index}'.encode(); put(logical,data,0o600)
+ evidence_preimages.append({'logicalPath':source,'mode':0o400,'preimagePath':logical,'sha256':m['digest'](data),'sizeBytes':len(data)})
+private=[deployment,*evidence_preimages]
+orphan_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/enterprise-postgres.json"
+orphan={'containerInspect':{},'predecessorIdentity':{'name':'enterprise-postgres'},'schema':m['ROLLBACK_SPEC_SCHEMA'],'transactionId':tx}
+put(orphan_path,m['canonical_bytes'](orphan),0o600)
+g['validate_journal_identity']=lambda value, label, reconciler: value
+g['container_identity']=lambda value: {'name':'enterprise-postgres'}
+g['controller_predecessor_identity_match']=lambda before, current: before == current
 journal={'authorityDocumentId':doc,'authoritySha256':m['digest'](authority_bytes),'beganAtUnixSeconds':now-1,'createdAtUnixSeconds':now-1,
- 'dataMutationEvidence':[entry],'dataMutationStatus':{'mutation-one':'APPLIED'},'deploymentConfigPreimage':{},'evidencePreimages':[],
- 'phase':'ABORTED','reconciliationSha256':'2'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now}
+ 'dataMutationEvidence':[entry],'dataMutationStatus':{'mutation-one':'APPLIED'},'deploymentConfigPreimage':deployment,'evidencePreimages':evidence_preimages,
+ 'phase':'ABORTED','reconciliationSha256':'2'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now,'validationLaneSha256':None}
 put(m['JOURNAL'],m['canonical_bytes'](journal),0o600)
 record,record_data,archive=m['materialize_abort_record'](authority,authority_bytes,journal)
 binding={**record,'recordPath':archive,'recordSha256':m['digest'](record_data)}
 receipt={'abortedAuthorizedReconciliation':binding,'schema':'platform.v1-local-private-control-receipt/v1','status':'ACTIVE'}
 receipt_bytes=m['canonical_bytes'](receipt); put(m['ACTIVE_RECEIPT'],receipt_bytes,0o444); g['PREVERIFIED_CONTROLLER_RECEIPT']=receipt_bytes
 result=m['finalize_consumed_abort'](authority,authority_bytes)
-print(json.dumps({'archiveExists':os.path.exists(m['physical'](result['journalArchivePath'])),'currentRecord':os.path.exists(m['physical'](m['ABORT_RECORD'])),'journal':os.path.exists(m['physical'](m['JOURNAL'])),'recordStatus':record['status'],'resultStatus':result['status']}))`);
+print(json.dumps({'archiveExists':os.path.exists(m['physical'](result['journalArchivePath'])),'currentRecord':os.path.exists(m['physical'](m['ABORT_RECORD'])),'journal':os.path.exists(m['physical'](m['JOURNAL'])),'orphanSpec':os.path.exists(m['physical'](orphan_path)),'private':any(os.path.exists(m['physical'](item['preimagePath'])) for item in private),'recordStatus':record['status'],'resultStatus':result['status']}))`);
   assert.deepEqual(value, {
     archiveExists: true,
     currentRecord: false,
     journal: false,
+    orphanSpec: false,
+    private: false,
     recordStatus: "ABORTED_WITH_RESIDUAL_DATA_MUTATIONS",
     resultStatus: "ABORT_FINALIZED",
   });
+});
+
+test("zero-step superseded finalization deletes e19 digest-divergent rollback specs only in historical cleanup mode", () => {
+  const value = jsonPython(`
+import os,tempfile,time
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['finalize_consumed_abort'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+def put(logical,data,mode):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(data); os.chmod(p,mode)
+doc='d'*64; authority={'authorizedDataMutations':[{'id':'mutation-one'}],'documentId':doc}; authority_bytes=m['canonical_bytes'](authority)
+tx='a'*64; now=int(time.time())
+deployment_data=b'deployment'; deployment_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/deployment-env.bin"; put(deployment_path,deployment_data,0o600)
+deployment={'logicalPath':m['DEPLOYMENT_ENV'],'mode':0o600,'preimagePath':deployment_path,'sha256':m['digest'](deployment_data),'sizeBytes':len(deployment_data)}
+evidence_preimages=[]
+for index,source in enumerate(m['evidence_preimage_sources']()):
+ logical=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/evidence-preimages/{index:02d}.bin"; data=f'private-{index}'.encode(); put(logical,data,0o600)
+ evidence_preimages.append({'logicalPath':source,'mode':0o400,'preimagePath':logical,'sha256':m['digest'](data),'sizeBytes':len(data)})
+before={'configHash':'1'*64,'containerId':'2'*64,'exitCode':0,'health':'healthy','imageId':'sha256:'+'3'*64,
+ 'imageReference':'fixture@sha256:'+'4'*64,'name':'enterprise-postgres','networkMembership':[{'aliases':['postgres'],'networkName':'enterprise_net'}],
+ 'runtimeConfigSha256':'5'*64,'semanticSha256':'6'*64,'service':'postgres','state':'running'}
+live={**before,'project':'platform_infra_vps','runtimeConfigSha256':'7'*64,'semanticSha256':'8'*64}
+orphan_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/{before['name']}.json"
+orphan={'containerInspect':{},'predecessorIdentity':before,'schema':m['ROLLBACK_SPEC_SCHEMA'],'transactionId':tx}; put(orphan_path,m['canonical_bytes'](orphan),0o600)
+g['container_identity']=lambda value:dict(live)
+journal={'authorityDocumentId':doc,'authoritySha256':m['digest'](authority_bytes),'beganAtUnixSeconds':now-2,'createdAtUnixSeconds':now-2,
+ 'dataMutationEvidence':[],'dataMutationStatus':{'mutation-one':'PENDING'},'deploymentConfigPreimage':deployment,'evidencePreimages':evidence_preimages,
+ 'phase':'ABORTED','reconciliationSha256':'9'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now-1,'validationLaneSha256':None}
+journal_bytes=m['canonical_bytes'](journal); put(m['JOURNAL'],journal_bytes,0o600)
+record,record_data,archive=m['materialize_abort_record'](authority,authority_bytes,journal)
+binding={**record,'recordPath':archive,'recordSha256':m['digest'](record_data)}
+receipt={'abortedAuthorizedReconciliation':binding,'schema':'platform.v1-local-private-control-receipt/v1','status':'ACTIVE'}
+receipt_bytes=m['canonical_bytes'](receipt); put(m['ACTIVE_RECEIPT'],receipt_bytes,0o444); g['PREVERIFIED_CONTROLLER_RECEIPT']=receipt_bytes
+strict=m['controller_predecessor_identity_match'](before,live); historical=m['historical_cleanup_predecessor_identity_match'](before,live)
+result=m['finalize_consumed_abort'](authority,authority_bytes)
+print(json.dumps({'historical':historical,'journalRemoved':not os.path.exists(m['physical'](m['JOURNAL'])),
+ 'specRemoved':not os.path.exists(m['physical'](orphan_path)),'status':result['status'],'strict':strict}))`);
+  assert.deepEqual(value, { historical: true, journalRemoved: true, specRemoved: true, status: "ABORT_FINALIZED", strict: false });
+});
+
+test("prepare can clean an older reconciler's receipt-bound archived abort artifacts", () => {
+  const value = jsonPython(`
+import os,tempfile,time
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['cleanup_receipt_bound_abort_preimages'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.stat(root).st_gid
+def put(logical,data,mode):
+ p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(data); os.chmod(p,mode)
+tx='c'*64; authority_id='d'*64; authority_sha='e'*64; now=int(time.time())
+deployment_data=b'old-deployment-private'; deployment_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/deployment-env.bin"; put(deployment_path,deployment_data,0o600)
+deployment={'logicalPath':m['DEPLOYMENT_ENV'],'mode':0o600,'preimagePath':deployment_path,'sha256':m['digest'](deployment_data),'sizeBytes':len(deployment_data)}
+evidence_preimages=[]
+for index,source in enumerate(m['evidence_preimage_sources']()):
+ logical=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/evidence-preimages/{index:02d}.bin"; data=f'old-private-{index}'.encode(); put(logical,data,0o600)
+ evidence_preimages.append({'logicalPath':source,'mode':0o400,'preimagePath':logical,'sha256':m['digest'](data),'sizeBytes':len(data)})
+private=[deployment,*evidence_preimages]
+orphan_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/enterprise-postgres.json"
+before={'configHash':'1'*64,'containerId':'2'*64,'exitCode':0,'health':'healthy','imageId':'sha256:'+'3'*64,
+ 'imageReference':'fixture@sha256:'+'4'*64,'name':'enterprise-postgres','networkMembership':[{'aliases':['postgres'],'networkName':'enterprise_net'}],
+ 'runtimeConfigSha256':'5'*64,'semanticSha256':'6'*64,'service':'postgres','state':'running'}
+live={**before,'project':'platform_infra_vps','runtimeConfigSha256':'7'*64,'semanticSha256':'8'*64}
+orphan={'containerInspect':{},'predecessorIdentity':before,'schema':m['ROLLBACK_SPEC_SCHEMA'],'transactionId':tx}; put(orphan_path,m['canonical_bytes'](orphan),0o600)
+journal={'authorityDocumentId':authority_id,'authoritySha256':authority_sha,'beganAtUnixSeconds':now-2,'createdAtUnixSeconds':now-2,
+ 'dataMutationEvidence':[],'dataMutationStatus':{},'deploymentConfigPreimage':deployment,'evidencePreimages':evidence_preimages,
+ 'phase':'ABORTED','reconciliationSha256':'1'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now-1}
+journal_bytes=m['canonical_bytes'](journal); journal_sha=m['digest'](journal_bytes)
+put(f"{m['JOURNAL_ARCHIVE_DIR']}/{tx}-{journal_sha}.json",journal_bytes,0o444)
+record={'authorityDocumentId':authority_id,'authoritySha256':authority_sha,'completedAtUnixSeconds':now-1,'journalSha256':journal_sha,
+ 'residualDataMutations':[],'residualDataMutationsSha256':m['digest'](m['canonical']([]).encode()),'schema':m['ABORT_RECORD_SCHEMA'],
+ 'status':'ABORTED_NO_DATA_MUTATION','transactionId':tx}
+record_bytes=m['canonical_bytes'](record); record_sha=m['digest'](record_bytes); record_path=f"{m['ABORT_RECORD_ARCHIVE_DIR']}/{tx}-{record_sha}.json"; put(record_path,record_bytes,0o444)
+receipt={'abortedAuthorizedReconciliation':{**record,'recordPath':record_path,'recordSha256':record_sha},'schema':'platform.v1-local-private-control-receipt/v1','status':'ACTIVE'}
+put(m['ACTIVE_RECEIPT'],m['canonical_bytes'](receipt),0o444)
+g['container_identity']=lambda value:live
+strict=m['controller_predecessor_identity_match'](before,live)
+historical=m['historical_cleanup_predecessor_identity_match'](before,live)
+m['cleanup_receipt_bound_abort_preimages']()
+cleaned=not os.path.exists(m['physical'](orphan_path)) and not any(os.path.exists(m['physical'](item['preimagePath'])) for item in private)
+print(json.dumps({'cleaned':cleaned,'historical':historical,'journalArchive':os.path.exists(m['physical'](f"{m['JOURNAL_ARCHIVE_DIR']}/{tx}-{journal_sha}.json")),'recordArchive':os.path.exists(m['physical'](record_path)),'strict':strict}))`);
+  assert.deepEqual(value, { cleaned: true, historical: true, journalArchive: true, recordArchive: true, strict: false });
+});
+
+test("transaction cleanup rejects a digest-matched preimage path outside its exact rollback directory", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['cleanup_transaction_preimages'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID']=os.geteuid(); g['OWNER_GID']=os.getegid()
+victim='/var/lib/platform-infrastructure/v1/local-private/do-not-delete.bin'; pathname=m['physical'](victim); os.makedirs(os.path.dirname(pathname),mode=0o700,exist_ok=True); data=b'authority-owned-private'; open(pathname,'wb').write(data); os.chmod(pathname,0o600)
+tx='9'*64
+journal={'deploymentConfigPreimage':{'logicalPath':m['DEPLOYMENT_ENV'],'mode':0o600,'preimagePath':victim,'sha256':m['digest'](data),'sizeBytes':len(data)},'evidencePreimages':[],'steps':[],'transactionId':tx}
+try: m['cleanup_transaction_preimages'](journal); rejected=False
+except m['Stop']: rejected=True
+print(json.dumps({'bytes':open(pathname,'rb').read().decode(),'rejected':rejected,'stillExists':os.path.exists(pathname)}))`);
+  assert.deepEqual(value, { bytes: "authority-owned-private", rejected: true, stillExists: true });
 });
 
 test("sealed EVIDENCED journal is archived and removed before the next prepare", () => {
@@ -2098,13 +2629,16 @@ g=m['finalize_evidenced_journal'].__globals__; g['TEST_ROOT']=root; g['OWNER_UID
 def put(logical,data,mode):
  p=m['physical'](logical); os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True); open(p,'wb').write(data); os.chmod(p,mode)
 doc='d'*64; authority={'documentId':doc}; authority_bytes=m['canonical_bytes'](authority); tx='b'*64; now=int(time.time())
-private=[]
-for index in range(2):
+deployment_data=b'deployment-private'; deployment_path=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/deployment-env.bin"; put(deployment_path,deployment_data,0o600)
+deployment={'logicalPath':m['DEPLOYMENT_ENV'],'mode':0o600,'preimagePath':deployment_path,'sha256':m['digest'](deployment_data),'sizeBytes':len(deployment_data)}
+evidence_preimages=[]
+for index,source in enumerate(m['evidence_preimage_sources']()):
  logical=f"{m['ROLLBACK_SPEC_DIR']}/{tx}/evidence-preimages/{index:02d}.bin"; data=f'private-{index}'.encode(); put(logical,data,0o600)
- private.append({'logicalPath':'/unused/'+str(index),'mode':0o400,'preimagePath':logical,'sha256':m['digest'](data),'sizeBytes':len(data)})
+ evidence_preimages.append({'logicalPath':source,'mode':0o400,'preimagePath':logical,'sha256':m['digest'](data),'sizeBytes':len(data)})
+private=[deployment,*evidence_preimages]
 journal={'authorityDocumentId':doc,'authoritySha256':m['digest'](authority_bytes),'beganAtUnixSeconds':now-2,'createdAtUnixSeconds':now-2,
- 'dataMutationEvidence':[],'dataMutationStatus':{},'deploymentConfigPreimage':private[0],'evidencePreimages':[private[1]],'phase':'EVIDENCED',
- 'reconciliationSha256':'2'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now}
+ 'dataMutationEvidence':[],'dataMutationStatus':{},'deploymentConfigPreimage':deployment,'evidencePreimages':evidence_preimages,'phase':'EVIDENCED',
+ 'reconciliationSha256':'2'*64,'schema':m['JOURNAL_SCHEMA'],'steps':[],'transactionId':tx,'updatedAtUnixSeconds':now,'validationLaneSha256':None}
 put(m['JOURNAL'],m['canonical_bytes'](journal),0o600); runtime=m['canonical_bytes']({'status':'PASS'}); checkpoint=m['canonical_bytes']({'status':'PASS'})
 put(m['RUNTIME_EVIDENCE'],runtime,0o444); put(m['LOCAL_CHECKPOINT'],checkpoint,0o400)
 external={'dataMutations':[],'releaseAuthorityDocumentId':doc,'releaseAuthoritySha256':m['digest'](authority_bytes),'runtimeEvidenceSha256':m['digest'](runtime),'status':'SEALED'}
@@ -2133,17 +2667,100 @@ before={'imageId':image,'imageReference':'registry.invalid/old@'+image,'networkM
  {'aliases':['old'],'networkName':'net-a'}, {'aliases':['legacy','old'],'networkName':'net-b'},
 ]}
 payload,primary,additional=m['rollback_create_payload'](raw,before)
-expected={'name':'old','containerId':'a'*64,'configHash':'b'*64,'exitCode':0,'health':'healthy','imageId':image,'imageReference':before['imageReference'],'networkMembership':before['networkMembership'],'project':'p','runtimeConfigSha256':'c'*64,'semanticSha256':'d'*64,'service':'s','state':'running'}
-actual=dict(expected); actual['containerId']='e'*64
-print(json.dumps({'additional':additional,'matches':m['recreated_identity_matches'](actual,expected),'payload':payload,'primary':primary}))`);
+print(json.dumps({'additional':additional,'payload':payload,'primary':primary}))`);
   assert.equal(value.primary, "net-a");
   assert.equal(value.payload.HostConfig.NetworkMode, "net-a");
   assert.deepEqual(value.payload.NetworkingConfig.EndpointsConfig["net-a"].Aliases, ["old"]);
   assert.deepEqual(value.additional, [{ aliases: ["legacy", "old"], networkName: "net-b", ipv4Address: "", ipv6Address: "" }]);
-  assert.equal(value.matches, true, "recreated identity may differ only in containerId");
   assert.match(source, /ROLLBACK_SPEC_SCHEMA/);
   assert.match(source, /preserve_private_json/);
   assert.match(source, /if backup is None:[\s\S]{0,180}recreate_predecessor/);
   assert.match(source, /Docker Engine rollback request was rejected.*response was suppressed/);
   assert.doesNotMatch(source, /identity_matches_predecessor\([^\n]+before\).*containerId.*must/);
+});
+
+test("legacy-name raw recreate resumes exactly once across intent/create/connect/start crash cuts", () => {
+  const value = jsonPython(`
+import os,tempfile
+root=tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root,0o700)
+g=m['recreate_predecessor'].__globals__; g['TEST_ROOT']=root
+old=m['LEGACY_ALERT_DISPATCHER']; new=m['CANONICAL_ALERT_DISPATCHER']; image='sha256:'+'1'*64; image_ref='fixture/alert@sha256:'+'2'*64
+before={'configHash':'3'*64,'containerId':'4'*64,'exitCode':0,'health':'healthy','imageId':image,'imageReference':image_ref,
+ 'name':old,'networkMembership':[{'aliases':['alert'],'networkName':'enterprise_net'},{'aliases':['alert'],'networkName':'routing'}],
+ 'runtimeConfigSha256':'5'*64,'semanticSha256':'6'*64,'service':'alert-dispatcher','state':'running'}
+native={**before,'project':'platform_infra_vps'}; new_id='7'*64
+def scenario(boundary):
+ state={'exists':False,'memberships':[],'runtime':'created'}; commands=[]; saves=[]
+ step={'before':before,'containerName':new,'restoredByRecreate':False,'status':'ABORTING'}; journal={'transactionId':'a'*64}
+ g['load_rollback_spec']=lambda value,transaction:{'containerInspect':{'bound':True}}
+ g['rollback_native_identity']=lambda value,transaction:dict(native)
+ g['image_id_for']=lambda reference:image
+ g['rollback_create_payload']=lambda raw,record:({'Image':image_ref},'enterprise_net',[{'aliases':['alert'],'networkName':'routing','ipv4Address':'','ipv6Address':''}])
+ def actual():
+  return {**native,'containerId':new_id,'networkMembership':sorted(state['memberships'],key=lambda item:item['networkName']),
+   'state':state['runtime'],'health':'healthy' if state['runtime']=='running' else 'none'}
+ g['container_identity']=lambda raw:actual()
+ def inspect(name,missing_ok=False):
+  if name != old: raise AssertionError(name)
+  if not state['exists']: return None
+  return ({'bound':True},actual())
+ g['inspect_one']=inspect
+ def create(method,endpoint,body=None):
+  if state['exists']: raise AssertionError('duplicate create')
+  commands.append('create:'+endpoint); state['exists']=True; state['memberships']=[{'aliases':['alert'],'networkName':'enterprise_net'}]
+  return {'Id':new_id}
+ g['docker_engine_request']=create
+ g['docker_binary']=lambda:'/usr/bin/docker'
+ def run(command,label,**kwargs):
+  if command[1]=='network':
+   commands.append('connect'); state['memberships'].append({'aliases':['alert'],'networkName':'routing'})
+  elif command[1]=='start':
+   commands.append('start'); state['runtime']='running'
+  else: raise AssertionError(command)
+  return b''
+ g['run']=run; g['save_journal']=lambda value:saves.append(step['restoredByRecreate'])
+ os.environ['PLATFORM_V1_RECONCILE_TEST_FAULT']=boundary
+ try: m['recreate_predecessor'](step,journal)
+ except m['Stop'] as error:
+  if error.code != 75: raise
+ del os.environ['PLATFORM_V1_RECONCILE_TEST_FAULT']
+ m['recreate_predecessor'](step,journal)
+ return {'commands':commands,'final':m['recreated_identity_matches'](actual(),step,journal),
+  'intentSavedFirst':saves and saves[0] is True,'oldName':old in commands[0]}
+results={boundary:scenario(boundary) for boundary in ('AFTER_RECREATE_INTENT','AFTER_RECREATE_CREATE','AFTER_RECREATE_CONNECT','AFTER_RECREATE_START')}
+print(json.dumps(results,sort_keys=True))`);
+  for (const result of Object.values(value)) {
+    assert.deepEqual(result.commands.map((item) => item.startsWith("create:") ? "create" : item), ["create", "connect", "start"]);
+    assert.equal(result.final, true);
+    assert.equal(result.intentSavedFirst, true);
+    assert.equal(result.oldName, true);
+  }
+});
+
+test("service transition status binds the aligned runtime digest", () => {
+  const value = jsonPython(`
+def record(name):
+ h=m['digest'](name.encode())
+ return {'configHash':h,'containerId':h,'imageId':'sha256:'+h,
+  'imageReference':'registry.invalid/'+name+'@sha256:'+h,'name':name,
+  'runtimeConfigSha256':'1'*64,'service':name.removeprefix('enterprise-')}
+previous=[record(name) for name in m['CANONICAL_CONTAINERS']]
+current={item['name']:dict(item) for item in previous}
+name='enterprise-control-center'
+current[name]['runtimeConfigSha256']='2'*64
+digest_only=next(item for item in m['service_transitions'](
+ {'predecessorRuntimeIdentities':previous},current) if item['current']['name']==name)
+current[name]['imageId']='sha256:'+'f'*64
+real_drift=next(item for item in m['service_transitions'](
+ {'predecessorRuntimeIdentities':previous},current) if item['current']['name']==name)
+print(json.dumps({
+ 'digestPreserved':digest_only['previous']['runtimeConfigSha256'] != digest_only['current']['runtimeConfigSha256'],
+ 'digestStatus':digest_only['status'],
+ 'realDriftStatus':real_drift['status'],
+}))`);
+  assert.deepEqual(value, {
+    digestPreserved: true,
+    digestStatus: "RECREATED",
+    realDriftStatus: "RECREATED",
+  });
 });

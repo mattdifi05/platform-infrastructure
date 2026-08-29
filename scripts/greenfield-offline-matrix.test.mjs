@@ -1004,16 +1004,19 @@ describe("C) TRANSACTION (delegated state machine)", () => {
         crashStderr += chunk;
       });
       const deadline = Date.now() + 20_000;
-      let danglingVisible = false;
+      let anchoredDanglingVisible = false;
       while (Date.now() < deadline) {
         try {
-          danglingVisible = journalRecords(fx.journal)
-            .some((record) => record.state === "FINAL_CAPTURE" && record.status === "ENTERED");
+          const records = journalRecords(fx.journal);
+          const anchor = JSON.parse(fs.readFileSync(path.join(fx.journalDir, "chain-head.json"), "utf8"));
+          anchoredDanglingVisible = records
+            .some((record) => record.state === "FINAL_CAPTURE" && record.status === "ENTERED")
+            && anchor.recordCount === records.length;
         } catch {}
-        if (danglingVisible) break;
+        if (anchoredDanglingVisible) break;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
       }
-      assert.ok(danglingVisible, `FINAL_CAPTURE never entered the journal: ${crashStderr}`);
+      assert.ok(anchoredDanglingVisible, `FINAL_CAPTURE never reached its anchored journal frontier: ${crashStderr}`);
       child.kill("SIGKILL");
       await new Promise((resolve) => child.once("exit", resolve));
       try {
