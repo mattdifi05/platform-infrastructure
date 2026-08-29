@@ -2718,7 +2718,9 @@ def existing_recovery_binding() -> Dict[str, object]:
         "exportSha256", "exportSizeBytes", "imageIndexDigest", "imageIndexPath", "imageManifestDigest", "manifestConfig",
         "recoveryImageId", "recoveryTag", "runningImageId",
     )
-    value = exact_keys(recovery, fields, "active receipt scheduler recovery binding")
+    if not isinstance(recovery, dict) or not set(fields).issubset(recovery):
+        stop("active receipt scheduler recovery binding fields differ from the closed V1 schema.")
+    value = {field: recovery[field] for field in fields}
     if value["archiveFormat"] != "OCI_DOCKER_SAVE_V1" or value["exportPath"] != SCHEDULER_RECOVERY_EXPORT:
         stop("active receipt scheduler recovery binding is not the fixed export.")
     for key in ("configHash", "containerId", "exportSha256"):
