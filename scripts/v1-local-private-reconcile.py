@@ -2714,7 +2714,7 @@ def existing_recovery_binding() -> Dict[str, object]:
         stop("active receipt local artifact trust is not one PASS LOCAL_DOCKER_IMMUTABLE_IMAGE_ID binding.")
     recovery = trust.get("schedulerRecovery")
     fields = (
-        "archiveFormat", "configDigest", "configHash", "containerId", "exportIdentity", "exportLabels", "exportPath",
+        "archiveFormat", "configDigest", "configHash", "containerId", "exportLabels", "exportPath",
         "exportSha256", "exportSizeBytes", "imageIndexDigest", "imageIndexPath", "imageManifestDigest", "manifestConfig",
         "recoveryImageId", "recoveryTag", "runningImageId",
     )
@@ -2731,8 +2731,9 @@ def existing_recovery_binding() -> Dict[str, object]:
     if value["recoveryImageId"] == value["runningImageId"]:
         stop("active receipt scheduler recovery running/recovery image IDs are not distinct.")
     export_snapshot = stable_recovery_export_snapshot()
-    if export_snapshot != {"identity": value["exportIdentity"], "sha256": value["exportSha256"], "sizeBytes": value["exportSizeBytes"]}:
+    if export_snapshot["sha256"] != value["exportSha256"] or export_snapshot["sizeBytes"] != value["exportSizeBytes"]:
         stop("scheduler recovery image export differs from the active receipt binding.")
+    value["exportIdentity"] = export_snapshot["identity"]
     return value
 
 
