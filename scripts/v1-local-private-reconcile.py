@@ -5103,10 +5103,29 @@ def verify_superseded_transport_abort_preconditions(authority: Dict[str, object]
 
 def superseded_transport_abort_journal(authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
     """One zero-step ABORTED journal for a transaction that provably never
-    entered apply: nothing was mutated, so nothing is undone."""
+    entered apply: nothing was mutated, so nothing is undone.  When an apply
+    journal already exists it must prove the same thing (phase APPLYING, every
+    step and mutation still PENDING, no mutation evidence); its exact bytes are
+    archived for the audit trail before the ABORTED journal replaces it."""
     marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
     transaction_id = digest(authority_bytes + marker_bytes)
     now = int(time.time())
+    if os.path.lexists(physical(JOURNAL)):
+        existing_bytes = secure_file(JOURNAL, "existing reconciliation journal", MAX_JSON, 0o600)
+        existing = parse_json(existing_bytes, "existing reconciliation journal", True)
+        pending_mutations = existing.get("dataMutationStatus", {})
+        if (
+            existing.get("phase") != "APPLYING"
+            or existing.get("dataMutationEvidence") != []
+            or not isinstance(pending_mutations, dict)
+            or any(status != "PENDING" for status in pending_mutations.values())
+            or any(isinstance(step, dict) and step.get("status") not in (None, "PENDING") for step in existing.get("steps", []))
+        ):
+            stop("superseding-transport abort requires one journal that proves apply never mutated.")
+        archive = f"{JOURNAL_ARCHIVE_DIR}/{transaction_id}-{digest(existing_bytes)}.json"
+        preserve_json(archive, existing, "archived superseded-transport reconciliation journal")
+        if secure_file(archive, "archived superseded-transport reconciliation journal", MAX_JSON, 0o444) != existing_bytes:
+            stop("archived superseded-transport journal differs from the preserved bytes.")
     journal = {
         "authorityDocumentId": authority["documentId"],
         "authoritySha256": digest(authority_bytes),
@@ -5123,7 +5142,7 @@ def superseded_transport_abort_journal(authority: Dict[str, object], authority_b
         "transactionId": transaction_id,
         "updatedAtUnixSeconds": now,
     }
-    atomic_json(JOURNAL, journal, 0o600, False)
+    atomic_json(JOURNAL, journal, 0o600, True)
     return validate_journal(journal, authority, authority_bytes, reconciliation)
 
 
@@ -5454,9 +5473,13 @@ def transition_identity(record: Optional[Dict[str, object]]) -> Optional[Dict[st
 
 
 def identity_matches_predecessor(actual: Dict[str, object], expected: Dict[str, object], *, name_may_differ: bool = False) -> bool:
+    """Whether one live reconciler identity proves the recorded predecessor
+    unchanged on every implementation-independent field (the two semantic
+    digest fields are implementation-bound and are verified by the controller's
+    own capture; the compose project is reconciler-only bookkeeping)."""
     fields = (
         "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
-        "project", "runtimeConfigSha256", "semanticSha256", "service", "state",
+        "service", "state",
     )
     if not name_may_differ and actual.get("name") != expected.get("name"):
         return False
@@ -5647,7 +5670,7 @@ def load_rollback_spec(step: Dict[str, object], journal: Dict[str, object]) -> D
         or value["transactionId"] != journal["transactionId"]
         or value["predecessorIdentity"] != step.get("before")
         or not isinstance(value["containerInspect"], dict)
-        or container_identity(value["containerInspect"]) != step.get("before")
+        or not controller_predecessor_identity_match(step.get("before"), container_identity(value["containerInspect"]))
     ):
         stop("private rollback specification differs from the exact predecessor identity.")
     return value

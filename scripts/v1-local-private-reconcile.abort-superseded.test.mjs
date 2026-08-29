@@ -194,7 +194,7 @@ test("superseded transport abort journal is one zero-step ABORTED transaction", 
 import hashlib, json, os, tempfile, time
 root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700); os.chown(root, os.geteuid(), os.getegid())
 g = m['superseded_transport_abort_journal'].__globals__; g['TEST_ROOT'] = root; g['OWNER_UID'] = os.geteuid(); g['OWNER_GID'] = os.getegid()
-def put(logical, data, mode):
+def put(logical, data, mode, raw=False):
     p = m['physical'](logical); os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
     if os.path.exists(p): os.chmod(p, 0o600)
     open(p, 'wb').write(data); os.chmod(p, mode)
@@ -206,7 +206,7 @@ marker_bytes = m['canonical_bytes'](marker)
 put(m['RECONCILIATION'], marker_bytes, 0o600)
 put(m['DEPLOYMENT_ENV'], b'deployment-env-preimage-bytes', 0o600)
 for index, source in enumerate(m['evidence_preimage_sources']()):
-    put(source, f'preimage-{index:02d}'.encode(), 0o400 if index % 2 else 0o600)
+    put(source, f'preimage-{index:02d}'.encode(), 0o400 if index % 2 else 0o600, raw=True)
 reconciliation = {'beganAtUnixSeconds': began}
 journal = m['superseded_transport_abort_journal'](authority, authority_bytes, reconciliation)
 stored = json.loads(open(m['physical'](m['JOURNAL'])).read())
@@ -391,4 +391,95 @@ def scenario(kind):
 results = {kind: scenario(kind) for kind in ('production', 'production_old_tag', 'validation', 'validation_no_receipt')}
 print(json.dumps(results))`);
   assert.deepEqual(value, { production: true, production_old_tag: false, validation: true, validation_no_receipt: false });
+});
+
+test("rollback specification and predecessor identity comparisons use the implementation-independent projection", () => {
+  const value = jsonPython(`
+import json, os, tempfile
+root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700)
+g = m['load_rollback_spec'].__globals__; g['TEST_ROOT'] = root; g['OWNER_UID'] = os.geteuid(); g['OWNER_GID'] = os.getegid()
+def put(logical, value, mode=0o600, raw=False):
+    p = m['physical'](logical); os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    if os.path.exists(p): os.chmod(p, 0o600)
+    data = value if raw else m['canonical_bytes'](value)
+    with open(p, 'wb') as stream: stream.write(data)
+    os.chmod(p, mode); os.chown(p, os.geteuid(), os.getegid()); return data
+runtime_labels = {name: value for name, value in zip(sorted(m['RUNTIME_IDENTITY_LABEL_BY_ENV'].values()), ('a', 'b', 'c', 'd', 'e', 'f'))}
+config_hash = '7' * 64; identifier = '8' * 64; image = 'sha256:' + '9' * 64; name = 'enterprise-control-center'
+inspect = {
+ 'Id': identifier, 'Image': image, 'Name': '/' + name, 'Mounts': [],
+ 'Config': {'Cmd': None, 'Entrypoint': None, 'Env': [], 'Healthcheck': None, 'Image': 'registry.invalid/control@' + image,
+  'Labels': {**runtime_labels, 'com.docker.compose.config-hash': config_hash, 'com.docker.compose.project': 'platform_infra_vps',
+   'traefik.enable': 'false', 'com.docker.compose.service': 'control-center'}, 'User': '', 'WorkingDir': '/app'},
+ 'HostConfig': {'BlkioWeight': 700, 'CapAdd': None, 'CapDrop': None, 'CpuShares': 1024, 'ExtraHosts': ['auth.local:host-gateway'],
+  'GroupAdd': ['100'], 'Init': True, 'Memory': 536870912, 'MemoryReservation': 134217728, 'NanoCpus': 1000000000,
+  'LogConfig': {'Type': 'json-file', 'Config': {'max-file': '5', 'max-size': '10m'}},
+  'NetworkMode': 'platform_infra_vps_platform_routing', 'PidMode': '', 'PidsLimit': 384, 'PortBindings': {}, 'Privileged': False,
+  'ReadonlyRootfs': True, 'RestartPolicy': {'Name': 'always'}, 'SecurityOpt': ['no-new-privileges:true'],
+  'Tmpfs': {'/tmp': 'rw,noexec,nosuid,nodev,size=67108864'}, 'Ulimits': [{'Name': 'nofile', 'Soft': 16384, 'Hard': 16384}]},
+ 'NetworkSettings': {'Networks': {'platform_infra_vps_platform_routing': {'Aliases': [name, identifier[:12]]}}, 'Ports': {}},
+ 'State': {'ExitCode': 0, 'Health': {'Status': 'healthy'}, 'Status': 'running'},
+}
+live = m['container_identity'](inspect)
+recorded_fields = ("configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
+                   "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state")
+before = {field: live[field] for field in recorded_fields}
+transaction_id = 'a' * 64
+spec = {'containerInspect': inspect, 'predecessorIdentity': before, 'schema': m['ROLLBACK_SPEC_SCHEMA'], 'transactionId': transaction_id}
+spec_path = m['ROLLBACK_SPEC_DIR'] + '/' + transaction_id + '/enterprise-control-center.json'
+put(spec_path, spec)
+journal = {'transactionId': transaction_id}
+step = {'before': before, 'rollbackSpecPath': spec_path, 'rollbackSpecSha256': m['digest'](m['canonical_bytes'](spec))}
+loaded = m['load_rollback_spec'](step, journal)
+drifted_inspect = dict(inspect); drifted_inspect['Id'] = 'c' * 64
+drifted_spec = dict(spec, containerInspect=drifted_inspect)
+put(spec_path, drifted_spec)
+step['rollbackSpecSha256'] = m['digest'](m['canonical_bytes'](drifted_spec))
+try:
+    m['load_rollback_spec'](step, journal)
+    drift_stopped = False
+except m['Stop']:
+    drift_stopped = True
+live_drift = dict(live, containerId='e' * 64)
+semantic_drift = dict(live, semanticSha256='d' * 64, runtimeConfigSha256='d' * 64, project='other_project')
+print(json.dumps({
+  'loaded': loaded['predecessorIdentity'] == before,
+  'driftStopped': drift_stopped,
+  'identityProjectionToleratesBoundFields': m['identity_matches_predecessor'](semantic_drift, before),
+  'identityProjectionStopsRealDrift': not m['identity_matches_predecessor'](live_drift, before),
+}))`);
+  assert.deepEqual(value, { loaded: true, driftStopped: true, identityProjectionToleratesBoundFields: true, identityProjectionStopsRealDrift: true });
+});
+
+test("superseding-transport abort verifies an existing journal proves apply never mutated", () => {
+  const value = jsonPython(`
+import json, os, tempfile
+root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700); os.chown(root, os.geteuid(), os.getegid())
+g = m['superseded_transport_abort_journal'].__globals__; g['TEST_ROOT'] = root; g['OWNER_UID'] = os.geteuid(); g['OWNER_GID'] = os.getegid()
+def put(logical, value, mode=0o600, raw=False):
+    p = m['physical'](logical); os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    if os.path.exists(p): os.chmod(p, 0o600)
+    data = value if raw else m['canonical_bytes'](value)
+    with open(p, 'wb') as stream: stream.write(data)
+    os.chmod(p, mode); os.chown(p, os.geteuid(), os.getegid()); return data
+authority = {'documentId': 'd' * 64, 'authorizedDataMutations': [{'id': 'mutation-one'}]}
+authority_bytes = m['canonical_bytes'](authority)
+marker = {'schema': 'platform.v1-local-private-reconciliation/v1', 'status': 'RECONCILING', 'beganAtUnixSeconds': 1787000000}
+marker_bytes = put(m['RECONCILIATION'], marker)
+transaction_id = m['digest'](authority_bytes + marker_bytes)
+executed = {'authorityDocumentId': authority['documentId'], 'authoritySha256': m['digest'](authority_bytes),
+  'beganAtUnixSeconds': 1787000000, 'createdAtUnixSeconds': 1787000060, 'dataMutationEvidence': [],
+  'dataMutationStatus': {'mutation-one': 'PENDING'}, 'deploymentConfigPreimage': {}, 'evidencePreimages': [],
+  'phase': 'APPLYING', 'reconciliationSha256': m['digest'](marker_bytes), 'schema': m['JOURNAL_SCHEMA'],
+  'steps': [{'kind': 'SERVICE', 'status': 'PENDING', 'containerName': 'enterprise-postgres'}],
+  'transactionId': transaction_id, 'updatedAtUnixSeconds': 1787000060}
+put(m['JOURNAL'], executed)
+put(m['DEPLOYMENT_ENV'], b'deployment-env-preimage-bytes', 0o600, raw=True)
+for index, source in enumerate(m['evidence_preimage_sources']()):
+    put(source, f'preimage-{index:02d}'.encode(), 0o400 if index % 2 else 0o600, raw=True)
+reconciliation = {'beganAtUnixSeconds': 1787000000}
+journal = m['superseded_transport_abort_journal'](authority, authority_bytes, reconciliation)
+stored = json.loads(open(m['physical'](m['JOURNAL'])).read())
+print(json.dumps({'phase': journal['phase'], 'stepsReplaced': journal['steps'] == [], 'storedIdentical': m['canonical_bytes'](journal) == m['canonical_bytes'](stored)}))`);
+  assert.deepEqual(value, { phase: "ABORTED", stepsReplaced: true, storedIdentical: true });
 });
