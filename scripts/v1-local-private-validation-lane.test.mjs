@@ -179,7 +179,7 @@ test("deploy source contract: validation mode skips CMS and seal, distinct evide
   const source = fs.readFileSync(deployScript, "utf8");
   assert.match(source, /REMOTE_VALIDATION_LANE_CAT=/);
   assert.match(source, /VALIDATION_MODE=0/);
-  assert.match(source, /\[ "\$VALIDATION_MODE" != 1 \] && capture_remote 1 "controller seal"/);
+  assert.match(source, /\[ "\$\{VALIDATION_MODE:-0\}" != 1 \] && capture_remote 1 "controller seal"/);
   assert.match(source, /VALIDATION_MODE" != 1 ]; then\n  fetch_and_verify_cms PRE/);
   assert.match(source, /VALIDATION_MODE" != 1 ]; then\n  fetch_and_verify_cms POST/);
   assert.match(source, /evidence-validation/);
