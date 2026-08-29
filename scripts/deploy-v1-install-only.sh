@@ -24,7 +24,7 @@ VALIDATION_OPEN_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-
 READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 SSH=/usr/bin/ssh
 GIT=/usr/bin/git
-OPENSSL=${PLATFORM_V1_INSTALL_TEST_OPENSSL:-/usr/bin/openssl}
+OPENSSL=${PLATFORM_V1_INSTALL_TEST_OPENSSL:-${DEPLOY_OPENSSL_PATH:-/usr/bin/openssl}}
 SYSTEM_NAME=$(/usr/bin/uname -s)
 case "$SYSTEM_NAME" in
   Darwin)
@@ -81,6 +81,7 @@ case "$SSH_PORT" in ""|*[!0-9]*) fail "DEPLOY_SSH_PORT must be numeric." ;; esac
 [ -x "$SSH" ] || fail "The fixed SSH client is unavailable." 78
 [ -x "$GIT" ] || fail "The fixed Git client is unavailable." 78
 [ -x "$NODE" ] || fail "The fixed local Node.js runtime is unavailable." 78
+[ -x "$OPENSSL" ] || fail "The fixed OpenSSL client is unavailable." 78
 for dependency in ssh-known-host-endpoint.sh pinned-ssh-host-key.mjs v1-brownfield-install-receipt.mjs; do
   [ -f "$SCRIPT_ROOT/$dependency" ] && [ ! -L "$SCRIPT_ROOT/$dependency" ] \
     || fail "The exact V1 install dependency $dependency is unavailable." 78

@@ -1357,6 +1357,7 @@ test("source has no frozen candidate pin and transports no plan or authority inp
     'WORKLOAD_LOCK_SOURCE="$REPOSITORY_ROOT/config/no-hosted-workloads.local-private.lock.json"',
     "SSH=/usr/bin/ssh",
     'SSH=${PLATFORM_V1_LOCAL_PRIVATE_TEST_SSH:-$SSH}',
+    'OPENSSL=${PLATFORM_V1_LOCAL_PRIVATE_TEST_OPENSSL:-${DEPLOY_OPENSSL_PATH:-/usr/bin/openssl}}',
     'NODE="${HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"',
   ]) assert.ok(source.includes(value), `LOCAL_PRIVATE client is missing ${value}`);
   assert.doesNotMatch(source, /^CANDIDATE_(?:COMMIT|TREE)=|^SOURCE_ARCHIVE_SHA256=/m);

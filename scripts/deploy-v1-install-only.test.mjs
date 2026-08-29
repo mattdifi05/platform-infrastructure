@@ -673,6 +673,7 @@ test("source derives exact-main identity and exposes only the closed staging seq
     "PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /bin/bash -o pipefail -c \"/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log\"'",
     "VALIDATION_OPEN_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-open'",
     "READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'",
+    "OPENSSL=${PLATFORM_V1_INSTALL_TEST_OPENSSL:-${DEPLOY_OPENSSL_PATH:-/usr/bin/openssl}}",
     "nodeRuntimeReceiptSha256", "verify-node-runtime",
     "verify-bootstrap", "verify-control-artifacts", "verify-authority", "verify-prepare", "SSH=/usr/bin/ssh",
     "/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
