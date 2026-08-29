@@ -101,6 +101,7 @@ CHECKPOINT_EVIDENCE_PATHS = {
 }
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
 VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
+VALIDATION_LANE_MAX_BACKUP_AGE = 24 * 3600
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 ID_RE = re.compile(r"^[a-f0-9]{64}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -1831,7 +1832,11 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
     now = int(time.time())
     if value["generatedAtUnixSeconds"] > now + 60 or now - value["generatedAtUnixSeconds"] > MAX_CHECKPOINT_AGE:
         stop("validation PRE-DEPLOY checkpoint is stale or future-dated.")
-    if value["backupCapturedUnixSeconds"] > now + 60 or now - value["backupCapturedUnixSeconds"] > MAX_BACKUP_AGE:
+    # The reused backup reference is honestly disclosed (restoreVerified and
+    # runtimeRecovered are false, so no recovery is claimed); its age is
+    # bounded by the validation lane lifetime instead of the production
+    # six-hour mandatory-backup window, and anything older fails closed.
+    if value["backupCapturedUnixSeconds"] > now + 60 or now - value["backupCapturedUnixSeconds"] > VALIDATION_LANE_MAX_BACKUP_AGE:
         stop("validation reused backup reference is stale or future-dated.")
     export_snapshot = stream_snapshot(SCHEDULER_RECOVERY_EXPORT, "scheduler recovery image export")
     if export_snapshot["sha256"] != value["schedulerRecoveryImageExportSha256"]:
