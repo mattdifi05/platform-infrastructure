@@ -287,3 +287,108 @@ except m['Stop']:
 print(json.dumps({'exportSha': recovered['exportSha256'] == export_sha, 'imageIdsDistinct': recovered['recoveryImageId'] != recovered['runningImageId'], 'driftStopped': drift_stopped}))`);
   assert.deepEqual(value, { exportSha: true, imageIdsDistinct: true, driftStopped: true });
 });
+
+test("validate_pre_mutation_checkpoint enforces the production contract and the receipt-bound validation lane", () => {
+  const value = jsonPython(`
+import copy, hashlib, json, os, tempfile, time
+root_base = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root_base, 0o700)
+g = m['validate_pre_mutation_checkpoint'].__globals__; g['OWNER_UID'] = os.geteuid()
+def semantic_guard(authority, documents, reconciliation_sha, transaction_id, began_at, now, evidence_phase):
+    return None
+g['validate_backup_evidence_bundle'] = semantic_guard
+def put(logical, value, mode=0o400, raw=False):
+    p = m['physical'](logical); os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    if os.path.exists(p): os.chmod(p, 0o600)
+    data = value if raw else m['canonical_bytes'](value)
+    with open(p, 'wb') as stream: stream.write(data)
+    os.chmod(p, mode); os.chown(p, os.geteuid(), os.getegid()); return data
+def scenario(kind):
+    root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700)
+    g['TEST_ROOT'] = root; g['OWNER_GID'] = os.getegid()
+    now = int(time.time()); generated = now - 5
+    captured = now - 7200 if kind == 'validation' else now - 20
+    commit = '1' * 40; tree = '2' * 40; archive = '3' * 64; doc = '4' * 64
+    old_commit = '9' * 40
+    tools = {name: {'imageId': 'sha256:' + '5' * 64, 'imageReference': 'registry.invalid/' + name + '@sha256:' + '6' * 64} for name in ('mariadbRestore', 'minioRestore', 'nodeUtility', 'postgresRestore', 'resticRclone')}
+    authority = {'backupToolImages': tools, 'candidateCommit': commit, 'candidateTree': tree, 'documentId': doc, 'sourceArchiveSha256': archive}
+    authority_bytes = m['canonical_bytes'](authority)
+    common = {'artifactSetSha256': '7' * 64, 'authorityDocumentId': doc,
+              'authoritySha256': m['digest'](authority_bytes), 'backupSetSha256': '8' * 64, 'backupToolImages': tools,
+              'candidateCommit': commit, 'candidateTree': tree, 'evidencePhase': 'PRE', 'reconciliationSha256': None,
+              'runId': '20260824T120000Z-abcdef12', 'sourceArchiveSha256': archive, 'transactionId': None}
+    rows = [{'logicalKey': key} for key in m['EVIDENCE_LOGICAL_KEYS']]
+    logical = {**common, 'artifactCount': 14, 'artifactManifestSha256': '9' * 64, 'artifacts': copy.deepcopy(rows), 'backupCompletedUnixSeconds': captured,
+               'capturedAtUnixSeconds': captured, 'checksumVerifiedCount': 14, 'freshArtifactStreamHashCount': 14,
+               'generatedAtUnixSeconds': generated, 'hmacVerifiedCount': 14, 'schema': 'platform.v1-local-private-logical-backup-evidence/v1',
+               'sourceSummarySha256': 'a' * 64, 'status': 'PASS', 'totalArtifactBytes': 14}
+    offhost = {**common, 'artifactCount': 14, 'completedAtUnixSeconds': generated - 1, 'distinctSnapshotCount': 14,
+               'exactPayloadReadbackCount': 14, 'freshExactSnapshotCount': 14, 'generatedAtUnixSeconds': generated, 'hostingerUsed': False,
+               'noPrune': True, 'offsiteProofSha256': 'b' * 64, 'proofs': copy.deepcopy(rows), 'recoveryEscrow': {},
+               'repository': 'rclone:platform-onedrive:platform-infrastructure/restic', 'repositoryProvider': 'OneDrive', 'retentionSkipped': True,
+               'schema': 'platform.v1-local-private-offhost-backup-evidence/v1', 'sourceSummarySha256': 'a' * 64, 'status': 'PASS'}
+    restore = {**common, 'artifactCount': 14, 'completedAtUnixSeconds': generated - 1, 'expectedRestoreCount': 14,
+               'generatedAtUnixSeconds': generated, 'localRestoreResultsSha256': 'c' * 64, 'passedRestoreCount': 14, 'results': copy.deepcopy(rows),
+               'schema': 'platform.v1-local-private-restore-evidence/v1', 'sourceSummarySha256': 'a' * 64, 'status': 'PASS'}
+    secret = {**common, 'backupCompletedUnixSeconds': captured, 'capturedAtUnixSeconds': captured, 'encryptedArtifact': {},
+              'generatedAtUnixSeconds': generated, 'plaintextTemporaryStateAbsent': True, 'recoveryEscrow': {},
+              'schema': 'platform.v1-local-private-secrets-backup-evidence/v1', 'secretBindingInventory': {}, 'secretRestore': {},
+              'secretValuesRecorded': False, 'sourceSummarySha256': 'a' * 64, 'status': 'PASS'}
+    export_data = b'x' * 2048; put(m['SCHEDULER_RECOVERY_EXPORT'], export_data, raw=True)
+    export_snapshot = m['stable_recovery_export_snapshot'](); recovery_id = 'sha256:' + 'd' * 64; running_id = 'sha256:' + 'e' * 64
+    runtime = {**common, 'capturedAtUnixSeconds': generated, 'containerCount': 36, 'containerIdentitySetSha256': 'f' * 64,
+               'generatedAtUnixSeconds': generated, 'recovery': {'exportSha256': export_snapshot['sha256'], 'recoveryImageId': recovery_id,
+               'runningImageId': running_id}, 'schema': 'platform.v1-local-private-runtime-inventory-evidence/v1', 'status': 'PASS',
+               'volumeCount': 1, 'volumeSetSha256': '1' * 64}
+    documents = {'logicalBackupEvidenceSha256': logical, 'offHostBackupEvidenceSha256': offhost,
+                 'restoreEvidenceSha256': restore, 'runtimeInventorySha256': runtime, 'secretsBackupEvidenceSha256': secret}
+    digests = {key: m['digest'](put(m['CHECKPOINT_EVIDENCE_PATHS'][key], document)) for key, document in documents.items()}
+    if kind in ('validation', 'validation_no_receipt'):
+        checkpoint = {'authoritative': False, 'backupCapturedUnixSeconds': captured, 'candidateCommit': commit, 'candidateTree': tree,
+                      'destructiveMutationPlanned': False, 'generatedAtUnixSeconds': generated, **digests, 'restoreVerified': False, 'runtimeRecovered': False,
+                      'schedulerRecoveryImageExportSha256': export_snapshot['sha256'], 'schedulerRecoveryImageId': recovery_id,
+                      'schedulerRunningImageId': running_id, 'schema': m['VALIDATION_CHECKPOINT_SCHEMA'], 'sourceArchiveSha256': archive, 'validation': True}
+        checkpoint_bytes = put(m['VALIDATION_CHECKPOINT_FILE'], checkpoint)
+    else:
+        checkpoint = {'authoritative': False, 'backupCapturedUnixSeconds': captured, 'candidateCommit': commit, 'candidateTree': tree,
+                      'destructiveMutationPlanned': False, 'generatedAtUnixSeconds': generated, **digests, 'restoreVerified': True, 'runtimeRecovered': True,
+                      'schedulerRecoveryImageExportSha256': export_snapshot['sha256'], 'schedulerRecoveryImageId': recovery_id,
+                      'schedulerRunningImageId': running_id, 'schema': 'platform.v1-local-private-predeploy-checkpoint/v1', 'sourceArchiveSha256': archive}
+        checkpoint_bytes = put(m['LOCAL_CHECKPOINT'], checkpoint)
+    tag_candidate = old_commit if kind in ('validation', 'production_old_tag') else commit
+    labels = {'com.platform.v1.local-private.candidate-commit': tag_candidate,
+              'com.platform.v1.local-private.scheduler-config-hash': '2' * 64,
+              'com.platform.v1.local-private.scheduler-container-id': '3' * 64,
+              'com.platform.v1.local-private.scheduler-running-image-id': running_id}
+    config = 'sha256:' + '4' * 64
+    recovery = {'archiveFormat': 'OCI_DOCKER_SAVE_V1', 'configDigest': config, 'configHash': '2' * 64, 'containerId': '3' * 64,
+                'exportIdentity': export_snapshot['identity'], 'exportLabels': labels, 'exportPath': m['SCHEDULER_RECOVERY_EXPORT'],
+                'exportSha256': export_snapshot['sha256'], 'exportSizeBytes': export_snapshot['sizeBytes'], 'imageIndexDigest': recovery_id,
+                'imageIndexPath': 'blobs/sha256/' + recovery_id.removeprefix('sha256:'), 'imageManifestDigest': 'sha256:' + '5' * 64,
+                'manifestConfig': 'blobs/sha256/' + config.removeprefix('sha256:'), 'recoveryImageId': recovery_id,
+                'recoveryTag': 'platform/v1-scheduler-recovery:' + tag_candidate, 'runningImageId': running_id}
+    reconciliation = {'rollbackCheckpointSha256': m['digest'](checkpoint_bytes), 'rollbackSchedulerRecovery': recovery,
+                      'rollbackSchedulerRecoverySha256': m['digest'](m['canonical'](recovery).encode())}
+    if kind == 'validation':
+        receipt = {'localArtifactTrust': {'mode': 'LOCAL_DOCKER_IMMUTABLE_IMAGE_ID', 'status': 'PASS',
+                  'schedulerRecovery': dict(recovery, containerName='enterprise-backup-scheduler', status='RECOVERY_IMAGE_EXPORT_BOUND')},
+                  'schema': 'platform.v1-local-private-control-receipt/v1', 'status': 'ACTIVE'}
+        put(m['ACTIVE_RECEIPT'], receipt, 0o444)
+        lane = {'candidateCommit': commit, 'createdAtUnixSeconds': now - 60, 'expiresAtUnixSeconds': now + 72000,
+                'reason': 'validation lane fixture', 'schema': m['VALIDATION_LANE_SCHEMA']}
+        put(m['VALIDATION_LANE_FILE'], lane, 0o400)
+    if kind == 'validation_no_receipt':
+        receipt = {'localArtifactTrust': {'mode': 'LOCAL_DOCKER_IMMUTABLE_IMAGE_ID', 'status': 'PASS',
+                  'schedulerRecovery': dict(recovery, exportSha256='sha256:' + '8' * 64, recoveryImageId='sha256:' + '8' * 64,
+                  recoveryTag='platform/v1-scheduler-recovery:' + old_commit, containerName='enterprise-backup-scheduler', status='RECOVERY_IMAGE_EXPORT_BOUND')},
+                  'schema': 'platform.v1-local-private-control-receipt/v1', 'status': 'ACTIVE'}
+        put(m['ACTIVE_RECEIPT'], receipt, 0o444)
+        lane = {'candidateCommit': commit, 'createdAtUnixSeconds': now - 60, 'expiresAtUnixSeconds': now + 72000,
+                'reason': 'validation lane fixture', 'schema': m['VALIDATION_LANE_SCHEMA']}
+        put(m['VALIDATION_LANE_FILE'], lane, 0o400)
+    try:
+        m['validate_pre_mutation_checkpoint'](authority, authority_bytes, reconciliation); return True
+    except m['Stop']: return False
+results = {kind: scenario(kind) for kind in ('production', 'production_old_tag', 'validation', 'validation_no_receipt')}
+print(json.dumps(results))`);
+  assert.deepEqual(value, { production: true, production_old_tag: false, validation: true, validation_no_receipt: false });
+});

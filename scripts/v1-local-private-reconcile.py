@@ -59,6 +59,8 @@ RUNTIME_EVIDENCE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence.json"
 
 VALIDATION_LANE_FILE = f"{STATE_DIR}/validation-lane.json"
 VALIDATION_CHECKPOINT_FILE = f"{PREDEPLOY_DIR}/local-private-checkpoint-validation.json"
+VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
+VALIDATION_LANE_MAX_BACKUP_AGE = 24 * 3600
 VALIDATION_RUNTIME_EVIDENCE_FILE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence-validation.json"
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
 VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
@@ -2801,37 +2803,55 @@ def validate_pre_mutation_checkpoint(
     immutable marker to one still-fresh checkpoint, all five exact evidence
     files, and the byte-identical scheduler recovery export.
     """
-    checkpoint_identity = fixed_file_identity(LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint")
+    lane = load_validation_lane(authority["candidateCommit"])
+    if lane is not None:
+        checkpoint_file, label = VALIDATION_CHECKPOINT_FILE, "pre-mutation validation checkpoint"
+        expected_schema, expected_restored = VALIDATION_CHECKPOINT_SCHEMA, False
+        checkpoint_fields = (
+            "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree", "destructiveMutationPlanned",
+            "generatedAtUnixSeconds", "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256",
+            "restoreVerified", "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+            "schedulerRecoveryImageId", "schedulerRunningImageId", "schema", "secretsBackupEvidenceSha256",
+            "sourceArchiveSha256", "validation",
+        )
+        max_captured_age = VALIDATION_LANE_MAX_BACKUP_AGE
+    else:
+        checkpoint_file, label = LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint"
+        expected_schema, expected_restored = "platform.v1-local-private-predeploy-checkpoint/v1", True
+        checkpoint_fields = (
+            "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree", "destructiveMutationPlanned",
+            "generatedAtUnixSeconds", "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256",
+            "restoreVerified", "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
+            "schedulerRecoveryImageId", "schedulerRunningImageId", "schema", "secretsBackupEvidenceSha256", "sourceArchiveSha256",
+        )
+        max_captured_age = 3600
+    checkpoint_identity = fixed_file_identity(checkpoint_file, label)
     if checkpoint_identity[-1] & 0o022:
-        stop("pre-mutation LOCAL_PRIVATE checkpoint is writable by group/other.")
-    checkpoint_bytes = secure_file(LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint", MAX_AUTHORITY)
-    if fixed_file_identity(LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint") != checkpoint_identity:
-        stop("pre-mutation LOCAL_PRIVATE checkpoint changed around its stable snapshot.")
-    checkpoint = exact_keys(parse_json(checkpoint_bytes, "pre-mutation LOCAL_PRIVATE checkpoint", True), (
-        "authoritative", "backupCapturedUnixSeconds", "candidateCommit", "candidateTree", "destructiveMutationPlanned",
-        "generatedAtUnixSeconds", "logicalBackupEvidenceSha256", "offHostBackupEvidenceSha256", "restoreEvidenceSha256",
-        "restoreVerified", "runtimeInventorySha256", "runtimeRecovered", "schedulerRecoveryImageExportSha256",
-        "schedulerRecoveryImageId", "schedulerRunningImageId", "schema", "secretsBackupEvidenceSha256", "sourceArchiveSha256",
-    ), "pre-mutation LOCAL_PRIVATE checkpoint")
+        stop(f"{label} is writable by group/other.")
+    checkpoint_bytes = secure_file(checkpoint_file, label, MAX_AUTHORITY)
+    if fixed_file_identity(checkpoint_file, label) != checkpoint_identity:
+        stop(f"{label} changed around its stable snapshot.")
+    checkpoint = exact_keys(parse_json(checkpoint_bytes, label, True), checkpoint_fields, label)
     now = int(time.time())
     captured = checkpoint["backupCapturedUnixSeconds"]
     generated = checkpoint["generatedAtUnixSeconds"]
     if (
         digest(checkpoint_bytes) != reconciliation.get("rollbackCheckpointSha256")
-        or checkpoint["schema"] != "platform.v1-local-private-predeploy-checkpoint/v1"
+        or checkpoint["schema"] != expected_schema
         or checkpoint["authoritative"] is not False
         or checkpoint["destructiveMutationPlanned"] is not False
-        or checkpoint["restoreVerified"] is not True
-        or checkpoint["runtimeRecovered"] is not True
+        or checkpoint["restoreVerified"] is not expected_restored
+        or checkpoint["runtimeRecovered"] is not expected_restored
+        or (lane is not None and checkpoint["validation"] is not True)
         or checkpoint["candidateCommit"] != authority["candidateCommit"]
         or checkpoint["candidateTree"] != authority["candidateTree"]
         or checkpoint["sourceArchiveSha256"] != authority["sourceArchiveSha256"]
         or isinstance(captured, bool) or not isinstance(captured, int)
         or isinstance(generated, bool) or not isinstance(generated, int)
         or captured > generated or generated > now + 60
-        or now - captured > 3600 or now - generated > 900
+        or now - captured > max_captured_age or now - generated > 900
     ):
-        stop("pre-mutation LOCAL_PRIVATE checkpoint is stale or differs from its reconciliation/authority binding.")
+        stop(f"{label} is stale or differs from its reconciliation/authority binding.")
     for key in CHECKPOINT_EVIDENCE_PATHS:
         if not isinstance(checkpoint[key], str) or SHA256_RE.fullmatch(checkpoint[key]) is None:
             stop(f"pre-mutation LOCAL_PRIVATE checkpoint {key} is not a canonical digest.")
@@ -2968,6 +2988,20 @@ def validate_pre_mutation_checkpoint(
     ):
         stop("pre-mutation runtime evidence does not bind the checkpoint recovery export.")
 
+    if lane is not None:
+        receipt = parse_json(secure_file(ACTIVE_RECEIPT, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444), "LOCAL_PRIVATE active receipt", True)
+        trust_recovery = receipt.get("localArtifactTrust", {}).get("schedulerRecovery")
+        trust_recovery = trust_recovery if isinstance(trust_recovery, dict) else {}
+        trust_labels = trust_recovery.get("exportLabels")
+        expected_recovery_candidate = trust_labels.get("com.platform.v1.local-private.candidate-commit") if isinstance(trust_labels, dict) else None
+        expected_recovery_tag = trust_recovery.get("recoveryTag")
+        if not isinstance(expected_recovery_candidate, str) or not re.fullmatch(r"[a-f0-9]{40}", expected_recovery_candidate or "") or not isinstance(expected_recovery_tag, str) or expected_recovery_tag != f"platform/v1-scheduler-recovery:{expected_recovery_candidate}":
+            stop("active receipt recovery binding is not one fixed recovery tag/candidate pair.")
+        if checkpoint["schedulerRecoveryImageExportSha256"] != trust_recovery.get("exportSha256"):
+            stop("validation checkpoint recovery export differs from the active receipt binding.")
+    else:
+        expected_recovery_candidate = authority["candidateCommit"]
+        expected_recovery_tag = f"platform/v1-scheduler-recovery:{authority['candidateCommit']}"
     recovery = exact_keys(reconciliation.get("rollbackSchedulerRecovery"), (
         "archiveFormat", "configDigest", "configHash", "containerId", "exportIdentity", "exportLabels", "exportPath",
         "exportSha256", "exportSizeBytes", "imageIndexDigest", "imageIndexPath", "imageManifestDigest", "manifestConfig",
@@ -2999,9 +3033,9 @@ def validate_pre_mutation_checkpoint(
         or recovery["imageIndexDigest"] != recovery["recoveryImageId"]
         or recovery["imageIndexPath"] != f"blobs/sha256/{recovery_hex}"
         or recovery["manifestConfig"] != f"blobs/sha256/{config_hex}"
-        or recovery["recoveryTag"] != f"platform/v1-scheduler-recovery:{authority['candidateCommit']}"
+        or recovery["recoveryTag"] != expected_recovery_tag
         or recovery_labels != {
-            "com.platform.v1.local-private.candidate-commit": authority["candidateCommit"],
+            "com.platform.v1.local-private.candidate-commit": expected_recovery_candidate,
             "com.platform.v1.local-private.scheduler-config-hash": recovery["configHash"],
             "com.platform.v1.local-private.scheduler-container-id": recovery["containerId"],
             "com.platform.v1.local-private.scheduler-running-image-id": recovery["runningImageId"],
@@ -3018,10 +3052,10 @@ def validate_pre_mutation_checkpoint(
     if recovery_export_identity(os.lstat(physical(SCHEDULER_RECOVERY_EXPORT))) != export_snapshot["identity"]:
         stop("scheduler recovery image export identity changed after validation.")
     if (
-        fixed_file_identity(LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint") != checkpoint_identity
-        or secure_file(LOCAL_CHECKPOINT, "pre-mutation LOCAL_PRIVATE checkpoint", MAX_AUTHORITY) != checkpoint_bytes
+        fixed_file_identity(checkpoint_file, label) != checkpoint_identity
+        or secure_file(checkpoint_file, label, MAX_AUTHORITY) != checkpoint_bytes
     ):
-        stop("pre-mutation LOCAL_PRIVATE checkpoint changed before apply mutation.")
+        stop(f"{label} changed before apply mutation.")
 
 
 def require_evidence_sha(value: object, label: str) -> str:
