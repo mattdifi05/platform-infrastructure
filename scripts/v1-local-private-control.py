@@ -1829,6 +1829,24 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
     recovery_image_id = value["schedulerRecoveryImageId"]
     if any(not isinstance(item, str) or re.fullmatch(r"sha256:[a-f0-9]{64}", item) is None for item in (running_image_id, recovery_image_id)) or running_image_id == recovery_image_id:
         stop("validation scheduler running/recovery image IDs are invalid or not distinct.")
+    # The reused recovery export was produced for the PREVIOUS exact release,
+    # so its OCI annotations bind that release's recovery tag and candidate;
+    # the expected identities come from the ACTIVE receipt's own recovery
+    # binding (the same source the validation checkpoint reused), and the
+    # checkpoint's recovery image ID must equal the receipt-bound index
+    # digest.  Anything else fails closed.
+    receipt = parse_json(secure_file(RECEIPT_FILE, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444), "LOCAL_PRIVATE active receipt", True)
+    trust_recovery = receipt.get("localArtifactTrust", {}).get("schedulerRecovery")
+    trust_recovery = trust_recovery if isinstance(trust_recovery, dict) else {}
+    receipt_labels = trust_recovery.get("exportLabels")
+    expected_commit = receipt_labels.get("com.platform.v1.local-private.candidate-commit") if isinstance(receipt_labels, dict) else None
+    expected_tag = trust_recovery.get("recoveryTag")
+    if not isinstance(expected_commit, str) or not re.fullmatch(r"[a-f0-9]{40}", expected_commit or "") or not isinstance(expected_tag, str) or expected_tag != f"platform/v1-scheduler-recovery:{expected_commit}":
+        stop("active receipt recovery binding is not one fixed recovery tag/candidate pair.")
+    if value["schedulerRecoveryImageExportSha256"] != trust_recovery.get("exportSha256"):
+        stop("validation checkpoint recovery export differs from the active receipt binding.")
+    if recovery_image_id != trust_recovery.get("recoveryImageId"):
+        stop("validation checkpoint recovery image differs from the active receipt binding.")
     now = int(time.time())
     if value["generatedAtUnixSeconds"] > now + 60 or now - value["generatedAtUnixSeconds"] > MAX_CHECKPOINT_AGE:
         stop("validation PRE-DEPLOY checkpoint is stale or future-dated.")
@@ -1841,7 +1859,7 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
     export_snapshot = stream_snapshot(SCHEDULER_RECOVERY_EXPORT, "scheduler recovery image export")
     if export_snapshot["sha256"] != value["schedulerRecoveryImageExportSha256"]:
         stop("scheduler recovery image export bytes differ from the validation checkpoint.")
-    export_metadata = parse_recovery_export(export_snapshot, recovery_image_id)
+    export_metadata = parse_recovery_export(export_snapshot, recovery_image_id, expected_tag, expected_commit)
     recovery: Dict[str, object] = {
         "exportIdentity": export_snapshot["identity"],
         "exportPath": SCHEDULER_RECOVERY_EXPORT,
