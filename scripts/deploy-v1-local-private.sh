@@ -506,8 +506,63 @@ validate_protocol_json() {
 import crypto from "node:crypto";
 import fs from "node:fs";
 const [filename, kind, authorityPath, authoritySha, peerPath] = process.argv.slice(1);
-const stable = (v) => Array.isArray(v) ? `[${v.map(stable).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v);
-const parse = (pathname, label) => { const raw = fs.readFileSync(pathname); let value; try { value = JSON.parse(raw); } catch { throw new Error(`${label} is not JSON.`); } if (raw.toString() !== `${stable(value)}\n`) throw new Error(`${label} is not canonical JSON.`); return value; };
+const exactStable = (v) => {
+  if (v === null) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") return JSON.stringify(v);
+  if (typeof v === "object" && v !== null && typeof v.__rawNumber === "string") return v.__rawNumber;
+  if (typeof v === "string") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(exactStable).join(",")}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${exactStable(v[k])}`).join(",")}}`;
+};
+const exactParse = (text) => {
+  let i = 0;
+  const ws = () => { while (i < text.length && " \t\n\r".includes(text[i])) i++; };
+  const string_ = () => {
+    if (text[i] !== "\"") throw new Error("q");
+    i++; let out = "";
+    while (i < text.length) {
+      const c = text[i];
+      if (c === "\"") { i++; return out; }
+      if (c === "\\") {
+        i++; const e = text[i];
+        if (e === "u") { out += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16)); i += 5; continue; }
+        out += { b: "\\b", f: "\\f", n: "\\n", r: "\\r", t: "\\t" }[e] ?? e; i++; continue;
+      }
+      out += c; i++;
+    }
+    throw new Error("q");
+  };
+  const value = () => {
+    ws(); const c = text[i];
+    if (c === "{") {
+      i++; const obj = {}; ws();
+      if (text[i] === "}") { i++; return obj; }
+      for (;;) { ws(); const key = string_(); ws(); if (text[i] !== ":") throw new Error("q"); i++; obj[key] = value(); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "}") throw new Error("q"); i++; return obj; }
+    }
+    if (c === "[") {
+      i++; const arr = []; ws();
+      if (text[i] === "]") { i++; return arr; }
+      for (;;) { arr.push(value()); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "]") throw new Error("q"); i++; return arr; }
+    }
+    if (c === "\"") return string_();
+    if (text.startsWith("true", i)) { i += 4; return true; }
+    if (text.startsWith("false", i)) { i += 5; return false; }
+    if (text.startsWith("null", i)) { i += 4; return null; }
+    const start = i;
+    while (i < text.length && /[-+0-9.eE]/.test(text[i])) i++;
+    if (start === i) throw new Error("q");
+    return { __rawNumber: text.slice(start, i) };
+  };
+  const out = value(); ws();
+  if (i !== text.length) throw new Error("q");
+  return out;
+};
+const stable = (v) => exactStable(v);
+const parse = (pathname, label) => { const raw = fs.readFileSync(pathname); const value = exactParse(raw.toString()); if (raw.toString() !== `${stable(value)}\n`) throw new Error(`${label} is not canonical JSON.`); return value; };
 const authority = parse(authorityPath, "authority");
 const value = parse(filename, kind);
 const sha = /^[a-f0-9]{64}$/;
@@ -574,8 +629,63 @@ verify_cms_evidence() {
 import crypto from "node:crypto";
 import fs from "node:fs";
 const [authorityPath, offhostPath, secretsPath, phase, authoritySha] = process.argv.slice(1);
-const stable = (v) => Array.isArray(v) ? `[${v.map(stable).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v);
-const read = (p, label) => { const raw = fs.readFileSync(p); let v; try { v = JSON.parse(raw); } catch { throw new Error(`${label} is not JSON.`); } if (raw.toString() !== `${stable(v)}\n`) throw new Error(`${label} is not canonical JSON.`); return { raw, v }; };
+const exactStable = (v) => {
+  if (v === null) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") return JSON.stringify(v);
+  if (typeof v === "object" && v !== null && typeof v.__rawNumber === "string") return v.__rawNumber;
+  if (typeof v === "string") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(exactStable).join(",")}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${exactStable(v[k])}`).join(",")}}`;
+};
+const exactParse = (text) => {
+  let i = 0;
+  const ws = () => { while (i < text.length && " \t\n\r".includes(text[i])) i++; };
+  const string_ = () => {
+    if (text[i] !== "\"") throw new Error("q");
+    i++; let out = "";
+    while (i < text.length) {
+      const c = text[i];
+      if (c === "\"") { i++; return out; }
+      if (c === "\\") {
+        i++; const e = text[i];
+        if (e === "u") { out += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16)); i += 5; continue; }
+        out += { b: "\\b", f: "\\f", n: "\\n", r: "\\r", t: "\\t" }[e] ?? e; i++; continue;
+      }
+      out += c; i++;
+    }
+    throw new Error("q");
+  };
+  const value = () => {
+    ws(); const c = text[i];
+    if (c === "{") {
+      i++; const obj = {}; ws();
+      if (text[i] === "}") { i++; return obj; }
+      for (;;) { ws(); const key = string_(); ws(); if (text[i] !== ":") throw new Error("q"); i++; obj[key] = value(); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "}") throw new Error("q"); i++; return obj; }
+    }
+    if (c === "[") {
+      i++; const arr = []; ws();
+      if (text[i] === "]") { i++; return arr; }
+      for (;;) { arr.push(value()); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "]") throw new Error("q"); i++; return arr; }
+    }
+    if (c === "\"") return string_();
+    if (text.startsWith("true", i)) { i += 4; return true; }
+    if (text.startsWith("false", i)) { i += 5; return false; }
+    if (text.startsWith("null", i)) { i += 4; return null; }
+    const start = i;
+    while (i < text.length && /[-+0-9.eE]/.test(text[i])) i++;
+    if (start === i) throw new Error("q");
+    return { __rawNumber: text.slice(start, i) };
+  };
+  const out = value(); ws();
+  if (i !== text.length) throw new Error("q");
+  return out;
+};
+const stable = (v) => exactStable(v);
+const read = (p, label) => { const raw = fs.readFileSync(p); const v = exactParse(raw.toString()); if (raw.toString() !== `${stable(v)}\n`) throw new Error(`${label} is not canonical JSON.`); return { raw, v }; };
 const authorityRead = read(authorityPath, "authority"); const authority = authorityRead.v;
 const offhost = read(offhostPath, "off-host evidence").v; const secrets = read(secretsPath, "secrets evidence").v;
 const common = ["artifactSetSha256", "authorityDocumentId", "authoritySha256", "backupSetSha256", "backupToolImages", "candidateCommit", "candidateTree", "evidencePhase", "reconciliationSha256", "runId", "sourceArchiveSha256", "transactionId"];
@@ -598,17 +708,73 @@ if (stable(escrow) !== stable(secrets.recoveryEscrow) || !escrow || escrow.statu
   || typeof escrow.ciphertextBase64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(escrow.ciphertextBase64)) throw new Error("CMS escrow cross-binding is invalid.");
 const ciphertext = Buffer.from(escrow.ciphertextBase64, "base64");
 const digest = crypto.createHash("sha256").update(ciphertext).digest("hex");
-if (ciphertext.length < 256 || ciphertext.length > 65536 || ciphertext.length !== escrow.ciphertextSizeBytes || digest !== escrow.ciphertextSha256) throw new Error("CMS ciphertext identity is invalid.");
+const escrowSize = typeof escrow.ciphertextSizeBytes === "object" && escrow.ciphertextSizeBytes !== null ? Number(escrow.ciphertextSizeBytes.__rawNumber) : escrow.ciphertextSizeBytes;
+if (ciphertext.length < 256 || ciphertext.length > 65536 || ciphertext.length !== escrowSize || digest !== escrow.ciphertextSha256) throw new Error("CMS ciphertext identity is invalid.");
 process.stdout.write(ciphertext);
 ' "$authority_snapshot" "$cms_offhost" "$cms_secrets" "$cms_phase" "$AUTHORITY_SHA256" \
   | "$OPENSSL" cms -decrypt -binary -inform DER -recip "$recovery_cert_snapshot" -inkey "$recovery_private_key" 2>/dev/null \
   | "$NODE" --input-type=module -e '
 import fs from "node:fs";
 const [authorityPath, offhostPath, phase] = process.argv.slice(1);
-const stable = (v) => Array.isArray(v) ? `[${v.map(stable).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v);
-const authority = JSON.parse(fs.readFileSync(authorityPath)); const evidence = JSON.parse(fs.readFileSync(offhostPath)); const raw = fs.readFileSync(0);
-let value; try { value = JSON.parse(raw); } catch { throw new Error("decrypted CMS bootstrap is not JSON."); }
-if (raw.toString() !== `${stable(value)}\n`) throw new Error("decrypted CMS bootstrap is not canonical JSON.");
+const exactStable = (v) => {
+  if (v === null) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") return JSON.stringify(v);
+  if (typeof v === "object" && v !== null && typeof v.__rawNumber === "string") return v.__rawNumber;
+  if (typeof v === "string") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(exactStable).join(",")}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${exactStable(v[k])}`).join(",")}}`;
+};
+const exactParse = (text) => {
+  let i = 0;
+  const ws = () => { while (i < text.length && " \t\n\r".includes(text[i])) i++; };
+  const string_ = () => {
+    if (text[i] !== "\"") throw new Error("q");
+    i++; let out = "";
+    while (i < text.length) {
+      const c = text[i];
+      if (c === "\"") { i++; return out; }
+      if (c === "\\") {
+        i++; const e = text[i];
+        if (e === "u") { out += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16)); i += 5; continue; }
+        out += { b: "\\b", f: "\\f", n: "\\n", r: "\\r", t: "\\t" }[e] ?? e; i++; continue;
+      }
+      out += c; i++;
+    }
+    throw new Error("q");
+  };
+  const value = () => {
+    ws(); const c = text[i];
+    if (c === "{") {
+      i++; const obj = {}; ws();
+      if (text[i] === "}") { i++; return obj; }
+      for (;;) { ws(); const key = string_(); ws(); if (text[i] !== ":") throw new Error("q"); i++; obj[key] = value(); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "}") throw new Error("q"); i++; return obj; }
+    }
+    if (c === "[") {
+      i++; const arr = []; ws();
+      if (text[i] === "]") { i++; return arr; }
+      for (;;) { arr.push(value()); ws();
+        if (text[i] === ",") { i++; continue; } if (text[i] !== "]") throw new Error("q"); i++; return arr; }
+    }
+    if (c === "\"") return string_();
+    if (text.startsWith("true", i)) { i += 4; return true; }
+    if (text.startsWith("false", i)) { i += 5; return false; }
+    if (text.startsWith("null", i)) { i += 4; return null; }
+    const start = i;
+    while (i < text.length && /[-+0-9.eE]/.test(text[i])) i++;
+    if (start === i) throw new Error("q");
+    return { __rawNumber: text.slice(start, i) };
+  };
+  const out = value(); ws();
+  if (i !== text.length) throw new Error("q");
+  return out;
+};
+const stable = (v) => exactStable(v);
+const authority = exactParse(fs.readFileSync(authorityPath).toString()); const evidence = exactParse(fs.readFileSync(offhostPath).toString()); const raw = fs.readFileSync(0);(0);
+let value; try { value = exactParse(raw.toString()); } catch { throw new Error("decrypted CMS bootstrap is not JSON."); }
+if (raw.toString() !== `${exactStable(value)}\n`) throw new Error("decrypted CMS bootstrap is not canonical JSON.");
 const fields = ["authorityDocumentId", "candidateCommit", "candidateTree", "certificateSha256Fingerprint", "confidentialPassphrase", "phase", "reconciliationSha256", "resticPassword", "resticRepository", "runId", "schema", "sourceArchiveSha256", "transactionId"];
 if (stable(Object.keys(value).sort()) !== stable(fields.sort()) || value.schema !== "platform.v1-local-private-recovery-bootstrap/v1"
   || value.authorityDocumentId !== authority.documentId || value.candidateCommit !== authority.candidateCommit || value.candidateTree !== authority.candidateTree
