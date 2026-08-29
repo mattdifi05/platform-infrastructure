@@ -1835,7 +1835,7 @@ def validate_validation_checkpoint(lane: Dict[str, object]) -> Tuple[str, bytes,
     # binding (the same source the validation checkpoint reused), and the
     # checkpoint's recovery image ID must equal the receipt-bound index
     # digest.  Anything else fails closed.
-    receipt = parse_json(secure_file(RECEIPT_FILE, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444), "LOCAL_PRIVATE active receipt", True)
+    receipt = parse_json(secure_file(RECEIPT_FILE, "LOCAL_PRIVATE active receipt", MAX_JSON, 0o444), "LOCAL_PRIVATE active receipt", True)
     trust_recovery = receipt.get("localArtifactTrust", {}).get("schedulerRecovery")
     trust_recovery = trust_recovery if isinstance(trust_recovery, dict) else {}
     receipt_labels = trust_recovery.get("exportLabels")
