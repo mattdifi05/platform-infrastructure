@@ -660,6 +660,14 @@ cmp -s "$remote_authority" "$authority_snapshot" \
   || fail "The remote exact release authority differs byte-for-byte from the local clean-main authority." 65
 
 # PRE is the last backup/restore/off-site gate before maintenance begins.
+VALIDATION_MODE=0
+validation_lane_file="$work/validation-lane.json"
+if capture_remote 1 "validation lane marker" "$REMOTE_VALIDATION_LANE_CAT" "$validation_lane_file" 4096; then
+  VALIDATION_MODE=1
+  echo "VALIDATION LANE ACTIVE: production seal and CMS escrow verification are disabled for this run." >&2
+else
+  rm -f "$validation_lane_file"
+fi
 if [ "$VALIDATION_MODE" != 1 ]; then
   fetch_and_verify_cms PRE
 else
@@ -667,13 +675,6 @@ else
 fi
 
 validation_lane_file="$work/validation-lane.json"
-VALIDATION_MODE=0
-if capture_remote 1 "validation lane marker" "$REMOTE_VALIDATION_LANE_CAT" "$validation_lane_file" 4096; then
-  VALIDATION_MODE=1
-  echo "VALIDATION LANE ACTIVE: production seal and CMS escrow verification are disabled for this run." >&2
-else
-  rm -f "$validation_lane_file"
-fi
 
 begin_response="$work/begin-maintenance-response.json"
 if ! capture_remote 3 "begin-maintenance" "$REMOTE_CONTROLLER begin-maintenance" "$begin_response" 131072; then
@@ -694,7 +695,7 @@ fi
 # APPLIED -> COMMITTING. Never issue abort after this point.
 evidence_response="$work/reconcile-evidence-response.json"
 if ! capture_remote 3 "reconcile evidence" "$REMOTE_RECONCILER evidence" "$evidence_response" 131072 \
-  || ! validate_protocol_json "$evidence_response" "$([ "$VALIDATION_MODE" = 1 ] && echo evidence-validation || echo evidence)"; then
+  || ! validate_protocol_json "$evidence_response" "$([ "${VALIDATION_MODE:-0}" = 1 ] && echo evidence-validation || echo evidence)"; then
   fail "reconcile evidence remained unverifiable after bounded idempotent retries; abort is closed after possible COMMITTING." 65
 fi
 
@@ -711,7 +712,7 @@ if [ "$VALIDATION_MODE" = 1 ]; then
 fi
 seal_response="$work/seal-response.json"
 seal_observed=0
-if [ "$VALIDATION_MODE" != 1 ] && capture_remote 1 "controller seal" "$REMOTE_CONTROLLER seal" "$seal_response" 131072; then
+if [ "${VALIDATION_MODE:-0}" != 1 ] && capture_remote 1 "controller seal" "$REMOTE_CONTROLLER seal" "$seal_response" 131072; then
   seal_observed=1
 else
   uncertain_verify="$work/uncertain-seal-verify.json"
