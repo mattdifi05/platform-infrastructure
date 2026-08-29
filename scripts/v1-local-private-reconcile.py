@@ -41,6 +41,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 
 STATE_DIR = "/var/lib/platform-infrastructure/v1/local-private"
+BOOTSTRAP_BRIDGE_RECEIPT_FILE = "/var/lib/platform-infrastructure/v1/bootstrap-bridge-receipt.json"
+BOOTSTRAP_CONTROL_RECEIPT_FILE = "/var/lib/platform-infrastructure/v1/bootstrap-control-artifact-receipt.json"
+INSTALL_RECEIPTS_DIR = "/var/lib/platform-infrastructure/v1/install-receipts"
 PREDEPLOY_DIR = "/var/lib/platform-infrastructure/v1/predeploy/current"
 AUTHORITY = f"{STATE_DIR}/exact-release-authority.json"
 AUTHORITY_ARCHIVE_DIR = f"{STATE_DIR}/release-authorities"
@@ -93,6 +96,7 @@ JOURNAL_ARCHIVE_DIR = f"{STATE_DIR}/reconcile-journals"
 SHARED_LOCK = "/run/lock/platform-v1-local-private-transaction.lock"
 LOCK = "/run/lock/platform-v1-local-private-reconcile.lock"
 ACTIVE_RECEIPT = f"{STATE_DIR}/active-receipt.json"
+STATE_FILE = f"{STATE_DIR}/state.json"
 
 CONTROLLER = "/usr/local/libexec/platform-v1-local-private-control"
 INSTALLER = "/usr/local/libexec/platform-v1-brownfield-install-consumer"
@@ -4761,7 +4765,7 @@ def build_authority(
     return value
 
 
-def read_authority() -> Tuple[Dict[str, object], bytes]:
+def read_authority(check_artifacts: bool = True, check_source_archive: bool = True) -> Tuple[Dict[str, object], bytes]:
     data = secure_file(AUTHORITY, "exact release authority", MAX_AUTHORITY, 0o444)
     value = exact_keys(parse_json(data, "exact release authority", True), (
         "activeManagedContainerNames", "artifacts", "authorityMode", "authorizedDataMutations", "backupToolImages", "candidateCommit", "candidateTree",
@@ -4794,9 +4798,13 @@ def read_authority() -> Tuple[Dict[str, object], bytes]:
         stop("render environment path differs from the fixed path.")
     env_bytes = secure_file(RENDER_ENV, "exact render environment", 1024 * 1024, 0o400)
     render_bytes = secure_file(RENDER, "exact release render", MAX_JSON, 0o444)
-    source_bytes = secure_file(SOURCE_ARCHIVE, "exact source archive", MAX_ARCHIVE, 0o444)
-    if digest(env_bytes) != env_binding["sha256"] or digest(render_bytes) != value["renderSha256"] or digest(source_bytes) != value["sourceArchiveSha256"]:
-        stop("exact authority environment, render or source bytes drifted.")
+    if check_source_archive:
+        source_bytes = secure_file(SOURCE_ARCHIVE, "exact source archive", MAX_ARCHIVE, 0o444)
+        if digest(env_bytes) != env_binding["sha256"] or digest(render_bytes) != value["renderSha256"] or digest(source_bytes) != value["sourceArchiveSha256"]:
+            stop("exact authority environment, render or source bytes drifted.")
+    else:
+        if digest(env_bytes) != env_binding["sha256"] or digest(render_bytes) != value["renderSha256"]:
+            stop("exact authority environment or render bytes drifted.")
     if value["releaseRoot"] != release_root(value["candidateCommit"], value["sourceArchiveSha256"]):
         stop("exact authority release root is not commit/archive-derived.")
     _, env_values = parse_env(env_bytes, "exact render environment")
@@ -4832,21 +4840,222 @@ def read_authority() -> Tuple[Dict[str, object], bytes]:
     expected_producer = evidence_producer_binding(value["releaseRoot"])
     if producer != expected_producer:
         stop("exact-release evidence producer differs from authority code/operation/offsite policy.")
-    exact_keys(value["artifacts"], ("composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit"), "exact release artifacts")
-    for name, logical in {
+    if check_artifacts:
+        validate_installed_artifacts_match_authority(value)
+    return value, data
+
+
+AUTHORITY_ARTIFACT_NAMES = ("composeWrapper", "controller", "installer", "reconciler", "sudoers", "unit")
+
+
+def authority_artifact_binding(value: Dict[str, object], name: str) -> Tuple[str, int, Optional[int]]:
+    logical = {
         "composeWrapper": f"{value['releaseRoot']}/scripts/compose-vps.sh",
         "controller": CONTROLLER,
         "installer": INSTALLER,
         "reconciler": RECONCILER,
         "sudoers": SUDOERS,
         "unit": UNIT,
-    }.items():
+    }[name]
+    maximum = 65536 if name in ("sudoers", "unit") else 2 * 1024 * 1024
+    expected_mode = 0o440 if name == "sudoers" else 0o444 if name == "unit" else None
+    return logical, maximum, expected_mode
+
+
+def validate_installed_artifacts_match_authority(value: Dict[str, object]) -> None:
+    exact_keys(value["artifacts"], AUTHORITY_ARTIFACT_NAMES, "exact release artifacts")
+    for name in AUTHORITY_ARTIFACT_NAMES:
         artifact = exact_keys(value["artifacts"].get(name) if isinstance(value["artifacts"], dict) else None, ("path", "sha256"), f"{name} artifact")
-        maximum = 65536 if name in ("sudoers", "unit") else 2 * 1024 * 1024
-        expected_mode = 0o440 if name == "sudoers" else 0o444 if name == "unit" else None
+        logical, maximum, expected_mode = authority_artifact_binding(value, name)
         if artifact["path"] != logical or digest(secure_file(logical, f"{name} artifact", maximum, expected_mode)) != artifact["sha256"]:
             stop(f"{name} artifact differs from exact authority.")
-    return value, data
+
+
+def installed_artifacts_match_authority(value: Dict[str, object]) -> bool:
+    """Boolean form of the installed-artifact authority loop; never stops."""
+    artifacts = value.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != set(AUTHORITY_ARTIFACT_NAMES):
+        return False
+    for name in AUTHORITY_ARTIFACT_NAMES:
+        artifact = artifacts.get(name)
+        if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
+            return False
+        logical, maximum, expected_mode = authority_artifact_binding(value, name)
+        if artifact["path"] != logical:
+            return False
+        try:
+            installed = secure_file(logical, f"{name} artifact", maximum, expected_mode)
+        except Stop:
+            return False
+        if digest(installed) != artifact["sha256"]:
+            return False
+    return True
+
+
+def installed_source_archive_matches_authority(value: Dict[str, object]) -> bool:
+    try:
+        source_bytes = secure_file(SOURCE_ARCHIVE, "exact source archive", MAX_ARCHIVE, 0o444)
+    except Stop:
+        return False
+    return digest(source_bytes) == value["sourceArchiveSha256"]
+
+
+BOOTSTRAP_BRIDGE_RECEIPT_FIELDS = (
+    "bridgeSha256", "candidateCommit", "candidateConsumerSha256", "candidateTree",
+    "checkpointAfterSha256", "checkpointBeforeSha256", "controlArtifactReceiptSha256",
+    "dataMutation", "dockerMutation", "documentId", "gitBundleSha256", "hostControlMutation",
+    "installReceiptSha256", "legacyBroadSudoersAfterSha256", "legacyBroadSudoersBeforeSha256",
+    "legacyConsumerSha256", "legacyV1SudoersSha256", "nodeRuntimeReceiptSha256",
+    "releaseRoot", "schema", "sourceArchiveAfterSha256", "sourceArchiveBeforeSha256",
+    "stagingEnvironmentSha256", "stagingMutation", "status",
+)
+BOOTSTRAP_BRIDGE_RECEIPT_FIELDS_V2 = BOOTSTRAP_BRIDGE_RECEIPT_FIELDS + ("transportSanction",)
+BOOTSTRAP_CONTROL_RECEIPT_FIELDS = (
+    "artifacts", "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
+    "hostControlMutation", "schema", "sourceArchiveSha256", "status",
+)
+BOOTSTRAP_CONTROL_RECEIPT_ARTIFACT_NAMES = ("installer", "controller", "reconciler", "unit", "sudoers")
+BOOTSTRAP_CONTROL_ARTIFACT_RECEIPT_SCHEMA = "platform.v1-control-artifact-install-receipt/v1"
+BOOTSTRAP_BRIDGE_RECEIPT_SCHEMA = "platform.v1-brownfield-bootstrap-bridge-receipt/v1"
+
+
+def latest_transport_tooling_coherence() -> str:
+    """Prove the installed control tooling is exactly the latest sanctioned
+    bootstrap transport's, via the bridge/control-artifact receipt chain.
+
+    Returns the proven installed candidate commit.  Any missing, non-canonical,
+    or inconsistent receipt fails closed; there is no path that accepts
+    unproven installed tooling."""
+    bridge_raw = secure_file(BOOTSTRAP_BRIDGE_RECEIPT_FILE, "bootstrap bridge receipt", MAX_AUTHORITY, 0o400)
+    bridge = parse_json(bridge_raw, "bootstrap bridge receipt", True)
+    if not isinstance(bridge, dict) or set(bridge) not in (set(BOOTSTRAP_BRIDGE_RECEIPT_FIELDS), set(BOOTSTRAP_BRIDGE_RECEIPT_FIELDS_V2)):
+        stop("bootstrap bridge receipt is not one exact closed object.")
+    without = dict(bridge)
+    document_id = without.pop("documentId", None)
+    if not isinstance(document_id, str) or document_id != digest(canonical(without).encode()):
+        stop("bootstrap bridge receipt document ID is invalid.")
+    if (
+        bridge["schema"] != BOOTSTRAP_BRIDGE_RECEIPT_SCHEMA
+        or bridge["status"] != "BOOTSTRAP_CONTROL_INSTALLED"
+        or not isinstance(bridge["candidateCommit"], str) or COMMIT_RE.fullmatch(bridge["candidateCommit"]) is None
+        or not isinstance(bridge["candidateTree"], str) or COMMIT_RE.fullmatch(bridge["candidateTree"]) is None
+        or not isinstance(bridge["sourceArchiveAfterSha256"], str) or SHA256_RE.fullmatch(bridge["sourceArchiveAfterSha256"]) is None
+    ):
+        stop("bootstrap bridge receipt identity/status is invalid.")
+    control_raw = secure_file(BOOTSTRAP_CONTROL_RECEIPT_FILE, "bootstrap control artifact receipt", MAX_AUTHORITY, 0o400)
+    if digest(control_raw) != bridge["controlArtifactReceiptSha256"]:
+        stop("bootstrap control artifact receipt differs from the bridge receipt binding.")
+    control = parse_json(control_raw, "bootstrap control artifact receipt", True)
+    if not isinstance(control, dict) or set(control) != set(BOOTSTRAP_CONTROL_RECEIPT_FIELDS):
+        stop("bootstrap control artifact receipt is not one exact closed object.")
+    if (
+        control["schema"] != BOOTSTRAP_CONTROL_ARTIFACT_RECEIPT_SCHEMA
+        or control["status"] != "CONTROL_ARTIFACTS_INSTALLED"
+        or control["candidateCommit"] != bridge["candidateCommit"]
+        or control["candidateTree"] != bridge["candidateTree"]
+        or control["sourceArchiveSha256"] != bridge["sourceArchiveAfterSha256"]
+        or control["dataMutation"] is not False
+        or control["dockerMutation"] is not False
+        or control["hostControlMutation"] is not True
+    ):
+        stop("bootstrap control artifact receipt differs from the bridge transport identity.")
+    if not isinstance(control["artifacts"], list) or len(control["artifacts"]) != len(BOOTSTRAP_CONTROL_RECEIPT_ARTIFACT_NAMES):
+        stop("bootstrap control artifact receipt inventory is invalid.")
+    logical_by_name = {"installer": INSTALLER, "controller": CONTROLLER, "reconciler": RECONCILER, "unit": UNIT, "sudoers": SUDOERS}
+    seen = set()
+    for raw in control["artifacts"]:
+        item = exact_keys(raw, ("mode", "name", "path", "sha256"), "installed control artifact")
+        logical = logical_by_name.get(item["name"])
+        if logical is None or item["name"] in seen or item["path"] != logical:
+            stop("bootstrap control artifact receipt names an unexpected artifact.")
+        seen.add(item["name"])
+        maximum = 65536 if item["name"] in ("sudoers", "unit") else 2 * 1024 * 1024
+        expected_mode = 0o440 if item["name"] == "sudoers" else 0o444 if item["name"] == "unit" else None
+        if digest(secure_file(logical, f"installed control artifact {item['name']}", maximum, expected_mode)) != item["sha256"]:
+            stop(f"installed control artifact {item['name']} differs from its sanctioned transport binding.")
+    if seen != set(BOOTSTRAP_CONTROL_RECEIPT_ARTIFACT_NAMES):
+        stop("bootstrap control artifact receipt inventory is incomplete.")
+    return bridge["candidateCommit"]
+
+
+def authority_candidate_transport_complete(value: Dict[str, object]) -> None:
+    """Prove the open transaction's own candidate was completely transported:
+    one immutable install receipt with a terminal install-only status must
+    bind exactly the authority's candidate identity."""
+    receipt_logical = f"{INSTALL_RECEIPTS_DIR}/{value['candidateCommit']}-{value['sourceArchiveSha256']}.json"
+    raw = secure_file(receipt_logical, "transaction candidate install receipt", MAX_AUTHORITY, 0o444)
+    receipt = parse_json(raw, "transaction candidate install receipt", True)
+    if not isinstance(receipt, dict) or set(receipt) != set((
+        "activationAuthorized", "authorizationSource", "backupEvidenceAuthoritative",
+        "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
+        "readyButDisabled", "releaseRoot", "schema", "sourceArchiveSha256", "status",
+    )):
+        stop("transaction candidate install receipt is not one exact closed object.")
+    if (
+        receipt["schema"] != "platform.v1-brownfield-install-receipt/v1"
+        or receipt["status"] not in ("INSTALL_ONLY_COMPLETE", "ALREADY_INSTALLED")
+        or receipt["candidateCommit"] != value["candidateCommit"]
+        or receipt["candidateTree"] != value["candidateTree"]
+        or receipt["sourceArchiveSha256"] != value["sourceArchiveSha256"]
+        or receipt["releaseRoot"] != value["releaseRoot"]
+        or receipt["authorizationSource"] != "ROOT_OPERATOR_EXPLICIT_INSTALL_ONLY"
+        or receipt["backupEvidenceAuthoritative"] is not False
+        or receipt["activationAuthorized"] is not False
+        or receipt["dataMutation"] is not False
+        or receipt["dockerMutation"] is not False
+    ):
+        stop("transaction candidate install receipt boundary/binding is invalid.")
+
+
+def verify_superseded_transport_abort_preconditions(authority: Dict[str, object], reconciliation: Dict[str, object]) -> None:
+    """Prove apply never started before admitting the zero-step stale abort.
+
+    Every condition fails closed: the live state and receipt must be
+    byte-identical to the preserved predecessor evidence, every recorded
+    predecessor runtime identity must match the live capture on the closed
+    controller projection, and no data-mutation evidence may exist for this
+    transaction authority."""
+    state_bytes = secure_file(STATE_FILE, "LOCAL_PRIVATE state", MAX_AUTHORITY, 0o600)
+    receipt_bytes = secure_file(ACTIVE_RECEIPT, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444)
+    if digest(state_bytes) != reconciliation["previousStateSha256"] or digest(receipt_bytes) != reconciliation["previousReceiptSha256"]:
+        stop("stale abort requires the live state/receipt to equal the preserved predecessor evidence.")
+    for record in reconciliation["predecessorRuntimeIdentities"]:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            stop("stale abort predecessor identity inventory is invalid.")
+        source = inspect_one(record["name"])
+        if not controller_predecessor_identity_match(record, source[1]):
+            stop(f"stale abort requires predecessor container {record['name']} to match the recorded runtime identity.")
+    evidence_dir = physical(MUTATION_EVIDENCE_DIR)
+    if os.path.isdir(evidence_dir):
+        for entry in os.listdir(evidence_dir):
+            if entry.startswith(f"{authority['documentId']}-"):
+                stop("stale abort requires no materialized data-mutation evidence for the transaction authority.")
+
+
+def superseded_transport_abort_journal(authority: Dict[str, object], authority_bytes: bytes, reconciliation: Dict[str, object]) -> Dict[str, object]:
+    """One zero-step ABORTED journal for a transaction that provably never
+    entered apply: nothing was mutated, so nothing is undone."""
+    marker_bytes = secure_file(RECONCILIATION, "controller reconciliation marker", MAX_JSON, 0o600)
+    transaction_id = digest(authority_bytes + marker_bytes)
+    now = int(time.time())
+    journal = {
+        "authorityDocumentId": authority["documentId"],
+        "authoritySha256": digest(authority_bytes),
+        "beganAtUnixSeconds": reconciliation["beganAtUnixSeconds"],
+        "createdAtUnixSeconds": now,
+        "dataMutationEvidence": [],
+        "dataMutationStatus": {item["id"]: "PENDING" for item in authority["authorizedDataMutations"]},
+        "deploymentConfigPreimage": materialize_deployment_config_preimage(transaction_id),
+        "evidencePreimages": materialize_evidence_preimages(transaction_id),
+        "phase": "ABORTED",
+        "reconciliationSha256": digest(marker_bytes),
+        "schema": JOURNAL_SCHEMA,
+        "steps": [],
+        "transactionId": transaction_id,
+        "updatedAtUnixSeconds": now,
+    }
+    atomic_json(JOURNAL, journal, 0o600, False)
+    return validate_journal(journal, authority, authority_bytes, reconciliation)
 
 
 def prepare() -> Dict[str, object]:
@@ -5296,11 +5505,32 @@ def predecessor_map(reconciliation: Dict[str, object]) -> Dict[str, Dict[str, ob
     return result
 
 
+def controller_predecessor_identity_match(before: object, live: object) -> bool:
+    """Whether one live reconciler container identity proves the controller-
+    recorded predecessor identity unchanged.
+
+    The controller begin records exactly the closed field set below while the
+    reconciler capture additionally carries the compose ``project`` for its
+    own rollback purposes.  The comparison is one explicit closed-set
+    projection: the recorded key set must be exact, every recorded field must
+    be present and equal in the live capture, and the only tolerated extra
+    live key is ``project``; any other difference fails closed."""
+    fields = (
+        "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
+        "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state",
+    )
+    if not isinstance(before, dict) or set(before) != set(fields):
+        return False
+    if not isinstance(live, dict) or set(live) != set(fields) | {"project"}:
+        return False
+    return all(before[key] == live[key] for key in fields)
+
+
 def materialize_rollback_spec(transaction_id: str, before: Optional[Dict[str, object]]) -> Tuple[Optional[str], Optional[str]]:
     if before is None:
         return None, None
     source = inspect_one(before["name"])
-    if source[1] != before:
+    if not controller_predecessor_identity_match(before, source[1]):
         stop(f"rollback source {before['name']} differs from controller predecessor evidence.")
     logical_directory = f"{ROLLBACK_SPEC_DIR}/{transaction_id}"
     ensure_directory(ROLLBACK_SPEC_DIR, 0o700)
@@ -6914,7 +7144,7 @@ def abort() -> Dict[str, object]:
     succeeds, the fixed operator sequence is controller ``abort-maintenance``
     followed by controller ``verify``.
     """
-    authority, authority_bytes = read_authority()
+    authority, authority_bytes = read_authority(check_artifacts=False, check_source_archive=False)
     validate_authority_material(authority)
     marker_exists = os.path.lexists(physical(RECONCILIATION))
     journal_exists = os.path.lexists(physical(JOURNAL))
@@ -6924,6 +7154,31 @@ def abort() -> Dict[str, object]:
         return cleanup_consumed_abort_without_current_journal(authority, authority_bytes)
     if not marker_exists:
         return {"authorityDocumentId": authority["documentId"], "status": "ABORTED", "transactionId": None}
+    strict_tooling = installed_artifacts_match_authority(authority) and installed_source_archive_matches_authority(authority)
+    if not strict_tooling:
+        # The open transaction belongs to a superseded exact release: a newer
+        # sanctioned bootstrap transport is installed (proven by the receipt
+        # chain below), so the transaction's begin-era tooling is gone and its
+        # rollback plan cannot be executed.  Because apply provably never
+        # started (every precondition fails closed), the honest closure is one
+        # zero-step ABORTED journal plus its record; the fixed operator
+        # sequence stays controller ``abort-maintenance`` then ``verify``.
+        coherent_candidate = latest_transport_tooling_coherence()
+        if coherent_candidate == authority["candidateCommit"]:
+            stop("superseding-transport abort requires a different installed candidate.")
+        authority_candidate_transport_complete(authority)
+        reconciliation = read_reconciliation(authority, authority_bytes)
+        verify_superseded_transport_abort_preconditions(authority, reconciliation)
+        configure_secret_identity_readonly()
+        journal = superseded_transport_abort_journal(authority, authority_bytes, reconciliation)
+        record, data, archive = materialize_abort_record(authority, authority_bytes, journal)
+        return {
+            "abortRecordPath": archive,
+            "abortRecordSha256": digest(data),
+            "authorityDocumentId": authority["documentId"],
+            "status": record["status"],
+            "transactionId": journal["transactionId"],
+        }
     reconciliation = read_reconciliation(authority, authority_bytes)
     configure_secret_identity_readonly()
     journal = read_or_create_journal(authority, authority_bytes, reconciliation)
