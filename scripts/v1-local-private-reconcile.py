@@ -2702,6 +2702,38 @@ def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
     return lane
 
 
+def existing_recovery_binding() -> Dict[str, object]:
+    """The live scheduler recovery binding reused by the validation checkpoint.
+
+    Sourced from the ACTIVE receipt's localArtifactTrust (the controller's own
+    recovery binding) and verified byte-for-byte, identity-for-identity, against
+    the current export file; any drift fails closed."""
+    receipt = parse_json(secure_file(ACTIVE_RECEIPT, "LOCAL_PRIVATE active receipt", MAX_AUTHORITY, 0o444), "LOCAL_PRIVATE active receipt", True)
+    trust = receipt.get("localArtifactTrust")
+    if not isinstance(trust, dict) or trust.get("status") != "PASS" or trust.get("mode") != "LOCAL_DOCKER_IMMUTABLE_IMAGE_ID":
+        stop("active receipt local artifact trust is not one PASS LOCAL_DOCKER_IMMUTABLE_IMAGE_ID binding.")
+    recovery = trust.get("schedulerRecovery")
+    fields = (
+        "archiveFormat", "configDigest", "configHash", "containerId", "exportIdentity", "exportLabels", "exportPath",
+        "exportSha256", "exportSizeBytes", "imageIndexDigest", "imageIndexPath", "imageManifestDigest", "manifestConfig",
+        "recoveryImageId", "recoveryTag", "runningImageId",
+    )
+    value = exact_keys(recovery, fields, "active receipt scheduler recovery binding")
+    if value["archiveFormat"] != "OCI_DOCKER_SAVE_V1" or value["exportPath"] != SCHEDULER_RECOVERY_EXPORT:
+        stop("active receipt scheduler recovery binding is not the fixed export.")
+    for key in ("configHash", "containerId", "exportSha256"):
+        require_evidence_sha(value[key], f"active receipt scheduler recovery {key}")
+    for key in ("configDigest", "imageIndexDigest", "imageManifestDigest", "recoveryImageId", "runningImageId"):
+        if not isinstance(value[key], str) or IMAGE_ID_RE.fullmatch(value[key]) is None:
+            stop(f"active receipt scheduler recovery {key} is not one canonical image/digest identity.")
+    if value["recoveryImageId"] == value["runningImageId"]:
+        stop("active receipt scheduler recovery running/recovery image IDs are not distinct.")
+    export_snapshot = stable_recovery_export_snapshot()
+    if export_snapshot != {"identity": value["exportIdentity"], "sha256": value["exportSha256"], "sizeBytes": value["exportSizeBytes"]}:
+        stop("scheduler recovery image export differs from the active receipt binding.")
+    return value
+
+
 def write_validation_checkpoint(authority: Dict[str, object], binding: Dict[str, object]) -> Dict[str, object]:
     """Honest non-production checkpoint: reuse references, no PASS claims."""
     lane = load_validation_lane(authority["candidateCommit"])
