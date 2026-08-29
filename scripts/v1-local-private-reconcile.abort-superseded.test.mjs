@@ -44,7 +44,9 @@ recorded = json.loads(${JSON.stringify(JSON.stringify(recorded))})
 live = json.loads(${JSON.stringify(JSON.stringify(live))})
 print(json.dumps({
   'match': m['controller_predecessor_identity_match'](recorded, live),
-  'drift': m['controller_predecessor_identity_match'](dict(recorded, containerId='${"c".repeat(64)}'), live),
+  'containerDrift': m['controller_predecessor_identity_match'](dict(recorded, containerId='${"c".repeat(64)}'), live),
+  'imageDrift': m['controller_predecessor_identity_match'](dict(recorded, imageId='sha256:' + '${"9".repeat(64)}'), live),
+  'networkDrift': m['controller_predecessor_identity_match'](dict(recorded, networkMembership=[]), live),
   'extraLiveKey': m['controller_predecessor_identity_match'](recorded, dict(live, unexpected='x')),
   'recordedWithProject': m['controller_predecessor_identity_match'](dict(recorded, project='platform_infra'), live),
   'missingLiveField': m['controller_predecessor_identity_match'](recorded, {k: v for k, v in live.items() if k != 'semanticSha256'}),
@@ -53,7 +55,9 @@ print(json.dumps({
 }))`);
   assert.deepEqual(result, {
     match: true,
-    drift: false,
+    containerDrift: false,
+    imageDrift: false,
+    networkDrift: false,
     extraLiveKey: false,
     recordedWithProject: false,
     missingLiveField: false,
@@ -234,6 +238,8 @@ test("abort source keeps both closure routes and their exact guards", () => {
   assert.match(preconditions, /controller_predecessor_identity_match\(record, source\[1\]\)/);
   assert.match(preconditions, /data-mutation evidence/);
   const projection = runPython("import inspect; print(inspect.getsource(m['controller_predecessor_identity_match']))");
+  assert.match(projection, /RECONCILER_COMPARABLE_IDENTITY_FIELDS/);
   assert.match(projection, /set\(before\) != set\(fields\)/);
   assert.match(projection, /set\(fields\) \| \{"project"\}/);
+  assert.match(projection, /for key in comparable/);
 });

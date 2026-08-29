@@ -5505,25 +5505,39 @@ def predecessor_map(reconciliation: Dict[str, object]) -> Dict[str, Dict[str, ob
     return result
 
 
+CONTROLLER_RECORDED_IDENTITY_FIELDS = (
+    "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
+    "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state",
+)
+RECONCILER_COMPARABLE_IDENTITY_FIELDS = (
+    "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
+    "name", "networkMembership", "service", "state",
+)
+
+
 def controller_predecessor_identity_match(before: object, live: object) -> bool:
     """Whether one live reconciler container identity proves the controller-
-    recorded predecessor identity unchanged.
+    recorded predecessor identity unchanged on every implementation-independent
+    field.
 
-    The controller begin records exactly the closed field set below while the
-    reconciler capture additionally carries the compose ``project`` for its
-    own rollback purposes.  The comparison is one explicit closed-set
-    projection: the recorded key set must be exact, every recorded field must
-    be present and equal in the live capture, and the only tolerated extra
-    live key is ``project``; any other difference fails closed."""
-    fields = (
-        "configHash", "containerId", "exitCode", "health", "imageId", "imageReference",
-        "name", "networkMembership", "runtimeConfigSha256", "semanticSha256", "service", "state",
-    )
+    The controller begin records exactly CONTROLLER_RECORDED_IDENTITY_FIELDS
+    and the controller's own capture is the sole authority for the two
+    semantic digest fields (runtimeConfigSha256, semanticSha256): the
+    reconciler's semantic model is a different implementation whose digests
+    are not comparable across modules, so the closed-set projection here
+    compares the ten implementation-independent fields and the controller
+    verifies the full recorded set during abort-maintenance.  The reconciler
+    capture additionally carries the compose ``project`` for its own rollback
+    purposes; the recorded key set must be exact, the live key set must be
+    exactly the recorded set plus ``project``, and any difference on any
+    comparable field fails closed."""
+    fields = CONTROLLER_RECORDED_IDENTITY_FIELDS
+    comparable = RECONCILER_COMPARABLE_IDENTITY_FIELDS
     if not isinstance(before, dict) or set(before) != set(fields):
         return False
     if not isinstance(live, dict) or set(live) != set(fields) | {"project"}:
         return False
-    return all(before[key] == live[key] for key in fields)
+    return all(before[key] == live[key] for key in comparable)
 
 
 def materialize_rollback_spec(transaction_id: str, before: Optional[Dict[str, object]]) -> Tuple[Optional[str], Optional[str]]:
