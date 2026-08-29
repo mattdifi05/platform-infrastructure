@@ -193,14 +193,50 @@ without = dict(bridge); without.pop('documentId')
 bridge['documentId'] = m['digest'](m['canonical'](without).encode())
 put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
 proven = m['latest_transport_tooling_coherence']()
+signed = {
+    'candidateCommit': commit, 'candidateTree': tree, 'checkpointSha256': bridge['checkpointAfterSha256'],
+    'createdAtUnixSeconds': 1800000000,
+    'greenfieldPreimagePath': '/home/platform_infrastructure/greenfield-live/render/preimage/greenfield-deployment.env',
+    'greenfieldPreimageSha256': bridge['stagingEnvironmentSha256'],
+    'greenfieldProvenancePath': '/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json',
+    'greenfieldProvenanceReleaseCommit': 'd' * 40, 'greenfieldProvenanceSha256': 'd' * 64,
+    'priorCandidateCommit': 'd' * 40, 'priorCandidateTree': 'e' * 40,
+    'priorCheckpointAfterSha256': 'e' * 64, 'priorReceiptDocumentId': 'f' * 64,
+    'priorStagingEnvironmentSha256': bridge['stagingEnvironmentSha256'],
+    'reasonCode': m['BOOTSTRAP_SUCCESSOR_SANCTION_REASON'],
+    'runtimeActiveReceiptSha256': '1' * 64, 'runtimeAuthorityDocumentId': '2' * 64,
+    'runtimeAuthoritySha256': '3' * 64, 'runtimeCandidateCommit': 'f' * 40,
+    'runtimeCandidateTree': '1' * 40, 'runtimeSourceArchiveSha256': '4' * 64,
+    'schema': m['BOOTSTRAP_SUCCESSOR_SANCTION_SCHEMA'],
+    'signatureBase64': 'c2ln', 'sourceArchiveSha256': archive,
+}
+bridge['transportSanction'] = {
+    **signed, 'present': True, 'sanctionDigest': sha(m['canonical_bytes'](signed)),
+    'signerCertSha256': m['BOOTSTRAP_SANCTION_TRUST_CERT_SHA256'],
+}
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
+successor_proven = m['latest_transport_tooling_coherence']()
+bridge['transportSanction']['unexpected'] = True
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
+try:
+    m['latest_transport_tooling_coherence']()
+    successor_extra_stopped = False
+except m['Stop']:
+    successor_extra_stopped = True
+del bridge['transportSanction']['unexpected']
+without = dict(bridge); without.pop('documentId'); bridge['documentId'] = m['digest'](m['canonical'](without).encode())
+put(m['BOOTSTRAP_BRIDGE_RECEIPT_FILE'], m['canonical_bytes'](bridge), 0o400)
 put(m['RECONCILER'], b'replaced-reconciler-bytes', 0o555)
 try:
     m['latest_transport_tooling_coherence']()
     drift_stopped = False
 except m['Stop']:
     drift_stopped = True
-print(json.dumps({'proven': proven == commit, 'driftStopped': drift_stopped}))`);
-  assert.deepEqual(value, { proven: true, driftStopped: true });
+print(json.dumps({'proven': proven == commit, 'successorProven': successor_proven == commit,
+ 'successorExtraStopped': successor_extra_stopped, 'driftStopped': drift_stopped}))`);
+  assert.deepEqual(value, { proven: true, successorProven: true, successorExtraStopped: true, driftStopped: true });
 });
 
 test("superseded transport abort journal is one zero-step ABORTED transaction", () => {

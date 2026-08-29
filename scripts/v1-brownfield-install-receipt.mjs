@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const V1_EXACT_RELEASE_AUTHORITY_PATH = "/var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json";
@@ -15,6 +16,10 @@ export const V1_INSTALL_READY_BUT_DISABLED = Object.freeze([
 const RECEIPT_SCHEMA = "platform.v1-brownfield-install-receipt/v1";
 const CONTROL_ARTIFACT_RECEIPT_SCHEMA = "platform.v1-control-artifact-install-receipt/v1";
 const BOOTSTRAP_BRIDGE_RECEIPT_SCHEMA = "platform.v1-brownfield-bootstrap-bridge-receipt/v1";
+const SUCCESSOR_SANCTION_SCHEMA = "platform.v1-transport-successor-sanction/v2";
+const SUCCESSOR_SANCTION_REASON = "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE";
+const SANCTION_TRUST_CERT_SHA256 = "358dcd60560f0976f6b27db0972cc996d336516a529c48bf4236dcf22e0c55a2";
+const GREENFIELD_LIVE_ENV_ROOT = "/home/platform_infrastructure/greenfield-live/";
 const NODE_RUNTIME_PREREQUISITE_RECEIPT_SCHEMA = "platform.v1-node-runtime-prerequisite-receipt/v1";
 const AUTHORITY_SCHEMA = "platform.v1-local-private-exact-release-authority/v1";
 const BACKUP_TOOL_IMAGE_KEYS = Object.freeze([
@@ -43,6 +48,19 @@ const EXACT_BOOTSTRAP_BRIDGE_RECEIPT_FIELDS = Object.freeze([
   "legacyConsumerSha256", "legacyV1SudoersSha256", "nodeRuntimeReceiptSha256",
   "releaseRoot", "schema", "sourceArchiveAfterSha256", "sourceArchiveBeforeSha256",
   "stagingEnvironmentSha256", "stagingMutation", "status", "transportSanction",
+]);
+const EXACT_SUCCESSOR_SANCTION_FIELDS = Object.freeze([
+  "candidateCommit", "candidateTree", "checkpointSha256", "createdAtUnixSeconds",
+  "greenfieldPreimagePath", "greenfieldPreimageSha256", "greenfieldProvenancePath",
+  "greenfieldProvenanceReleaseCommit", "greenfieldProvenanceSha256",
+  "priorCandidateCommit", "priorCandidateTree", "priorCheckpointAfterSha256",
+  "priorReceiptDocumentId", "priorStagingEnvironmentSha256", "reasonCode", "schema",
+  "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+  "runtimeCandidateCommit", "runtimeCandidateTree", "runtimeSourceArchiveSha256",
+  "signatureBase64", "sourceArchiveSha256",
+]);
+const EXACT_SUCCESSOR_SANCTION_SUMMARY_FIELDS = Object.freeze([
+  ...EXACT_SUCCESSOR_SANCTION_FIELDS, "present", "sanctionDigest", "signerCertSha256",
 ]);
 const EXACT_PREPARE_RECEIPT_FIELDS = Object.freeze([
   "authorityDocumentId", "authorityPath", "authoritySha256", "renderSha256",
@@ -519,6 +537,75 @@ export function verifyV1ControlArtifactReceipt(options_) {
   return Object.freeze({ ...receipt, artifacts: Object.freeze(normalized.map((item) => Object.freeze({ ...item }))) });
 }
 
+function verifyBootstrapTransportSanction(receipt) {
+  const sanction = receipt.transportSanction;
+  if (!sanction || typeof sanction !== "object" || Array.isArray(sanction)) {
+    invalid("V1 bootstrap bridge transportSanction is not an object.");
+  }
+  const keys = Object.keys(sanction).sort();
+  if (sanction.present === false) {
+    if (JSON.stringify(keys) !== JSON.stringify(["present"])) {
+      invalid("V1 bootstrap bridge transportSanction sentinel is invalid.");
+    }
+    return;
+  }
+  const legacyKeys = ["present", "reasonCode", "sanctionDigest", "signerCertSha256"];
+  if (JSON.stringify(keys) === JSON.stringify(legacyKeys)) {
+    if (sanction.present !== true
+      || sanction.reasonCode !== "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES"
+      || !/^[0-9a-f]{64}$/.test(sanction.sanctionDigest)
+      || sanction.sanctionDigest === "0".repeat(64)
+      || !/^[0-9a-f]{64}$/.test(sanction.signerCertSha256)
+      || sanction.signerCertSha256 === "0".repeat(64)) {
+      invalid("V1 bootstrap bridge transportSanction payload is invalid.");
+    }
+    return;
+  }
+  exactObject(sanction, EXACT_SUCCESSOR_SANCTION_SUMMARY_FIELDS, "V1 bootstrap successor sanction summary");
+  if (sanction.present !== true || sanction.schema !== SUCCESSOR_SANCTION_SCHEMA
+    || sanction.reasonCode !== SUCCESSOR_SANCTION_REASON
+    || sanction.signerCertSha256 !== SANCTION_TRUST_CERT_SHA256
+    || !Number.isSafeInteger(sanction.createdAtUnixSeconds) || sanction.createdAtUnixSeconds <= 0) {
+    invalid("V1 bootstrap successor sanction identity is invalid.");
+  }
+  for (const field of [
+    "checkpointSha256", "greenfieldPreimageSha256", "greenfieldProvenanceSha256",
+    "priorCheckpointAfterSha256", "priorReceiptDocumentId", "priorStagingEnvironmentSha256",
+    "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+    "runtimeSourceArchiveSha256", "sanctionDigest", "signerCertSha256",
+    "sourceArchiveSha256",
+  ]) lowercaseSha256(sanction[field], `V1 bootstrap successor sanction ${field}`);
+  for (const field of [
+    "candidateCommit", "candidateTree", "greenfieldProvenanceReleaseCommit",
+    "priorCandidateCommit", "priorCandidateTree", "runtimeCandidateCommit", "runtimeCandidateTree",
+  ]) {
+    gitObject(sanction[field], `V1 bootstrap successor sanction ${field}`);
+    if (sanction[field] === "0".repeat(40)) invalid(`V1 bootstrap successor sanction ${field} is a placeholder.`);
+  }
+  for (const field of ["greenfieldPreimagePath", "greenfieldProvenancePath"]) {
+    const pathname = sanction[field];
+    if (typeof pathname !== "string" || pathname === "/home/platform_infrastructure/platform-infrastructure/.env"
+      || !pathname.startsWith(GREENFIELD_LIVE_ENV_ROOT) || path.posix.normalize(pathname) !== pathname) {
+      invalid(`V1 bootstrap successor sanction ${field} is invalid.`);
+    }
+  }
+  if (typeof sanction.signatureBase64 !== "string" || sanction.signatureBase64.length === 0
+    || sanction.signatureBase64.length > 32 * 1024
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(sanction.signatureBase64)) {
+    invalid("V1 bootstrap successor sanction signature is invalid.");
+  }
+  const signed = Object.fromEntries(EXACT_SUCCESSOR_SANCTION_FIELDS.map((field) => [field, sanction[field]]));
+  if (sanction.sanctionDigest !== sha256(`${stableJson(signed)}\n`)
+    || sanction.candidateCommit !== receipt.candidateCommit
+    || sanction.candidateTree !== receipt.candidateTree
+    || sanction.checkpointSha256 !== receipt.checkpointAfterSha256
+    || sanction.sourceArchiveSha256 !== receipt.sourceArchiveAfterSha256
+    || sanction.greenfieldPreimageSha256 !== receipt.stagingEnvironmentSha256
+    || sanction.greenfieldPreimageSha256 !== sanction.priorStagingEnvironmentSha256) {
+    invalid("V1 bootstrap successor sanction receipt binding is invalid.");
+  }
+}
+
 export function verifyV1BootstrapBridgeReceipt(options_) {
   const expected = expectedBinding(options_);
   const { value: receipt } = readCanonicalObject(options_.file, "V1 bootstrap bridge receipt", MAX_RECEIPT_BYTES);
@@ -540,22 +627,7 @@ export function verifyV1BootstrapBridgeReceipt(options_) {
     "legacyBroadSudoersAfterSha256", "legacyBroadSudoersBeforeSha256", "legacyConsumerSha256",
     "legacyV1SudoersSha256", "sourceArchiveBeforeSha256", "stagingEnvironmentSha256",
   ]) lowercaseSha256(receipt[field], "V1 bootstrap bridge " + field);
-  const sanction = receipt.transportSanction;
-  if (!sanction || typeof sanction !== "object" || Array.isArray(sanction)) {
-    invalid("V1 bootstrap bridge transportSanction is not an object.");
-  } else {
-    const sanctionKeys = Object.keys(sanction).sort();
-    if (sanction.present === true) {
-      if (JSON.stringify(sanctionKeys) !== JSON.stringify(["present", "reasonCode", "sanctionDigest", "signerCertSha256"])
-        || sanction.reasonCode !== "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES"
-        || !/^[0-9a-f]{64}$/.test(sanction.sanctionDigest)
-        || !/^[0-9a-f]{64}$/.test(sanction.signerCertSha256)) {
-        invalid("V1 bootstrap bridge transportSanction payload is invalid.");
-      }
-    } else if (sanction.present !== false || JSON.stringify(sanctionKeys) !== JSON.stringify(["present"])) {
-      invalid("V1 bootstrap bridge transportSanction sentinel is invalid.");
-    }
-  }
+  verifyBootstrapTransportSanction(receipt);
   if (receipt.legacyConsumerSha256 !== "9902e8c83f12cee7d16ee97b660cde12444da479acbe85f9efa4c613d82f76a9"
     || receipt.legacyV1SudoersSha256 !== sha256([
       "Defaults:platform_infrastructure env_reset",

@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const bridge = path.join(import.meta.dirname, "v1-brownfield-bootstrap-bridge.py");
@@ -170,19 +170,19 @@ function createFixture(t) {
   };
 }
 
-function advanceCandidate(candidate) {
-  write(path.join(candidate.seed, "README.md"), "transport-only bootstrap fixture candidate B\n", 0o644);
+function advanceCandidate(candidate, label = "B") {
+  write(path.join(candidate.seed, "README.md"), `transport-only bootstrap fixture candidate ${label}\n`, 0o644);
   write(
     path.join(candidate.seed, "scripts", "v1-brownfield-install-consumer.py"),
-    Buffer.concat([fs.readFileSync(consumer), Buffer.from("\n# exact candidate B installer bytes\n")]),
+    Buffer.concat([fs.readFileSync(consumer), Buffer.from(`\n# exact candidate ${label} installer bytes\n`)]),
     0o755,
   );
-  write(path.join(candidate.seed, "scripts", "v1-local-private-control.py"), "#!/usr/bin/python3 -I\n# candidate B controller\nraise SystemExit(0)\n", 0o644);
-  write(path.join(candidate.seed, "scripts", "v1-local-private-reconcile.py"), "#!/usr/bin/python3 -I\n# candidate B reconciler\nraise SystemExit(0)\n", 0o644);
-  write(path.join(candidate.seed, "systemd", "platform-v1-local-private-control.service"), "[Unit]\nDescription=V1 fixture candidate B\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n", 0o644);
+  write(path.join(candidate.seed, "scripts", "v1-local-private-control.py"), `#!/usr/bin/python3 -I\n# candidate ${label} controller\nraise SystemExit(0)\n`, 0o644);
+  write(path.join(candidate.seed, "scripts", "v1-local-private-reconcile.py"), `#!/usr/bin/python3 -I\n# candidate ${label} reconciler\nraise SystemExit(0)\n`, 0o644);
+  write(path.join(candidate.seed, "systemd", "platform-v1-local-private-control.service"), `[Unit]\nDescription=V1 fixture candidate ${label}\n[Service]\nType=simple\nExecStart=/usr/local/libexec/platform-v1-local-private-control supervise\n`, 0o644);
   git(candidate.seed, ["add", "."]);
-  git(candidate.seed, ["commit", "--quiet", "-m", "candidate B"]);
-  return { ...candidate, ...buildTransport(candidate.seed, candidate.root, "b", { checkpointUnixSeconds: candidate.checkpointUnixSeconds }) };
+  git(candidate.seed, ["commit", "--quiet", "-m", `candidate ${label}`]);
+  return { ...candidate, ...buildTransport(candidate.seed, candidate.root, label.toLowerCase(), { checkpointUnixSeconds: candidate.checkpointUnixSeconds }) };
 }
 
 function execute(candidate) {
@@ -478,10 +478,12 @@ function stageGreenfieldPreimage(candidate, greenfieldEnv, releaseCommit) {
     preimageSha256: sha(greenfieldEnv),
     imageIdentities,
   };
-  write(fixed(candidate.root, provenancePath), Buffer.from(`${stable(provenance)}\n`), 0o400);
+  const provenanceBytes = Buffer.from(`${stable(provenance)}\n`);
+  write(fixed(candidate.root, provenancePath), provenanceBytes, 0o400);
   candidate.environment.PLATFORM_V1_LIVE_ENV = envPath;
   candidate.environment.PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE = "1";
   candidate.environment.PLATFORM_V1_LIVE_ENV_PROVENANCE = provenancePath;
+  return { envPath, greenfieldEnv, provenance, provenanceBytes, provenancePath };
 }
 
 test("greenfield preimage selection binds the bridge to the greenfield .env and never the brownfield .env", (t) => {
@@ -577,6 +579,118 @@ function craftTransportSanction(priorBootstrap, candidateManifest, overrides = {
     assert.equal(signResult.status, 0, signResult.stderr?.toString());
     signatureBase64 = fs.readFileSync(signatureOut).toString("base64");
   }
+  return Buffer.from(`${stable({ ...core, signatureBase64 })}\n`);
+}
+
+function stageTransitionalRuntimeAuthority(candidate, label = "runtime-predecessor") {
+  const runtimeCommit = sha(`commit-${label}`).slice(0, 40);
+  const runtimeTree = sha(`tree-${label}`).slice(0, 40);
+  const runtimeSource = Buffer.from(`exact runtime authority source archive ${label}\n`);
+  const runtimeSourceSha256 = sha(runtimeSource);
+  const runtimeRelease = `/srv/platform-infrastructure/releases/${runtimeCommit}-${runtimeSourceSha256}`;
+  const runtimeReconciler = Buffer.from(`#!/usr/bin/python3 -I\n# ${label} exact reconciler\nraise SystemExit(0)\n`);
+  fs.chmodSync(fixed(candidate.root, "/usr/local/libexec/platform-v1-local-private-reconcile"), 0o700);
+  write(fixed(candidate.root, "/usr/local/libexec/platform-v1-local-private-reconcile"), runtimeReconciler, 0o555);
+  fs.chmodSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar"), 0o600);
+  write(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar"), runtimeSource, 0o444);
+  const paths = {
+    installer: "/usr/local/libexec/platform-v1-brownfield-install-consumer",
+    controller: "/usr/local/libexec/platform-v1-local-private-control",
+    reconciler: "/usr/local/libexec/platform-v1-local-private-reconcile",
+    unit: "/etc/systemd/system/platform-v1-local-private-control.service",
+    sudoers: "/etc/sudoers.d/platform-v1-local-private-control",
+  };
+  const artifacts = Object.fromEntries(Object.entries(paths).map(([name, logical]) => [name, {
+    path: logical, sha256: sha(fs.readFileSync(fixed(candidate.root, logical))),
+  }]));
+  artifacts.composeWrapper = { path: `${runtimeRelease}/scripts/compose-vps.sh`, sha256: sha("runtime compose wrapper") };
+  const authorityBase = {
+    activeManagedContainerNames: [], artifacts, authorityMode: "LOCAL_PRIVATE", authorizedDataMutations: [],
+    backupToolImages: {}, candidateCommit: runtimeCommit, candidateTree: runtimeTree, checkoutProof: {},
+    controllerVerificationScope: "AUTHORITY_ARCHIVE_RELEASE_RENDER_ONLY_NOT_GITHUB", disabledComposeServices: [],
+    evidenceProducer: {}, expectedContainerNames: [], legacyNetworkAttachments: [], legacyRouteChecks: [],
+    legacyUnmanagedContainers: [], preservedLegacyContainerNames: [], recoveryEscrowCertificate: {},
+    releaseRoot: runtimeRelease, renderEnvironment: {}, renderSha256: sha("runtime render"), runtimeIdentity: {},
+    schema: "platform.v1-local-private-exact-release-authority/v1", serviceTargets: [],
+    sourceArchiveSha256: runtimeSourceSha256, status: "AUTHORIZED",
+  };
+  const authority = { ...authorityBase, documentId: sha(stable(authorityBase)) };
+  const authorityBytes = Buffer.from(`${stable(authority)}\n`);
+  const authorityPath = "/var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json";
+  if (fs.existsSync(fixed(candidate.root, authorityPath))) fs.chmodSync(fixed(candidate.root, authorityPath), 0o600);
+  write(fixed(candidate.root, authorityPath), authorityBytes, 0o444);
+  write(fixed(candidate.root, `/var/lib/platform-infrastructure/v1/local-private/release-authorities/${authority.documentId}.json`), authorityBytes, 0o444);
+  const stateBytes = Buffer.from(`${stable({ fixture: label, schema: "platform.v1-local-private-control-state/v1", status: "ACTIVE" })}\n`);
+  const receiptBytes = Buffer.from(`${stable({ fixture: label, schema: "platform.v1-local-private-control-receipt/v1", status: "ACTIVE" })}\n`);
+  write(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/state.json"), stateBytes, 0o600);
+  if (fs.existsSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/active-receipt.json"))) {
+    fs.chmodSync(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/active-receipt.json"), 0o600);
+  }
+  write(fixed(candidate.root, "/var/lib/platform-infrastructure/v1/local-private/active-receipt.json"), receiptBytes, 0o444);
+  for (const logical of [
+    "/var/lib/platform-infrastructure/v1/local-private/reconciliation.json",
+    "/var/lib/platform-infrastructure/v1/local-private/reconcile-journal.json",
+    "/var/lib/platform-infrastructure/v1/local-private/reconciliation-abort-record.json",
+  ]) fs.rmSync(fixed(candidate.root, logical), { force: true });
+  const controllerVerify = path.join(candidate.root, "tools", `controller-verify-${label}`);
+  const transactionLock = fixed(candidate.root, "/run/lock/platform-v1-local-private-transaction.lock");
+  write(controllerVerify, `#!${python} -I
+import fcntl, os, sys
+fd = os.open(${JSON.stringify(transactionLock)}, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(75)
+with open(sys.argv[1], "rb") as stream:
+    sys.stdout.buffer.write(stream.read())
+`, 0o700);
+  candidate.environment.PLATFORM_V1_BOOTSTRAP_TEST_CONTROLLER_VERIFY = controllerVerify;
+  return {
+    runtimeActiveReceiptSha256: sha(receiptBytes),
+    runtimeAuthorityDocumentId: authority.documentId,
+    runtimeAuthoritySha256: sha(authorityBytes),
+    runtimeCandidateCommit: runtimeCommit,
+    runtimeCandidateTree: runtimeTree,
+    runtimeSourceArchiveSha256: runtimeSourceSha256,
+    runtimeReconciler,
+  };
+}
+
+function craftSuccessorSanction(priorBootstrap, candidateManifest, greenfield, runtime, overrides = {}) {
+  const trust = ensureSanctionTrust();
+  const core = {
+    candidateCommit: candidateManifest.candidateCommit,
+    candidateTree: candidateManifest.candidateTree,
+    checkpointSha256: candidateManifest.checkpointSha256,
+    createdAtUnixSeconds: Math.floor(Date.now() / 1000),
+    greenfieldPreimagePath: greenfield.envPath,
+    greenfieldPreimageSha256: sha(greenfield.greenfieldEnv),
+    greenfieldProvenancePath: greenfield.provenancePath,
+    greenfieldProvenanceReleaseCommit: greenfield.provenance.releaseCommit,
+    greenfieldProvenanceSha256: sha(greenfield.provenanceBytes),
+    priorCandidateCommit: priorBootstrap.candidateCommit,
+    priorCandidateTree: priorBootstrap.candidateTree,
+    priorCheckpointAfterSha256: priorBootstrap.checkpointAfterSha256,
+    priorReceiptDocumentId: priorBootstrap.documentId,
+    priorStagingEnvironmentSha256: priorBootstrap.stagingEnvironmentSha256,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE",
+    ...runtime,
+    schema: "platform.v1-transport-successor-sanction/v2",
+    sourceArchiveSha256: candidateManifest.sourceArchiveSha256,
+    ...(overrides.core ?? {}),
+  };
+  delete core.runtimeReconciler;
+  const coreBuffer = Buffer.from(`${stable(core)}\n`);
+  const coreFile = path.join(trust.root, `successor-core-${sha(coreBuffer).slice(0, 12)}.bin`);
+  const signatureOut = path.join(trust.root, `successor-sig-${sha(coreBuffer).slice(0, 12)}.der`);
+  fs.writeFileSync(coreFile, coreBuffer);
+  const signer = overrides.foreignSigner ? ensureForeignSigner() : { certPath: trust.certPath, keyPath: trust.keyPath };
+  const signResult = spawnSync(SANCTION_OPENSSL_BIN,
+    ["cms", "-sign", "-binary", "-in", coreFile, "-signer", signer.certPath, "-inkey", signer.keyPath, "-outform", "DER", "-out", signatureOut],
+    { encoding: "buffer" });
+  assert.equal(signResult.status, 0, signResult.stderr?.toString());
+  let signatureBase64 = fs.readFileSync(signatureOut).toString("base64");
+  if (overrides.tamperSignature) signatureBase64 = `${signatureBase64.slice(0, -4)}AAAA`;
   return Buffer.from(`${stable({ ...core, signatureBase64 })}\n`);
 }
 
@@ -701,4 +815,211 @@ test("a sanctioned-flow crash rolls back to the pristine divergent pre-state and
   delete candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
   const retried = execute(candidateB);
   assert.equal(retried.status, 0, retried.stderr);
+});
+
+function successorFixture(t, label = "B") {
+  const candidateA = createFixture(t);
+  const greenfieldEnv = Buffer.from("PLATFORM_MODE=LOCAL_PRIVATE\nGREENFIELD_SECRET=stable-successor-preimage\n");
+  const greenfield = stageGreenfieldPreimage(candidateA, greenfieldEnv, candidateA.commit);
+  const installedA = execute(candidateA);
+  assert.equal(installedA.status, 0, installedA.stderr);
+  const priorBootstrap = JSON.parse(installedA.stdout).bootstrap;
+  const candidateB = advanceCandidate(candidateA, label);
+  sanctionSeams(candidateB);
+  const runtime = stageTransitionalRuntimeAuthority(candidateB, `authority-before-${label.toLowerCase()}`);
+  return { candidateA, candidateB, greenfield, priorBootstrap, runtime };
+}
+
+function installSuccessorFrame(candidate, sanctionBytes, label) {
+  const transport = buildTransport(candidate.seed, candidate.root, label, {
+    checkpointUnixSeconds: candidate.checkpointUnixSeconds,
+    sanctionBytes,
+  });
+  assert.equal(transport.manifest.candidateCommit, candidate.manifest.candidateCommit);
+  assert.equal(transport.manifest.candidateTree, candidate.manifest.candidateTree);
+  assert.equal(transport.manifest.checkpointSha256, candidate.manifest.checkpointSha256);
+  assert.equal(transport.manifest.sourceArchiveSha256, candidate.manifest.sourceArchiveSha256);
+  Object.assign(candidate, transport);
+}
+
+function immutableSnapshot(candidate, logical) {
+  const pathname = fixed(candidate.root, logical);
+  const metadata = fs.statSync(pathname);
+  return { bytes: fs.readFileSync(pathname), ino: metadata.ino, mtimeMs: metadata.mtimeMs };
+}
+
+function assertImmutableSnapshot(candidate, logical, before) {
+  const pathname = fixed(candidate.root, logical);
+  const after = fs.statSync(pathname);
+  assert.deepEqual(fs.readFileSync(pathname), before.bytes, `${logical} bytes changed`);
+  assert.equal(after.ino, before.ino, `${logical} inode changed`);
+  assert.equal(after.mtimeMs, before.mtimeMs, `${logical} mtime changed`);
+}
+
+test("a v2 operator signature authorizes exact A-to-B preimage continuity through the closed transitional authority", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const immutablePaths = [
+    greenfield.envPath,
+    greenfield.provenancePath,
+    `/home/platform_infrastructure/.v1-release-staging/${priorBootstrap.candidateCommit}/.env`,
+    "/home/platform_infrastructure/platform-infrastructure/.env",
+  ];
+  const before = new Map(immutablePaths.map((logical) => [logical, immutableSnapshot(candidateB, logical)]));
+  const sanction = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime);
+  installSuccessorFrame(candidateB, sanction, "successor-b");
+
+  const result = execute(candidateB);
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = JSON.parse(result.stdout).bootstrap;
+  assert.equal(receipt.candidateCommit, candidateB.commit);
+  assert.equal(receipt.stagingEnvironmentSha256, sha(greenfield.greenfieldEnv));
+  assert.equal(receipt.transportSanction.schema, "platform.v1-transport-successor-sanction/v2");
+  assert.equal(receipt.transportSanction.reasonCode, "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE");
+  assert.equal(receipt.transportSanction.priorReceiptDocumentId, priorBootstrap.documentId);
+  assert.equal(receipt.transportSanction.runtimeAuthorityDocumentId, runtime.runtimeAuthorityDocumentId);
+  assert.equal(receipt.transportSanction.checkpointSha256, candidateB.manifest.checkpointSha256);
+  assert.equal(receipt.transportSanction.sourceArchiveSha256, candidateB.manifest.sourceArchiveSha256);
+  for (const logical of immutablePaths) assertImmutableSnapshot(candidateB, logical, before.get(logical));
+});
+
+test("legacy v1 sanction cannot authorize successor continuity and target predeploy inputs remain untouched", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const sourcePath = "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar";
+  const checkpointPath = "/var/lib/platform-infrastructure/v1/predeploy/current/install-checkpoint.json";
+  const protectedPaths = [greenfield.envPath, greenfield.provenancePath, sourcePath, checkpointPath];
+  const before = new Map(protectedPaths.map((logical) => [logical, immutableSnapshot(candidateB, logical)]));
+  const legacy = craftTransportSanction(priorBootstrap, candidateB.manifest);
+  installSuccessorFrame(candidateB, legacy, "successor-v1-rejected");
+
+  const result = execute(candidateB);
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /not one exact closed object/);
+  for (const logical of protectedPaths) assertImmutableSnapshot(candidateB, logical, before.get(logical));
+  assert.deepEqual(
+    fs.readFileSync(fixed(candidateB.root, "/usr/local/libexec/platform-v1-local-private-reconcile")),
+    runtime.runtimeReconciler,
+  );
+});
+
+test("a tampered v2 successor signature fails closed before target predeploy mutation", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const sourcePath = "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar";
+  const checkpointPath = "/var/lib/platform-infrastructure/v1/predeploy/current/install-checkpoint.json";
+  const sourceBefore = immutableSnapshot(candidateB, sourcePath);
+  const checkpointBefore = immutableSnapshot(candidateB, checkpointPath);
+  const tampered = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime, { tamperSignature: true });
+  installSuccessorFrame(candidateB, tampered, "successor-tampered");
+
+  const result = execute(candidateB);
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /signature rejected/);
+  assertImmutableSnapshot(candidateB, sourcePath, sourceBefore);
+  assertImmutableSnapshot(candidateB, checkpointPath, checkpointBefore);
+});
+
+test("a valid B-bound successor signature cannot be replayed for candidate C", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const sanctionB = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime);
+  installSuccessorFrame(candidateB, sanctionB, "successor-replay-b");
+  const installedB = execute(candidateB);
+  assert.equal(installedB.status, 0, installedB.stderr);
+
+  const candidateC = advanceCandidate(candidateB, "C");
+  sanctionSeams(candidateC);
+  stageTransitionalRuntimeAuthority(candidateC, "authority-before-c");
+  installSuccessorFrame(candidateC, sanctionB, "successor-replay-c");
+  const sourceBefore = immutableSnapshot(candidateC, "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar");
+  const result = execute(candidateC);
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /successor transport sanction binding is invalid/);
+  assertImmutableSnapshot(candidateC, "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar", sourceBefore);
+});
+
+test("same-candidate retry with a regenerated checkpoint requires and accepts one fresh v2 signature", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const firstSanction = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime);
+  installSuccessorFrame(candidateB, firstSanction, "successor-checkpoint-b");
+  const first = execute(candidateB);
+  assert.equal(first.status, 0, first.stderr);
+  const priorB = JSON.parse(first.stdout).bootstrap;
+
+  Object.assign(candidateB, buildTransport(candidateB.seed, candidateB.root, "successor-checkpoint-b-fresh", {
+    checkpointUnixSeconds: candidateB.checkpointUnixSeconds + 1,
+  }));
+  const persistedRuntime = Object.fromEntries([
+    "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+    "runtimeCandidateCommit", "runtimeCandidateTree", "runtimeSourceArchiveSha256",
+  ].map((field) => [field, priorB.transportSanction[field]]));
+  const freshSanction = craftSuccessorSanction(priorB, candidateB.manifest, greenfield, persistedRuntime);
+  installSuccessorFrame(candidateB, freshSanction, "successor-checkpoint-b-fresh-signed");
+  const retried = execute(candidateB);
+  assert.equal(retried.status, 0, retried.stderr);
+  const receipt = JSON.parse(retried.stdout).bootstrap;
+  assert.equal(receipt.checkpointAfterSha256, candidateB.manifest.checkpointSha256);
+  assert.equal(receipt.transportSanction.sanctionDigest, sha(freshSanction));
+  assert.notEqual(receipt.transportSanction.sanctionDigest, sha(firstSanction));
+});
+
+test("a crash after the v2 receipt commit retries the exact signed frame without mutating continuity inputs", (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const sanction = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime);
+  installSuccessorFrame(candidateB, sanction, "successor-crash-forward");
+  const immutablePaths = [
+    greenfield.envPath,
+    greenfield.provenancePath,
+    `/home/platform_infrastructure/.v1-release-staging/${priorBootstrap.candidateCommit}/.env`,
+  ];
+  const before = new Map(immutablePaths.map((logical) => [logical, immutableSnapshot(candidateB, logical)]));
+  candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER = String(crashSeamAt('journal["status"] = "COMMITTED"'));
+  const crashed = execute(candidateB);
+  assert.equal(crashed.status, 87, crashed.stderr);
+  for (const logical of immutablePaths) assertImmutableSnapshot(candidateB, logical, before.get(logical));
+
+  delete candidateB.environment.PLATFORM_V1_BOOTSTRAP_TEST_CRASH_AFTER;
+  const retried = execute(candidateB);
+  assert.equal(retried.status, 0, retried.stderr);
+  const summary = JSON.parse(retried.stdout).bootstrap.transportSanction;
+  assert.equal(summary.schema, "platform.v1-transport-successor-sanction/v2");
+  assert.equal(summary.sanctionDigest, sha(sanction));
+  for (const logical of immutablePaths) assertImmutableSnapshot(candidateB, logical, before.get(logical));
+});
+
+test("successor publication fails closed while the shared LOCAL_PRIVATE transaction lock is held", async (t) => {
+  const { candidateB, greenfield, priorBootstrap, runtime } = successorFixture(t);
+  const sanction = craftSuccessorSanction(priorBootstrap, candidateB.manifest, greenfield, runtime);
+  installSuccessorFrame(candidateB, sanction, "successor-lock-contention");
+  const sourcePath = "/var/lib/platform-infrastructure/v1/predeploy/current/exact-source-archive.tar";
+  const checkpointPath = "/var/lib/platform-infrastructure/v1/predeploy/current/install-checkpoint.json";
+  const sourceBefore = immutableSnapshot(candidateB, sourcePath);
+  const checkpointBefore = immutableSnapshot(candidateB, checkpointPath);
+  const lockPath = fixed(candidateB.root, "/run/lock/platform-v1-local-private-transaction.lock");
+  const holder = spawn(python, ["-I", "-c", [
+    "import fcntl, os, sys",
+    "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)",
+    "os.fchmod(fd, 0o600)",
+    "fcntl.flock(fd, fcntl.LOCK_EX)",
+    "sys.stdout.write('locked\\n'); sys.stdout.flush()",
+    "sys.stdin.buffer.read(1)",
+  ].join("\n"), lockPath], { stdio: ["pipe", "pipe", "pipe"] });
+  t.after(() => { if (holder.exitCode === null) holder.kill("SIGKILL"); });
+  await new Promise((resolve, reject) => {
+    let stdout = "";
+    holder.stdout.setEncoding("utf8");
+    holder.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.includes("locked\n")) resolve();
+    });
+    holder.once("error", reject);
+    holder.once("exit", (code) => {
+      if (!stdout.includes("locked\n")) reject(new Error(`lock holder exited early: ${code}`));
+    });
+  });
+
+  const result = execute(candidateB);
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /another V1 LOCAL_PRIVATE maintenance transaction is active/);
+  assertImmutableSnapshot(candidateB, sourcePath, sourceBefore);
+  assertImmutableSnapshot(candidateB, checkpointPath, checkpointBefore);
+  holder.stdin.end("\n");
+  await new Promise((resolve) => holder.once("exit", resolve));
 });

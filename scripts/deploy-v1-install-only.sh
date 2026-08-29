@@ -20,6 +20,7 @@ if [ -n "${PLATFORM_V1_LIVE_ENV:-}" ]; then
   BOOTSTRAP_REMOTE_COMMAND="/usr/bin/sudo -n -- env PLATFORM_V1_LIVE_ENV='${PLATFORM_V1_LIVE_ENV}' PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE='${PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE:-1}' PLATFORM_V1_LIVE_ENV_PROVENANCE='${PLATFORM_V1_LIVE_ENV_PROVENANCE:?PLATFORM_V1_LIVE_ENV_PROVENANCE is required when PLATFORM_V1_LIVE_ENV is set}' ${BOOTSTRAP_REMOTE_COMMAND#/usr/bin/sudo -n -- }"
 fi
 PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /bin/bash -o pipefail -c "/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log"'
+VALIDATION_OPEN_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-open'
 READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 SSH=/usr/bin/ssh
 GIT=/usr/bin/git
@@ -90,6 +91,31 @@ require_input_file "V1 exact-main Node runtime prerequisite" "$NODE_RUNTIME_SOUR
 require_input_file "SSH private key" "$SSH_KEY_SOURCE"
 require_input_file "SSH known-hosts input" "$KNOWN_HOSTS_SOURCE"
 
+if [ -n "${PLATFORM_V1_LIVE_ENV:-}" ]; then
+  [ "${PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE:-1}" = 1 ] \
+    && [ -n "${PLATFORM_V1_LIVE_ENV_PROVENANCE:-}" ] \
+    || fail "The explicit greenfield preimage requires exact mode 1 and one provenance path." 65
+  "$NODE" --input-type=module - "${PLATFORM_V1_LIVE_ENV}" "${PLATFORM_V1_LIVE_ENV_PROVENANCE}" <<'NODE'
+import path from "node:path";
+const values = process.argv.slice(2);
+if (values.length !== 2 || values[0] === values[1]) throw new Error("Greenfield preimage paths are not distinct.");
+for (const value of values) {
+  if (!value.startsWith("/home/platform_infrastructure/greenfield-live/")
+    || path.posix.normalize(value) !== value || /['"\\\0\r\n]/.test(value)) {
+    throw new Error("Greenfield preimage path is not canonical and shell-safe.");
+  }
+}
+NODE
+elif [ -n "${PLATFORM_V1_LIVE_ENV_PROVENANCE:-}${PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE:-}" ]; then
+  fail "Greenfield preimage mode/provenance cannot be supplied without PLATFORM_V1_LIVE_ENV." 65
+fi
+
+INSTALL_VALIDATION_LANE=${PLATFORM_V1_INSTALL_VALIDATION_LANE:-PRODUCTION}
+case "$INSTALL_VALIDATION_LANE" in
+  PRODUCTION|FAST) ;;
+  *) fail "PLATFORM_V1_INSTALL_VALIDATION_LANE must be exactly PRODUCTION or FAST." 65 ;;
+esac
+
 "$NODE" --input-type=module - \
   "$BOOTSTRAP_RECEIPT_OUTPUT" "$CONTROL_ARTIFACT_RECEIPT_OUTPUT" "$NODE_RUNTIME_RECEIPT_OUTPUT" \
   "$PREPARE_RECEIPT_OUTPUT" "$AUTHORITY_OUTPUT" <<'NODE'
@@ -140,6 +166,7 @@ bootstrap_receipt="$work/bootstrap-receipt.json"
 control_artifact_receipt="$work/control-artifact-receipt.json"
 node_runtime_receipt="$work/node-runtime-prerequisite-receipt.json"
 prepare_receipt="$work/prepare-receipt.json"
+validation_open_receipt="$work/validation-open-receipt.json"
 authority_first="$work/exact-release-authority.first.json"
 authority_second="$work/exact-release-authority.second.json"
 upload_response="$work/upload-response"
@@ -181,15 +208,40 @@ SANCTION_PRIOR_DOCUMENT_ID=${PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_RECEIPT_DOCUME
 SANCTION_PRIOR_CHECKPOINT_SHA256=${PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_CHECKPOINT_SHA256:-}
 SANCTION_CERT_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_CERT:-}
 SANCTION_KEY_INPUT=${PLATFORM_V1_TRANSPORT_SANCTION_KEY:-}
+SANCTION_MODE=${PLATFORM_V1_TRANSPORT_SANCTION_MODE:-}
+SUCCESSOR_PRIOR_CANDIDATE_COMMIT=${PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_CANDIDATE_COMMIT:-}
+SUCCESSOR_PRIOR_CANDIDATE_TREE=${PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_CANDIDATE_TREE:-}
+SUCCESSOR_PRIOR_STAGING_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_STAGING_ENVIRONMENT_SHA256:-}
+SUCCESSOR_PREIMAGE_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PREIMAGE_SHA256:-}
+SUCCESSOR_PROVENANCE_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PROVENANCE_SHA256:-}
+SUCCESSOR_PROVENANCE_COMMIT=${PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PROVENANCE_RELEASE_COMMIT:-}
+SUCCESSOR_RUNTIME_RECEIPT_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_ACTIVE_RECEIPT_SHA256:-}
+SUCCESSOR_RUNTIME_AUTHORITY_DOCUMENT_ID=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_AUTHORITY_DOCUMENT_ID:-}
+SUCCESSOR_RUNTIME_AUTHORITY_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_AUTHORITY_SHA256:-}
+SUCCESSOR_RUNTIME_CANDIDATE_COMMIT=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_CANDIDATE_COMMIT:-}
+SUCCESSOR_RUNTIME_CANDIDATE_TREE=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_CANDIDATE_TREE:-}
+SUCCESSOR_RUNTIME_SOURCE_SHA256=${PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_SOURCE_ARCHIVE_SHA256:-}
+SUCCESSOR_INPUTS="$SUCCESSOR_PRIOR_CANDIDATE_COMMIT$SUCCESSOR_PRIOR_CANDIDATE_TREE$SUCCESSOR_PRIOR_STAGING_SHA256$SUCCESSOR_PREIMAGE_SHA256$SUCCESSOR_PROVENANCE_SHA256$SUCCESSOR_PROVENANCE_COMMIT$SUCCESSOR_RUNTIME_RECEIPT_SHA256$SUCCESSOR_RUNTIME_AUTHORITY_DOCUMENT_ID$SUCCESSOR_RUNTIME_AUTHORITY_SHA256$SUCCESSOR_RUNTIME_CANDIDATE_COMMIT$SUCCESSOR_RUNTIME_CANDIDATE_TREE$SUCCESSOR_RUNTIME_SOURCE_SHA256"
 if [ -n "$SANCTION_PRIOR_DOCUMENT_ID" ] || [ -n "$SANCTION_PRIOR_CHECKPOINT_SHA256" ] \
-  || [ -n "$SANCTION_CERT_INPUT" ] || [ -n "$SANCTION_KEY_INPUT" ]; then
+  || [ -n "$SANCTION_CERT_INPUT" ] || [ -n "$SANCTION_KEY_INPUT" ] \
+  || [ -n "$SANCTION_MODE" ] || [ -n "$SUCCESSOR_INPUTS" ]; then
+  [ -n "$SANCTION_MODE" ] || SANCTION_MODE=CHECKPOINT
+  case "$SANCTION_MODE" in CHECKPOINT|SUCCESSOR) ;; *) fail "Transport sanction mode must be exactly CHECKPOINT or SUCCESSOR." 65 ;; esac
   case "$SANCTION_PRIOR_DOCUMENT_ID" in ????????????????????????????????????????????????????????????????) ;; *) fail "Transport sanction prior receipt document id is invalid." 65 ;; esac
   case "$SANCTION_PRIOR_DOCUMENT_ID" in *[!0-9a-f]*) fail "Transport sanction prior receipt document id is not lowercase hexadecimal." 65 ;; esac
   case "$SANCTION_PRIOR_CHECKPOINT_SHA256" in ????????????????????????????????????????????????????????????????) ;; *) fail "Transport sanction prior checkpoint digest is invalid." 65 ;; esac
   case "$SANCTION_PRIOR_CHECKPOINT_SHA256" in *[!0-9a-f]*) fail "Transport sanction prior checkpoint digest is not lowercase hexadecimal." 65 ;; esac
   require_input_file "Transport sanction escrow certificate" "$SANCTION_CERT_INPUT"
   require_input_file "Transport sanction operator signing key" "$SANCTION_KEY_INPUT"
+  if [ "$SANCTION_MODE" = SUCCESSOR ]; then
+    [ -n "${PLATFORM_V1_LIVE_ENV:-}" ] && [ "${PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE:-1}" = 1 ] \
+      && [ -n "${PLATFORM_V1_LIVE_ENV_PROVENANCE:-}" ] \
+      || fail "Successor transport sanction requires the explicit greenfield preimage and provenance." 65
+  elif [ -n "$SUCCESSOR_INPUTS" ]; then
+    fail "Successor transport fields are closed outside SUCCESSOR sanction mode." 65
+  fi
 else
+  SANCTION_MODE=NONE
   SANCTION_PRIOR_DOCUMENT_ID=""
   SANCTION_PRIOR_CHECKPOINT_SHA256=""
   SANCTION_CERT_INPUT=""
@@ -228,19 +280,92 @@ if [ -n "$SANCTION_PRIOR_DOCUMENT_ID" ]; then
   sanction_core="$work/bootstrap-transport-sanction-core.json"
   sanction_sig="$work/bootstrap-transport-sanction.sig"
   SANCTION_CERT_STABLE="$work/sanction-cert.pem"
+  SANCTION_KEY_SNAPSHOT="$work/sanction-key.pem"
+  sanction_cert_before=$(hash_file "$SANCTION_CERT_INPUT")
+  sanction_key_before=$(hash_file "$SANCTION_KEY_INPUT")
   cp -- "$SANCTION_CERT_INPUT" "$SANCTION_CERT_STABLE"
+  cp -- "$SANCTION_KEY_INPUT" "$SANCTION_KEY_SNAPSHOT"
   chmod 444 "$SANCTION_CERT_STABLE"
+  chmod 600 "$SANCTION_KEY_SNAPSHOT"
   SANCTION_CERT_SHA256=$(hash_file "$SANCTION_CERT_STABLE")
-  [ "$(hash_file "$SANCTION_CERT_INPUT")" = "$SANCTION_CERT_SHA256" ] \
-    || fail "The transport sanction escrow certificate changed during stable capture." 65
-  printf '%s\n' "{\"checkpointSha256\":\"$CHECKPOINT_SHA256\",\"createdAtUnixSeconds\":$(date -u +%s),\"priorCheckpointAfterSha256\":\"$SANCTION_PRIOR_CHECKPOINT_SHA256\",\"priorReceiptDocumentId\":\"$SANCTION_PRIOR_DOCUMENT_ID\",\"reasonCode\":\"TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES\",\"schema\":\"platform.v1-transport-checkpoint-sanction/v1\"}" > "$sanction_core"
-  "$OPENSSL" cms -sign -binary -in "$sanction_core" -signer "$SANCTION_CERT_STABLE" -inkey "$SANCTION_KEY_INPUT" -outform DER -out "$sanction_sig" 2>/dev/null \
+  [ "$sanction_cert_before" = "$SANCTION_CERT_SHA256" ] \
+    && [ "$(hash_file "$SANCTION_CERT_INPUT")" = "$SANCTION_CERT_SHA256" ] \
+    && [ "$sanction_key_before" = "$(hash_file "$SANCTION_KEY_SNAPSHOT")" ] \
+    && [ "$sanction_key_before" = "$(hash_file "$SANCTION_KEY_INPUT")" ] \
+    || fail "The transport sanction certificate or signing key changed during stable capture." 65
+  "$NODE" --input-type=module - \
+    "$sanction_core" "$SANCTION_MODE" "$CHECKPOINT_SHA256" "$SANCTION_PRIOR_CHECKPOINT_SHA256" "$SANCTION_PRIOR_DOCUMENT_ID" \
+    "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" \
+    "${PLATFORM_V1_LIVE_ENV:-}" "$SUCCESSOR_PREIMAGE_SHA256" \
+    "${PLATFORM_V1_LIVE_ENV_PROVENANCE:-}" "$SUCCESSOR_PROVENANCE_COMMIT" "$SUCCESSOR_PROVENANCE_SHA256" \
+    "$SUCCESSOR_PRIOR_CANDIDATE_COMMIT" "$SUCCESSOR_PRIOR_CANDIDATE_TREE" "$SUCCESSOR_PRIOR_STAGING_SHA256" \
+    "$SUCCESSOR_RUNTIME_RECEIPT_SHA256" "$SUCCESSOR_RUNTIME_AUTHORITY_DOCUMENT_ID" "$SUCCESSOR_RUNTIME_AUTHORITY_SHA256" \
+    "$SUCCESSOR_RUNTIME_CANDIDATE_COMMIT" "$SUCCESSOR_RUNTIME_CANDIDATE_TREE" "$SUCCESSOR_RUNTIME_SOURCE_SHA256" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+const [output, mode, checkpointSha256, priorCheckpointAfterSha256, priorReceiptDocumentId,
+  candidateCommit, candidateTree, sourceArchiveSha256, greenfieldPreimagePath,
+  greenfieldPreimageSha256, greenfieldProvenancePath, greenfieldProvenanceReleaseCommit,
+  greenfieldProvenanceSha256, priorCandidateCommit, priorCandidateTree,
+  priorStagingEnvironmentSha256, runtimeActiveReceiptSha256, runtimeAuthorityDocumentId,
+  runtimeAuthoritySha256, runtimeCandidateCommit, runtimeCandidateTree,
+  runtimeSourceArchiveSha256] = process.argv.slice(2);
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+const sha = /^[a-f0-9]{64}$/;
+const git = /^[a-f0-9]{40}$/;
+for (const [label, value] of Object.entries({ checkpointSha256, priorCheckpointAfterSha256, priorReceiptDocumentId, sourceArchiveSha256 })) {
+  if (!sha.test(value) || value === "0".repeat(64)) throw new Error(`Transport sanction ${label} is invalid.`);
+}
+let core;
+if (mode === "CHECKPOINT") {
+  core = {
+    checkpointSha256, createdAtUnixSeconds: Math.floor(Date.now() / 1000),
+    priorCheckpointAfterSha256, priorReceiptDocumentId,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES",
+    schema: "platform.v1-transport-checkpoint-sanction/v1",
+  };
+} else if (mode === "SUCCESSOR") {
+  for (const [label, value] of Object.entries({
+    greenfieldPreimageSha256, greenfieldProvenanceSha256, priorStagingEnvironmentSha256,
+    runtimeActiveReceiptSha256, runtimeAuthorityDocumentId, runtimeAuthoritySha256,
+    runtimeSourceArchiveSha256,
+  })) if (!sha.test(value) || value === "0".repeat(64)) throw new Error(`Successor sanction ${label} is invalid.`);
+  for (const [label, value] of Object.entries({
+    candidateCommit, candidateTree, greenfieldProvenanceReleaseCommit, priorCandidateCommit,
+    priorCandidateTree, runtimeCandidateCommit, runtimeCandidateTree,
+  })) if (!git.test(value) || value === "0".repeat(40)) throw new Error(`Successor sanction ${label} is invalid.`);
+  for (const [label, value] of Object.entries({ greenfieldPreimagePath, greenfieldProvenancePath })) {
+    if (!value.startsWith("/home/platform_infrastructure/greenfield-live/")
+      || path.posix.normalize(value) !== value || /['"\\\0\r\n]/.test(value)) throw new Error(`Successor sanction ${label} is invalid.`);
+  }
+  if (greenfieldPreimageSha256 !== priorStagingEnvironmentSha256) throw new Error("Successor sanction preimage differs from prior staging.");
+  core = {
+    candidateCommit, candidateTree, checkpointSha256,
+    createdAtUnixSeconds: Math.floor(Date.now() / 1000), greenfieldPreimagePath,
+    greenfieldPreimageSha256, greenfieldProvenancePath, greenfieldProvenanceReleaseCommit,
+    greenfieldProvenanceSha256, priorCandidateCommit, priorCandidateTree,
+    priorCheckpointAfterSha256, priorReceiptDocumentId, priorStagingEnvironmentSha256,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE",
+    runtimeActiveReceiptSha256, runtimeAuthorityDocumentId, runtimeAuthoritySha256,
+    runtimeCandidateCommit, runtimeCandidateTree, runtimeSourceArchiveSha256,
+    schema: "platform.v1-transport-successor-sanction/v2",
+    sourceArchiveSha256,
+  };
+} else throw new Error("Unknown transport sanction mode.");
+fs.writeFileSync(output, `${stable(core)}\n`, { flag: "wx", mode: 0o400 });
+NODE
+  "$OPENSSL" cms -sign -binary -in "$sanction_core" -signer "$SANCTION_CERT_STABLE" -inkey "$SANCTION_KEY_SNAPSHOT" -outform DER -out "$sanction_sig" 2>/dev/null \
     || fail "The transport sanction CMS signature failed." 65
   "$OPENSSL" base64 -A -in "$sanction_sig" -out "$work/sanction-sig.b64" \
     || fail "The transport sanction signature encoding failed." 65
   export PLATFORM_V1_SANCTION_SIGNABLE_JSON="$sanction_core"
   export PLATFORM_V1_SANCTION_SIGNATURE_B64
   PLATFORM_V1_SANCTION_SIGNATURE_B64=$(cat "$work/sanction-sig.b64")
+  [ "$(hash_file "$SANCTION_CERT_INPUT")" = "$SANCTION_CERT_SHA256" ] \
+    && [ "$(hash_file "$SANCTION_CERT_STABLE")" = "$SANCTION_CERT_SHA256" ] \
+    && [ "$(hash_file "$SANCTION_KEY_INPUT")" = "$sanction_key_before" ] \
+    && [ "$(hash_file "$SANCTION_KEY_SNAPSHOT")" = "$sanction_key_before" ] \
+    || fail "The transport sanction certificate or signing key changed while it was used." 65
 else
   unset PLATFORM_V1_SANCTION_SIGNABLE_JSON || true
   export PLATFORM_V1_SANCTION_SIGNATURE_B64=""
@@ -337,6 +462,30 @@ NODE
 "$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-bootstrap \
   --file "$bootstrap_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
   --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+if [ "$SANCTION_MODE" != NONE ]; then
+  "$NODE" --input-type=module - "$transport_sanction" "$bootstrap_receipt" "$SANCTION_MODE" <<'NODE'
+import crypto from "node:crypto";
+import fs from "node:fs";
+const [sanctionPath, receiptPath, mode] = process.argv.slice(2);
+const sanctionRaw = fs.readFileSync(sanctionPath);
+const sanction = JSON.parse(sanctionRaw);
+const receipt = JSON.parse(fs.readFileSync(receiptPath));
+const summary = receipt.transportSanction;
+const digest = crypto.createHash("sha256").update(sanctionRaw).digest("hex");
+if (!summary || summary.present !== true || summary.sanctionDigest !== digest) {
+  throw new Error("Bootstrap receipt did not consume the exact requested transport sanction.");
+}
+if (mode === "CHECKPOINT") {
+  if (sanction.schema !== "platform.v1-transport-checkpoint-sanction/v1"
+    || summary.reasonCode !== sanction.reasonCode) throw new Error("Checkpoint sanction receipt binding is invalid.");
+} else if (mode === "SUCCESSOR") {
+  if (sanction.schema !== "platform.v1-transport-successor-sanction/v2") throw new Error("Successor sanction schema is invalid.");
+  for (const [key, value] of Object.entries(sanction)) {
+    if (summary[key] !== value) throw new Error(`Successor sanction receipt lost signed field ${key}.`);
+  }
+} else throw new Error("Transport sanction mode is invalid after bootstrap.");
+NODE
+fi
 "$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-control-artifacts \
   --file "$control_artifact_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
   --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
@@ -347,6 +496,26 @@ NODE
 "$NODE" "$SCRIPT_ROOT/v1-brownfield-install-receipt.mjs" verify-node-runtime \
   --file "$node_runtime_receipt" --candidateCommit "$CANDIDATE_COMMIT" --candidateTree "$CANDIDATE_TREE" \
   --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" --repositoryRoot "$REPOSITORY_ROOT" >/dev/null
+
+if [ "$INSTALL_VALIDATION_LANE" = FAST ]; then
+  ( ulimit -f 16; exec "$SSH" "$@" -- "$REMOTE" "$VALIDATION_OPEN_REMOTE_COMMAND" < /dev/null ) > "$validation_open_receipt" \
+    || fail "The installed V1 reconciler could not open the FAST validation lane." 65
+  "$NODE" --input-type=module - \
+    "$validation_open_receipt" "$CANDIDATE_COMMIT" "$CANDIDATE_TREE" "$SOURCE_ARCHIVE_SHA256" <<'NODE'
+import fs from "node:fs";
+const [filename, candidateCommit, candidateTree, sourceArchiveSha256] = process.argv.slice(2);
+const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+const raw = fs.readFileSync(filename, "utf8");
+const value = JSON.parse(raw);
+if (raw !== `${stable(value)}\n`
+  || Object.keys(value).sort().join(",") !== ["candidateCommit", "candidateTree", "schema", "sourceArchiveSha256", "status", "validationLaneSha256"].sort().join(",")
+  || value.schema !== "platform.v1-local-private-validation-lane-open-result/v1"
+  || value.status !== "VALIDATION_LANE_OPEN"
+  || value.candidateCommit !== candidateCommit || value.candidateTree !== candidateTree
+  || value.sourceArchiveSha256 !== sourceArchiveSha256
+  || !/^[0-9a-f]{64}$/.test(value.validationLaneSha256)) throw new Error("FAST validation lane opening is not exact-candidate-bound.");
+NODE
+fi
 
 ( ulimit -f 128; exec "$SSH" "$@" -- "$REMOTE" "$PREPARE_REMOTE_COMMAND" < /dev/null ) > "$prepare_receipt" \
   || fail "The installed V1 reconciler prepare step failed." 65

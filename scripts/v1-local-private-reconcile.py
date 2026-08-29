@@ -64,6 +64,8 @@ VALIDATION_LANE_MAX_BACKUP_AGE = 24 * 3600
 VALIDATION_RUNTIME_EVIDENCE_FILE = f"{PREDEPLOY_DIR}/runtime-inventory-evidence-validation.json"
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
 VALIDATION_LANE_TTL_SECONDS = 24 * 3600
+VALIDATION_LANE_OPEN_RESULT_SCHEMA = "platform.v1-local-private-validation-lane-open-result/v1"
+VALIDATION_LANE_CLOSE_RESULT_SCHEMA = "platform.v1-local-private-validation-lane-close-result/v1"
 MUTATION_EVIDENCE_DIR = f"{STATE_DIR}/data-mutation-evidence"
 SECRET_DIR = "/home/platform_infrastructure/platform-infrastructure/secrets"
 DEPLOYMENT_REPO = "/home/platform_infrastructure/platform-infrastructure"
@@ -2806,12 +2808,12 @@ def stable_recovery_export_snapshot() -> Dict[str, object]:
         os.close(fd)
 
 
-def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
-    """Return the operator validation-lane marker when present and valid.
+def validation_lane_snapshot() -> Optional[Tuple[Dict[str, object], bytes]]:
+    """Return one structurally valid root-owned marker without selecting a mode.
 
-    Absence of the file means production mode.  A present marker must be one
-    root-owned 0400 canonical document bound to the current candidate and
-    unexpired; anything else fails closed.
+    Lifecycle operations need to distinguish a safe stale/foreign marker from
+    malformed bytes.  Only the former may be atomically superseded, and only
+    while no reconciliation transaction is open.
     """
     pathname = physical(VALIDATION_LANE_FILE)
     if not os.path.lexists(pathname):
@@ -2822,17 +2824,36 @@ def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
         or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o400
     ):
         stop("validation lane marker identity/mode is unsafe.")
-    lane = parse_json(secure_file(VALIDATION_LANE_FILE, "validation lane marker", 4096), "validation lane marker", True)
+    data = secure_file(VALIDATION_LANE_FILE, "validation lane marker", 4096, 0o400)
+    lane = parse_json(data, "validation lane marker", True)
     if set(lane.keys()) != {"schema", "candidateCommit", "createdAtUnixSeconds", "expiresAtUnixSeconds", "reason"}:
         stop("validation lane marker is not one exact closed object.")
     if (
         lane.get("schema") != VALIDATION_LANE_SCHEMA
-        or lane.get("candidateCommit") != candidate_commit
+        or not isinstance(lane.get("candidateCommit"), str)
+        or COMMIT_RE.fullmatch(lane["candidateCommit"]) is None
         or isinstance(lane.get("createdAtUnixSeconds"), bool) or not isinstance(lane.get("createdAtUnixSeconds"), int)
         or isinstance(lane.get("expiresAtUnixSeconds"), bool) or not isinstance(lane.get("expiresAtUnixSeconds"), int)
         or not isinstance(lane.get("reason"), str) or len(lane["reason"]) < 8
+        or lane["expiresAtUnixSeconds"] <= lane["createdAtUnixSeconds"]
         or lane["expiresAtUnixSeconds"] - lane["createdAtUnixSeconds"] > VALIDATION_LANE_TTL_SECONDS
     ):
+        stop("validation lane marker fields are invalid.")
+    return lane, data
+
+
+def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
+    """Return the operator validation-lane marker when present and valid.
+
+    Absence of the file means production mode.  A present marker must be one
+    root-owned 0400 canonical document bound to the current candidate and
+    unexpired; anything else fails closed.
+    """
+    snapshot = validation_lane_snapshot()
+    if snapshot is None:
+        return None
+    lane, _ = snapshot
+    if lane["candidateCommit"] != candidate_commit:
         stop("validation lane marker fields are invalid.")
     now = int(time.time())
     if lane["createdAtUnixSeconds"] > now + 60 or now >= lane["expiresAtUnixSeconds"]:
@@ -2842,6 +2863,71 @@ def load_validation_lane(candidate_commit: str) -> Optional[Dict[str, object]]:
 
 def validation_lane_sha256(lane: Optional[Dict[str, object]]) -> Optional[str]:
     return None if lane is None else digest(canonical_bytes(lane))
+
+
+def validation_transaction_files_present() -> bool:
+    return any(
+        os.path.lexists(physical(logical))
+        for logical in (RECONCILIATION, JOURNAL, ABORT_RECORD)
+    )
+
+
+def validation_open() -> Dict[str, object]:
+    """Open FAST for the checkpoint-bound install candidate, never caller data.
+
+    The main dispatcher already holds the shared transaction lock and the
+    reconciler-local lock.  A valid same-candidate marker is immutable across
+    retries.  A canonical foreign or expired marker can be superseded only
+    after all three current transaction files are proven absent.
+    """
+    if validation_transaction_files_present():
+        stop("validation lane cannot change while a reconciliation transaction is open.")
+    binding = install_binding()
+    snapshot = validation_lane_snapshot()
+    now = int(time.time())
+    existing_lane: Optional[Dict[str, object]] = None
+    existing_bytes: Optional[bytes] = None
+    if snapshot is not None:
+        existing_lane, existing_bytes = snapshot
+    same_candidate_fresh = (
+        existing_lane is not None
+        and existing_lane["candidateCommit"] == binding["candidateCommit"]
+        and existing_lane["createdAtUnixSeconds"] <= now + 60
+        and now < existing_lane["expiresAtUnixSeconds"]
+    )
+    if same_candidate_fresh:
+        marker = existing_lane
+        marker_bytes = existing_bytes
+    else:
+        if (
+            existing_lane is not None
+            and existing_lane["candidateCommit"] == binding["candidateCommit"]
+            and existing_lane["createdAtUnixSeconds"] > now + 60
+        ):
+            stop("future-dated validation lane marker cannot be superseded.")
+        marker = {
+            "candidateCommit": binding["candidateCommit"],
+            "createdAtUnixSeconds": now,
+            "expiresAtUnixSeconds": now + VALIDATION_LANE_TTL_SECONDS,
+            "reason": "FAST_VALIDATION_NO_MUTATION",
+            "schema": VALIDATION_LANE_SCHEMA,
+        }
+        marker_bytes = atomic_json(
+            VALIDATION_LANE_FILE, marker, 0o400, snapshot is not None,
+        )
+    if marker_bytes is None:
+        stop("validation lane marker lifecycle lost its exact bytes.")
+    observed = validation_lane_snapshot()
+    if observed is None or observed[0] != marker or observed[1] != marker_bytes:
+        stop("validation lane marker changed during atomic publication.")
+    return {
+        "candidateCommit": binding["candidateCommit"],
+        "candidateTree": binding["candidateTree"],
+        "schema": VALIDATION_LANE_OPEN_RESULT_SCHEMA,
+        "sourceArchiveSha256": binding["sourceArchiveSha256"],
+        "status": "VALIDATION_LANE_OPEN",
+        "validationLaneSha256": digest(marker_bytes),
+    }
 
 
 def journal_uses_validation_lane(
@@ -5477,6 +5563,24 @@ BOOTSTRAP_BRIDGE_RECEIPT_FIELDS = (
     "stagingEnvironmentSha256", "stagingMutation", "status",
 )
 BOOTSTRAP_BRIDGE_RECEIPT_FIELDS_V2 = BOOTSTRAP_BRIDGE_RECEIPT_FIELDS + ("transportSanction",)
+BOOTSTRAP_SUCCESSOR_SANCTION_FIELDS = (
+    "candidateCommit", "candidateTree", "checkpointSha256", "createdAtUnixSeconds",
+    "greenfieldPreimagePath", "greenfieldPreimageSha256", "greenfieldProvenancePath",
+    "greenfieldProvenanceReleaseCommit", "greenfieldProvenanceSha256",
+    "priorCandidateCommit", "priorCandidateTree", "priorCheckpointAfterSha256",
+    "priorReceiptDocumentId", "priorStagingEnvironmentSha256", "reasonCode", "schema",
+    "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+    "runtimeCandidateCommit", "runtimeCandidateTree", "runtimeSourceArchiveSha256",
+    "signatureBase64", "sourceArchiveSha256",
+)
+BOOTSTRAP_SUCCESSOR_SANCTION_SUMMARY_FIELDS = BOOTSTRAP_SUCCESSOR_SANCTION_FIELDS + (
+    "present", "sanctionDigest", "signerCertSha256",
+)
+BOOTSTRAP_SUCCESSOR_SANCTION_SCHEMA = "platform.v1-transport-successor-sanction/v2"
+BOOTSTRAP_SUCCESSOR_SANCTION_REASON = "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE"
+BOOTSTRAP_LEGACY_SANCTION_REASON = "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES"
+BOOTSTRAP_SANCTION_TRUST_CERT_SHA256 = "358dcd60560f0976f6b27db0972cc996d336516a529c48bf4236dcf22e0c55a2"
+BOOTSTRAP_GREENFIELD_ROOT = "/home/platform_infrastructure/greenfield-live/"
 BOOTSTRAP_CONTROL_RECEIPT_FIELDS = (
     "artifacts", "candidateCommit", "candidateTree", "dataMutation", "dockerMutation",
     "hostControlMutation", "schema", "sourceArchiveSha256", "status",
@@ -5484,6 +5588,89 @@ BOOTSTRAP_CONTROL_RECEIPT_FIELDS = (
 BOOTSTRAP_CONTROL_RECEIPT_ARTIFACT_NAMES = ("installer", "controller", "reconciler", "unit", "sudoers")
 BOOTSTRAP_CONTROL_ARTIFACT_RECEIPT_SCHEMA = "platform.v1-control-artifact-install-receipt/v1"
 BOOTSTRAP_BRIDGE_RECEIPT_SCHEMA = "platform.v1-brownfield-bootstrap-bridge-receipt/v1"
+
+
+def validate_bootstrap_transport_sanction(bridge: Dict[str, object]) -> None:
+    if "transportSanction" not in bridge:
+        return
+    value = bridge["transportSanction"]
+    if isinstance(value, dict) and set(value) == {"present"} and value["present"] is False:
+        return
+    if isinstance(value, dict) and set(value) == {
+        "present", "reasonCode", "sanctionDigest", "signerCertSha256",
+    }:
+        if (
+            value["present"] is not True
+            or value["reasonCode"] != BOOTSTRAP_LEGACY_SANCTION_REASON
+            or not isinstance(value["sanctionDigest"], str)
+            or SHA256_RE.fullmatch(value["sanctionDigest"]) is None
+            or value["sanctionDigest"] == "0" * 64
+            or not isinstance(value["signerCertSha256"], str)
+            or SHA256_RE.fullmatch(value["signerCertSha256"]) is None
+            or value["signerCertSha256"] == "0" * 64
+        ):
+            stop("bootstrap legacy transport sanction summary is invalid.")
+        return
+    value = exact_keys(
+        value, BOOTSTRAP_SUCCESSOR_SANCTION_SUMMARY_FIELDS,
+        "bootstrap successor transport sanction summary",
+    )
+    if (
+        value["present"] is not True
+        or value["schema"] != BOOTSTRAP_SUCCESSOR_SANCTION_SCHEMA
+        or value["reasonCode"] != BOOTSTRAP_SUCCESSOR_SANCTION_REASON
+        or value["signerCertSha256"] != BOOTSTRAP_SANCTION_TRUST_CERT_SHA256
+        or isinstance(value["createdAtUnixSeconds"], bool)
+        or not isinstance(value["createdAtUnixSeconds"], int)
+        or value["createdAtUnixSeconds"] <= 0
+    ):
+        stop("bootstrap successor transport sanction identity is invalid.")
+    for field in (
+        "checkpointSha256", "greenfieldPreimageSha256", "greenfieldProvenanceSha256",
+        "priorCheckpointAfterSha256", "priorReceiptDocumentId", "priorStagingEnvironmentSha256",
+        "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+        "runtimeSourceArchiveSha256", "sanctionDigest",
+        "signerCertSha256", "sourceArchiveSha256",
+    ):
+        if (
+            not isinstance(value[field], str) or SHA256_RE.fullmatch(value[field]) is None
+            or value[field] == "0" * 64
+        ):
+            stop(f"bootstrap successor transport sanction {field} is invalid.")
+    for field in (
+        "candidateCommit", "candidateTree", "greenfieldProvenanceReleaseCommit",
+        "priorCandidateCommit", "priorCandidateTree", "runtimeCandidateCommit", "runtimeCandidateTree",
+    ):
+        if (
+            not isinstance(value[field], str) or COMMIT_RE.fullmatch(value[field]) is None
+            or value[field] == "0" * 40
+        ):
+            stop(f"bootstrap successor transport sanction {field} is invalid.")
+    for field in ("greenfieldPreimagePath", "greenfieldProvenancePath"):
+        pathname = value[field]
+        if (
+            not isinstance(pathname, str) or not pathname.startswith(BOOTSTRAP_GREENFIELD_ROOT)
+            or os.path.normpath(pathname) != pathname or any(character in pathname for character in "'\"\\\x00\r\n")
+        ):
+            stop(f"bootstrap successor transport sanction {field} is invalid.")
+    signature = value["signatureBase64"]
+    if not isinstance(signature, str) or not signature or len(signature) > 32 * 1024:
+        stop("bootstrap successor transport sanction signature is invalid.")
+    try:
+        base64.b64decode(signature.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError, binascii.Error):
+        stop("bootstrap successor transport sanction signature encoding is invalid.")
+    signed = {field: value[field] for field in BOOTSTRAP_SUCCESSOR_SANCTION_FIELDS}
+    if (
+        value["sanctionDigest"] != digest(canonical_bytes(signed))
+        or value["candidateCommit"] != bridge["candidateCommit"]
+        or value["candidateTree"] != bridge["candidateTree"]
+        or value["checkpointSha256"] != bridge["checkpointAfterSha256"]
+        or value["sourceArchiveSha256"] != bridge["sourceArchiveAfterSha256"]
+        or value["greenfieldPreimageSha256"] != bridge["stagingEnvironmentSha256"]
+        or value["greenfieldPreimageSha256"] != value["priorStagingEnvironmentSha256"]
+    ):
+        stop("bootstrap successor transport sanction receipt binding is invalid.")
 
 
 def latest_transport_tooling_coherence() -> str:
@@ -5509,6 +5696,7 @@ def latest_transport_tooling_coherence() -> str:
         or not isinstance(bridge["sourceArchiveAfterSha256"], str) or SHA256_RE.fullmatch(bridge["sourceArchiveAfterSha256"]) is None
     ):
         stop("bootstrap bridge receipt identity/status is invalid.")
+    validate_bootstrap_transport_sanction(bridge)
     control_raw = secure_file(BOOTSTRAP_CONTROL_RECEIPT_FILE, "bootstrap control artifact receipt", MAX_AUTHORITY, 0o400)
     if digest(control_raw) != bridge["controlArtifactReceiptSha256"]:
         stop("bootstrap control artifact receipt differs from the bridge receipt binding.")
@@ -5881,25 +6069,27 @@ def checkpoint_bound_zero_step_abort_journal(
     return validated
 
 
-def cleanup_receipt_bound_abort_preimages() -> None:
-    """Finish private-artifact cleanup left by an older exact reconciler.
-
-    This path is available only after all current transaction files are gone.
-    The root-owned ACTIVE receipt must bind both immutable abort-record and
-    journal archives byte-for-byte, so cleanup never depends on which release
-    candidate is currently installed.
-    """
-    if any(os.path.lexists(physical(path)) for path in (RECONCILIATION, JOURNAL, ABORT_RECORD)):
-        return
+def receipt_bound_abort_archive(
+    required: bool = False,
+) -> Optional[Tuple[Dict[str, object], Dict[str, object], Dict[str, object], bytes]]:
+    """Validate the ACTIVE receipt's immutable abort record and journal pair."""
+    if validation_transaction_files_present():
+        if required:
+            stop("validation lane closure refuses an open reconciliation transaction.")
+        return None
     if not os.path.lexists(physical(ACTIVE_RECEIPT)):
-        return
+        if required:
+            stop("validation lane closure requires one ACTIVE controller receipt.")
+        return None
     receipt = parse_json(
         secure_file(ACTIVE_RECEIPT, "receipt-bound abort cleanup ACTIVE receipt", MAX_AUTHORITY, 0o444),
         "receipt-bound abort cleanup ACTIVE receipt", True,
     )
     binding_raw = receipt.get("abortedAuthorizedReconciliation")
     if binding_raw is None:
-        return
+        if required:
+            stop("validation lane closure requires one receipt-bound aborted reconciliation.")
+        return None
     if receipt.get("schema") != "platform.v1-local-private-control-receipt/v1" or receipt.get("status") != "ACTIVE":
         stop("receipt-bound abort cleanup requires one ACTIVE controller receipt.")
     binding = exact_keys(binding_raw, (
@@ -5939,6 +6129,21 @@ def cleanup_receipt_bound_abort_preimages() -> None:
         or journal["authoritySha256"] != binding["authoritySha256"]
     ):
         stop("ACTIVE receipt does not exactly bind the archived abort transaction cleanup.")
+    return receipt, binding, journal, journal_bytes
+
+
+def cleanup_receipt_bound_abort_preimages() -> None:
+    """Finish private-artifact cleanup left by an older exact reconciler.
+
+    This path is available only after all current transaction files are gone.
+    The root-owned ACTIVE receipt must bind both immutable abort-record and
+    journal archives byte-for-byte, so cleanup never depends on which release
+    candidate is currently installed.
+    """
+    archived = receipt_bound_abort_archive()
+    if archived is None:
+        return
+    _, _, journal, _ = archived
     historical_zero_step = (
         journal.get("steps") == []
         and journal.get("validationLaneSha256") is None
@@ -5950,6 +6155,83 @@ def cleanup_receipt_bound_abort_preimages() -> None:
     cleanup_transaction_preimages(
         journal, allow_historical_identity=historical_zero_step,
     )
+
+
+def validation_close() -> Dict[str, object]:
+    """Remove FAST authority only after its no-mutation closure is durable.
+
+    Controller verification happens before the shared lock is acquired; the
+    exact ACTIVE receipt is reopened under both locks here.  Every failure is
+    checked before unlink, so an open or unverifiable transaction leaves the
+    marker byte-for-byte unchanged.  Absence is accepted only as an idempotent
+    retry against the same immutable archived FAST journal.
+    """
+    if validation_transaction_files_present():
+        stop("validation lane closure refuses an open reconciliation transaction.")
+    authority, authority_bytes = read_authority()
+    validate_authority_material(authority)
+    preverified = preverified_active_receipt()
+    archived = receipt_bound_abort_archive(required=True)
+    if archived is None:
+        stop("validation lane closure lost its receipt-bound abort archive.")
+    receipt, binding, journal, journal_bytes = archived
+    if receipt != preverified:
+        stop("controller ACTIVE receipt changed during validation lane closure.")
+    lane_sha = journal.get("validationLaneSha256")
+    mutation_status = journal.get("dataMutationStatus")
+    if (
+        receipt.get("candidateCommit") != authority["candidateCommit"]
+        or receipt.get("candidateTree") != authority["candidateTree"]
+        or receipt.get("sourceArchiveSha256") != authority["sourceArchiveSha256"]
+        or binding["authorityDocumentId"] != authority["documentId"]
+        or binding["authoritySha256"] != digest(authority_bytes)
+        or binding["status"] != "ABORTED_NO_DATA_MUTATION"
+        or binding["residualDataMutations"] != []
+        or binding["journalSha256"] != digest(journal_bytes)
+        or journal.get("schema") != JOURNAL_SCHEMA
+        or journal.get("phase") != "ABORTED"
+        or journal.get("transactionId") != binding["transactionId"]
+        or journal.get("authorityDocumentId") != authority["documentId"]
+        or journal.get("authoritySha256") != digest(authority_bytes)
+        or not isinstance(lane_sha, str)
+        or SHA256_RE.fullmatch(lane_sha) is None
+        or journal.get("steps") != []
+        or journal.get("dataMutationEvidence") != []
+        or not isinstance(mutation_status, dict)
+        or any(status != "NEVER_STARTED" for status in mutation_status.values())
+        or journal.get("abortCheckpointSha256") is not None
+    ):
+        stop("validation lane closure requires one exact archived FAST no-mutation transaction.")
+    snapshot = validation_lane_snapshot()
+    if snapshot is not None:
+        marker, marker_bytes = snapshot
+        if (
+            marker["candidateCommit"] != authority["candidateCommit"]
+            or digest(marker_bytes) != lane_sha
+        ):
+            stop("validation lane marker differs from its archived FAST transaction.")
+        if validation_transaction_files_present():
+            stop("validation lane transaction reopened before marker removal.")
+        if secure_file(VALIDATION_LANE_FILE, "validation lane marker", 4096, 0o400) != marker_bytes:
+            stop("validation lane marker changed before closure.")
+        pathname = physical(VALIDATION_LANE_FILE)
+        os.unlink(pathname)
+        directory_fd = os.open(
+            os.path.dirname(pathname), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return {
+        "authorityDocumentId": authority["documentId"],
+        "authoritySha256": digest(authority_bytes),
+        "candidateCommit": authority["candidateCommit"],
+        "schema": VALIDATION_LANE_CLOSE_RESULT_SCHEMA,
+        "status": "VALIDATION_LANE_CLOSED",
+        "transactionId": binding["transactionId"],
+        "validationLaneSha256": lane_sha,
+    }
 
 
 def prepare() -> Dict[str, object]:
@@ -9241,7 +9523,11 @@ def finalize_evidenced_journal(authority: Dict[str, object], authority_bytes: by
 
 def preverify_consumed_abort_before_shared_lock(operation: str) -> None:
     global PREVERIFIED_CONTROLLER_RECEIPT
-    if operation not in ("abort", "prepare") or os.path.lexists(physical(RECONCILIATION)):
+    if operation not in ("abort", "prepare", "validation-close") or os.path.lexists(physical(RECONCILIATION)):
+        return
+    if operation == "validation-close" and (
+        os.path.lexists(physical(JOURNAL)) or os.path.lexists(physical(ABORT_RECORD))
+    ):
         return
     if operation == "prepare" and not os.path.lexists(physical(ABORT_RECORD)) and not os.path.lexists(physical(JOURNAL)):
         return
@@ -9889,8 +10175,13 @@ def evidence() -> Dict[str, object]:
 
 def main() -> None:
     global EXECUTOR_FD_RESERVED, SHARED_LOCK_FD
-    if len(sys.argv) != 2 or sys.argv[1] not in ("prepare", "apply", "abort", "evidence"):
-        stop("usage: v1-local-private-reconcile prepare|apply|abort|evidence", 64)
+    if len(sys.argv) != 2 or sys.argv[1] not in (
+        "prepare", "apply", "abort", "evidence", "validation-open", "validation-close",
+    ):
+        stop(
+            "usage: v1-local-private-reconcile "
+            "prepare|apply|abort|evidence|validation-open|validation-close", 64,
+        )
     check_no_stdin()
     operation = sys.argv[1]
     configure_environment()
@@ -9920,6 +10211,8 @@ def main() -> None:
                 "apply": apply,
                 "abort": abort,
                 "evidence": evidence,
+                "validation-open": validation_open,
+                "validation-close": validation_close,
             }[operation]()
             sys.stdout.write(canonical(result) + "\n")
         finally:

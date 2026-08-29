@@ -189,6 +189,8 @@ SUDOERS_EXACT_LINES = (
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile apply",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile abort",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile evidence",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile validation-open",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-reconcile validation-close",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json",
     "platform_infrastructure ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
@@ -973,7 +975,7 @@ def validate_sudoers_bytes(data: bytes) -> None:
     """
 
     if data != SUDOERS_EXACT_BYTES:
-        stop("frozen V1 sudoers artifact differs from the exact closed nineteen-line grant set.")
+        stop("frozen V1 sudoers artifact differs from the exact closed twenty-one-line grant set.")
 
 
 def validate_sudoers(pathname: str, expected_data: Optional[bytes] = None) -> None:

@@ -217,13 +217,28 @@ fs.appendFileSync(process.env.PLATFORM_V1_INSTALL_TEST_SSH_ARGUMENTS, \`CALL\\n\
 fs.appendFileSync(process.env.PLATFORM_V1_INSTALL_TEST_SSH_STDIN_SIZE, \`\${input.length}\\n\`);
 if (command.startsWith("/usr/bin/python3 -I -c ") && command.includes("tempfile.mkstemp")) {
   fs.writeFileSync(process.env.PLATFORM_V1_INSTALL_TEST_UPLOADED_BRIDGE, input);
-} else if (command === "/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply") {
+} else if (command.endsWith("/usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply")) {
   fs.writeFileSync(process.env.PLATFORM_V1_INSTALL_TEST_BOOTSTRAP_FRAME, input);
   if (process.env.PLATFORM_V1_INSTALL_TEST_RECEIPT_MODE === "invalid-bootstrap") {
     process.stdout.write('{"schema":"attacker"}\\n');
   } else {
     const manifestLength = Number.parseInt(input.subarray(0, 8).toString(), 16);
     const manifest = JSON.parse(input.subarray(8, 8 + manifestLength).toString());
+    const sanctionOffset = 8 + manifestLength + manifest.lengths.bridge + manifest.lengths.consumer + manifest.lengths.checkpoint;
+    const sanctionBytes = input.subarray(sanctionOffset, sanctionOffset + manifest.lengths.sanction);
+    const sanction = sanctionBytes.length === 2 ? null : JSON.parse(sanctionBytes.toString());
+    let transportSanction = { present: false };
+    if (sanction?.schema === "platform.v1-transport-checkpoint-sanction/v1") {
+      transportSanction = {
+        present: true, reasonCode: sanction.reasonCode, sanctionDigest: sha(sanctionBytes),
+        signerCertSha256: "a".repeat(64),
+      };
+    } else if (sanction?.schema === "platform.v1-transport-successor-sanction/v2") {
+      transportSanction = {
+        ...sanction, present: true, sanctionDigest: sha(sanctionBytes),
+        signerCertSha256: "358dcd60560f0976f6b27db0972cc996d336516a529c48bf4236dcf22e0c55a2",
+      };
+    }
     const control = process.env.PLATFORM_V1_INSTALL_TEST_RECEIPT_MODE === "invalid-control" ? { schema: "attacker" } : ${controlReceipt};
     const nodeRuntime = process.env.PLATFORM_V1_INSTALL_TEST_RECEIPT_MODE === "invalid-node-runtime" ? { schema: "attacker" } : ${nodeRuntimeReceipt};
     const controlBytes = Buffer.from(stable(control) + "\\n");
@@ -243,12 +258,19 @@ if (command.startsWith("/usr/bin/python3 -I -c ") && command.includes("tempfile.
       releaseRoot: \`/srv/platform-infrastructure/releases/\${manifest.candidateCommit}-\${manifest.sourceArchiveSha256}\`,
       schema: "platform.v1-brownfield-bootstrap-bridge-receipt/v1",
       sourceArchiveAfterSha256: manifest.sourceArchiveSha256, sourceArchiveBeforeSha256: "3".repeat(64),
-      stagingEnvironmentSha256: "4".repeat(64), stagingMutation: true, status: "BOOTSTRAP_CONTROL_INSTALLED",
-      transportSanction: { present: false },
+      stagingEnvironmentSha256: sanction?.greenfieldPreimageSha256 ?? "4".repeat(64), stagingMutation: true, status: "BOOTSTRAP_CONTROL_INSTALLED",
+      transportSanction,
     };
     const bootstrap = { ...base, documentId: sha(stable(base)) };
     process.stdout.write(stable({ bootstrap, controlArtifacts: control, nodeRuntime, schema: "platform.v1-brownfield-bootstrap-result/v1" }) + "\\n");
   }
+} else if (command === "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-open") {
+  process.stdout.write(stable({
+    candidateCommit: ${JSON.stringify(candidateCommit)}, candidateTree: ${JSON.stringify(candidateTree)},
+    schema: "platform.v1-local-private-validation-lane-open-result/v1",
+    sourceArchiveSha256: ${JSON.stringify(sourceArchiveSha256)}, status: "VALIDATION_LANE_OPEN",
+    validationLaneSha256: sha("validation-lane"),
+  }) + "\\n");
 } else if (command.startsWith("/usr/bin/sudo -n -- /bin/bash -o pipefail") && command.includes("platform-v1-local-private-reconcile prepare")) {
   process.stdout.write('${prepareReceipt}\\n');
 } else if (command === "/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json") {
@@ -450,6 +472,90 @@ test("packaging embeds a canonical newline-terminated sanction payload and keeps
   } finally { cleanup(withoutSanction); }
 });
 
+test("packaging emits the exact signed successor sanction and rejects incomplete successor identity", () => {
+  const OPENSSL_BIN = process.env.PLATFORM_V1_INSTALL_TEST_OPENSSL ?? "/usr/bin/openssl";
+  const signingRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "successor-signing-")));
+  const certPath = path.join(signingRoot, "cert.pem");
+  const keyPath = path.join(signingRoot, "key.pem");
+  try {
+    const generated = spawnSync(OPENSSL_BIN,
+      ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=V1 Successor Packaging Test", "-keyout", keyPath, "-out", certPath],
+      { encoding: "buffer" });
+    assert.equal(generated.status, 0, generated.stderr?.toString());
+    const priorCommit = "c".repeat(40);
+    const common = {
+      PLATFORM_V1_LIVE_ENV: "/home/platform_infrastructure/greenfield-live/render/preimage/greenfield-deployment.env",
+      PLATFORM_V1_REQUIRE_GREENFIELD_PREIMAGE: "1",
+      PLATFORM_V1_LIVE_ENV_PROVENANCE: "/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json",
+      PLATFORM_V1_TRANSPORT_SANCTION_MODE: "SUCCESSOR",
+      PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_RECEIPT_DOCUMENT_ID: "1".repeat(64),
+      PLATFORM_V1_TRANSPORT_SANCTION_PRIOR_CHECKPOINT_SHA256: "2".repeat(64),
+      PLATFORM_V1_TRANSPORT_SANCTION_CERT: certPath,
+      PLATFORM_V1_TRANSPORT_SANCTION_KEY: keyPath,
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_CANDIDATE_COMMIT: priorCommit,
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_CANDIDATE_TREE: "d".repeat(40),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_PRIOR_STAGING_ENVIRONMENT_SHA256: "3".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PREIMAGE_SHA256: "3".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PROVENANCE_SHA256: "4".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_GREENFIELD_PROVENANCE_RELEASE_COMMIT: priorCommit,
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_ACTIVE_RECEIPT_SHA256: "5".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_AUTHORITY_DOCUMENT_ID: "6".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_AUTHORITY_SHA256: "7".repeat(64),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_CANDIDATE_COMMIT: "e".repeat(40),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_CANDIDATE_TREE: "f".repeat(40),
+      PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_SOURCE_ARCHIVE_SHA256: "8".repeat(64),
+    };
+    const current = fixture();
+    try {
+      const result = execute(current, undefined, common);
+      assert.equal(result.status, 0, result.stderr);
+      const frame = fs.readFileSync(current.bootstrapFrameFile);
+      const manifestLength = Number.parseInt(frame.subarray(0, 8).toString(), 16);
+      const manifest = JSON.parse(frame.subarray(8, 8 + manifestLength).toString());
+      const offset = 8 + manifestLength + manifest.lengths.bridge + manifest.lengths.consumer + manifest.lengths.checkpoint;
+      const sanctionBytes = frame.subarray(offset, offset + manifest.lengths.sanction);
+      const sanction = JSON.parse(sanctionBytes);
+      assert.deepEqual(Object.keys(sanction).sort(), [
+        "candidateCommit", "candidateTree", "checkpointSha256", "createdAtUnixSeconds",
+        "greenfieldPreimagePath", "greenfieldPreimageSha256", "greenfieldProvenancePath",
+        "greenfieldProvenanceReleaseCommit", "greenfieldProvenanceSha256",
+        "priorCandidateCommit", "priorCandidateTree", "priorCheckpointAfterSha256",
+        "priorReceiptDocumentId", "priorStagingEnvironmentSha256", "reasonCode", "schema",
+        "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+        "runtimeCandidateCommit", "runtimeCandidateTree", "runtimeSourceArchiveSha256",
+        "signatureBase64", "sourceArchiveSha256",
+      ].sort());
+      assert.equal(sanction.schema, "platform.v1-transport-successor-sanction/v2");
+      assert.equal(sanction.candidateCommit, candidateCommit);
+      assert.equal(sanction.candidateTree, candidateTree);
+      assert.equal(sanction.sourceArchiveSha256, sourceArchiveSha256);
+      assert.equal(sanction.priorCandidateCommit, priorCommit);
+      assert.equal(sanction.greenfieldPreimageSha256, sanction.priorStagingEnvironmentSha256);
+      assert.equal(manifest.sanctionSha256, sha256(sanctionBytes));
+      const signature = Buffer.from(sanction.signatureBase64, "base64");
+      const core = { ...sanction };
+      delete core.signatureBase64;
+      const corePath = path.join(signingRoot, "verified-core.json");
+      const signaturePath = path.join(signingRoot, "verified-signature.der");
+      fs.writeFileSync(corePath, `${stableJson(core)}\n`);
+      fs.writeFileSync(signaturePath, signature);
+      const verified = spawnSync(OPENSSL_BIN,
+        ["cms", "-verify", "-binary", "-inform", "DER", "-in", signaturePath, "-content", corePath, "-noverify"],
+        { encoding: "buffer" });
+      assert.equal(verified.status, 0, verified.stderr?.toString());
+    } finally { cleanup(current); }
+
+    const incomplete = fixture();
+    try {
+      const environment = { ...common };
+      delete environment.PLATFORM_V1_TRANSPORT_SUCCESSOR_RUNTIME_ACTIVE_RECEIPT_SHA256;
+      const result = execute(incomplete, undefined, environment);
+      assert.equal(result.status, 1);
+      assert.equal(fs.existsSync(incomplete.argumentsFile), false);
+    } finally { cleanup(incomplete); }
+  } finally { fs.rmSync(signingRoot, { recursive: true, force: true }); }
+});
+
 test("rejects caller argument drift and unsafe output paths before SSH", () => {
   for (const args of [[], ["/tmp/attacker"]]) {
     const current = fixture();
@@ -533,6 +639,29 @@ test("real Git bundle transport advertises only the exact HEAD commit", () => {
   }
 });
 
+test("FAST install explicitly opens the exact candidate lane before prepare while production does not", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, { PLATFORM_V1_INSTALL_VALIDATION_LANE: "FAST" });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = fs.readFileSync(current.argumentsFile, "utf8").split(/^CALL$/m).slice(1).map((item) => item.trim().split("\n"));
+    const commands = calls.map((call) => call.at(-1));
+    const open = commands.indexOf("/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-open");
+    const prepare = commands.findIndex((command) => command.includes("platform-v1-local-private-reconcile prepare"));
+    assert.ok(open > 0);
+    assert.ok(prepare > open);
+  } finally { cleanup(current); }
+
+  for (const rejected of ["fast", "VALIDATION", "FAST ", "1"]) {
+    const invalid = fixture();
+    try {
+      const result = execute(invalid, undefined, { PLATFORM_V1_INSTALL_VALIDATION_LANE: rejected });
+      assert.equal(result.status, 65, rejected);
+      assert.equal(fs.existsSync(invalid.argumentsFile), false, rejected);
+    } finally { cleanup(invalid); }
+  }
+});
+
 test("source derives exact-main identity and exposes only the closed staging sequence", () => {
   const source = fs.readFileSync(productionScript, "utf8");
   for (const value of [
@@ -542,6 +671,7 @@ test("source derives exact-main identity and exposes only the closed staging seq
     "platform.v1-bootstrap-transport-checkpoint/v1", "platform.v1-brownfield-bootstrap-frame/v1",
     "UPLOAD_BRIDGE_REMOTE_COMMAND=", "BOOTSTRAP_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/python3 -I /home/platform_infrastructure/.v1-bootstrap-upload/v1-brownfield-bootstrap-bridge.py apply'",
     "PREPARE_REMOTE_COMMAND='/usr/bin/sudo -n -- /bin/bash -o pipefail -c \"/usr/local/libexec/platform-v1-local-private-reconcile prepare 2>&1 | tee /run/platform-v1-prepare-last.log\"'",
+    "VALIDATION_OPEN_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-open'",
     "READ_AUTHORITY_REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'",
     "nodeRuntimeReceiptSha256", "verify-node-runtime",
     "verify-bootstrap", "verify-control-artifacts", "verify-authority", "verify-prepare", "SSH=/usr/bin/ssh",

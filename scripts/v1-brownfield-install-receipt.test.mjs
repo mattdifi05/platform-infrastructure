@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   V1_EXACT_RELEASE_AUTHORITY_PATH,
   V1_INSTALL_READY_BUT_DISABLED,
+  verifyV1BootstrapBridgeReceipt,
   verifyV1ControlArtifactReceipt,
   verifyV1ExactReleaseAuthority,
   verifyV1InstallReceipt,
@@ -254,6 +255,97 @@ function fixture(t, { authority = validAuthority(), receipt = validReceipt(), ca
   return { authorityFile, receiptFile, root };
 }
 
+const successorSanctionFields = [
+  "candidateCommit", "candidateTree", "checkpointSha256", "createdAtUnixSeconds",
+  "greenfieldPreimagePath", "greenfieldPreimageSha256", "greenfieldProvenancePath",
+  "greenfieldProvenanceReleaseCommit", "greenfieldProvenanceSha256",
+  "priorCandidateCommit", "priorCandidateTree", "priorCheckpointAfterSha256",
+  "priorReceiptDocumentId", "priorStagingEnvironmentSha256", "reasonCode", "schema",
+  "runtimeActiveReceiptSha256", "runtimeAuthorityDocumentId", "runtimeAuthoritySha256",
+  "runtimeCandidateCommit", "runtimeCandidateTree", "runtimeSourceArchiveSha256",
+  "signatureBase64", "sourceArchiveSha256",
+];
+
+function validSuccessorSanctionSummary(overrides = {}) {
+  const preimageSha256 = "a".repeat(64);
+  const signed = {
+    candidateCommit,
+    candidateTree,
+    checkpointSha256: "4".repeat(64),
+    createdAtUnixSeconds: 1_800_000_000,
+    greenfieldPreimagePath: "/home/platform_infrastructure/greenfield-live/render/preimage/greenfield-deployment.env",
+    greenfieldPreimageSha256: preimageSha256,
+    greenfieldProvenancePath: "/home/platform_infrastructure/greenfield-live/render/preimage/preimage-provenance.json",
+    greenfieldProvenanceReleaseCommit: "6".repeat(40),
+    greenfieldProvenanceSha256: "b".repeat(64),
+    priorCandidateCommit: "6".repeat(40),
+    priorCandidateTree: "7".repeat(40),
+    priorCheckpointAfterSha256: "c".repeat(64),
+    priorReceiptDocumentId: "d".repeat(64),
+    priorStagingEnvironmentSha256: preimageSha256,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_WITH_EXACT_GREENFIELD_PREIMAGE_REUSE",
+    runtimeActiveReceiptSha256: "e".repeat(64),
+    runtimeAuthorityDocumentId: "f".repeat(64),
+    runtimeAuthoritySha256: "1".repeat(64),
+    runtimeCandidateCommit: "8".repeat(40),
+    runtimeCandidateTree: "9".repeat(40),
+    runtimeSourceArchiveSha256: "2".repeat(64),
+    schema: "platform.v1-transport-successor-sanction/v2",
+    signatureBase64: "QUJD",
+    sourceArchiveSha256,
+    ...overrides,
+  };
+  return {
+    ...signed,
+    present: true,
+    sanctionDigest: sha256(`${stableJson(signed)}\n`),
+    signerCertSha256: "358dcd60560f0976f6b27db0972cc996d336516a529c48bf4236dcf22e0c55a2",
+  };
+}
+
+function validBootstrapBridgeReceipt(transportSanction = { present: false }) {
+  const legacyV1Sudoers = [
+    "Defaults:platform_infrastructure env_reset",
+    "Defaults:platform_infrastructure secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "platform_infrastructure ALL=(root) NOPASSWD: /usr/local/libexec/platform-v1-local-private-control activate",
+    "",
+  ].join("\n");
+  return withDocumentId({
+    bridgeSha256: "1".repeat(64),
+    candidateCommit,
+    candidateConsumerSha256: "2".repeat(64),
+    candidateTree,
+    checkpointAfterSha256: "4".repeat(64),
+    checkpointBeforeSha256: "5".repeat(64),
+    controlArtifactReceiptSha256: "6".repeat(64),
+    dataMutation: false,
+    dockerMutation: false,
+    gitBundleSha256: "7".repeat(64),
+    hostControlMutation: true,
+    installReceiptSha256: "8".repeat(64),
+    legacyBroadSudoersAfterSha256: sha256("platform_infrastructure ALL=(ALL) NOPASSWD:ALL\n"),
+    legacyBroadSudoersBeforeSha256: sha256("platform_infrastructure ALL=(ALL) NOPASSWD:ALL\n"),
+    legacyConsumerSha256: "9902e8c83f12cee7d16ee97b660cde12444da479acbe85f9efa4c613d82f76a9",
+    legacyV1SudoersSha256: sha256(legacyV1Sudoers),
+    nodeRuntimeReceiptSha256: "9".repeat(64),
+    releaseRoot,
+    schema: "platform.v1-brownfield-bootstrap-bridge-receipt/v1",
+    sourceArchiveAfterSha256: sourceArchiveSha256,
+    sourceArchiveBeforeSha256: "6".repeat(64),
+    stagingEnvironmentSha256: "a".repeat(64),
+    stagingMutation: true,
+    status: "BOOTSTRAP_CONTROL_INSTALLED",
+    transportSanction,
+  });
+}
+
+function verifyBootstrapFixture(t, transportSanction) {
+  const current = fixture(t, { receipt: validBootstrapBridgeReceipt(transportSanction) });
+  return verifyV1BootstrapBridgeReceipt({
+    file: current.receiptFile, candidateCommit, candidateTree, sourceArchiveSha256,
+  });
+}
+
 function explicit(file, overrides = {}) {
   return verifyV1InstallReceipt({ file, candidateCommit, candidateTree, sourceArchiveSha256, ...overrides });
 }
@@ -287,6 +379,41 @@ test("accepts the exact closed five-artifact receipt against exact-main source b
   });
   assert.equal(receipt.status, "CONTROL_ARTIFACTS_INSTALLED");
   assert.deepEqual(receipt.artifacts.map(({ name }) => name), ["installer", "controller", "reconciler", "unit", "sudoers"]);
+});
+
+test("bootstrap receipt transport sanction dispatch accepts only the exact sentinel, legacy v1, or successor v2 shape", (t) => {
+  assert.equal(verifyBootstrapFixture(t, { present: false }).transportSanction.present, false);
+  const legacy = {
+    present: true,
+    reasonCode: "TRANSPORT_CHECKPOINT_REGENERATED_NO_PRIOR_BYTES",
+    sanctionDigest: "b".repeat(64),
+    signerCertSha256: "c".repeat(64),
+  };
+  assert.equal(verifyBootstrapFixture(t, legacy).transportSanction.reasonCode, legacy.reasonCode);
+  const successor = validSuccessorSanctionSummary();
+  assert.deepEqual(
+    Object.keys(successor).filter((field) => !["present", "sanctionDigest", "signerCertSha256"].includes(field)).sort(),
+    [...successorSanctionFields].sort(),
+  );
+  assert.equal(verifyBootstrapFixture(t, successor).transportSanction.schema, "platform.v1-transport-successor-sanction/v2");
+});
+
+test("bootstrap successor summary rejects shape, digest, trust, target, and preimage/prior-staging tamper", (t) => {
+  const missing = validSuccessorSanctionSummary();
+  delete missing.runtimeSourceArchiveSha256;
+  const badDigest = { ...validSuccessorSanctionSummary(), sanctionDigest: "7".repeat(64) };
+  const cases = [
+    [{ present: false, unexpected: true }, /sentinel/],
+    [{ ...validSuccessorSanctionSummary(), unexpected: true }, /missing or unexpected fields/],
+    [missing, /missing or unexpected fields/],
+    [badDigest, /receipt binding/],
+    [{ ...validSuccessorSanctionSummary(), signerCertSha256: "7".repeat(64) }, /identity/],
+    [validSuccessorSanctionSummary({ candidateCommit: "8".repeat(40) }), /receipt binding/],
+    [validSuccessorSanctionSummary({ priorStagingEnvironmentSha256: "7".repeat(64) }), /receipt binding/],
+  ];
+  for (const [sanction, pattern] of cases) {
+    assert.throws(() => verifyBootstrapFixture(t, sanction), pattern);
+  }
 });
 
 test("accepts authority-bound idempotent control artifact receipt", (t) => {

@@ -295,7 +295,7 @@ function fixture() {
   const responsePaths = Object.fromEntries([
     "preOffhost", "preSecrets", "postOffhost", "postSecrets", "begin", "apply", "validationApply", "evidence",
     "validationMode", "productionMode", "validationEvidence", "active", "unboundActive", "abortRecord", "abortRecordResidual", "abortRecordDocument", "abortActive", "abortActiveHistorical",
-    "abortFinalized", "abortClean",
+    "abortFinalized", "abortClean", "validationClose",
   ].map((name) => [name, path.join(root, `${name}.json`)]));
   writeCanonical(responsePaths.preOffhost, preEvidence.offhost);
   writeCanonical(responsePaths.preSecrets, preEvidence.secrets);
@@ -404,6 +404,12 @@ function fixture() {
   });
   writeCanonical(responsePaths.abortClean, {
     authorityDocumentId: authority.documentId, status: "ABORTED", transactionId: null,
+  });
+  writeCanonical(responsePaths.validationClose, {
+    authorityDocumentId: authority.documentId, authoritySha256, candidateCommit,
+    schema: "platform.v1-local-private-validation-lane-close-result/v1",
+    status: "VALIDATION_LANE_CLOSED", transactionId,
+    validationLaneSha256: sha("validation-lane"),
   });
   fs.writeFileSync(path.join(fixtureScripts, "v1-local-private-control-receipt.mjs"), `#!/usr/bin/env node
 import fs from "node:fs";
@@ -544,6 +550,10 @@ case "$command" in
   *"platform-v1-local-private-control runtime-authority")
     [ "$state" = ACTIVE ] || exit 65
     /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_AUTHORITY" ;;
+  *"platform-v1-local-private-reconcile validation-close")
+    [ "$state" = ACTIVE ] || exit 65
+    lost_once validation-close && exit 255
+    /bin/cat "$PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_CLOSE" ;;
   *"platform-v1-local-private-control seal")
     if [ "\${PLATFORM_V1_LOCAL_PRIVATE_TEST_FAIL_STAGE:-}" = seal-first ] && [ ! -e "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE.seal-first" ]; then
       : > "$PLATFORM_V1_LOCAL_PRIVATE_TEST_REMOTE_STATE.seal-first"
@@ -629,6 +639,7 @@ esac
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_ACTIVE_HISTORICAL: responsePaths.abortActiveHistorical,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_FINALIZED: responsePaths.abortFinalized,
     PLATFORM_V1_LOCAL_PRIVATE_TEST_ABORT_CLEAN: responsePaths.abortClean,
+    PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_CLOSE: responsePaths.validationClose,
   };
   return {
     root, authorityFile, knownHosts, composeWrapperSource, controllerSource, installerSource,
@@ -722,6 +733,7 @@ test("FAST validation closes and finalizes the transaction, then idempotently ac
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record",
       "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control runtime-authority",
+      "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-close",
     ]);
     const commands = remoteCommands(current);
     assert.equal(commands.some((command) => command.includes("offhost-backup-evidence.json")), false);
@@ -745,7 +757,8 @@ test("FAST validation canonically verifies historical provenance without request
     assert.equal(receipt.predecessorRuntimeProvenance.profile, "HISTORICAL_V1");
     assert.equal(Object.hasOwn(receipt, "externalAuthorizedReconciliation"), false);
     const commands = remoteCommands(current);
-    assert.equal(commands.at(-1), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record");
+    assert.equal(commands.at(-2), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record");
+    assert.equal(commands.at(-1), "/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-close");
     assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control runtime-authority")), false);
     assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
   } finally {
@@ -908,6 +921,23 @@ test("FAST validation retries a lost idempotent activation response without open
     assert.equal(result.stdout, current.abortReceipt);
     const commands = remoteCommands(current);
     assert.equal(commands.filter((command) => command.endsWith("platform-v1-local-private-control activate")).length, 2);
+    assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("FAST validation retries a lost idempotent validation-close response", () => {
+  const current = fixture();
+  try {
+    const result = execute(current, undefined, {
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_VALIDATION_LANE: "1",
+      PLATFORM_V1_LOCAL_PRIVATE_TEST_LOST_ONCE: "validation-close",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, current.abortReceipt);
+    const commands = remoteCommands(current);
+    assert.equal(commands.filter((command) => command.endsWith("platform-v1-local-private-reconcile validation-close")).length, 2);
     assert.equal(commands.some((command) => command.endsWith("platform-v1-local-private-control seal")), false);
   } finally {
     fs.rmSync(current.root, { recursive: true, force: true });
@@ -1306,12 +1336,14 @@ test("source has no frozen candidate pin and transports no plan or authority inp
     "V1 exact release authority changed during stable capture.",
     "The root ACTIVE receipt is not sealed to the exact authority bytes.",
     "REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate'",
+    "REMOTE_VALIDATION_CLOSE='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-close'",
     'exec "$SSH" "$@" -- "$REMOTE" "$REMOTE_COMMAND" < /dev/null',
     'capture_remote 3 "begin-maintenance" "$REMOTE_CONTROLLER begin-maintenance"',
     'capture_remote 3 "reconcile apply" "$REMOTE_RECONCILER apply"',
     'capture_remote 3 "reconcile evidence" "$REMOTE_RECONCILER evidence"',
     'capture_remote 1 "controller seal" "$REMOTE_CONTROLLER seal"',
     'capture_remote 3 "final controller verify" "$REMOTE_CONTROLLER verify"',
+    'capture_remote 3 "validation lane closure" "$REMOTE_VALIDATION_CLOSE"',
     '"$OPENSSL" cms -decrypt -binary -inform DER',
     '"$NODE" "$SCRIPT_ROOT/v1-local-private-control-receipt.mjs" verify',
     '--authorityFile "$authority_snapshot"',

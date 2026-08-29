@@ -86,6 +86,198 @@ def probe():
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("validation-open is checkpoint-candidate-bound, byte-idempotent, and safely supersedes only closed stale lanes", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "lane-open-")));
+  fs.chmodSync(root, 0o700);
+  const now = Math.floor(Date.now() / 1000);
+  const targetTree = "d".repeat(40);
+  const targetArchive = "e".repeat(64);
+  const lanePath = path.join(root, "var/lib/platform-infrastructure/v1/local-private/validation-lane.json");
+  const targetLane = (overrides = {}) => ({
+    candidateCommit: CANDIDATE,
+    createdAtUnixSeconds: now - 10,
+    expiresAtUnixSeconds: now + 3600,
+    reason: "fast validation lane",
+    schema: "platform.v1-local-private-validation-lane/v1",
+    ...overrides,
+  });
+  const runOpen = () => runWithRoot(`
+import importlib.util, json
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("rec", ${JSON.stringify(reconcile)})
+spec = importlib.util.spec_from_loader("rec", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+m.configure_environment()
+m.install_binding = lambda: {
+  "candidateCommit": ${JSON.stringify(CANDIDATE)}, "candidateTree": ${JSON.stringify(targetTree)},
+  "releaseRoot": "/srv/platform-infrastructure/releases/test", "sourceArchiveSha256": ${JSON.stringify(targetArchive)}
+}
+print(json.dumps(m.validation_open(), sort_keys=True))
+`, root);
+  try {
+    seedLane(root, targetLane());
+    const original = fs.readFileSync(lanePath);
+    const originalStat = fs.statSync(lanePath, { bigint: true });
+    let result = runOpen();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(fs.readFileSync(lanePath), original, "same-candidate retry rewrote marker bytes");
+    const retryStat = fs.statSync(lanePath, { bigint: true });
+    assert.equal(retryStat.ino, originalStat.ino, "same-candidate retry replaced the marker inode");
+    assert.equal(retryStat.mtimeNs, originalStat.mtimeNs, "same-candidate retry refreshed marker metadata");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      candidateCommit: CANDIDATE,
+      candidateTree: targetTree,
+      schema: "platform.v1-local-private-validation-lane-open-result/v1",
+      sourceArchiveSha256: targetArchive,
+      status: "VALIDATION_LANE_OPEN",
+      validationLaneSha256: sha(original),
+    });
+
+    for (const stale of [
+      targetLane({ candidateCommit: "c".repeat(40) }),
+      targetLane({ createdAtUnixSeconds: now - 7200, expiresAtUnixSeconds: now - 3600 }),
+    ]) {
+      seedLane(root, stale);
+      const staleBytes = fs.readFileSync(lanePath);
+      result = runOpen();
+      assert.equal(result.status, 0, result.stderr);
+      const replacement = fs.readFileSync(lanePath);
+      assert.notDeepEqual(replacement, staleBytes);
+      assert.equal(fs.statSync(lanePath).mode & 0o777, 0o400);
+      const document = JSON.parse(replacement);
+      assert.equal(document.candidateCommit, CANDIDATE);
+      assert.equal(document.reason, "FAST_VALIDATION_NO_MUTATION");
+      assert.equal(replacement.toString(), `${JSON.stringify(document, Object.keys(document).sort())}\n`);
+    }
+
+    for (const currentName of ["reconciliation.json", "reconcile-journal.json", "reconciliation-abort-record.json"]) {
+      const currentPath = path.join(path.dirname(lanePath), currentName);
+      for (const stale of [
+        targetLane({ candidateCommit: "c".repeat(40) }),
+        targetLane({ createdAtUnixSeconds: now - 7200, expiresAtUnixSeconds: now - 3600 }),
+      ]) {
+        seedLane(root, stale);
+        fs.writeFileSync(currentPath, "{}\n", { mode: 0o600 });
+        const before = fs.readFileSync(lanePath);
+        result = runOpen();
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /transaction is open/);
+        assert.deepEqual(fs.readFileSync(lanePath), before, `${currentName} did not preserve marker bytes`);
+        fs.unlinkSync(currentPath);
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("validation-close removes only an ACTIVE receipt-bound archived FAST no-mutation lane and is idempotent", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "lane-close-")));
+  fs.chmodSync(root, 0o700);
+  const now = Math.floor(Date.now() / 1000);
+  const lanePath = seedLane(root, {
+    candidateCommit: CANDIDATE,
+    createdAtUnixSeconds: now - 60,
+    expiresAtUnixSeconds: now + 3600,
+    reason: "FAST_VALIDATION_NO_MUTATION",
+    schema: "platform.v1-local-private-validation-lane/v1",
+  });
+  const laneSha = sha(fs.readFileSync(lanePath));
+  const authorityBytes = Buffer.from("authority-bytes\n");
+  const authoritySha = sha(authorityBytes);
+  const authorityId = sha("authority-document");
+  const transactionId = sha("validation-transaction");
+  const source = (overrides = "") => `
+import importlib.util, json
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("rec", ${JSON.stringify(reconcile)})
+spec = importlib.util.spec_from_loader("rec", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+m.configure_environment()
+authority = {"candidateCommit": ${JSON.stringify(CANDIDATE)}, "candidateTree": "d"*40,
+  "documentId": ${JSON.stringify(authorityId)}, "sourceArchiveSha256": "e"*64}
+authority_bytes = ${JSON.stringify(authorityBytes.toString())}.encode()
+binding = {"authorityDocumentId": authority["documentId"], "authoritySha256": m.digest(authority_bytes),
+  "journalSha256": "f"*64, "residualDataMutations": [],
+  "status": "ABORTED_NO_DATA_MUTATION", "transactionId": ${JSON.stringify(transactionId)}}
+receipt = {"candidateCommit": authority["candidateCommit"], "candidateTree": authority["candidateTree"],
+  "schema": "platform.v1-local-private-control-receipt/v1", "sourceArchiveSha256": authority["sourceArchiveSha256"],
+  "status": "ACTIVE"}
+journal = {"abortCheckpointSha256": None, "authorityDocumentId": authority["documentId"],
+  "authoritySha256": m.digest(authority_bytes), "dataMutationEvidence": [], "dataMutationStatus": {"db": "NEVER_STARTED"},
+  "phase": "ABORTED", "schema": m.JOURNAL_SCHEMA, "steps": [], "transactionId": binding["transactionId"],
+  "validationLaneSha256": ${JSON.stringify(laneSha)}}
+journal_bytes = b"archived-fast-journal\\n"
+binding["journalSha256"] = m.digest(journal_bytes)
+m.read_authority = lambda: (authority, authority_bytes)
+m.validate_authority_material = lambda value: {}
+m.preverified_active_receipt = lambda: receipt
+m.receipt_bound_abort_archive = lambda required=False: (receipt, binding, journal, journal_bytes)
+${overrides}
+try:
+    value = m.validation_close()
+    print(json.dumps({"ok": True, "value": value}, sort_keys=True))
+except m.Stop as error:
+    print(json.dumps({"error": str(error), "ok": False}, sort_keys=True))
+`;
+  try {
+    let result = runWithRoot(source(), root);
+    assert.equal(result.status, 0, result.stderr);
+    let verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(fs.existsSync(lanePath), false);
+    assert.deepEqual(verdict.value, {
+      authorityDocumentId: authorityId,
+      authoritySha256: authoritySha,
+      candidateCommit: CANDIDATE,
+      schema: "platform.v1-local-private-validation-lane-close-result/v1",
+      status: "VALIDATION_LANE_CLOSED",
+      transactionId,
+      validationLaneSha256: laneSha,
+    });
+
+    result = runWithRoot(source(), root);
+    assert.equal(result.status, 0, result.stderr);
+    verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true, "lost-output retry did not accept already absent marker");
+
+    seedLane(root, {
+      candidateCommit: CANDIDATE, createdAtUnixSeconds: now - 60, expiresAtUnixSeconds: now + 3600,
+      reason: "FAST_VALIDATION_NO_MUTATION", schema: "platform.v1-local-private-validation-lane/v1",
+    });
+    const before = fs.readFileSync(lanePath);
+    result = runWithRoot(source('journal["validationLaneSha256"] = "0"*64'), root);
+    verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, false);
+    assert.deepEqual(fs.readFileSync(lanePath), before, "archive mismatch removed or rewrote the marker");
+
+    const current = path.join(path.dirname(lanePath), "reconcile-journal.json");
+    fs.writeFileSync(current, "{}\n", { mode: 0o600 });
+    result = runWithRoot(source(), root);
+    verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.error, /open reconciliation transaction/);
+    assert.deepEqual(fs.readFileSync(lanePath), before, "open transaction changed the marker");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("validation lane lifecycle verbs are fixed no-argument operations under both reconciler locks", () => {
+  const source = fs.readFileSync(reconcile, "utf8");
+  const mainBody = source.slice(source.indexOf("def main() ->"));
+  assert.match(mainBody, /len\(sys\.argv\) != 2/);
+  assert.match(mainBody, /"validation-open", "validation-close"/);
+  assert.match(mainBody, /shared_lock_fd = acquire_lock\(SHARED_LOCK/);
+  assert.match(mainBody, /local_lock_fd = acquire_lock\(LOCK/);
+  assert.ok(mainBody.indexOf("shared_lock_fd = acquire_lock(SHARED_LOCK") < mainBody.indexOf("local_lock_fd = acquire_lock(LOCK"));
+  const openBody = source.slice(source.indexOf("def validation_open()"), source.indexOf("def journal_uses_validation_lane"));
+  assert.match(openBody, /binding = install_binding\(\)/);
+  assert.doesNotMatch(openBody, /sys\.argv|os\.environ/);
+  assert.match(openBody, /atomic_json\([\s\S]*VALIDATION_LANE_FILE[\s\S]*0o400/);
+  const closeBody = source.slice(source.indexOf("def validation_close()"), source.indexOf("def prepare() ->"));
+  assert.match(closeBody, /validation_transaction_files_present\(\)/);
+  assert.match(closeBody, /preverified_active_receipt\(\)/);
+  assert.match(closeBody, /receipt_bound_abort_archive\(required=True\)/);
+  assert.match(closeBody, /os\.unlink\(pathname\)[\s\S]*os\.fsync\(directory_fd\)/);
+});
+
 test("fast prepare validation checkpoint: honest booleans, real provenance, readback, no producer call", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "lane-checkpoint-")));
   fs.chmodSync(root, 0o700);

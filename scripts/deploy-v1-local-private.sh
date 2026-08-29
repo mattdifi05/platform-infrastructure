@@ -24,6 +24,7 @@ REMOTE_RECONCILER='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-priv
 REMOTE_ABORTED_RECORD='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control aborted-record'
 REMOTE_RUNTIME_AUTHORITY='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control runtime-authority'
 REMOTE_VALIDATION_MODE='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control validation-mode'
+REMOTE_VALIDATION_CLOSE='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile validation-close'
 REMOTE_AUTHORITY_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 REMOTE_OFFHOST_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json'
 REMOTE_SECRETS_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json'
@@ -635,6 +636,20 @@ if (kind === "validation-mode") {
   const alreadyClean = stable(Object.keys(value).sort()) === stable(["authorityDocumentId", "status", "transactionId"].sort())
     && value.authorityDocumentId === authority.documentId && value.status === "ABORTED" && value.transactionId === null;
   if (!finalized && !alreadyClean) throw new Error("second abort did not finalize the exact transaction.");
+} else if (kind === "validation-close") {
+  const peer = parse(peerPath, "validation abort response");
+  if (stable(Object.keys(value).sort()) !== stable([
+      "authorityDocumentId", "authoritySha256", "candidateCommit", "schema", "status",
+      "transactionId", "validationLaneSha256",
+    ].sort())
+    || value.schema !== "platform.v1-local-private-validation-lane-close-result/v1"
+    || value.status !== "VALIDATION_LANE_CLOSED"
+    || value.authorityDocumentId !== authority.documentId
+    || value.authoritySha256 !== authoritySha
+    || value.candidateCommit !== authority.candidateCommit
+    || value.transactionId !== peer.transactionId
+    || peer.status !== "ABORTED_NO_DATA_MUTATION"
+    || !sha.test(value.validationLaneSha256)) throw new Error("validation lane closure is not authority/abort-bound.");
 } else if (kind === "reconciling-or-active") {
   if (value.status === "ACTIVE") {
     const external = value.externalAuthorizedReconciliation;
@@ -958,6 +973,11 @@ NODE
   else
     fail "The validation runtime provenance classification is invalid." 65
   fi
+  validation_close_response="$work/validation-close-response.json"
+  capture_remote 3 "validation lane closure" "$REMOTE_VALIDATION_CLOSE" "$validation_close_response" 4096 \
+    || fail "The finalized FAST validation lane could not be closed after bounded retries." 75
+  validate_protocol_json "$validation_close_response" validation-close "$abort_record" \
+    || fail "The finalized FAST validation lane closure is not authority/abort-bound." 65
   cat "$receipt"
   exit 0
 fi
