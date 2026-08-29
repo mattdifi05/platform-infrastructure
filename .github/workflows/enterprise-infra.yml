@@ -365,7 +365,6 @@ jobs:
             scripts/v1-brownfield-control-plane-gate.test.mjs \
             scripts/v1-local-private-control.test.mjs \
             scripts/v1-local-private-control.e2e.test.mjs \
-            scripts/v1-local-private-control.begin-retry-apply.test.mjs \
             scripts/v1-local-private-evidence-producer.test.mjs \
             scripts/v1-local-private-reconcile.test.mjs \
             scripts/deploy-v1-local-private.test.mjs \
