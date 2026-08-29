@@ -92,6 +92,13 @@ MAX_BACKUP_AGE = 6 * 3600
 
 VALIDATION_LANE_FILE = f"{STATE_DIR}/validation-lane.json"
 VALIDATION_CHECKPOINT_FILE = "/var/lib/platform-infrastructure/v1/predeploy/current/local-private-checkpoint-validation.json"
+CHECKPOINT_EVIDENCE_PATHS = {
+    "logicalBackupEvidenceSha256": "/var/lib/platform-infrastructure/v1/predeploy/current/logical-backup-evidence.json",
+    "offHostBackupEvidenceSha256": "/var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json",
+    "restoreEvidenceSha256": "/var/lib/platform-infrastructure/v1/predeploy/current/restore-evidence.json",
+    "runtimeInventorySha256": "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence.json",
+    "secretsBackupEvidenceSha256": "/var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json",
+}
 VALIDATION_LANE_SCHEMA = "platform.v1-local-private-validation-lane/v1"
 VALIDATION_CHECKPOINT_SCHEMA = "platform.v1-local-private-predeploy-checkpoint-validation/v1"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
