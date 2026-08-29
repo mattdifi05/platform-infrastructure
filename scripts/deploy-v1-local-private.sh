@@ -21,6 +21,7 @@ WORKLOAD_LOCK_SOURCE="$REPOSITORY_ROOT/config/no-hosted-workloads.local-private.
 REMOTE_COMMAND='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control activate'
 REMOTE_CONTROLLER='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-control'
 REMOTE_RECONCILER='/usr/bin/sudo -n -- /usr/local/libexec/platform-v1-local-private-reconcile'
+REMOTE_VALIDATION_LANE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/validation-lane.json'
 REMOTE_AUTHORITY_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/local-private/exact-release-authority.json'
 REMOTE_OFFHOST_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/offhost-backup-evidence.json'
 REMOTE_SECRETS_EVIDENCE_CAT='/usr/bin/sudo -n -- /usr/bin/cat /var/lib/platform-infrastructure/v1/predeploy/current/secrets-backup-evidence.json'
@@ -522,6 +523,10 @@ if (kind === "begin") {
   if (stable(Object.keys(value).sort()) !== stable(["evidencePath", "evidenceSha256", "status"].sort())
     || value.evidencePath !== "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence.json"
     || value.status !== "PASS" || !sha.test(value.evidenceSha256)) throw new Error("evidence response is not canonical PASS evidence.");
+} else if (kind === "evidence-validation") {
+  if (stable(Object.keys(value).sort()) !== stable(["evidencePath", "evidenceSha256", "status"].sort())
+    || value.evidencePath !== "/var/lib/platform-infrastructure/v1/predeploy/current/runtime-inventory-evidence-validation.json"
+    || value.status !== "VALIDATION" || !sha.test(value.evidenceSha256)) throw new Error("validation evidence response is not canonical VALIDATION evidence.");
 } else if (kind === "abort-record") {
   if (value.authorityDocumentId !== authority.documentId || !sha.test(value.transactionId)
     || !["ABORTED_NO_DATA_MUTATION", "ABORTED_WITH_RESIDUAL_DATA_MUTATIONS"].includes(value.status)
@@ -655,7 +660,20 @@ cmp -s "$remote_authority" "$authority_snapshot" \
   || fail "The remote exact release authority differs byte-for-byte from the local clean-main authority." 65
 
 # PRE is the last backup/restore/off-site gate before maintenance begins.
-fetch_and_verify_cms PRE
+if [ "$VALIDATION_MODE" != 1 ]; then
+  fetch_and_verify_cms PRE
+else
+  echo "VALIDATION MODE: PRE CMS escrow verification skipped (no fresh escrow upload)."
+fi
+
+validation_lane_file="$work/validation-lane.json"
+VALIDATION_MODE=0
+if capture_remote 1 "validation lane marker" "$REMOTE_VALIDATION_LANE_CAT" "$validation_lane_file" 4096; then
+  VALIDATION_MODE=1
+  echo "VALIDATION LANE ACTIVE: production seal and CMS escrow verification are disabled for this run." >&2
+else
+  rm -f "$validation_lane_file"
+fi
 
 begin_response="$work/begin-maintenance-response.json"
 if ! capture_remote 3 "begin-maintenance" "$REMOTE_CONTROLLER begin-maintenance" "$begin_response" 131072; then
@@ -676,17 +694,24 @@ fi
 # APPLIED -> COMMITTING. Never issue abort after this point.
 evidence_response="$work/reconcile-evidence-response.json"
 if ! capture_remote 3 "reconcile evidence" "$REMOTE_RECONCILER evidence" "$evidence_response" 131072 \
-  || ! validate_protocol_json "$evidence_response" evidence; then
+  || ! validate_protocol_json "$evidence_response" "$([ "$VALIDATION_MODE" = 1 ] && echo evidence-validation || echo evidence)"; then
   fail "reconcile evidence remained unverifiable after bounded idempotent retries; abort is closed after possible COMMITTING." 65
 fi
 
 # POST recovery material must be locally decryptable before the controller is
 # allowed to seal the newly committed runtime.
-fetch_and_verify_cms POST
+if [ "$VALIDATION_MODE" != 1 ]; then
+  fetch_and_verify_cms POST
+else
+  echo "VALIDATION MODE: POST CMS escrow verification skipped (no fresh escrow upload)."
+fi
 
+if [ "$VALIDATION_MODE" = 1 ]; then
+  echo "VALIDATION MODE: production seal is forbidden; stopping before seal."
+fi
 seal_response="$work/seal-response.json"
 seal_observed=0
-if capture_remote 1 "controller seal" "$REMOTE_CONTROLLER seal" "$seal_response" 131072; then
+if [ "$VALIDATION_MODE" != 1 ] && capture_remote 1 "controller seal" "$REMOTE_CONTROLLER seal" "$seal_response" 131072; then
   seal_observed=1
 else
   uncertain_verify="$work/uncertain-seal-verify.json"
