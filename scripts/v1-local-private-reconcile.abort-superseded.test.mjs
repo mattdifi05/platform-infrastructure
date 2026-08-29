@@ -243,3 +243,50 @@ test("abort source keeps both closure routes and their exact guards", () => {
   assert.match(projection, /set\(fields\) \| \{"project"\}/);
   assert.match(projection, /for key in comparable/);
 });
+
+test("existing recovery binding reuses the active receipt binding and verifies the export bytes", () => {
+  const value = jsonPython(`
+import hashlib, json, os, tempfile
+root = tempfile.mkdtemp(dir=os.path.realpath(tempfile.gettempdir())); os.chmod(root, 0o700)
+g = m['existing_recovery_binding'].__globals__; g['TEST_ROOT'] = root; g['OWNER_UID'] = os.geteuid(); g['OWNER_GID'] = os.getegid()
+def put(logical, data, mode):
+    p = m['physical'](logical); os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    if os.path.exists(p): os.chmod(p, 0o600)
+    open(p, 'wb').write(data); os.chmod(p, mode); os.chown(p, os.geteuid(), os.getegid())
+export_bytes = (b'export-tar-header' + b'x' * 2048)
+export_sha = hashlib.sha256(export_bytes).hexdigest()
+put(m['SCHEDULER_RECOVERY_EXPORT'], export_bytes, 0o444)
+st = os.stat(m['physical'](m['SCHEDULER_RECOVERY_EXPORT']))
+binding = {
+    'archiveFormat': 'OCI_DOCKER_SAVE_V1',
+    'configDigest': 'sha256:' + 'a' * 64,
+    'configHash': 'b' * 64,
+    'containerId': 'c' * 64,
+    'exportIdentity': {'ctimeNs': st.st_ctime_ns, 'device': st.st_dev, 'gid': st.st_gid, 'inode': st.st_ino,
+                        'mode': __import__('stat').S_IMODE(st.st_mode), 'mtimeNs': st.st_mtime_ns,
+                        'nlink': st.st_nlink, 'size': st.st_size, 'uid': st.st_uid},
+    'exportLabels': {'com.platform.v1.local-private.candidate-commit': 'a' * 40},
+    'exportPath': m['SCHEDULER_RECOVERY_EXPORT'],
+    'exportSha256': export_sha,
+    'exportSizeBytes': st.st_size,
+    'imageIndexDigest': 'sha256:' + 'd' * 64,
+    'imageIndexPath': 'blobs/sha256/' + 'd' * 64,
+    'imageManifestDigest': 'sha256:' + 'e' * 64,
+    'manifestConfig': 'blobs/sha256/' + 'a' * 64,
+    'recoveryImageId': 'sha256:' + 'd' * 64,
+    'recoveryTag': 'platform/v1-scheduler-recovery:' + 'a' * 40,
+    'runningImageId': 'sha256:' + 'f' * 64,
+}
+trust = {'mode': 'LOCAL_DOCKER_IMMUTABLE_IMAGE_ID', 'schedulerRecovery': binding, 'status': 'PASS'}
+receipt = {'localArtifactTrust': trust, 'schema': 'platform.v1-local-private-control-receipt/v1', 'status': 'ACTIVE'}
+put(m['ACTIVE_RECEIPT'], m['canonical_bytes'](receipt), 0o444)
+recovered = m['existing_recovery_binding']()
+put(m['SCHEDULER_RECOVERY_EXPORT'], b'tampered-bytes', 0o444)
+try:
+    m['existing_recovery_binding']()
+    drift_stopped = False
+except m['Stop']:
+    drift_stopped = True
+print(json.dumps({'exportSha': recovered['exportSha256'] == export_sha, 'imageIdsDistinct': recovered['recoveryImageId'] != recovered['runningImageId'], 'driftStopped': drift_stopped}))`);
+  assert.deepEqual(value, { exportSha: true, imageIdsDistinct: true, driftStopped: true });
+});
