@@ -468,6 +468,13 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /var cacheTtlMs = 300000/);
   assert.match(localClient, /var prefetchTimeoutMs = 15000/);
   assert.match(localClient, /var preloadWorkerCount = 4/);
+  assert.match(localClient, /var backgroundPreloadWorkerCount = 1/);
+  assert.match(localClient, /var prefetchControllers = new Map\(\)/);
+  assert.match(localClient, /function cancelBackgroundPreload\(\)/);
+  assert.match(localClient, /requestIdleCallback\(run, \{ timeout: 1000 \}\)/);
+  assert.match(localClient, /workerCount: backgroundPreloadWorkerCount/);
+  assert.match(localClient, /while \(queue\.length && isCurrentBackgroundPreload\(generation\)\)/);
+  assert.match(localClient, /activeRequest = null;\s+scheduleControlCenterPreload\(\);/);
   assert.match(localClient, /var formSubmissions = new WeakSet\(\)/);
   assert.match(localClient, /var navigationSequence = 0/);
   assert.match(localClient, /If-None-Match/);
