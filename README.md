@@ -1076,7 +1076,7 @@ e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.runtime.yaml`: servizi runtime platform opzionali; non definisce app concrete.
 - `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload.
-- `compose.runtime-isolation.yaml`: overlay VPS finale con mount allowlist, proxy Docker e budget cgroup; va caricato per ultimo.
+- `compose.runtime-isolation.yaml`: overlay di hardening core con mount allowlist, proxy Docker e budget cgroup; nella V1.0 precede le proiezioni LOCAL_PRIVATE, applicative e greenfield.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
