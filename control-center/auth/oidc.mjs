@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import pg from "pg";
+import { parseCidrs } from "../first-configuration/config.mjs";
 import { resolveAuthorizationCapability } from "./route-capabilities.mjs";
 
 const { Pool } = pg;
@@ -29,17 +30,25 @@ const INVALID_PROVIDER_TOKEN_ERROR_CODES = new Set([
   "ERR_JWT_INVALID",
 ]);
 
-export async function createControlCenterAuth({ env = process.env } = {}) {
+export async function createControlCenterAuth({ env = process.env, fetchImpl = fetch } = {}) {
   const config = readAuthConfig(env);
   if (config.mode === "test-disabled") {
     return new TestDisabledAuth(config);
+  }
+  if (config.mode === "app-passkey") {
+    const { AppPasskeyAuth } = await import("./app-passkey.mjs");
+    const store = config.store === "memory"
+      ? new MemoryAuthStore()
+      : new PostgresAuthStore(config.databaseUrl);
+    await store.ready({ requirePasskeys: true });
+    return new AppPasskeyAuth(config, store);
   }
 
   const store = config.store === "memory"
     ? new MemoryAuthStore()
     : new PostgresAuthStore(config.databaseUrl);
   await store.ready();
-  return new OidcPasskeyAuth(config, store);
+  return new OidcPasskeyAuth(config, store, { fetchImpl });
 }
 
 export function readAuthConfig(env = process.env) {
@@ -54,8 +63,11 @@ export function readAuthConfig(env = process.env) {
     }
     return { mode, environment, bindHost };
   }
+  if (mode === "app-passkey") {
+    return readAppPasskeyConfig(env, { environment, nodeEnvironment, bindHost });
+  }
   if (mode !== "oidc-passkey") {
-    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_MODE must be oidc-passkey.");
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_MODE must be oidc-passkey or app-passkey.");
   }
   if (env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || env.CONTROL_CENTER_ADMIN_PASSWORD_FILE) {
     throw new AuthConfigurationError("Local password authentication is not supported.");
@@ -129,12 +141,75 @@ export function readAuthConfig(env = process.env) {
   };
 }
 
+function readAppPasskeyConfig(env, { environment, nodeEnvironment, bindHost }) {
+  const store = String(env.CONTROL_CENTER_AUTH_STORE || "postgres").trim().toLowerCase();
+  if (!["postgres", "memory"].includes(store)) {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_STORE must be postgres or memory.");
+  }
+  if (store === "memory" && nodeEnvironment !== "test") {
+    throw new AuthConfigurationError("The in-memory app-passkey store is restricted to NODE_ENV=test.");
+  }
+  if (String(env.NODE_TLS_REJECT_UNAUTHORIZED || "").trim() === "0") {
+    throw new AuthConfigurationError("TLS certificate verification must remain enabled.");
+  }
+  const publicOrigin = originOf(requiredHttpsUrl(env.CONTROL_CENTER_PUBLIC_ORIGIN, "CONTROL_CENTER_PUBLIC_ORIGIN"));
+  const publicUrl = new URL(publicOrigin);
+  if (publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash || publicUrl.username || publicUrl.password) {
+    throw new AuthConfigurationError("CONTROL_CENTER_PUBLIC_ORIGIN must be an exact HTTPS origin without path, query, fragment, or credentials.");
+  }
+  const publicHost = publicUrl.host.toLowerCase();
+  const rpId = String(env.CONTROL_CENTER_AUTH_RP_ID || publicUrl.hostname).trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/.test(rpId) ||
+      !publicUrl.hostname.toLowerCase().endsWith(rpId) ||
+      (publicUrl.hostname.toLowerCase() !== rpId && !publicUrl.hostname.toLowerCase().endsWith(`.${rpId}`))) {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_RP_ID must be the exact Control Center hostname or a parent suffix.");
+  }
+  const adminUsername = requiredText(env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME || "admin", "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME");
+  const adminEmail = requiredText(env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL || "admin@example.com", "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL");
+  const adminSubject = `app-admin:${sha256(`${publicOrigin}\0${adminUsername}`).slice(0, 48)}`;
+  const webauthnUserId = sha256(`webauthn-user\0${adminSubject}`);
+  const databaseUrl = store === "postgres" ? readDatabaseUrl(env.CONTROL_CENTER_AUTH_DATABASE_URL_FILE) : "";
+  const allowedCidrs = parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS || "192.168.1.0/24,127.0.0.0/8,::1/128");
+  const trustedProxyCidrs = parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS || "172.16.0.0/12,127.0.0.0/8,::1/128");
+  return {
+    mode: "app-passkey",
+    environment,
+    bindHost,
+    publicOrigin,
+    publicHost,
+    rpId,
+    rpName: requiredText(env.CONTROL_CENTER_AUTH_RP_NAME || "Platform Control Center", "CONTROL_CENTER_AUTH_RP_NAME"),
+    adminUsername,
+    adminEmail,
+    adminDisplayName: String(env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_DISPLAY_NAME || adminUsername).trim() || adminUsername,
+    adminSubject,
+    webauthnUserId,
+    ownerRole: "owner",
+    adminRole: "admin",
+    viewerRole: "viewer",
+    sessionMaxAgeSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS, 86400, 3600, 7 * 86400),
+    sessionIdleSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_IDLE_SECONDS, 86400, 300, 7 * 86400),
+    passkeyTtlSeconds: boundedInteger(env.CONTROL_CENTER_PASSKEY_TTL_SECONDS, 10 * 365 * 86400, 86400, 20 * 365 * 86400),
+    challengeTtlSeconds: boundedInteger(env.CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS, 5 * 60, 60, 86400),
+    freshAuthSeconds: boundedInteger(env.CONTROL_CENTER_FRESH_AUTH_SECONDS, 300, 60, 900),
+    loginMaxAttempts: boundedInteger(env.CONTROL_CENTER_LOGIN_MAX_ATTEMPTS, 20, 2, 100),
+    loginWindowSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_WINDOW_SECONDS, 60, 10, 600),
+    loginLockSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_LOCK_SECONDS, 60, 10, 3600),
+    sessionPolicyVersion: requiredText(env.CONTROL_CENTER_SESSION_POLICY_VERSION || "1", "CONTROL_CENTER_SESSION_POLICY_VERSION"),
+    allowedCidrs,
+    trustedProxyCidrs,
+    store,
+    databaseUrl,
+  };
+}
+
 class OidcPasskeyAuth {
-  constructor(config, store) {
+  constructor(config, store, { fetchImpl = fetch } = {}) {
     this.config = config;
     this.store = store;
     this.enabled = true;
     this.mode = config.mode;
+    this.fetch = fetchImpl;
     this.jwks = createRemoteJWKSet(new URL(config.jwksUri), {
       cooldownDuration: 30_000,
       cacheMaxAge: 10 * 60_000,
@@ -179,6 +254,80 @@ class OidcPasskeyAuth {
     return target.toString();
   }
 
+  beginPasskeyRegistration() {
+    const state = opaqueToken();
+    const nonce = opaqueToken();
+    const codeVerifier = opaqueToken(64);
+    const target = new URL(this.config.authorizationEndpoint);
+    target.searchParams.set("client_id", this.config.clientId);
+    target.searchParams.set("redirect_uri", this.config.redirectUri);
+    target.searchParams.set("response_type", "code");
+    target.searchParams.set("scope", "openid profile email");
+    target.searchParams.set("state", state);
+    target.searchParams.set("nonce", nonce);
+    target.searchParams.set("code_challenge", base64urlSha256(codeVerifier));
+    target.searchParams.set("code_challenge_method", "S256");
+    target.searchParams.set("kc_action", "webauthn-register-passwordless");
+    return {
+      authorizationUrl: target.toString(),
+      stateHash: sha256(state),
+      nonceHash: sha256(nonce),
+      codeVerifier,
+    };
+  }
+
+  async completePasskeyRegistration(url, transaction) {
+    if (url.searchParams.get("error")) {
+      throw new AuthRequestError("Passkey registration was rejected by the identity provider.", 401);
+    }
+    if (url.searchParams.get("kc_action_status") !== "success") {
+      throw new AuthRequestError("The identity provider did not confirm passkey registration.", 401);
+    }
+    const code = boundedAuthorizationCode(url.searchParams.get("code"));
+    const state = String(url.searchParams.get("state") || "");
+    if (!code || !state || !transaction?.codeVerifier || !transaction?.nonceHash || !transaction?.subject) {
+      throw new AuthRequestError("Passkey registration callback is incomplete.", 400);
+    }
+
+    const response = await this.fetch(this.config.tokenEndpoint, {
+      method: "POST",
+      redirect: "error",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: this.config.clientId,
+        code,
+        redirect_uri: this.config.redirectUri,
+        code_verifier: transaction.codeVerifier,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw new AuthRequestError("OIDC passkey-registration token exchange failed.", 401);
+    const tokens = await response.json();
+    const idToken = typeof tokens.id_token === "string" ? tokens.id_token : "";
+    if (!idToken) throw new AuthRequestError("OIDC response did not contain an ID token.", 401);
+
+    const { payload } = await jwtVerify(idToken, this.jwks, {
+      issuer: this.config.issuer,
+      audience: this.config.clientId,
+      algorithms: ["RS256", "ES256"],
+      clockTolerance: 5,
+      maxTokenAge: "10 minutes",
+    });
+    const audience = Array.isArray(payload.aud) ? payload.aud.map(String) : [String(payload.aud || "")];
+    if (audience.length !== 1 || audience[0] !== this.config.clientId) {
+      throw new AuthRequestError("Passkey registration requires the exact Control Center audience.", 401);
+    }
+    if (!safeEqualText(String(payload.nonce || ""), transaction.nonceHash, true)) {
+      throw new AuthRequestError("OIDC nonce validation failed.", 401);
+    }
+    const subject = requiredClaim(payload.sub, "sub");
+    if (!safeEqualText(subject, transaction.subject)) {
+      throw new AuthRequestError("Passkey registration subject changed during the transaction.", 403);
+    }
+    return { subject };
+  }
+
   async completeLogin(url) {
     if (url.searchParams.get("error")) {
       throw new AuthRequestError("Identity provider authentication was rejected.", 401);
@@ -192,7 +341,7 @@ class OidcPasskeyAuth {
       throw new AuthRequestError("OIDC transaction is invalid or expired.", 401);
     }
 
-    const response = await fetch(this.config.tokenEndpoint, {
+    const response = await this.fetch(this.config.tokenEndpoint, {
       method: "POST",
       redirect: "error",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -483,6 +632,8 @@ class TestDisabledAuth {
   async validateMutation(_req, _url, session) { return session; }
   async backchannelLogout() { throw new AuthRequestError("OIDC back-channel logout is unavailable.", 404); }
   async providerSecurityEvent() { throw new AuthRequestError("Provider security events are unavailable.", 404); }
+  beginPasskeyRegistration() { throw new AuthRequestError("Passkey registration is unavailable.", 404); }
+  async completePasskeyRegistration() { throw new AuthRequestError("Passkey registration is unavailable.", 404); }
   async close() {}
   async discardLogin() {}
 }
@@ -491,18 +642,23 @@ export class PostgresAuthStore {
   constructor(connectionString) {
     this.pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
   }
-  async ready() {
+  async ready({ requirePasskeys = false } = {}) {
     const result = await this.pool.query(
       `select to_regclass('control_auth.oidc_transactions') as transactions,
               to_regclass('control_auth.sessions') as sessions,
               to_regclass('control_auth.login_throttle') as throttle,
               to_regclass('control_auth.provider_event_tokens') as provider_event_tokens,
               to_regclass('control_auth.provider_revocations') as provider_revocations,
+              to_regclass('control_auth.passkeys') as passkeys,
+              to_regclass('control_auth.webauthn_challenges') as webauthn_challenges,
               exists(select 1 from information_schema.columns where table_schema='control_auth' and table_name='sessions' and column_name='csrf_hash') as csrf_ready`,
     );
     if (!result.rows[0]?.transactions || !result.rows[0]?.sessions || !result.rows[0]?.throttle ||
         !result.rows[0]?.provider_event_tokens || !result.rows[0]?.provider_revocations || !result.rows[0]?.csrf_ready) {
       throw new AuthConfigurationError("Control Center auth migrations are not applied.");
+    }
+    if (requirePasskeys && (!result.rows[0]?.passkeys || !result.rows[0]?.webauthn_challenges)) {
+      throw new AuthConfigurationError("Control Center app-passkey migration 006 is not applied.");
     }
   }
   async createTransaction(item) {
@@ -648,6 +804,64 @@ export class PostgresAuthStore {
   async clearLoginThrottle(keyHash) {
     await this.pool.query("delete from control_auth.login_throttle where key_hash=$1", [keyHash]);
   }
+  async createWebAuthnChallenge(item) {
+    await this.pool.query("delete from control_auth.webauthn_challenges where expires_at <= now()");
+    await this.pool.query(
+      `insert into control_auth.webauthn_challenges
+       (challenge_hash,challenge,flow,user_id,peer_hash,expires_at)
+       values ($1,$2,$3,$4,$5,$6)
+       on conflict (challenge_hash) do update
+       set challenge=excluded.challenge,flow=excluded.flow,user_id=excluded.user_id,
+           peer_hash=excluded.peer_hash,created_at=now(),expires_at=excluded.expires_at`,
+      [item.challengeHash, item.challenge, item.flow, item.userId, item.peerHash, item.expiresAt],
+    );
+  }
+  async consumeWebAuthnChallenge({ challengeHash, challenge, flow, userId, peerHash }) {
+    const result = await this.pool.query(
+      `delete from control_auth.webauthn_challenges
+       where challenge_hash=$1 and challenge=$2 and flow=$3 and user_id=$4 and peer_hash=$5 and expires_at > now()
+       returning challenge,flow,user_id,peer_hash,expires_at`,
+      [challengeHash, challenge, flow, userId, peerHash],
+    );
+    const row = result.rows[0];
+    return row ? {
+      challenge: row.challenge,
+      flow: row.flow,
+      userId: row.user_id,
+      peerHash: row.peer_hash,
+      expiresAt: row.expires_at,
+    } : null;
+  }
+  async listPasskeys(userId) {
+    await this.pool.query("delete from control_auth.passkeys where expires_at <= now()");
+    const result = await this.pool.query(
+      `select credential_id,user_id,webauthn_user_id,public_key,counter,transports,device_type,backed_up,
+              created_at,expires_at,last_used_at,updated_at
+       from control_auth.passkeys where user_id=$1 and expires_at > now() order by created_at asc`,
+      [userId],
+    );
+    return result.rows.map(normalizePasskeyRow);
+  }
+  async createPasskey(item) {
+    const result = await this.pool.query(
+      `insert into control_auth.passkeys
+       (credential_id,user_id,webauthn_user_id,public_key,counter,transports,device_type,backed_up,expires_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       on conflict (credential_id) do nothing`,
+      [item.id, item.userId, item.webauthnUserId, item.publicKey, item.counter, item.transports || [], item.deviceType, item.backedUp, item.expiresAt],
+    );
+    return result.rowCount === 1;
+  }
+  async updatePasskeyCounter({ credentialId, userId, counter, deviceType, backedUp }) {
+    const result = await this.pool.query(
+      `update control_auth.passkeys
+       set counter=$1,device_type=coalesce($2,device_type),backed_up=coalesce($3,backed_up),last_used_at=now(),updated_at=now()
+       where credential_id=$4 and user_id=$5 and expires_at > now() and counter <= $1
+       returning credential_id`,
+      [counter, deviceType || null, backedUp === undefined ? null : Boolean(backedUp), credentialId, userId],
+    );
+    return result.rowCount === 1;
+  }
   async close() { await this.pool.end(); }
 }
 
@@ -658,6 +872,8 @@ export class MemoryAuthStore {
     this.loginThrottle = new Map();
     this.providerEventTokens = new Map();
     this.providerRevocations = new Map();
+    this.passkeys = new Map();
+    this.webauthnChallenges = new Map();
   }
   async ready() {}
   async createTransaction(item) {
@@ -729,6 +945,53 @@ export class MemoryAuthStore {
     return { allowed: attempts <= maxAttempts, retryAfterSeconds: lockedUntil ? lockSeconds : 0 };
   }
   async clearLoginThrottle(keyHash) { this.loginThrottle.delete(keyHash); }
+  async createWebAuthnChallenge(item) {
+    const now = Date.now();
+    for (const [key, value] of this.webauthnChallenges) {
+      if (value.expiresAt.getTime() <= now) this.webauthnChallenges.delete(key);
+    }
+    this.webauthnChallenges.set(item.challengeHash, {
+      ...structuredClone(item),
+      expiresAt: new Date(item.expiresAt),
+    });
+  }
+  async consumeWebAuthnChallenge({ challengeHash, challenge, flow, userId, peerHash }) {
+    const item = this.webauthnChallenges.get(challengeHash);
+    this.webauthnChallenges.delete(challengeHash);
+    if (!item || item.challenge !== challenge || item.flow !== flow || item.userId !== userId ||
+        item.peerHash !== peerHash || item.expiresAt.getTime() <= Date.now()) return null;
+    return structuredClone(item);
+  }
+  async listPasskeys(userId) {
+    const now = Date.now();
+    for (const [key, value] of this.passkeys) {
+      if (value.expiresAt.getTime() <= now) this.passkeys.delete(key);
+    }
+    return [...this.passkeys.values()]
+      .filter((item) => item.userId === userId && item.expiresAt.getTime() > now)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .map((item) => structuredClone(item));
+  }
+  async createPasskey(item) {
+    if (this.passkeys.has(item.id)) return false;
+    this.passkeys.set(item.id, {
+      ...structuredClone(item),
+      publicKey: new Uint8Array(item.publicKey),
+      createdAt: new Date(item.createdAt || Date.now()),
+      expiresAt: new Date(item.expiresAt),
+    });
+    return true;
+  }
+  async updatePasskeyCounter({ credentialId, userId, counter, deviceType, backedUp }) {
+    const item = this.passkeys.get(credentialId);
+    if (!item || item.userId !== userId || item.expiresAt.getTime() <= Date.now() || item.counter > counter) return false;
+    item.counter = counter;
+    if (deviceType) item.deviceType = deviceType;
+    if (backedUp !== undefined) item.backedUp = Boolean(backedUp);
+    item.lastUsedAt = new Date();
+    item.updatedAt = new Date();
+    return true;
+  }
   async close() {}
 }
 
@@ -785,6 +1048,24 @@ function normalizeSessionRow(row) {
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
+  };
+}
+
+function normalizePasskeyRow(row) {
+  if (!row) return null;
+  return {
+    id: row.credential_id,
+    userId: row.user_id,
+    webauthnUserId: row.webauthn_user_id,
+    publicKey: row.public_key,
+    counter: Number(row.counter || 0),
+    transports: Array.isArray(row.transports) ? row.transports : [],
+    deviceType: row.device_type || "singleDevice",
+    backedUp: row.backed_up === true,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    lastUsedAt: row.last_used_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -928,6 +1209,12 @@ function requiredClaim(value, name) {
   const text = String(value || "").trim();
   if (!text) throw new AuthRequestError(`OIDC ${name} claim is required.`, 401);
   return text;
+}
+
+function boundedAuthorizationCode(value) {
+  const code = String(value || "");
+  if (!code || code.length > 4096 || /[\r\n\0]/.test(code)) return "";
+  return code;
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {

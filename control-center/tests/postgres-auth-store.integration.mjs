@@ -35,6 +35,7 @@ if (!databaseUrl) {
     "../migrations/002_session_security.sql",
     "../migrations/003_oidc_provider_revocation.sql",
     "../migrations/004_first_configuration.sql",
+    "../migrations/006_app_passkeys.sql",
   ]) {
     await adminPool.query(readFileSync(new URL(migration, import.meta.url), "utf8"));
   }
@@ -136,6 +137,37 @@ if (!databaseUrl) {
   assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, false);
   await store.clearLoginThrottle(throttleHash);
   assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, true);
+
+  const webauthnChallenge = {
+    challengeHash: nextHash(),
+    challenge: "c".repeat(43),
+    flow: "registration",
+    userId: subject,
+    peerHash: nextHash(),
+    expiresAt: new Date(Date.now() + 60_000),
+  };
+  await store.createWebAuthnChallenge(webauthnChallenge);
+  assert.deepEqual(
+    (await store.consumeWebAuthnChallenge(webauthnChallenge)).challenge,
+    webauthnChallenge.challenge,
+  );
+  assert.equal(await store.consumeWebAuthnChallenge(webauthnChallenge), null);
+  const passkey = {
+    id: `credential-${nextHash()}`,
+    userId: subject,
+    webauthnUserId: nextHash(),
+    publicKey: Buffer.from([1, 2, 3]),
+    counter: 0,
+    transports: ["internal"],
+    deviceType: "singleDevice",
+    backedUp: false,
+    expiresAt: new Date(Date.now() + 60_000),
+  };
+  assert.equal(await store.createPasskey(passkey), true);
+  assert.equal(await store.createPasskey({ ...passkey, publicKey: Buffer.from([9]) }), false);
+  assert.deepEqual([...((await store.listPasskeys(subject))[0].publicKey)], [1, 2, 3]);
+  assert.equal(await store.updatePasskeyCounter({ credentialId: passkey.id, userId: subject, counter: 1 }), true);
+  assert.equal(await store.updatePasskeyCounter({ credentialId: passkey.id, userId: subject, counter: 0 }), false);
 
   const firstConfigurationStore = new PostgresFirstConfigurationStore(
     withApplicationName(runtimeDatabaseUrl, "first-configuration-runtime"),

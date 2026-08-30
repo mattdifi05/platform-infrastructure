@@ -31,14 +31,16 @@ const SENSITIVE_READS = Object.freeze([
 ]);
 
 const LEGACY_SENSITIVE_ROUTES = Object.freeze([
-  ["GET", "/"],
-  ["GET", "/index.html"],
   ["POST", "/actions/vault-command"],
   ["POST", "/actions/database-command"],
+  ["POST", "/actions/database-delete-command"],
   ["POST", "/actions/database-admin-login"],
   ["GET", "/actions/phpmyadmin-login"],
   ["GET", "/actions/phppgadmin-login"],
   ["POST", "/actions/backup-command"],
+  ["POST", "/actions/backup-delete-command"],
+  ["POST", "/actions/redis-restore-command"],
+  ["POST", "/actions/redis-backup-delete-command"],
   ["POST", "/actions/identity-command"],
   ["POST", "/actions/settings-command"],
 ]);
@@ -146,7 +148,7 @@ test("fresh-owner authorization accepts 299 and 300 seconds but rejects 301 seco
   t.mock.timers.enable({ apis: ["Date"], now });
   const auth = await createControlCenterAuth({ env: completeOidcEnv() });
   t.after(() => auth.close());
-  for (const pathname of ["/control/vault", "/", "/index.html"]) {
+  for (const pathname of ["/control/vault"]) {
     const target = url(pathname);
     const request = {
       method: "GET",
@@ -226,9 +228,15 @@ test("ordinary cataloged reads and mutations preserve documented role behavior",
   assert.equal(authorize(auth, "GET", "/control/projects", session("unknown")).status, 403);
 });
 
-test("the HTML shell and legacy sensitive actions retain the same owner and freshness boundary", async (t) => {
+test("the HTML shell lasts for the session while legacy sensitive actions require a fresh owner", async (t) => {
   const auth = await createControlCenterAuth({ env: completeOidcEnv() });
   t.after(() => auth.close());
+
+  for (const pathname of ["/", "/index.html"]) {
+    assert.equal(authorize(auth, "GET", pathname, session("viewer")).status, 200);
+    assert.equal(authorize(auth, "GET", pathname, session("admin")).status, 200);
+    assert.equal(authorize(auth, "GET", pathname, session("owner", 301)).status, 200);
+  }
 
   for (const [method, pathname] of LEGACY_SENSITIVE_ROUTES) {
     assert.equal(authorize(auth, method, pathname, session("viewer")).status, 403);
@@ -236,6 +244,10 @@ test("the HTML shell and legacy sensitive actions retain the same owner and fres
     assert.equal(authorize(auth, method, pathname, session("owner", 301)).status, 428);
     assert.equal(authorize(auth, method, pathname, session("owner")).status, 200);
   }
+
+  assert.equal(authorize(auth, "POST", "/actions/redis-backup-command", session("viewer")).status, 403);
+  assert.equal(authorize(auth, "POST", "/actions/redis-backup-command", session("admin")).status, 200);
+  assert.equal(authorize(auth, "POST", "/actions/redis-backup-command", session("owner", 301)).status, 200);
 });
 
 test("the shared normalizer removes only the exact v1 API segment", () => {

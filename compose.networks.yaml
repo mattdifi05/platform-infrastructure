@@ -51,6 +51,7 @@ services:
       - platform_db_admin
       - platform_observability
       - platform_egress
+      - platform_cache
 
   project-router:
     networks: !override

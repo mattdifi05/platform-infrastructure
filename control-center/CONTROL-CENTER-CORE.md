@@ -9,7 +9,7 @@ state and execution behavior is owned by modules:
 
 | Area | Module | Contract |
 | --- | --- | --- |
-| Admin authentication | `auth/` | OIDC passkey, PostgreSQL sessions, fail closed |
+| Admin authentication | `auth/` | Application-owned SimpleWebAuthn passkey, PostgreSQL credential/session store, fail closed; OIDC is explicit compatibility mode |
 | Backup jobs | `backup/contracts.mjs` | typed resources, signed manifests, exact ownership |
 | Database operations | `database/` | principal ownership and destructive state machine |
 | Vault crypto | `vault/keyring.mjs` | versioned key IDs and authenticated encryption |

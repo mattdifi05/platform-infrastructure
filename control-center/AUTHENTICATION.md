@@ -2,15 +2,45 @@
 
 ## Invariant
 
-The Control Center is fail-closed. Administrative access uses Keycloak OIDC
-Authorization Code with PKCE and a passkey-only authentication flow. A local
-password, password hash, shared secret, email OTP, SMS OTP or password fallback
-is not a supported authentication path.
+The Control Center is fail-closed. The V1 default is application-owned
+WebAuthn (`CONTROL_CENTER_AUTH_MODE=app-passkey`): the browser talks directly to
+the Control Center, SimpleWebAuthn verifies the assertion, and only the
+credential public key/counter plus opaque sessions are stored in the dedicated
+PostgreSQL `control_auth` schema. There is no Keycloak redirect, impersonation,
+bootstrap token or client secret in this mode. A local password, password hash,
+email OTP, SMS OTP or password fallback is not a supported authentication path.
+
+`oidc-passkey` remains an explicitly selected compatibility mode for deployments
+that still use an external identity provider; it is not required by the direct
+V1 flow described below.
 
 The only bypass mode is `test-disabled`. Startup accepts it only when
 `NODE_ENV=test` and `CONTROL_CENTER_BIND_HOST` is a loopback address.
 
-## Request flow
+## Application-owned request flow (`app-passkey`)
+
+1. `GET /first-configuration` is available only on the exact portal host and
+   management LAN. Its single action calls `POST /auth/passkey/register/options`.
+2. The browser invokes `navigator.credentials.create()` with resident,
+   user-verifying credentials. The response is sent to
+   `POST /auth/passkey/register/verify`; the one-use, peer-bound challenge is
+   consumed and verified against the exact `CONTROL_CENTER_PUBLIC_ORIGIN` and
+   RP ID.
+3. The verified credential public key, counter and authenticator metadata are
+   stored in PostgreSQL. One credential is sufficient and remains registered
+   independently from the daily session (`CONTROL_CENTER_PASSKEY_TTL_SECONDS`,
+   default ten years).
+4. Registration creates an opaque 24-hour session. Subsequent login uses
+   `POST /auth/passkey/login/options` and `POST /auth/passkey/login/verify`; a
+   successful assertion updates the counter and creates a fresh session.
+5. State-changing requests still require the exact portal Origin,
+   `Sec-Fetch-Site: same-origin` and the session CSRF token. Challenge and
+   login-start throttles are persisted in PostgreSQL.
+
+The application flow never calls Keycloak. The `/auth/callback`, handoff and
+OIDC provider-event endpoints are unavailable in this mode.
+
+## External OIDC request flow (`oidc-passkey` compatibility mode)
 
 1. `GET /auth/login` creates a cryptographically random state, nonce and PKCE
    verifier. Only hashes of state and nonce are retained; the transaction has a
@@ -94,17 +124,32 @@ catalog entry and role-matrix test.
 
 ## Required configuration
 
-- `CONTROL_CENTER_AUTH_MODE=oidc-passkey`
+For the V1 direct flow:
+
+- `CONTROL_CENTER_AUTH_MODE=app-passkey`
 - `CONTROL_CENTER_AUTH_STORE=postgres`
-- external HTTPS issuer, authorization endpoint and callback URI
-- internal token and JWKS endpoints reachable only by the control plane
-- public client ID `platform-control-center`; no client secret
-- required ACR `urn:platform:loa:passkey`
-- required AMR `webauthn`
-- session policy version, five-minute fresh-auth window and shared PostgreSQL
-  login-start throttle
+- exact HTTPS `CONTROL_CENTER_PUBLIC_ORIGIN` (for this deployment,
+  `https://portal.platform-infrastructure.com`)
+- `CONTROL_CENTER_AUTH_RP_ID` equal to that host (or an explicitly intended
+  parent suffix) and `CONTROL_CENTER_AUTH_RP_NAME`
+- `CONTROL_CENTER_FIRST_CONFIGURATION_MODE=required`
+- ten-year passkey registration (`CONTROL_CENTER_PASSKEY_TTL_SECONDS`, default
+  `315360000`) with one-day session limits (default `86400`)
 - database URL supplied only through
   `CONTROL_CENTER_AUTH_DATABASE_URL_FILE`
+- management and trusted-proxy CIDRs; the first registration remains LAN-bound
+
+The application connects with the dedicated `control_center_runtime` role.
+Apply `migrations/001_auth_sessions.sql`, `migrations/002_session_security.sql`,
+`migrations/003_oidc_provider_revocation.sql` (session/throttle tables remain
+shared), `migrations/004_first_configuration.sql`, and
+`migrations/006_app_passkeys.sql` before starting the service. Migration 006
+creates the public-key and one-use challenge tables and grants only bounded CRUD
+to the runtime role.
+
+When `CONTROL_CENTER_AUTH_MODE=oidc-passkey` is explicitly selected, also supply
+the external HTTPS issuer, authorization/token/JWKS endpoints and the OIDC
+client settings described in the compatibility section above.
 
 Apply `migrations/001_auth_sessions.sql`,
 `migrations/002_session_security.sql`, and
@@ -123,6 +168,18 @@ Outside First Configuration, the runtime identity requires only CRUD access to `
 migration and backup identities remain separate.
 
 ## LOCAL_PRIVATE guided First Configuration
+
+With `app-passkey`, First Configuration is intentionally reduced to one
+network-bounded action: open the exact portal URL, press **Registra la
+passkey**, complete the normal browser authenticator prompt, and continue. The
+first verified credential immediately closes the setup state; there is no
+administrator handoff, external origin, second-passkey requirement or
+Keycloak/impersonation step. The credential and its counter are retained in
+PostgreSQL for one day, after which the setup/login flow can require a new
+registration.
+
+The remainder of this section documents the separate `oidc-passkey`
+compatibility mode and is not part of the direct V1 path.
 
 Guided First Configuration is enabled only with
 `CONTROL_CENTER_FIRST_CONFIGURATION_MODE=required` and a LOCAL_PRIVATE

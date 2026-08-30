@@ -63,14 +63,23 @@ services:
     container_name: gf-redis
   traefik:
     container_name: gf-traefik
+    volumes: !override
+      - ./traefik/traefik.edge-http.greenfield.yml:/etc/traefik/traefik.edge-http.yml:ro
+      - ./traefik/dynamic/middlewares.yml:/etc/traefik/dynamic/middlewares.yml:ro
+      - ./traefik/dynamic/admin-routes.yml:/etc/traefik/dynamic/admin-routes.yml:ro
+      - ./traefik/dynamic/project-routes.yml:/etc/traefik/dynamic/project-routes.yml:ro
     networks: !override
       platform_edge:
         ipv4_address: 172.30.251.3
+      platform_routing: {}
+      platform_observability: {}
+      platform_egress: {}
   waf:
     container_name: gf-waf
     networks: !override
       platform_edge:
         ipv4_address: 172.30.251.2
+      platform_ingress: {}
 
 networks:
   enterprise_net:

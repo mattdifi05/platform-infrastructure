@@ -7,12 +7,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const baseCompose = read("compose.yaml");
+const prodCompose = read("compose.prod.yaml");
+const vpsCompose = read("compose.vps.yaml");
 const vpsWaf = read("compose.vps-waf.yaml");
 const vpsEnv = read(".env.vps.example");
 const edgeTraefik = read("traefik/traefik.edge-http.yml");
 const networks = read("compose.networks.yaml");
 const networkPolicy = read("scripts/network-segmentation-policy.mjs");
 const middlewares = read("traefik/dynamic/middlewares.yml");
+const vpsWafRules = read("waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf");
 const trustedProxySnapshot = JSON.parse(read("cloudflare/trusted-proxy-cidrs.json"));
 
 test("FG-053 plaintext edge traffic redirects and cannot spoof forwarded HTTPS", () => {
@@ -57,6 +61,18 @@ test("FG-060 rate key skips only the pinned provider hops and ignores spoofed le
   assert.equal(throughCloudflareA, "203.0.113.10");
   assert.equal(throughCloudflareB, "203.0.113.11");
   assert.notEqual(throughCloudflareA, throughCloudflareB);
+});
+
+test("OIDC authorization redirect_uri exemption is exact and target-scoped", () => {
+  assert.match(vpsWafRules, /REQUEST_HEADERS:Host "@rx \(\?i\)\^auth\\\.platform-infrastructure\\\.com\$"/);
+  assert.match(vpsWafRules, /id:1000107,phase:1,pass,nolog,[^\n"]*chain/);
+  assert.match(vpsWafRules, /REQUEST_URI "@rx \^\/realms\/platform\/protocol\/openid-connect\/auth/);
+  assert.match(vpsWafRules, /ctl:ruleRemoveTargetById=931130;ARGS:redirect_uri/);
+  assert.doesNotMatch(
+    vpsWafRules,
+    /ctl:ruleRemoveTargetById=931130(?!;ARGS:redirect_uri)/,
+    "the CRS RFI rule must not be removed broadly",
+  );
 });
 
 test("FG-060 origin firewall refuses provider drift before applying trusted ranges", () => {

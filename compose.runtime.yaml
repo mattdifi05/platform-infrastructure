@@ -27,6 +27,11 @@ services:
       - ./traefik/dynamic/project-routes.yml:/etc/traefik/dynamic/project-routes.yml:ro
 
   local-dns:
+    profiles: !reset []
+    cpus: 0.10
+    mem_limit: 64m
+    mem_reservation: 16m
+    pids_limit: 64
     ports:
       - "${LOCAL_DNS_BIND:-192.168.1.164}:53:53/udp"
       - "${LOCAL_DNS_BIND:-192.168.1.164}:53:53/tcp"

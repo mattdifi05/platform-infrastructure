@@ -180,7 +180,7 @@ function buildAcceptRender() {
       restart: "always",
       ...coreResources("0.50", "256m", "64m", 192),
       environment: { REDIS_USERNAME: "platform", REDIS_PASSWORD_FILE: "/run/secrets/redis_password" },
-      command: ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"],
+      command: ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && cd /data && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"],
       depends_on: { "broker-auth-bootstrap": { condition: "service_completed_successfully" } },
       secrets: [secretGrant("redis_password")],
       volumes: [volumeMount("enterprise_redis_data", "/data"), volumeMount("redis_auth_config", "/run/platform-broker", true)],

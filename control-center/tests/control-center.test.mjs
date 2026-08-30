@@ -157,61 +157,43 @@ test("Admin Control Center local foundation", async (t) => {
 
   const html = await getText(`${baseUrl}/`);
   assert.match(html, /Admin Control Center/);
-  assert.match(html, /<body data-cc-theme="light">/);
-  assert.doesNotMatch(html, /data-cc-preloading|cc-preload-screen|Caricamento portale/);
+  assert.match(html, /<body data-cc-theme="light" data-cc-preloading="true">/);
+  assert.match(html, /data-cc-preload-screen/);
+  assert.match(html, /Caricamento Control Center/);
   assert.match(html, /ops-shell/);
-  assert.match(html, /Stato/);
   assert.match(html, /Applicazioni/);
+  assert.match(html, /section-projects/);
+  assert.match(html, /data-ops-nav-group="projects" data-ops-nav-expanded="true"/);
+  assert.match(html, /id="ops-nav-panel-projects" aria-hidden="false"/);
+  assert.doesNotMatch(html, /data-ops-nav-group="status"|ops-nav-panel-status|section=status/);
+  assert.doesNotMatch(html, /data-ops-nav-group="vault"|section=vault/);
+  assert.match(html, /data-ops-nav-group="secrets"/);
+  assert.doesNotMatch(html, /data-ops-nav-group="redis"|href="\/\?section=redis"/);
+  assert.match(html, /<a class="ops-nav-main ops-nav-direct" href="\/\?section=secrets" data-passkey-return-to="\/\?section=secrets">/);
+  assert.doesNotMatch(html, /data-status-runner|data-status-run-form|Avvia test reali|Registro completo test/);
   assert.doesNotMatch(html, /Attività/);
   assert.doesNotMatch(html, /section=activity/);
   assert.doesNotMatch(html, />Risorse<\/a>/);
   assert.doesNotMatch(html, /href="\/\?section=files"/);
   assert.doesNotMatch(html, /href="\/\?section=databases"/);
-  assert.match(html, /NO GO LIVE/);
-  assert.match(html, /Esecuzione/);
-  assert.match(html, /data-status-run-form/);
-  assert.match(html, /<details class="ops-status-runner" data-status-run-console>/);
-  assert.doesNotMatch(html, /<details class="ops-status-runner"[^>]*open/);
-  assert.doesNotMatch(html, /ops-status-section-list/);
-  assert.match(html, /data-status-section-detail=/);
-  assert.doesNotMatch(html, /data-status-tabs/);
-  assert.doesNotMatch(html, /data-status-tab="all"/);
-  assert.match(html, /data-ops-nav-group="status" data-ops-nav-expanded="true" data-ops-nav-has-active-child="true" data-ops-nav-locked="true"/);
   assert.match(html, /<span class="ops-nav-pill" aria-hidden="true"><\/span>/);
-  assert.match(html, /id="ops-nav-panel-status" aria-hidden="false"/);
   assert.match(html, /data-ops-nav-toggle/);
-  assert.match(html, /aria-label="Sezione attuale: Stato" aria-expanded="true" aria-controls="ops-nav-panel-status" aria-disabled="true"/);
-  assert.match(html, /aria-label="Apri Applicazioni" aria-expanded="false" aria-controls="ops-nav-panel-projects"/);
-  assert.match(html, /<button class="ops-nav-main" type="button" data-ops-nav-toggle aria-label="Sezione attuale: Stato"/);
-  assert.doesNotMatch(html, /<a class="ops-nav-main/);
-  assert.match(html, /data-ops-nav-group="projects" data-ops-nav-expanded="false" data-ops-nav-has-active-child="false" data-ops-nav-locked="false"/);
-  assert.match(html, /id="ops-nav-panel-projects" aria-hidden="true"/);
+  assert.match(html, /aria-label="Sezione attuale: Applicazioni" aria-expanded="true" aria-controls="ops-nav-panel-projects" aria-disabled="true"/);
+  assert.match(html, /<a class="ops-nav-main ops-nav-direct"/);
   assert.doesNotMatch(html, /data-ops-nav-group="backups"/);
   assert.doesNotMatch(html, /ops-nav-panel-backups/);
-  assert.match(html, /href="\/\?section=status&amp;statusCategory=domain-edge#status-run"/);
-  assert.match(html, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card="go-live"[^>]*href="\/\?section=status&amp;statusCategory=go-live#status-run"/);
-  assert.match(html, /data-status-category-card="go-live"/);
-  assert.match(html, /statusCategory=domain-edge/);
-  assert.match(html, /Esegui sezione/);
-  assert.match(html, /name="scope" value="category"/);
-  assert.match(html, /name="scope" value="check"/);
-  assert.match(html, /data-status-run-inline/);
-  assert.match(html, /Avvia test reali/);
-  assert.match(html, /action="\/actions\/status-check"/);
-  assert.match(html, /data-status-section-detail="go-live"/);
-  assert.doesNotMatch(html, /full-restore-drill/);
+  const redisHtml = await getText(`${baseUrl}/?section=redis`);
+  assert.match(redisHtml, /Applicazioni/);
+  assert.doesNotMatch(redisHtml, /section-redis|data-redis-section|Backup Redis|action="\/actions\/redis-backup-command"/);
   const domainStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=domain-edge`);
-  assert.match(domainStatusHtml, /data-status-section-detail="domain-edge"/);
-  assert.match(domainStatusHtml, /portal-through-waf|cloudflare-access-admin/);
-  assert.doesNotMatch(domainStatusHtml, /full-restore-drill/);
+  assert.match(domainStatusHtml, /Applicazioni/);
+  assert.doesNotMatch(domainStatusHtml, /data-status-section-detail|data-status-runner|Registro completo test/);
   const backupStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=backup-dr`);
-  assert.match(backupStatusHtml, /data-status-section-detail="backup-dr"/);
-  assert.match(backupStatusHtml, /full-restore-drill|Backup\/restore off-site/);
-  assert.doesNotMatch(backupStatusHtml, /cloudflare-access-admin/);
+  assert.match(backupStatusHtml, /Applicazioni/);
+  assert.doesNotMatch(backupStatusHtml, /data-status-section-detail|full-restore-drill/);
   const githubStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=github-release`);
-  assert.match(githubStatusHtml, /data-status-section-detail="github-release"/);
-  assert.match(githubStatusHtml, /github-actions-run-evidence|GitHub Actions runtime/);
-  assert.match(backupStatusHtml, /offsite-backup-restore-rpo-rto/);
+  assert.match(githubStatusHtml, /Applicazioni/);
+  assert.doesNotMatch(githubStatusHtml, /data-status-section-detail|github-actions-run-evidence/);
   assert.doesNotMatch(html, /Non pronto per andare online|Pronto per andare online/);
   assert.doesNotMatch(html, /Riepilogo go live/);
   assert.doesNotMatch(html, /Verdetto/);
@@ -226,9 +208,6 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(html, /Control Center local UI contract/);
   assert.doesNotMatch(html, /Simple Mode operational MVP/);
   assert.doesNotMatch(html, /Advanced Mode enterprise sections/);
-  assert.match(html, /Go live e decisione/);
-  assert.match(html, /<details class="ops-status-check-row/);
-  assert.match(html, /ops-status-check-details/);
   assert.doesNotMatch(html, /ops-status-check-copy/);
   assert.match(html, /\/assets\/control-center\/control-center\.css/);
   assert.match(html, /\/assets\/control-center\/control-center\.js/);
@@ -236,15 +215,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(html, /ops-topbar/);
   assert.match(html, /ops-sidebar/);
   assert.match(html, /ops-nav/);
-  assert.match(html, /data-ops-nav-group="status"/);
-  assert.match(html, /ops-nav-panel-status/);
-  assert.match(html, /data-ops-nav-group="projects" data-ops-nav-expanded="false"/);
-  assert.match(html, /id="ops-nav-panel-projects" aria-hidden="true"/);
   assert.match(html, /href="\/\?section=projects&amp;project=node-demo"/);
   assert.doesNotMatch(html, /class="ops-nav-main[^"]*"[^>]*aria-current="page"/);
-  assert.match(html, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card="go-live"/);
-  assert.doesNotMatch(html, /class="ops-nav-main[^"]*"[^>]*href=/);
-  assert.match(html, /data-status-section-detail="go-live"/);
+  assert.match(html, /class="ops-nav-subitem active" aria-current="page" href="\/\?section=projects"/);
+  assert.doesNotMatch(html, /class="ops-nav-main[^"]*"[^>]*href="\/\?section=projects"/);
   assert.doesNotMatch(html, /ops-status-pill/);
   assert.doesNotMatch(html, /class="cc-tabs"/);
   assert.doesNotMatch(html, /Open navigation/);
@@ -292,7 +266,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /--cc-surface-raised/);
   assert.match(localStyles, /--cc-line/);
   assert.match(localStyles, /\.cc-app-shell/);
-  assert.doesNotMatch(localStyles, /data-cc-preloading|cc-preload-screen|ccPreloadSpin/);
+  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-app-shell\s*\{[^}]*visibility:\s*hidden/s);
+  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-preload-screen\s*\{[^}]*display:\s*grid/s);
+  assert.doesNotMatch(localStyles, /ccPreloadSpin/);
   assert.match(localStyles, /\.cc-app-shell\[aria-busy="true"\] \.ops-page\s*\{[^}]*opacity:\s*\.72/s);
   assert.match(localStyles, /\.ops-shell/);
   assert.match(localStyles, /\.ops-sidebar/);
@@ -354,6 +330,18 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-project-state-dot\.warn/);
   assert.match(localStyles, /\.ops-project-state-dot\.bad/);
   assert.match(localStyles, /\.ops-page\s*\{[^}]*align-content:\s*start/s);
+  assert.match(localStyles, /\.section-secrets\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.section-secrets \.ops-page\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.section-secrets \.ops-vault-section\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.section-secrets \.ops-vault-grid\s*\{[^}]*height:\s*auto[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.ops-vault-form\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
+  assert.match(localStyles, /\.ops-vault-inventory\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.ops-vault-list\s*\{[^}]*overflow:\s*auto[^}]*overscroll-behavior:\s*contain/s);
+  assert.match(localStyles, /\.ops-vault-list\s*\{[^}]*grid-auto-rows:\s*max-content/s);
+  assert.match(localStyles, /\.ops-vault-item\s*\{[^}]*align-items:\s*start[^}]*grid-auto-rows:\s*max-content[^}]*height:\s*auto[^}]*overflow:\s*hidden/s);
+  assert.match(localStyles, /\.ops-vault-item-meta\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(localStyles, /\.ops-vault-item-main \.ops-vault-item-details\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*normal/s);
+  assert.match(localStyles, /\.ops-vault-reveal\s*\{[^}]*grid-template-columns:\s*minmax\(140px,\s*1fr\) auto auto[^}]*min-width:\s*0/s);
   assert.match(localStyles, /\.ops-section\s*\{[^}]*grid-auto-rows:\s*max-content/s);
   assert.match(localStyles, /\.ops-project-detail-screen\s*\{[^}]*align-content:\s*start/s);
   assert.match(localStyles, /\.ops-shell\s*\{[^}]*--ops-sidebar-width:\s*264px/s);
@@ -361,8 +349,13 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*background:\s*transparent/s);
   assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*width:\s*var\(--ops-sidebar-width\)/s);
-  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\) auto/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*overflow-y:\s*hidden/s);
   assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*scrollbar-width:\s*thin/s);
+  assert.match(localStyles, /\.ops-nav\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(localStyles, /\.ops-nav\s*\{[^}]*align-content:\s*start[^}]*grid-auto-rows:\s*max-content/s);
+  assert.match(localStyles, /\.ops-logout-form\s*\{[^}]*bottom:\s*0[^}]*position:\s*sticky/s);
+  assert.match(localStyles, /\.ops-logout-button\s*\{[^}]*background:\s*#dc2626[^}]*border-radius:\s*50%[^}]*height:\s*48px[^}]*width:\s*48px/s);
   assert.match(localStyles, /scrollbar-color:\s*rgba\(30,\s*41,\s*59,\s*\.18\)\s+transparent/);
   assert.match(localStyles, /\.ops-sidebar::-webkit-scrollbar\s*\{[^}]*width:\s*5px/s);
   assert.match(localStyles, /\.ops-status-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
@@ -399,7 +392,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-project-backup-list\s*\{[^}]*height:\s*100%/s);
   assert.match(localStyles, /\.ops-project-backup-list\s*\{[^}]*max-height:\s*100%/s);
   assert.match(localStyles, /\.ops-project-backup-row\s*\{[^}]*background:\s*#ffffff/s);
-  assert.match(localStyles, /\.ops-project-backup-row > span:last-child\s*\{[^}]*min-width:\s*0/s);
+  assert.match(localStyles, /\.ops-project-backup-row > span:nth-child\(2\)\s*\{[^}]*min-width:\s*0/s);
   assert.match(localStyles, /\.ops-button,\s*\.ops-icon-button\s*\{[^}]*border-radius:\s*999px/s);
   assert.match(localStyles, /\.ops-project-backup-head-form\s*\{[^}]*flex:\s*0 0 auto/s);
   assert.match(localStyles, /\.ops-project-backup-head-form \.ops-button\s*\{[^}]*min-height:\s*38px/s);
@@ -415,6 +408,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-project-select-chevron\s*\{[^}]*top:\s*50%/s);
   assert.match(localStyles, /\.ops-project-select-chevron \.fa-icon\s*\{[^}]*height:\s*12px/s);
   assert.match(localStyles, /\.ops-project-backup-restore-form \.ops-project-select select\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /#project-backups \.ops-project-backup-list > \.empty\s*\{[^}]*background:\s*#ffffff/s);
+  assert.match(localStyles, /\.ops-project-backup-row\s*\{[^}]*grid-template-columns:\s*40px minmax\(0,\s*1fr\) auto/s);
+  assert.match(localStyles, /\.ops-project-backup-delete\s*\{[^}]*background:\s*#ffffff[^}]*color:\s*#b42318/s);
   assert.doesNotMatch(localStyles, /ops-project-backup-fixed-scope/);
   assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*background:\s*transparent/s);
   assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*height:\s*100%/s);
@@ -439,14 +435,21 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-project-detail-item-icon\s*\{[^}]*background:\s*#175cd3/s);
   assert.doesNotMatch(localStyles, /\.ops-project-file-table/);
   const localServer = readFileSync(path.join(infraRoot, "control-center", "server.mjs"), "utf8");
+  assert.match(localServer, /requestedDisplayName\.toLowerCase\(\) === cleanName\.toLowerCase\(\)[\s\S]{0,80}\? cleanName/);
   assert.doesNotMatch(localServer, /renderProjectSelect\("status",\s*"Stato database"/);
   assert.match(localServer, /renderProjectSelect\("engine",\s*"Motore database"/);
   assert.match(localServer, /renderProjectSelect\("restoreMode",\s*"Contenuto restore"/);
+  assert.match(localServer, /function safeAppPasskeyReturnTo\(value\)/);
+  assert.match(localServer, /if \(raw === "\/\?section=secrets"\) return raw/);
+  assert.doesNotMatch(localServer, /allowedKeys = new Set\(\["section", "project", "deleteDatabase", "deleteBackup"\]\)/);
+  assert.match(localServer, /request\(verifyUrl\(\),/);
   assert.match(localStyles, /\.ops-icon-button/);
   assert.match(localStyles, /box-shadow:\s*var\(--cc-focus\)/);
   assert.match(localStyles, /color-scheme:\s*light/);
   assert.doesNotMatch(localStyles, /color-scheme:\s*dark/);
   assert.doesNotMatch(localStyles, /gradient/i);
+  assert.match(localStyles, /\.ops-redis-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(localStyles, /\.ops-redis-backup-list\s*\{[^}]*overflow-y:\s*auto/s);
   const localClient = await getText(`${baseUrl}/assets/control-center/control-center.js`);
   assert.match(localClient, /history\.pushState/);
   assert.match(localClient, /fetch\(/);
@@ -455,14 +458,29 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /addEventListener\("submit"/);
   assert.match(localClient, /addEventListener\("popstate"/);
   assert.match(localClient, /htmlCache/);
-  assert.match(localClient, /var cacheLimit = 32/);
-  assert.match(localClient, /var cacheTtlMs = 15000/);
-  assert.match(localClient, /var prefetchTimeoutMs = 1200/);
+  assert.match(localClient, /navigator\.credentials\.get\(\{ publicKey: publicKey \}\)/);
+  assert.match(localClient, /data-passkey-return-to/);
+  assert.match(localClient, /data-passkey-submit/);
+  assert.match(localClient, /\/actions\/redis-restore-command/);
+  assert.match(localClient, /\/actions\/redis-backup-delete-command/);
+  assert.match(localClient, /\/auth\/passkey\/login\/options/);
+  assert.match(localClient, /\/auth\/passkey\/login\/verify/);
+  assert.match(localClient, /var cacheLimit = 64/);
+  assert.match(localClient, /var cacheTtlMs = 300000/);
+  assert.match(localClient, /var prefetchTimeoutMs = 15000/);
+  assert.match(localClient, /var preloadWorkerCount = 4/);
   assert.match(localClient, /var formSubmissions = new WeakSet\(\)/);
   assert.match(localClient, /var navigationSequence = 0/);
   assert.match(localClient, /If-None-Match/);
   assert.match(localClient, /response\.status === 304/);
-  assert.doesNotMatch(localClient, /preloadPageLimit|preloadWorkerCount|stripInitialPreloadHtml|data-cc-preloading|cc-preload-screen/);
+  assert.match(localClient, /function redirectForReauthentication\(response, payload\)/);
+  assert.match(localClient, /payload\.error === "admin_reauthentication_required"/);
+  assert.match(localClient, /target\.pathname !== "\/auth\/login"/);
+  assert.match(localClient, /window\.location\.assign\(target\.href\)/);
+  assert.doesNotMatch(localClient, /preloadPageLimit|stripInitialPreloadHtml/);
+  assert.match(localClient, /data-cc-preload-screen/);
+  assert.match(localClient, /runInitialControlCenterPreload/);
+  assert.match(localClient, /revealFullyPreloadedControlCenter/);
   assert.match(localClient, /updateStableElement\(currentSidebar, nextSidebar, \{ preserveNavPill: true \}\)/);
   assert.match(localClient, /updateStableElement\(currentPage, nextPage\)/);
   assert.match(localClient, /nextPill\.replaceWith\(currentPill\)/);
@@ -472,9 +490,15 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /@media \(max-width: 860px\)[\s\S]*?\.ops-sidebar\s*\{[^}]*max-height:\s*min\(46dvh, 420px\)[^}]*position:\s*sticky/s);
   assert.match(localStyles, /@media \(max-width: 860px\)[\s\S]*?\.ops-nav\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(serverSource, /CONTROL_CENTER_CONTEXT_CACHE_TTL_MS/);
-  assert.match(serverSource, /req\.method !== "GET"\) invalidateControlContextCache\(\)/);
+  assert.match(serverSource, /CONTROL_CENTER_HTML_CACHE_TTL_MS/);
+  assert.match(serverSource, /req\.method !== "GET"\) await invalidateControlContextCache\(\)/);
   assert.match(serverSource, /req\.method === "GET" && !url\.pathname\.startsWith\("\/control\/"\)\s*\? await buildCachedContext/);
   assert.match(serverSource, /controlContextCache\.pending && controlContextCache\.key === key/);
+  assert.match(serverSource, /redisOperations\.cacheGetJson\(`context:\$\{key\}`\)/);
+  assert.match(serverSource, /redisOperations\.cacheSetJson\(`context:\$\{key\}`/);
+  assert.match(serverSource, /renderCachedControlCenter/);
+  assert.match(serverSource, /cachedVaultSecretUsageAnalysis/);
+  assert.match(serverSource, /redisOperations\.cacheGetJson\("metrics:prometheus"\)/);
   assert.match(serverSource, /context\.statusRows = opsStatusRows\(context\)/);
   assert.match(serverSource, /function statusRowsForContext\(context\)/);
   assert.match(localClient, /if \(sequence !== navigationSequence\) return true/);
@@ -524,7 +548,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /signal: controller\.signal/);
   assert.match(localClient, /window\.clearTimeout\(timeout\)/);
   assert.match(localClient, /cachedPage/);
-  assert.doesNotMatch(localClient, /collectPageUrlsForPreload|discoverPreloadUrls|pageUrlsForPreload|preloadControlCenterPages|finishControlCenterPreload|startControlCenterPreload|scheduleControlCenterPreload/);
+  assert.match(localClient, /portalPageUrlsForPreload/);
+  assert.match(localClient, /preloadControlCenterPages/);
+  assert.match(localClient, /scheduleControlCenterPreload/);
+  assert.match(localClient, /isSensitivePortalUrl/);
   assert.match(localClient, /positionOpsNavPill/);
   assert.match(localClient, /captureOpsNavPillRect/);
   assert.match(localClient, /moveOpsNavPillTowardLink/);
@@ -533,8 +560,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /restoreSidebarScrollTop/);
   assert.match(localClient, /rememberSidebarScrollBeforePointer/);
   assert.match(localClient, /consumePendingSidebarScrollTop/);
-  assert.match(localClient, /event\.target\.closest\("\.ops-nav-subitem\[href\]"\)/);
+  assert.match(localClient, /event\.target\.closest\("\.ops-nav-subitem\[href\], \.ops-nav-direct\[href\]"\)/);
   assert.match(localClient, /var previousSidebarScrollTop = options && typeof options\.sidebarScrollTop === "number" \? options\.sidebarScrollTop : currentSidebarScrollTop\(\)/);
+  assert.match(localClient, /var previousPageScrollTop = options && typeof options\.pageScrollTop === "number" \? options\.pageScrollTop : null/);
+  assert.match(localClient, /restorePageScrollTop\(previousPageScrollTop\)/);
+  assert.match(localClient, /pageScrollTop: pageScrollTop/);
   assert.match(localClient, /var sidebarScrollTop = consumePendingSidebarScrollTop\(\)/);
   assert.match(localClient, /navigate\(url, \{ history: "push", sidebarScrollTop: sidebarScrollTop \}\)/);
   assert.match(localClient, /document\.addEventListener\("pointerdown", rememberSidebarScrollBeforePointer, \{ capture: true \}\)/);
@@ -637,8 +667,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(projectsOpsHtml, /data-ops-nav-group="projects" data-ops-nav-expanded="true" data-ops-nav-has-active-child="true" data-ops-nav-locked="true"/);
   assert.match(projectsOpsHtml, /id="ops-nav-panel-projects" aria-hidden="false"/);
   assert.match(projectsOpsHtml, /aria-label="Sezione attuale: Applicazioni" aria-expanded="true" aria-controls="ops-nav-panel-projects" aria-disabled="true"/);
-  assert.match(projectsOpsHtml, /data-ops-nav-group="status" data-ops-nav-expanded="false" data-ops-nav-has-active-child="false" data-ops-nav-locked="false"/);
-  assert.match(projectsOpsHtml, /id="ops-nav-panel-status" aria-hidden="true"/);
+  assert.doesNotMatch(projectsOpsHtml, /data-ops-nav-group="status"|ops-nav-panel-status|section=vault/);
+  assert.match(projectsOpsHtml, /data-ops-nav-group="secrets"/);
   assert.match(projectsOpsHtml, /class="ops-nav-subitem active" aria-current="page" href="\/\?section=projects">[\s\S]*Tutte/);
   assert.doesNotMatch(projectsOpsHtml, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card=/);
   assert.match(projectsOpsHtml, /href="\/\?section=projects&amp;project=node-demo"/);
@@ -684,6 +714,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(projectDetailHtml, /Node\/Next/);
   assert.match(projectDetailHtml, /File manager/);
   assert.match(projectDetailHtml, /<h3>Database<\/h3>/);
+  assert.doesNotMatch(projectDetailHtml, /<h3>Secret<\/h3>|id="project-secrets"|ops-project-secret-panel/);
+  assert.doesNotMatch(projectDetailHtml, /Importa \d+ secret esistenti/);
+  assert.doesNotMatch(projectDetailHtml, /Secret rilevati|Inventario metadata secret/);
   assert.match(projectDetailHtml, /Backup/);
   assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-backups"'));
   assert.ok(projectDetailHtml.indexOf('id="project-backups"') < projectDetailHtml.indexOf('id="project-databases"'));
@@ -701,6 +734,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(projectDetailHtml, /Avvia restore drill/);
   assert.doesNotMatch(projectDetailHtml, />Ripristina backup</);
   assert.match(projectDetailHtml, /Avvia backup/);
+  assert.match(projectDetailHtml, /action="\/actions\/backup-delete-command"[^>]*data-passkey-submit/);
+  assert.doesNotMatch(projectDetailHtml, /auth\/login\?returnTo=.*deleteBackup/);
   assert.ok(projectDetailHtml.indexOf("Avvia backup") < projectDetailHtml.indexOf('class="ops-project-backup-list"'));
   assert.match(projectDetailHtml, /ops-project-backup-head-form/);
   assert.doesNotMatch(projectDetailHtml, /Backup DB/);
@@ -748,9 +783,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(projectDetailHtml, /name="credentialRef"/);
   assert.doesNotMatch(projectDetailHtml, /Riferimento secret password database/);
   assert.match(projectDetailHtml, /ROTATE-DATABASE-CREDENTIAL%3A|ROTATE-DATABASE-CREDENTIAL:/);
-  assert.match(projectDetailHtml, /name="action" value="delete"/);
-  assert.match(projectDetailHtml, /REQUEST-DATABASE-DELETE:/);
-  assert.match(projectDetailHtml, /Richiedi eliminazione/);
+  assert.match(projectDetailHtml, /action="\/actions\/database-delete-command"[^>]*data-passkey-submit/);
+  assert.doesNotMatch(projectDetailHtml, /auth\/login\?returnTo=.*deleteDatabase/);
+  assert.match(projectDetailHtml, /> Elimina<\/button>/);
+  assert.doesNotMatch(projectDetailHtml, /typedName|Nome database da eliminare|Richiedi eliminazione/);
   assert.doesNotMatch(projectDetailHtml, /name="openAfterCreate"/);
   assert.match(projectDetailHtml, /type="password" name="password" value="" placeholder="Password"/);
   assert.match(projectDetailHtml, /name="password" value="" placeholder="Password"[^>]*required/);
@@ -761,11 +797,40 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(projectDetailHtml, /href="\/\?section=databases#database-/);
   assert.doesNotMatch(projectDetailHtml, /db-password-should-not-leak/);
   assert.doesNotMatch(projectDetailHtml, /Platform Documentation/);
+  const databaseDeleteConfirmationHtml = await getText(`${baseUrl}/?section=projects&project=node-demo&deleteDatabase=legacy-mariadb-node-demo-external`);
+  assert.match(databaseDeleteConfirmationHtml, /action="\/actions\/database-delete-command"/);
+  assert.match(databaseDeleteConfirmationHtml, /name="action" value="delete-now"/);
+  assert.doesNotMatch(databaseDeleteConfirmationHtml, /Conferma eliminazione/);
+  assert.match(databaseDeleteConfirmationHtml, /data-passkey-submit/);
+  assert.doesNotMatch(databaseDeleteConfirmationHtml, /typedName|Nome database da eliminare/);
   const projectDetailSubpathHtml = await getText(`${baseUrl}/?section=projects&project=node-demo&path=src`);
   assert.match(projectDetailSubpathHtml, /File manager/);
   assert.match(projectDetailSubpathHtml, /index\.js/);
   assert.match(projectDetailSubpathHtml, /href="\/\?section=projects&project=node-demo"/);
   assert.doesNotMatch(projectDetailSubpathHtml, /href="\/\?section=files&project=node-demo"/);
+
+  const databaseVariantFixture = JSON.parse(readFileSync(databasesFile, "utf8"));
+  databaseVariantFixture["legacy-mariadb-node-demo-external"].displayName = "Node Demo legacy";
+  databaseVariantFixture["node-demo-mariadb-node-demo-primary"] = {
+    id: "node-demo-mariadb-node-demo-primary",
+    projectId: "node-demo",
+    engine: "mariadb",
+    name: "node_demo_primary",
+    displayName: "Node Demo",
+    ownerRole: "node_demo_user",
+    status: "active",
+    linkedApps: ["node-demo"],
+  };
+  writeFileSync(databasesFile, `${JSON.stringify(databaseVariantFixture, null, 2)}\n`);
+  await fetch(`${baseUrl}/control/not-a-real-route`, { method: "POST" });
+  const canonicalDatabaseHtml = await getText(`${baseUrl}/?section=projects&project=node-demo`);
+  assert.match(canonicalDatabaseHtml, /databaseId=node-demo-mariadb-node-demo-primary/);
+  assert.doesNotMatch(canonicalDatabaseHtml, /databaseId=legacy-mariadb-node-demo-external/);
+  assert.doesNotMatch(canonicalDatabaseHtml, /Node Demo legacy/);
+  delete databaseVariantFixture["node-demo-mariadb-node-demo-primary"];
+  delete databaseVariantFixture["legacy-mariadb-node-demo-external"].displayName;
+  writeFileSync(databasesFile, `${JSON.stringify(databaseVariantFixture, null, 2)}\n`);
+  await fetch(`${baseUrl}/control/not-a-real-route`, { method: "POST" });
 
   const networkApi = await getJson(`${baseUrl}/control/network`);
   assert.equal(networkApi.guardrails.readOnly, true);
@@ -831,9 +896,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(databasesOpsHtml, /Nessun database collegato/);
   assert.doesNotMatch(databasesOpsHtml, /name="project"/);
   const activityOpsHtml = await getText(`${baseUrl}/?section=activity`);
-  assert.match(activityOpsHtml, /Stato/);
-  assert.match(activityOpsHtml, /Sezioni/);
-  assert.match(activityOpsHtml, /data-status-section-detail="go-live"/);
+  assert.match(activityOpsHtml, /Applicazioni/);
+  assert.match(activityOpsHtml, /section-projects/);
+  assert.doesNotMatch(activityOpsHtml, /data-status-section-detail|data-status-runner/);
   assert.doesNotMatch(activityOpsHtml, /Errori, avvisi e problemi/);
   assert.doesNotMatch(activityOpsHtml, /section=activity/);
   const resourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
@@ -945,7 +1010,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusApi.statusCatalog.length > 5, true);
   assert.equal(new Set(statusApi.statusCatalog.map((check) => check.id)).size, statusApi.statusCatalog.length);
   assert.equal(statusApi.statusCatalog.every((check) => ["probe", "evidence-validation", "external-required"].includes(check.executionMode)), true);
+  assert.equal(statusApi.statusTests.length > statusApi.statusCatalog.length, true);
+  assert.equal(statusApi.statusTestSummary.lanes.some((lane) => lane.id === "go-no-go"), true);
+  assert.equal(statusApi.statusTestSummary.lanes.some((lane) => lane.id === "local"), true);
+  assert.equal(statusApi.statusTests.every((check) => check.valueExposed === undefined), true);
   assert.doesNotMatch(JSON.stringify(statusApi.statusCatalog), /snapshot/);
+  assert.doesNotMatch(JSON.stringify(statusApi.statusTests), /super-secret-token-should-not-leak/);
   assert.match(statusApi.goNoGo.status, /^(unknown|go|no-go)$/);
   const versionedStatusApi = await getJson(`${baseUrl}/control/v1/status`);
   assert.deepEqual(versionedStatusApi, statusApi);
@@ -1043,27 +1113,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(streamAfterDisconnect.status, 200);
   assert.match(await streamAfterDisconnect.text(), /^id: 4$/m);
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
-  assert.match(statusHtmlAfterRun, /Ultimo run/);
-  assert.match(statusHtmlAfterRun, /data-status-run-step-mark/);
-  assert.match(statusHtmlAfterRun, /Go live e decisione/);
-  assert.match(statusHtmlAfterRun, /statusCategory=github-release/);
-  assert.match(statusHtmlAfterRun, /statusCategory=backup-dr/);
-  assert.match(statusHtmlAfterRun, /<details class="ops-status-check-row/);
-  assert.match(statusHtmlAfterRun, /ops-status-check-details/);
-  assert.doesNotMatch(statusHtmlAfterRun, /<th>Controllo<\/th><th>Stato<\/th><th>Motivo<\/th><th>Cosa fare<\/th><th>Fonte<\/th>/);
-  assert.match(statusHtmlAfterRun, /data-status-section-detail="go-live"/);
-  assert.match(statusHtmlAfterRun, /name="scope" value="category"/);
-  assert.match(statusHtmlAfterRun, /name="scope" value="check"/);
-  assert.doesNotMatch(statusHtmlAfterRun, /full-restore-drill/);
-  assert.doesNotMatch(statusHtmlAfterRun, /Control Center avviato/);
-  assert.doesNotMatch(statusHtmlAfterRun, /Asset Portal serviti/);
-  assert.doesNotMatch(statusHtmlAfterRun, /Control Center local UI contract/);
-  assert.doesNotMatch(statusHtmlAfterRun, /Simple Mode operational MVP/);
-  assert.doesNotMatch(statusHtmlAfterRun, /Advanced Mode enterprise sections/);
+  assert.match(statusHtmlAfterRun, /Applicazioni/);
+  assert.match(statusHtmlAfterRun, /section-projects/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Registro completo test|data-status-run-step-mark|data-status-section-detail|statusCategory=/);
 
   const readinessHtml = await getText(`${baseUrl}/?mode=advanced&section=readiness`);
   assert.match(readinessHtml, /ops-shell/);
-  assert.match(readinessHtml, /Esecuzione/);
+  assert.match(readinessHtml, /Applicazioni/);
+  assert.doesNotMatch(readinessHtml, /data-status-runner/);
   assert.doesNotMatch(readinessHtml, /Readiness Matrix/);
 
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
@@ -1918,8 +1975,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseDeletePlan.status, 202);
   assert.equal(databaseDeletePlan.body.type, "database.delete");
   assert.equal(databaseDeletePlan.body.dryRun, true);
-  assert.equal(databaseDeletePlan.body.details.backupRequiredBeforeLiveDelete, true);
-  assert.equal(databaseDeletePlan.body.details.restorePointReady, true);
+  assert.equal(databaseDeletePlan.body.details.backupRequiredBeforeLiveDelete, false);
+  assert.equal(databaseDeletePlan.body.details.restorePointReady, false);
   assert.deepEqual(databaseDeletePlan.body.details.evidenceBlockers, []);
   assert.equal(databaseDeletePlan.body.details.databaseTouched, false);
 
@@ -1961,14 +2018,14 @@ test("Admin Control Center local foundation", async (t) => {
     action: "delete",
     id: "node-demo-mariadb-node-demo-app",
     projectId: "node-demo",
-    typedName: "node_demo_app",
     idempotencyKey: "delete-node-demo-mariadb-1",
     confirm: "REQUEST-DATABASE-DELETE:node-demo-mariadb-node-demo-app",
   });
   assert.equal(databaseDeleteRequest.status, 202);
   assert.equal(databaseDeleteRequest.body.type, "database.delete.requested");
   assert.equal(databaseDeleteRequest.body.deleteOperation.status, "evidence-verified");
-  assert.equal(databaseDeleteRequest.body.details.restorePointReady, true);
+  assert.equal(databaseDeleteRequest.body.details.restorePointReady, false);
+  assert.equal(databaseDeleteRequest.body.details.backupEvidenceWaived, true);
   assert.equal(databaseDeleteRequest.body.details.databaseTouched, false);
   assert.equal(databaseDeleteRequest.body.deleteOperation.database.credentialFile, "");
   const deleteOperationId = databaseDeleteRequest.body.deleteOperation.id;
@@ -1977,7 +2034,6 @@ test("Admin Control Center local foundation", async (t) => {
     action: "delete",
     id: "node-demo-mariadb-node-demo-app",
     projectId: "node-demo",
-    typedName: "node_demo_app",
     idempotencyKey: "delete-node-demo-mariadb-1",
     confirm: "REQUEST-DATABASE-DELETE:node-demo-mariadb-node-demo-app",
   });
@@ -1988,7 +2044,6 @@ test("Admin Control Center local foundation", async (t) => {
   const databaseDeleteApprove = await postJson(`${baseUrl}/actions/database-command`, {
     action: "delete-approve",
     operationId: deleteOperationId,
-    typedName: "node_demo_app",
     confirm: `APPROVE-DATABASE-DELETE:${deleteOperationId}`,
   });
   assert.equal(databaseDeleteApprove.status, 202);
@@ -1998,7 +2053,6 @@ test("Admin Control Center local foundation", async (t) => {
   const databaseDeleteExecute = await postJson(`${baseUrl}/actions/database-command`, {
     action: "delete-execute",
     operationId: deleteOperationId,
-    typedName: "node_demo_app",
     confirm: `EXECUTE-DATABASE-DELETE:${deleteOperationId}`,
   });
   assert.equal(databaseDeleteExecute.status, 409);
@@ -2115,10 +2169,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(bucketRestore.body.details.dataChanged, false);
   assert.equal(bucketRestore.body.details.minioTouched, false);
 
-  const secretsHtml = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
+  const secretsHtml = await getText(`${baseUrl}/?section=secrets`);
   assert.match(secretsHtml, /ops-shell/);
-  assert.doesNotMatch(secretsHtml, /Declare material/);
-  assert.doesNotMatch(secretsHtml, /Docker secrets/);
+  assert.match(secretsHtml, /<h1 id="control-page-title">Secret<\/h1>/);
+  assert.match(secretsHtml, /Aggiungi secret|Secret salvati/);
+  assert.doesNotMatch(secretsHtml, /Secret rilevati|Inventario metadata secret/);
+  assert.match(secretsHtml, /class="ops-nav-main ops-nav-direct active"[^>]*aria-current="page"/);
 
   const invalidMaterial = await postJson(`${baseUrl}/control/secrets/materials`, {
     projectId: "node-demo",
@@ -2172,13 +2228,20 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(materialStateText, /material-plain-value-should-not-leak/);
   assert.equal(JSON.parse(materialStateText)["node-demo-staging-app-config"].valueExposed, false);
 
-  const secretsHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
+  const secretsHtmlAfterApply = await getText(`${baseUrl}/?section=secrets`);
   assert.match(secretsHtmlAfterApply, /ops-shell/);
   assert.doesNotMatch(secretsHtmlAfterApply, /material-plain-value-should-not-leak/);
 
   const vaultHtml = await getText(`${baseUrl}/?section=vault`);
-  assert.match(vaultHtml, /Aggiungi secret/);
-  assert.match(vaultHtml, /Secret salvati/);
+  assert.match(vaultHtml, /Applicazioni/);
+  assert.doesNotMatch(vaultHtml, /Aggiungi secret|Secret salvati|Secret rilevati|Inventario metadata secret/);
+  const appVaultHtml = await getText(`${baseUrl}/?section=projects&project=node-demo`);
+  assert.doesNotMatch(appVaultHtml, /<h3>Secret<\/h3>|id="project-secrets"|ops-project-secret-panel/);
+  assert.doesNotMatch(appVaultHtml, /Importa \d+ secret esistenti/);
+  const secretsApi = await getJson(`${baseUrl}/control/secrets`);
+  assert.equal(secretsApi.inventory.some((item) => item.itemKey === "github_token" && item.available === true), true);
+  assert.equal(secretsApi.summary.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(secretsApi), /existing-github-token-should-reveal-only/);
   assert.doesNotMatch(vaultHtml, /vault-plain-value-should-not-leak/);
   assert.doesNotMatch(vaultHtml, /existing-github-token-should-reveal-only/);
 
@@ -2198,6 +2261,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-github-token"), true);
   assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-long-provider-secret"), true);
   assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-rclone-rclone-conf"), true);
+  assert.equal(vaultImportApply.body.items.every((item) => item.linkedApps.length === 0), true);
   assert.doesNotMatch(JSON.stringify(vaultImportApply.body), /existing-github-token-should-reveal-only/);
   assert.doesNotMatch(JSON.stringify(vaultImportApply.body), new RegExp(longExistingVaultValue));
   assert.doesNotMatch(JSON.stringify(vaultImportApply.body), /existing-rclone-token-should-reveal-only/);
@@ -2208,9 +2272,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(importedVaultInventory), /existing-github-token-should-reveal-only/);
   assert.doesNotMatch(JSON.stringify(importedVaultInventory), /sealedValue/);
 
-  const importedVaultHtml = await getText(`${baseUrl}/?section=vault`);
+  const importedVaultHtml = await getText(`${baseUrl}/?section=secrets`);
   assert.match(importedVaultHtml, /Github Token/);
   assert.match(importedVaultHtml, /Mostra/);
+  assert.match(importedVaultHtml, /Platform condiviso/);
+  assert.doesNotMatch(importedVaultHtml, /Secret rilevati|Inventario metadata secret/);
   assert.doesNotMatch(importedVaultHtml, /existing-github-token-should-reveal-only/);
 
   const importedReveal = await postJson(`${baseUrl}/control/vault/secrets/platform-local-github-token/reveal`, {
@@ -2300,8 +2366,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(vaultInventory), /vault-plain-value-should-not-leak/);
   assert.doesNotMatch(JSON.stringify(vaultInventory), /sealedValue/);
 
-  const vaultHtmlAfterApply = await getText(`${baseUrl}/?section=vault`);
+  const vaultHtmlAfterApply = await getText(`${baseUrl}/?section=secrets`);
   assert.match(vaultHtmlAfterApply, /Node demo app password/);
+  assert.match(vaultHtmlAfterApply, /Cosa significano i campi/);
+  assert.match(vaultHtmlAfterApply, /Usato realmente da: Node Demo/);
+  assert.match(vaultHtmlAfterApply, /node-demo\/src\/index\.js/);
+  assert.match(vaultHtmlAfterApply, /Scansione completa:/);
   assert.doesNotMatch(vaultHtmlAfterApply, /vault-plain-value-should-not-leak/);
   assert.doesNotMatch(vaultHtmlAfterApply, /sealedValue/);
 
@@ -2581,7 +2651,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(identityHtml, /identity-secret-should-not-leak/);
 
   const logsHtml = await getText(`${baseUrl}/?section=activity`);
-  assert.match(logsHtml, /Stato/);
+  assert.match(logsHtml, /Applicazioni/);
+  assert.doesNotMatch(logsHtml, /data-status-runner|Registro completo test/);
   assert.doesNotMatch(logsHtml, /Errori, avvisi e problemi/);
   assert.doesNotMatch(logsHtml, /Alert aperti/);
 
@@ -2806,7 +2877,8 @@ test("Admin Control Center local foundation", async (t) => {
 
   const legacyBackupsHtml = await getText(`${baseUrl}/?section=backups`);
   assert.match(legacyBackupsHtml, /ops-shell/);
-  assert.match(legacyBackupsHtml, /data-ops-nav-group="status" data-ops-nav-expanded="true"/);
+  assert.match(legacyBackupsHtml, /data-ops-nav-group="projects" data-ops-nav-expanded="true"/);
+  assert.doesNotMatch(legacyBackupsHtml, /data-ops-nav-group="status"|data-status-runner/);
   assert.doesNotMatch(legacyBackupsHtml, /data-ops-nav-group="backups"|ops-nav-panel-backups|Backup applicazioni|File manager backup|backupProject=/);
 
   const backupFiles = await getJson(`${baseUrl}/control/backups/files`);
@@ -3094,6 +3166,141 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(corruptVaultResponse.status, 500);
   assert.equal(readFileSync(vaultFile, "utf8"), "{not-valid-json\n");
 
+  assert.equal(stderr, "");
+});
+
+test("direct application backup creates a signed source artifact and terminal job", async (t) => {
+  const root = path.join(infraRoot, ".tmp", "control-center-direct-backup-tests", randomUUID());
+  const projectRoot = path.join(root, "projects", "demo", "public");
+  const stateRoot = path.join(root, "state");
+  const directBackupsRoot = path.join(stateRoot, "backups");
+  const directJobsRoot = path.join(stateRoot, "backup-jobs");
+  const signingKeyFile = path.join(root, "backup-signing-keys.txt");
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(stateRoot, { recursive: true });
+  writeFileSync(path.join(projectRoot, "index.php"), "<?php echo 'demo';\n");
+  writeFileSync(signingKeyFile, `test-backup-key=${"b".repeat(64)}\n`, { mode: 0o600 });
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
+      CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_AUTH_MODE: "test-disabled",
+      ...isolatedStateEnv(stateRoot),
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
+      CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      CONTROL_CENTER_BACKUP_ROOT: directBackupsRoot,
+      CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: "true",
+      CONTROL_CENTER_BACKUP_SIGNING_KEYS_FILE: signingKeyFile,
+      PROJECTS_ROOT: path.join(root, "projects"),
+      PROJECT_STATE_FILE: path.join(stateRoot, "projects.json"),
+      PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
+      PROJECT_BACKUP_RECORDS_FILE: path.join(stateRoot, "backups.jsonl"),
+      PROJECT_BACKUP_JOBS_DIR: directJobsRoot,
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      DOCS_HOST: "docs.localhost.com",
+      PROJECT_HOST_SUFFIX: ".localhost.com",
+      BACKUP_QUEUE_MAX_OUTSTANDING: "4",
+      BACKUP_QUEUE_MAX_PER_PRINCIPAL: "4",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(root, { recursive: true, force: true });
+  });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(`${baseUrl}/__health`, child);
+  const response = await fetch(`${baseUrl}/actions/backup-command`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+    body: "action=backup&scope=application&projectId=demo&backupMode=source",
+  });
+  const responseText = await response.text();
+  assert.equal(response.status, 202, responseText);
+  const result = JSON.parse(responseText);
+  assert.equal(result.details.executor, "control-center-direct-application-backup");
+  assert.equal(result.job.status, "done");
+  assert.match(result.details.manifestPath, /^manifests\/manifest-demo-/);
+  const manifestFile = path.join(directBackupsRoot, result.details.manifestPath);
+  const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+  assert.equal(manifest.signature.digest, backupDocumentDigest(manifest));
+  assert.equal(manifest.coverage.complete, true);
+  assert.equal(manifest.artifacts.length, 1);
+  assert.match(manifest.artifacts[0].path, /^applications\/demo\/demo-source-[0-9]{14}-[a-f0-9]{8}\.tar\.gz$/);
+  const artifactFile = path.join(directBackupsRoot, manifest.artifacts[0].path);
+  assert.equal(existsSync(artifactFile), true);
+  assert.equal(existsSync(`${artifactFile}.sha256`), true);
+  assert.equal(existsSync(`${artifactFile}.sig.json`), true);
+  assert.equal(existsSync(path.join(directJobsRoot, "done", `${result.job.id}.json`)), true);
+  const html = await getText(`${baseUrl}/?section=projects&project=demo`);
+  assert.doesNotMatch(html, /Ultime esecuzioni backup|Backup applicazione Demo completato|>Completato</);
+  assert.match(html, /Manifest firmato/);
+  assert.match(html, /action="\/actions\/backup-delete-command"[^>]*data-passkey-submit/);
+  assert.doesNotMatch(html, /auth\/login\?returnTo=.*deleteBackup/);
+
+  const genericDelete = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "delete-application",
+    projectId: "demo",
+    path: result.details.manifestPath,
+    confirm: `DELETE-APPLICATION-BACKUP:${manifest.id}`,
+  });
+  assert.equal(genericDelete.status, 409);
+  assert.equal(existsSync(manifestFile), true);
+  assert.equal(existsSync(artifactFile), true);
+
+  const sharedManifestPath = `manifests/${manifest.id}-shared.json`;
+  const sharedManifestFile = path.join(directBackupsRoot, sharedManifestPath);
+  const sharedUnsignedManifest = { ...manifest, id: `${manifest.id}-shared` };
+  delete sharedUnsignedManifest.signature;
+  const sharedManifest = {
+    ...sharedUnsignedManifest,
+    signature: {
+      ...manifest.signature,
+      digest: backupDocumentDigest(sharedUnsignedManifest),
+    },
+  };
+  writeFileSync(sharedManifestFile, `${JSON.stringify(sharedManifest, null, 2)}\n`, { mode: 0o600 });
+
+  const exactDelete = await postJson(`${baseUrl}/actions/backup-delete-command`, {
+    action: "delete-application",
+    projectId: "demo",
+    path: result.details.manifestPath,
+    confirm: `DELETE-APPLICATION-BACKUP:${manifest.id}`,
+  });
+  assert.equal(exactDelete.status, 202);
+  assert.equal(exactDelete.body.type, "backup.application.delete");
+  assert.equal(exactDelete.body.details.backupDeleted, true);
+  assert.equal(exactDelete.body.details.filesDeleted, 1);
+  assert.equal(exactDelete.body.details.artifactsDeleted, 0);
+  assert.equal(exactDelete.body.details.sharedArtifactsPreserved, 1);
+  assert.equal(existsSync(manifestFile), false);
+  assert.equal(existsSync(sharedManifestFile), true);
+  assert.equal(existsSync(artifactFile), true);
+  assert.equal(existsSync(`${artifactFile}.sha256`), true);
+  assert.equal(existsSync(`${artifactFile}.sig.json`), true);
+
+  const lastReferenceDelete = await postJson(`${baseUrl}/actions/backup-delete-command`, {
+    action: "delete-application",
+    projectId: "demo",
+    path: sharedManifestPath,
+    confirm: `DELETE-APPLICATION-BACKUP:${sharedManifest.id}`,
+  });
+  assert.equal(lastReferenceDelete.status, 202);
+  assert.equal(lastReferenceDelete.body.details.filesDeleted, 4);
+  assert.equal(lastReferenceDelete.body.details.artifactsDeleted, 1);
+  assert.equal(lastReferenceDelete.body.details.sharedArtifactsPreserved, 0);
+  assert.equal(existsSync(sharedManifestFile), false);
+  assert.equal(existsSync(artifactFile), false);
+  assert.equal(existsSync(`${artifactFile}.sha256`), false);
+  assert.equal(existsSync(`${artifactFile}.sig.json`), false);
   assert.equal(stderr, "");
 });
 
@@ -3402,6 +3609,14 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   });
   assert.equal(deniedMutation.status, 401);
 
+  const expiredBrowserLogout = await fetch(`${baseUrl}/logout`, {
+    method: "POST",
+    headers: { accept: "text/html" },
+    redirect: "manual",
+  });
+  assert.equal(expiredBrowserLogout.status, 303);
+  assert.equal(expiredBrowserLogout.headers.get("location"), "/auth/login");
+
   const loginPage = await fetch(`${baseUrl}/`);
   assert.equal(loginPage.status, 401);
   const loginHtml = await loginPage.text();
@@ -3460,6 +3675,10 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   assert.match(ownerSetCookieText, /SameSite=Lax/);
   const ownerCookie = cookieHeader(ownerSetCookies);
   const ownerCsrf = cookieValue(ownerSetCookies, "__Host-platform_cc_csrf");
+
+  const authenticatedPage = await getText(`${baseUrl}/`, { headers: { cookie: ownerCookie } });
+  assert.match(authenticatedPage, /class="ops-logout-form"/);
+  assert.match(authenticatedPage, /class="ops-logout-button"[^>]*aria-label="Logout"/);
 
   const replayCallback = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });
   assert.equal(replayCallback.status, 401);
@@ -3791,6 +4010,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     redirect: "manual",
   });
   assert.equal(logout.status, 303);
+  assert.equal(logout.headers.get("location"), "/auth/login");
   assert.equal(responseSetCookies(logout).filter((cookie) => /Max-Age=0/.test(cookie)).length, 2);
   const revokedReplay = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
   assert.equal(revokedReplay.status, 401);
@@ -4045,7 +4265,7 @@ function prepareFixture() {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
-  writeFileSync(path.join(projectsRoot, "node-demo", "src", "index.js"), "console.log('node-demo');\n");
+  writeFileSync(path.join(projectsRoot, "node-demo", "src", "index.js"), "console.log(process.env.APP_PASSWORD_FILE || 'node-demo');\n");
   writeFileSync(path.join(projectsRoot, "node-demo", ".env"), "DB_NAME=\"node_demo_external\"\nDB_PASSWORD=\"db-password-should-not-leak\"\n");
   writeFileSync(vaultKeyFile, `v20260629000000=${"a".repeat(64)}\n`, { mode: 0o600 });
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump"), "fixture-backup-data\n");

@@ -4979,7 +4979,7 @@ const CURRENT_CLOSED_AUTHORITY = {
       "command": [
         "sh",
         "-ec",
-        "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"
+        "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && cd /data && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"
       ]
     },
     "traefik": {

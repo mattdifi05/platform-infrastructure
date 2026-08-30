@@ -156,6 +156,7 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
       - ./projects-portal/state:/var/www/project-state
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
 
   project-router:
     <<: *runtime_control
