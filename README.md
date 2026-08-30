@@ -1057,9 +1057,11 @@ overlay VPS/WAF, `compose.backup-scheduler.yaml`, gli overlay runtime/network,
 `compose.local-private.yaml`, `compose.local-private-applications.yaml` e per
 ultimo `compose.greenfield.yaml`. Il file backup-scheduler completa le
 definizioni referenziate dagli overlay di rete, ma il profilo `backup` resta
-inattivo: i backup diretti del Control Center non richiedono l'attivazione
-della vecchia transaction. Le variabili provider richieste dal parsing
-devono comunque essere definite nell'ambiente esterno.
+inattivo: il lock abilita esattamente il solo profilo `admin` e registra anche
+renderer e profili intenzionalmente inattivi. I backup diretti del Control
+Center non richiedono l'attivazione della vecchia transaction. Le variabili
+provider richieste dal parsing devono comunque essere definite nell'ambiente
+esterno.
 
 Le quattro immagini Stexor vengono costruite dalla revisione bloccata con
 `compose.local-private-applications-build.yaml`; le altre applicazioni usano
