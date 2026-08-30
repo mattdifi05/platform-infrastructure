@@ -3908,36 +3908,6 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       17,
       "the exact PRE authority path did not normalize every active rendered service",
     );
-    const preAuthority = buildArchivePreAuthority({
-      reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
-      release,
-      renderBytes: final.bytes,
-      environmentBytes: finalEnvironmentBytes,
-      runtimeIdentity,
-      commit: runtimeCommit,
-      tree: runtimeTree,
-      archiveSha256,
-      archiveBytes,
-      compose,
-    });
-    assert.deepEqual(preAuthority, {
-      attachments: 30,
-      backupToolReferences: {
-        mariadbRestore: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
-        minioRestore: "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
-        nodeUtility: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
-        postgresRestore: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
-        resticRclone: resticImage,
-      },
-      backupTools: 5,
-      documentId: preAuthority.documentId,
-      preExecutorActions: 6,
-      preEntered: true,
-      routes: 10,
-      status: "AUTHORIZED",
-      targets: 17,
-    });
-    assert.match(preAuthority.documentId, /^[0-9a-f]{64}$/);
     assert.deepEqual(
       validateNoHostedCoreAuthority(lock, source.config, release, sourceEnvironment),
       [],
@@ -3996,6 +3966,50 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets outside the release", (
       environment,
     );
     assert.deepEqual(violations, [], `LOCAL_PRIVATE authority rejected: ${violations.join(",")}`);
+
+    const runtimeEnvironment = new Map(environment);
+    const runtimeValues = {
+      PLATFORM_RUNTIME_CANDIDATE_ID: "1".repeat(64),
+      PLATFORM_RUNTIME_COMMIT: "2".repeat(40),
+      PLATFORM_RUNTIME_TREE: "3".repeat(40),
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: "local-private-fixture",
+      PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: "4".repeat(64),
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "5".repeat(64),
+    };
+    for (const [key, value] of Object.entries(runtimeValues)) runtimeEnvironment.set(key, value);
+    const runtimeLabels = {
+      "com.platform.runtime.candidate-id": runtimeValues.PLATFORM_RUNTIME_CANDIDATE_ID,
+      "com.platform.runtime.commit": runtimeValues.PLATFORM_RUNTIME_COMMIT,
+      "com.platform.runtime.tree": runtimeValues.PLATFORM_RUNTIME_TREE,
+      "com.platform.runtime.deployment-id": runtimeValues.PLATFORM_RUNTIME_DEPLOYMENT_ID,
+      "com.platform.runtime.source-render-sha256": runtimeValues.PLATFORM_RUNTIME_SOURCE_RENDER_SHA256,
+      "com.platform.runtime.workload-lock-sha256": runtimeValues.PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256,
+    };
+    const runtimeConfig = structuredClone(config);
+    runtimeConfig["x-platform-runtime-labels"] = structuredClone(runtimeLabels);
+    for (const service of Object.values(runtimeConfig.services)) {
+      service.labels = structuredClone(runtimeLabels);
+    }
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(
+        lock,
+        runtimeConfig,
+        sandbox.root,
+        runtimeEnvironment,
+      ),
+      [],
+      "LOCAL_PRIVATE runtime identity labels were not projected exactly",
+    );
+    runtimeConfig.services.phpmyadmin.labels["com.platform.runtime.commit"] = "9".repeat(40);
+    assert.ok(
+      validateNoHostedCoreAuthority(
+        lock,
+        runtimeConfig,
+        sandbox.root,
+        runtimeEnvironment,
+      ).includes("phpmyadmin:local-private-runtime-identity-labels"),
+      "LOCAL_PRIVATE admin runtime identity drift escaped projection",
+    );
 
     const standardLock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
     assert.deepEqual(

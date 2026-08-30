@@ -7718,13 +7718,23 @@ function validateAndProjectLocalPrivateAdminServices(
     certificatesDirectory,
     environment,
   );
+  const runtimeIdentity = runtimeIdentityProjection(environment);
   for (const serviceName of LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES) {
     const expected = authority[serviceName];
     const observed = projectedConfig.services?.[serviceName];
+    const comparable = plainObject(observed) ? structuredClone(observed) : observed;
+    if (!runtimeIdentity.valid
+        || (runtimeIdentity.active
+          ? !sameFlatObject(observed?.labels, runtimeIdentity.labels)
+          : Object.hasOwn(observed ?? {}, "labels"))) {
+      violations.push(`${serviceName}:local-private-runtime-identity-labels`);
+    } else if (runtimeIdentity.active) {
+      delete comparable.labels;
+    }
     if (!plainObject(expected)
         || !plainObject(observed)
         || !/@sha256:[a-f0-9]{64}$/.test(expected.image)
-        || !sameStructuredJson(observed, expected)) {
+        || !sameStructuredJson(comparable, expected)) {
       violations.push(`${serviceName}:local-private-exact-authority`);
     }
     delete projectedConfig.services?.[serviceName];
