@@ -4960,7 +4960,7 @@ const CURRENT_CLOSED_AUTHORITY = {
         "-ec"
       ],
       "command": [
-        "cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf"
+        "cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /usr/local/bin/nats-server --config /run/platform-broker/nats-server.conf"
       ]
     },
     "platform-alert-dispatcher": {
@@ -5474,7 +5474,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     redis_auth_config: ["name"],
   },
   nodeBuildImageDefault: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
-  normalizedRenderSha256: "54ae78ca46efb3b1e039807272aeded22f0feadbe41410a1a2482dd29eb94c30",
+  normalizedRenderSha256: "157bf5e52f2d6d8480fd8b8acb0068cee25f09dcdaeffceb679c0f7f5981e905",
 };
 
 const CORE_SEMANTIC_POLICY_BYTES = `${JSON.stringify(CORE_SEMANTIC_POLICY)}\n`;

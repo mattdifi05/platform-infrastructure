@@ -206,7 +206,7 @@ services:
       - /bin/sh
       - -ec
     command:
-      - cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf
+      - cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /usr/local/bin/nats-server --config /run/platform-broker/nats-server.conf
     depends_on:
       broker-auth-bootstrap:
         condition: service_completed_successfully
