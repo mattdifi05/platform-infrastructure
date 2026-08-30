@@ -18,8 +18,8 @@
       "url": "https://github.com/mattdifi05/FeI-Platform.git",
       "visibility": "private",
       "ref": "main",
-      "commit": "e8b891b6d56fac9aed9ba1c5b7866df26bd7fa25",
-      "tree": "38d24216b1681f01d40461ce0eea54fae6214770",
+      "commit": "655e5088cab9ad290e9042138f0f777e6178cf27",
+      "tree": "60d3278ea4992d008c76ec794372175882f7c853",
       "checkoutDirectory": "fiplatform",
       "applications": ["fiplatform", "fireport"],
       "runtimeServices": ["php-fiplatform"]
