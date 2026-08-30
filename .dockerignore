@@ -27,6 +27,11 @@ dist
 **/.next
 playwright-report
 test-results
+# Control Center test and authoring files are exercised from the checkout/CI.
+# They are not part of the production runtime image.
+control-center/tests/
+control-center/**/*.test.mjs
+control-center/*.md
 security/dast
 security/dast/**
 security/sbom
