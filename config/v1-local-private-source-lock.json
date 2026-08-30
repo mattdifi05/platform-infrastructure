@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "capturedAt": "2026-08-30T13:51:06Z",
+  "scope": "V1.0 LOCAL_PRIVATE live parity",
+  "runtime": {
+    "composeProject": "platform_infra_greenfield",
+    "serviceCount": 32,
+    "liveBaseRenderSha256": "03eae7431b600cbe192f3fc2ad84e76a4f2503cfba2c50107cc1e0911084a2bd",
+    "liveObservedHostedWorkloadRuntimeLockSha256": "064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab",
+    "hostedWorkloadRuntimeLockSha256": "6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e",
+    "sourceRootVariable": "PHP_PROJECTS_DIR",
+    "sourceRootLiveValue": "/home/platform_infrastructure/v1-fresh-data/src",
+    "environmentFileClass": "external-state"
+  },
+  "repositories": [
+    {
+      "id": "fiplatform",
+      "url": "https://github.com/mattdifi05/FeI-Platform.git",
+      "visibility": "private",
+      "ref": "main",
+      "commit": "e8b891b6d56fac9aed9ba1c5b7866df26bd7fa25",
+      "tree": "38d24216b1681f01d40461ce0eea54fae6214770",
+      "checkoutDirectory": "fiplatform",
+      "applications": ["fiplatform", "fireport"],
+      "runtimeServices": ["php-fiplatform"]
+    },
+    {
+      "id": "stexor",
+      "url": "https://github.com/mattdifi05/Stexor-account.git",
+      "visibility": "private",
+      "ref": "main",
+      "commit": "60be3769302500777ff557e06284db0300136659",
+      "tree": "0d65cbb9b61cc45788c869a4da19612543205e43",
+      "checkoutDirectory": "stexor",
+      "applications": ["stexor", "stexor-account", "stexor-ui"],
+      "runtimeServices": [
+        "backend",
+        "web",
+        "worker-jobs",
+        "worker-notifications",
+        "node-account",
+        "node-ui"
+      ]
+    },
+    {
+      "id": "platform-hosted-applications",
+      "url": "https://github.com/mattdifi05/Platform-hosted-applications.git",
+      "visibility": "private",
+      "ref": "main",
+      "commit": "5646f5f981501a1f140bbbdf6d3254a409c01068",
+      "tree": "0937117c6f7f3bb7851d8fb683693a75c8840707",
+      "checkoutDirectory": "platform-hosted-applications",
+      "applications": [
+        {
+          "id": "anniversary",
+          "sourceSubdirectory": "apps/anniversary",
+          "materializedDirectory": "anniversary",
+          "runtimeServices": ["php-anniversary"]
+        },
+        {
+          "id": "matthewdifilippo",
+          "sourceSubdirectory": "apps/matthewdifilippo",
+          "materializedDirectory": "matthewdifilippo",
+          "runtimeServices": ["php-matthewdifilippo"]
+        },
+        {
+          "id": "opstudents",
+          "sourceSubdirectory": "apps/opstudents",
+          "materializedDirectory": "opstudents",
+          "runtimeServices": ["node-opstudents"]
+        },
+        {
+          "id": "stream",
+          "sourceSubdirectory": "apps/stream",
+          "materializedDirectory": "stream",
+          "runtimeServices": ["php-stream"]
+        },
+        {
+          "id": "workcalendar",
+          "sourceSubdirectory": "apps/workcalendar",
+          "materializedDirectory": "workcalendar",
+          "runtimeServices": ["php-workcalendar"]
+        }
+      ]
+    }
+  ],
+  "compose": {
+    "projectName": "platform_infra_greenfield",
+    "renderer": {
+      "name": "docker-compose-linux-x86_64",
+      "version": "5.3.1",
+      "sha256": "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959"
+    },
+    "activeProfiles": ["admin"],
+    "inactiveProfiles": [
+      "backup",
+      "legacy-shared-runtime-disabled",
+      "local-runtime-disabled",
+      "raw-host-metrics-disabled"
+    ],
+    "runtimeFilesInOrder": [
+      "compose.yaml",
+      "compose.secrets.yaml",
+      "compose.waf.yaml",
+      "compose.vps.yaml",
+      "compose.vps-waf.yaml",
+      "compose.backup-scheduler.yaml",
+      "compose.runtime.yaml",
+      "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
+      "compose.local-private.yaml",
+      "compose.local-private-applications.yaml",
+      "compose.greenfield.yaml"
+    ],
+    "applicationBuildFile": "compose.local-private-applications-build.yaml"
+  },
+  "localBuilds": [
+    {
+      "image": "platform/control-center:local",
+      "context": ".",
+      "dockerfile": "docker/control-center.Dockerfile"
+    },
+    {
+      "image": "platform/project-router:local",
+      "context": ".",
+      "dockerfile": "docker/project-router.Dockerfile"
+    },
+    {
+      "image": "platform/alert-dispatcher:local",
+      "context": ".",
+      "dockerfile": "docker/alert-dispatcher.Dockerfile"
+    },
+    {
+      "image": "platform/php-apache:local",
+      "context": ".",
+      "dockerfile": "docker/php-apache.Dockerfile"
+    },
+    {
+      "images": [
+        "platform/backend:local",
+        "platform/web:local",
+        "platform/worker-jobs:local",
+        "platform/worker-notifications:local"
+      ],
+      "sourceRepository": "stexor",
+      "composeFile": "compose.local-private-applications-build.yaml"
+    }
+  ],
+  "externalState": {
+    "neverCommit": [
+      "runtime.env",
+      "secrets/",
+      "state/",
+      "certs/",
+      "restore/",
+      "database volumes and dumps",
+      "application .env files",
+      "application uploads, logs, queues and caches",
+      "generated build output and dependency directories"
+    ]
+  }
+}

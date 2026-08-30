@@ -266,7 +266,7 @@ Superficie HTTP consigliata:
 - `app.localhost.com`, `api.localhost.com`, `auth.localhost.com`, `storage.localhost.com` e `grafana.localhost.com`: nomi finali riservati a superfici live o applicazioni esterne, non pubblicati dal profilo platform default.
 - `projects.localhost.com` e wildcard progetto: disabilitati nella route pubblica. La lista e enable/disable restano in `portal`.
 
-`portal.localhost.com` serve l'Infrastructure Portal dal servizio Node `control-center`, separato da PHP Apache. Il componente e' il progetto Node `@platform/control-center` e usa un sistema visivo locale: componenti dichiarati in `control-center/components/ui/controlCenterUi.mjs`, icone self-hosted in `control-center/components/ui/controlIcons.mjs`, token `--cc-*` e CSS in `control-center/styles/control-center.css`, servito da `/assets/control-center/control-center.css` ed esposto da `/control/ui-package`. Il Control Center non deve dipendere da applicazioni reali: con discovery disabilitata Applications puo' essere zero e la UI mostra `No applications attached.`. Quando `CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS=true`, puo' leggere sorgenti esterni da `PHP_PROJECTS_DIR` per generare metadata locali, ma quei progetti non diventano parte della repository. Il Control Center espone la topologia Network Advanced da `/control/network` leggendo Compose e Traefik dynamic config in modalita' read-only, espone la mappa Monitoring Advanced da `/control/monitoring` leggendo Prometheus, Grafana, Loki e Alertmanager config senza query live, permette create metadata-only, enable/disable locale, update metadata, archive e soft delete solo nello stato Control Center. Lo state adapter in `control-center/state/` conserva i formati JSON/JSONL esistenti con letture strict, write atomiche private, lock, revisioni e snapshot rollback; resta un design single-writer e non e' HA. Database distruttivi, principal e Vault mantengono store specializzati. L'API versionata e' `/control/v1/*`; `/control/*` resta alias compatibile. `PHP_SOURCE_DIR` punta a `php-runtime-root`, una root statica neutra: PHP Apache resta solo runtime generico e non contiene la UI/API del Control Center. L'accesso amministrativo e' sempre fail-closed tramite Keycloak OIDC, Authorization Code con PKCE e autenticazione passkey attestata dai claim `acr` e `amr`; non esiste login locale con password. Le sessioni usano cookie opachi e revocabili, mentre transazioni OIDC e sessioni sono persistite nello schema PostgreSQL `control_auth`. La sola modalita' senza auth e' `test-disabled`, accettata esclusivamente con `NODE_ENV=test` e bind loopback. `PROJECTS_HOST` resta solo alias legacy opzionale e non va configurato per nuove installazioni. Dettagli e procedura candidata: `control-center/CONTROL-CENTER-CORE.md` e `control-center/STATE-STORE-MIGRATION.md`.
+`portal.localhost.com` serve l'Infrastructure Portal dal servizio Node `control-center`, separato da PHP Apache. Il componente e' il progetto Node `@platform/control-center` e usa un sistema visivo locale: componenti dichiarati in `control-center/components/ui/controlCenterUi.mjs`, icone self-hosted in `control-center/components/ui/controlIcons.mjs`, token `--cc-*` e CSS in `control-center/styles/control-center.css`, servito da `/assets/control-center/control-center.css` ed esposto da `/control/ui-package`. Il Control Center non deve dipendere da applicazioni reali: con discovery disabilitata Applications puo' essere zero e la UI mostra `No applications attached.`. Quando `CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS=true`, puo' leggere sorgenti esterni da `PHP_PROJECTS_DIR` per generare metadata locali, ma quei progetti non diventano parte della repository. Il Control Center espone la topologia Network Advanced da `/control/network` leggendo Compose e Traefik dynamic config in modalita' read-only, espone la mappa Monitoring Advanced da `/control/monitoring` leggendo Prometheus, Grafana, Loki e Alertmanager config senza query live, permette create metadata-only, enable/disable locale, update metadata, archive e soft delete solo nello stato Control Center. Lo state adapter in `control-center/state/` conserva i formati JSON/JSONL esistenti con letture strict, write atomiche private, lock, revisioni e snapshot rollback; resta un design single-writer e non e' HA. Database distruttivi, principal e Vault mantengono store specializzati. L'API versionata e' `/control/v1/*`; `/control/*` resta alias compatibile. `PHP_SOURCE_DIR` punta a `php-runtime-root`, una root statica neutra: PHP Apache resta solo runtime generico e non contiene la UI/API del Control Center. L'accesso amministrativo e' sempre fail-closed: il V1 usa direttamente WebAuthn verificato da SimpleWebAuthn con credenziali e sessioni nel PostgreSQL `control_auth`; `oidc-passkey` resta solo una modalita' compatibilita' esplicita. Non esiste login locale con password. La sola modalita' senza auth e' `test-disabled`, accettata esclusivamente con `NODE_ENV=test` e bind loopback. `PROJECTS_HOST` resta solo alias legacy opzionale e non va configurato per nuove installazioni. Dettagli e procedura candidata: `control-center/CONTROL-CENTER-CORE.md` e `control-center/STATE-STORE-MIGRATION.md`.
 Advanced Mode espone lo scheletro delle aree enterprise richieste, inclusi Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced e Billing / Plans. Queste superfici restano plan/evidence-only finche' un adapter esplicito non esegue apply e verifyRemote.
 L'API Advanced read-only e' disponibile su `/control/advanced` e `/control/advanced/:section`; espone capability, guardrail ed evidence metadata senza chiamare provider live, senza toccare Docker e senza marcare evidenza production. `/control/readiness` legge i manifest `governance/enterprise-requirements.json` e `governance/production-readiness.json` montati read-only, pubblica una matrice repo/live-proof sanificata e mantiene `productionEvidence=false` finche' non passano le prove live.
 Il registry adapter server-side e' disponibile su `/control/adapters` e `/control/adapters/:id`; include Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security e Go/No-Go. `/control/adapters/:id/plan` e `/verify` producono piani auditati, mentre `/apply` viene respinto finche' non esiste un adapter live esplicito con conferma forte e verifyRemote.
@@ -1042,6 +1042,34 @@ La piattaforma hosting deve esporre runtime, database, Redis, proxy, WAF,
 backup, observability e deployment sicuri. I flussi utente specifici restano
 fuori dal GO/NO-GO infra.
 
+## V1.0 LOCAL_PRIVATE corrente
+
+La V1.0 attiva non e' piu' descritta dal solo core. Il contratto riproducibile
+e' composto da questa repository, dal lock
+`config/v1-local-private-source-lock.json` e dalle tre revisioni applicative
+immutabili indicate nel lock. Le sorgenti vengono materializzate sotto
+`PHP_PROJECTS_DIR` con le directory `fiplatform`, `stexor`, `anniversary`,
+`matthewdifilippo`, `opstudents`, `stream` e `workcalendar`; dati, `.env`,
+upload, log e cache restano esterni a Git.
+
+Il runtime si rende caricando, nell'ordine registrato nel lock, il core, gli
+overlay VPS/WAF, `compose.backup-scheduler.yaml`, gli overlay runtime/network,
+`compose.local-private.yaml`, `compose.local-private-applications.yaml` e per
+ultimo `compose.greenfield.yaml`. Il file backup-scheduler completa le
+definizioni referenziate dagli overlay di rete, ma il profilo `backup` resta
+inattivo: il lock abilita esattamente il solo profilo `admin` e registra anche
+renderer e profili intenzionalmente inattivi. I backup diretti del Control
+Center non richiedono l'attivazione della vecchia transaction. Le variabili
+provider richieste dal parsing devono comunque essere definite nell'ambiente
+esterno.
+
+Le quattro immagini Stexor vengono costruite dalla revisione bloccata con
+`compose.local-private-applications-build.yaml`; le altre applicazioni usano
+runtime PHP/Node con sorgenti bind-mounted. `runtime.env`, certificati,
+segreti, stato Control Center e volumi database non appartengono a Git e
+devono essere ripristinati separatamente. Inventario, eccezioni intenzionali
+e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
+
 ## File principali
 
 - `compose.yaml`: stack local/dev production-like.
@@ -1050,10 +1078,13 @@ fuori dal GO/NO-GO infra.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.runtime.yaml`: servizi runtime platform opzionali; non definisce app concrete.
 - `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload.
-- `compose.runtime-isolation.yaml`: overlay VPS finale con mount allowlist, proxy Docker e budget cgroup; va caricato per ultimo.
+- `compose.runtime-isolation.yaml`: overlay di hardening core con mount allowlist, proxy Docker e budget cgroup; nella V1.0 precede le proiezioni LOCAL_PRIVATE, applicative e greenfield.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
+- `compose.local-private-applications.yaml`: topologia applicativa esatta della V1.0 LOCAL_PRIVATE.
+- `compose.local-private-applications-build.yaml`: build riproducibile delle immagini Stexor bloccate.
+- `config/v1-local-private-source-lock.json`: repository, commit, tree, layout sorgenti e ordine Compose della V1.0.
 - `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
 - `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo sul target, dentro l'image ID ops autenticato. Un env non-default deve essere l'esatto `/srv/platform-infrastructure/release-states/<releaseId>-<envSha256>/environment.env`, root-owned, group-readable dal deployment e mode `0640`; il bind nel runner e' file-only/read-only. Il lock risultante e' target-local, non portabile. Con la policy inclusa il percorso termina `EXTERNAL-PENDING`.
 - `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.

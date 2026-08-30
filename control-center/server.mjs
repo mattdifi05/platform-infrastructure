@@ -2,10 +2,11 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
 import { createFirstConfiguration, FIRST_CONFIGURATION_STATES, FirstConfigurationError } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
@@ -27,6 +28,7 @@ import {
 import {
   createDatabaseDeleteOperation,
   databaseDeleteConfirmation,
+  databaseDeleteEvidenceFingerprint,
   findDatabaseDeleteRestorePoint,
   parseDatabaseDeleteOperation,
   transitionDatabaseDeleteOperation,
@@ -35,6 +37,7 @@ import {
   backupDocumentDigest,
   backupResourceId,
   createBackupJobDocument,
+  createBackupManifestDocument,
   parseBackupJobDocument,
   parseBackupManifestDocument,
 } from "./backup/contracts.mjs";
@@ -61,6 +64,7 @@ import {
   StatusEventStreamError,
 } from "./status/event-stream.mjs";
 import { createProjectDiskUsageReader, unavailableUsage as unavailableProjectDiskUsage } from "./resources/project-disk-usage.mjs";
+import { createRedisOperations, RedisOperationsError, validateRedisBackupDocument } from "./redis/operations.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -83,6 +87,8 @@ const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || pa
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
 const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
 const backupJobsDir = process.env.PROJECT_BACKUP_JOBS_DIR || "/var/www/project-state/backup-jobs";
+const directApplicationBackups = parseBoolean(process.env.CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS || "");
+const backupSigningKeysFile = process.env.CONTROL_CENTER_BACKUP_SIGNING_KEYS_FILE || process.env.BACKUP_SIGNING_KEYS_FILE || "/run/secrets/backup_signing_keys";
 const backupQueuePolicy = backupQueuePolicyFromEnvironment();
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
 const reportsRoot = process.env.CONTROL_CENTER_REPORTS_ROOT || path.join(platformInfraRoot, "reports");
@@ -103,9 +109,11 @@ const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOU
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
+const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
+const projectDiskUsagePartialTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000);
 const projectDiskUsageReader = createProjectDiskUsageReader({
-  ttlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000),
-  partialTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000),
+  ttlMs: projectDiskUsageTtlMs,
+  partialTtlMs: projectDiskUsagePartialTtlMs,
   staleTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_STALE_TTL_MS || 300000), 30000, 3600000),
   maxConcurrency: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_CONCURRENCY || 2), 1, 8),
   maxQueue: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_QUEUE || 32), 0, 512),
@@ -119,8 +127,11 @@ const projectDiskUsageReader = createProjectDiskUsageReader({
     yieldEvery: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_YIELD_EVERY || 64), 1, 1000),
   },
 });
-const controlContextCacheTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_CONTEXT_CACHE_TTL_MS || 2000), 250, 5000);
+const controlContextCacheTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_CONTEXT_CACHE_TTL_MS || 15000), 1000, 60000);
+const controlHtmlCacheTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_HTML_CACHE_TTL_MS || 15000), 1000, 60000);
 const controlContextCache = { key: "", value: null, expiresAt: 0, pending: null };
+const controlCacheGeneration = { value: 0, expiresAt: 0 };
+const vaultSecretUsageCache = { key: "", value: null, expiresAt: 0 };
 const phpMyAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPMYADMIN_INTERNAL_URL || "http://phpmyadmin:80").replace(/\/$/, "");
 const phpPgAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL || "http://phppgadmin:80").replace(/\/$/, "");
 const databaseLiveApply = parseBoolean(process.env.CONTROL_CENTER_DATABASE_LIVE_APPLY || "");
@@ -132,6 +143,18 @@ const postgresHost = normalizeHost(process.env.CONTROL_CENTER_POSTGRES_HOST || "
 const postgresPort = clampNumber(Number(process.env.CONTROL_CENTER_POSTGRES_PORT || 5432), 1, 65535);
 const postgresSuperuser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_SUPERUSER || "postgres") || "postgres";
 const postgresSuperuserPasswordFile = process.env.CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE || "";
+const redisBackupRoot = path.join(backupRoot, "redis");
+const redisOperations = createRedisOperations({
+  enabled: parseBoolean(process.env.CONTROL_CENTER_REDIS_LIVE_APPLY || ""),
+  host: normalizeHost(process.env.CONTROL_CENTER_REDIS_HOST || "redis"),
+  port: clampNumber(Number(process.env.CONTROL_CENTER_REDIS_PORT || 6379), 1, 65535),
+  username: String(process.env.CONTROL_CENTER_REDIS_USERNAME || "platform").trim(),
+  passwordFile: process.env.CONTROL_CENTER_REDIS_PASSWORD_FILE || "",
+  database: clampNumber(Number(process.env.CONTROL_CENTER_REDIS_DATABASE || 0), 0, 63),
+  workloadLockFile: process.env.CONTROL_CENTER_HOSTED_WORKLOAD_LOCK_FILE || "/run/platform/hosted-workloads.lock.json",
+  cachePrefix: process.env.CONTROL_CENTER_REDIS_CACHE_PREFIX || "control-center:cache:v1",
+  cacheMaxBytes: clampNumber(Number(process.env.CONTROL_CENTER_REDIS_CACHE_MAX_BYTES || 4 * 1024 * 1024), 1024, 32 * 1024 * 1024),
+});
 const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https://waf:8443").replace(/\/$/, "");
 const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
@@ -170,7 +193,7 @@ const statusEventBroker = createStatusEventBroker({
 });
 const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
-const firstConfiguration = await createFirstConfiguration();
+const firstConfiguration = await createFirstConfiguration({ oidc: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
 
 const docs = {
@@ -224,11 +247,80 @@ const server = createServer(async (req, res) => {
     }
 
     if (firstConfiguration.enabled && url.pathname.startsWith("/first-configuration")) {
-      await handleFirstConfiguration(req, res, url);
+      if (firstConfiguration.direct) await handleDirectFirstConfiguration(req, res, url);
+      else await handleFirstConfiguration(req, res, url);
       return;
     }
 
+    if (controlAuth.mode === "app-passkey") {
+      if (url.pathname === "/auth/passkey/register/options" && req.method === "POST") {
+        const setup = await firstConfiguration.status();
+        if (firstConfiguration.enabled && setup.complete) {
+          throw new AuthRequestError("A Control Center passkey is already registered.", 409);
+        }
+        const options = await controlAuth.beginPasskeyRegistration(req);
+        json(res, { options });
+        return;
+      }
+      if (url.pathname === "/auth/passkey/register/verify" && req.method === "POST") {
+        const payload = await readPayload(req);
+        const login = await controlAuth.completePasskeyRegistration(req, payload);
+        appendAudit({
+          action: "admin.app-passkey.registration.success",
+          actor: login.subject,
+          target: login.subject,
+          environment,
+          risk: "high",
+          result: "success",
+          dryRun: false,
+          summary: "Application-owned WebAuthn credential verified and stored in Control Center PostgreSQL.",
+        });
+        res.setHeader("set-cookie", login.cookies);
+        json(res, { ok: true, redirect: "/" });
+        return;
+      }
+      if (url.pathname === "/auth/passkey/login/options" && req.method === "POST") {
+        const setup = await firstConfiguration.status();
+        if (firstConfiguration.enabled && !setup.complete) {
+          throw new AuthRequestError("Register the Control Center passkey before logging in.", 409);
+        }
+        const options = await controlAuth.beginLogin(req);
+        json(res, { options });
+        return;
+      }
+      if (url.pathname === "/auth/passkey/login/verify" && req.method === "POST") {
+        const payload = await readPayload(req);
+        const login = await controlAuth.completeLogin(req, payload);
+        appendAudit({
+          action: "admin.app-passkey.login.success",
+          actor: login.subject,
+          target: login.subject,
+          environment,
+          risk: "low",
+          result: "success",
+          dryRun: false,
+          summary: "Application-owned WebAuthn assertion verified and a PostgreSQL-backed session was created.",
+        });
+        res.setHeader("set-cookie", login.cookies);
+        json(res, { ok: true, redirect: safeAppPasskeyReturnTo(url.searchParams.get("returnTo")) });
+        return;
+      }
+    }
+
     if (url.pathname === "/auth/login" && req.method === "GET") {
+      if (controlAuth.mode === "app-passkey") {
+        controlAuth.assertRequest(req);
+        if (firstConfiguration.enabled) {
+          const setup = await firstConfiguration.status();
+          if (!setup.complete) {
+            redirect(res, "/first-configuration");
+            return;
+          }
+        }
+        setPasskeyPageHeaders(res, APP_PASSKEY_LOGIN_SCRIPT);
+        html(res, renderAppPasskeyLogin());
+        return;
+      }
       if (firstConfiguration.enabled) {
         const setup = await firstConfiguration.status();
         if (![FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED, FIRST_CONFIGURATION_STATES.LOGOUT_VERIFICATION_REQUIRED, FIRST_CONFIGURATION_STATES.RELOGIN_REQUIRED, FIRST_CONFIGURATION_STATES.FINALIZING, FIRST_CONFIGURATION_STATES.COMPLETE].includes(setup.state)) {
@@ -242,6 +334,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/auth/callback" && req.method === "GET") {
+      if (controlAuth.mode === "app-passkey") {
+        notFound(res);
+        return;
+      }
       let login;
       try {
         const setupBefore = await firstConfiguration.status();
@@ -420,7 +516,11 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/logout" && req.method === "POST") {
       const session = await controlAuth.authenticate(req);
       if (!session.ok) {
-        json(res, { error: "admin_auth_required", message: session.message }, session.status);
+        if (wantsJson(req)) {
+          json(res, { error: "admin_auth_required", message: session.message }, session.status);
+        } else {
+          redirect(res, "/auth/login");
+        }
         return;
       }
       const csrf = await controlAuth.validateMutation(req, url, session);
@@ -439,7 +539,7 @@ const server = createServer(async (req, res) => {
         summary: "Administrative session revoked.",
       });
       res.setHeader("set-cookie", await controlAuth.logout(req));
-      redirect(res, "/");
+      redirect(res, "/auth/login");
       return;
     }
 
@@ -463,8 +563,28 @@ const server = createServer(async (req, res) => {
 
     const authorization = controlAuth.authorize(req, url, session);
     if (!authorization.ok) {
+      if (authorization.reauthUrl && !wantsJson(req)) {
+        redirect(res, authorization.reauthUrl);
+        return;
+      }
       json(res, { error: authorization.error || "admin_authorization_required", message: authorization.message, ...(authorization.reauthUrl ? { reauthUrl: authorization.reauthUrl } : {}) }, authorization.status);
       return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/" && url.searchParams.get("section") === "secrets") {
+      const secretAuthorization = controlAuth.authorize(
+        { ...req, controlCenterOperation: { capability: "owner:fresh" } },
+        url,
+        session,
+      );
+      if (!secretAuthorization.ok) {
+        if (secretAuthorization.reauthUrl && !wantsJson(req)) {
+          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent("/?section=secrets")}`);
+          return;
+        }
+        json(res, { error: secretAuthorization.error || "admin_authorization_required", message: secretAuthorization.message, ...(secretAuthorization.reauthUrl ? { reauthUrl: secretAuthorization.reauthUrl } : {}) }, secretAuthorization.status);
+        return;
+      }
     }
 
     const csrf = await controlAuth.validateMutation(req, url, authorization);
@@ -491,7 +611,7 @@ const server = createServer(async (req, res) => {
       }
       const state = readState();
       const projects = discoverProjects(state);
-      if (req.method !== "GET") invalidateControlContextCache();
+      if (req.method !== "GET") await invalidateControlContextCache();
       const context = req.method === "GET" && !url.pathname.startsWith("/control/")
         ? await buildCachedContext({ projects, state })
         : await buildContext({ projects, state });
@@ -527,6 +647,11 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/actions/database-command") {
+      await handleDatabaseCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/database-delete-command") {
       await handleDatabaseCommand(req, res, context);
       return;
     }
@@ -576,6 +701,26 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/backup-delete-command") {
+      await handleBackupCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/redis-backup-command") {
+      await handleRedisBackupCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/redis-restore-command") {
+      await handleRedisRestoreCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/redis-backup-delete-command") {
+      await handleRedisBackupDeleteCommand(req, res, context);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/status-check") {
       await handleStatusCheck(req, res, context);
       return;
@@ -601,7 +746,10 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-      htmlPage(req, res, renderControlCenter(context, url.searchParams));
+      if ((url.searchParams.get("section") || "projects") === "secrets") {
+        context.vaultSecretUsage = await cachedVaultSecretUsageAnalysis(context);
+      }
+      htmlPage(req, res, await renderCachedControlCenter(context, url.searchParams));
     });
   } catch (error) {
     if (writeBackupQueueError(res, error)) return;
@@ -776,10 +924,37 @@ async function handleFirstConfiguration(req, res, url) {
   }
 }
 
-function firstConfigurationHeaders(res) {
+async function handleDirectFirstConfiguration(req, res, url) {
+  firstConfigurationHeaders(res);
+  if (req.method === "GET" && ["/first-configuration", "/first-configuration/"].includes(url.pathname)) {
+    controlAuth.assertRequest(req);
+    const state = await firstConfiguration.status();
+    if (state.complete) {
+      redirect(res, "/");
+      return;
+    }
+    setPasskeyPageHeaders(res, APP_PASSKEY_REGISTRATION_SCRIPT);
+    html(res, renderAppPasskeyFirstConfiguration(state));
+    return;
+  }
+  notFound(res);
+}
+
+function setPasskeyPageHeaders(res, script) {
   res.setHeader("cache-control", "no-store, max-age=0");
   res.setHeader("pragma", "no-cache");
   res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+  res.setHeader(
+    "content-security-policy",
+    `default-src 'none'; script-src '${passkeyScriptHash(script)}'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
+  );
+}
+
+function firstConfigurationHeaders(res) {
+  res.setHeader("cache-control", "no-store, max-age=0");
+  res.setHeader("pragma", "no-cache");
+  res.setHeader("referrer-policy", "same-origin");
   res.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
 }
 
@@ -792,7 +967,7 @@ function rawRequestPathname(requestTarget) {
 async function shutdown() {
   statusEventBroker.close();
   server.close(async () => {
-    await Promise.all([controlAuth.close(), firstConfiguration.close()]);
+    await Promise.all([controlAuth.close(), firstConfiguration.close(), redisOperations.close()]);
     process.exit(0);
   });
   setTimeout(() => process.exit(1), 10_000).unref();
@@ -852,6 +1027,8 @@ async function handleApi(req, res, url, context, operation) {
         goNoGo: context.goNoGo,
         readiness: context.readiness,
         statusCatalog: statusExecutorCatalog(context),
+        statusTests: context.statusTests,
+        statusTestSummary: context.statusTestSummary,
         statusRun: context.statusRun,
         statusEvents: statusEventPage.events,
         statusEventsTruncated: statusEventPage.truncated,
@@ -934,7 +1111,14 @@ async function handleApi(req, res, url, context, operation) {
       return json(res, planStorageBucketRestore(parts[3], payload, context), 202);
     }
 
-    if (method === "GET" && route(parts, "control", "secrets")) return json(res, { inventory: context.sensitiveMaterials, stores: context.materialStores });
+    if (method === "GET" && route(parts, "control", "secrets")) {
+      return json(res, {
+        inventory: context.secretInventory,
+        sensitiveMaterials: context.sensitiveMaterials,
+        stores: context.materialStores,
+        summary: context.overview.secrets,
+      });
+    }
     if (method === "POST" && route(parts, "control", "secrets", "materials")) return json(res, planMaterialDeclare(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "rotation")) {
       return json(res, planMaterialRotation(parts[3], payload, context), 202);
@@ -1238,6 +1422,10 @@ async function handleDatabaseCommand(req, res, context) {
     if (action === "create") operation = planDatabaseCreate(payload, context);
     else if (action === "update") operation = planDatabaseUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "delete") operation = planDatabaseDelete(payload.id || payload.databaseId || "", payload, context);
+    else if (action === "delete-now") {
+      if (String(req.url || "").split("?", 1)[0] !== "/actions/database-delete-command") throw new RejectedOperationError("Database deletion requires the passkey-protected endpoint.");
+      operation = deleteDatabaseNow(payload.id || payload.databaseId || "", payload, context);
+    }
     else if (action === "delete-approve") operation = approveDatabaseDelete(payload.operationId || payload.id || "", payload, context);
     else if (action === "delete-execute") operation = executeDatabaseDelete(payload.operationId || payload.id || "", payload, context);
     else if (action === "credential") operation = planDatabaseCredentialUpdate(payload.id || payload.databaseId || "", payload, context);
@@ -1295,14 +1483,21 @@ async function openPhpMyAdminDatabase(res, context, payload) {
     const confirmation = `OPEN-PHPMYADMIN:${database.id}`;
     if (payload.confirm !== confirmation) throw new ValidationError("Missing phpMyAdmin confirmation token.");
     const project = resolveContextProject(context, database.projectId);
-    const credential = resolveMariaDbCredential(database, project);
-    if (!credential) {
+    const credentials = databaseAdminCredentials(database, project);
+    if (!credentials.length) {
       appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpMyAdmin app-scoped login rejected because no per-app database credential was found." });
       renderTransientMessage(res, 409, "Accesso phpMyAdmin non configurato", `Non ho trovato credenziali MariaDB dedicate per ${databaseDisplayName(database)}. Salva una password per questo database dalla scheda applicazione, poi riapri phpMyAdmin.`);
       return;
     }
-    const login = await phpMyAdminLogin(database, credential);
-    if (!login.ok) {
+    let login = null;
+    for (const credential of credentials) {
+      const attempt = await phpMyAdminLogin(database, credential);
+      if (attempt.ok) {
+        login = attempt;
+        break;
+      }
+    }
+    if (!login?.ok) {
       appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "failed", dryRun: true, summary: "phpMyAdmin app-scoped login failed without exposing credentials." });
       renderTransientMessage(res, 502, "Login phpMyAdmin fallito", "phpMyAdmin non ha accettato la credenziale limitata dell'app. Controlla utente DB e grants.");
       return;
@@ -1331,14 +1526,21 @@ async function handlePhpPgAdminLogin(req, res, url, context) {
     const confirmation = `OPEN-PHPPGADMIN:${database.id}`;
     if (confirm !== confirmation) throw new ValidationError("Missing phpPgAdmin confirmation token.");
     const project = resolveContextProject(context, database.projectId);
-    const credential = resolvePostgresCredential(database, project);
-    if (!credential) {
+    const credentials = databaseAdminCredentials(database, project);
+    if (!credentials.length) {
       appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpPgAdmin app-scoped login rejected because no PostgreSQL credential was found." });
       renderTransientMessage(res, 409, "Accesso phpPgAdmin non configurato", `Non ho trovato credenziali PostgreSQL limitate per ${databaseDisplayName(database)}. Configura il principal dedicato e il relativo credentialFile.`);
       return;
     }
-    const login = await phpPgAdminLogin(database, credential);
-    if (!login.ok) {
+    let login = null;
+    for (const credential of credentials) {
+      const attempt = await phpPgAdminLogin(database, credential);
+      if (attempt.ok) {
+        login = attempt;
+        break;
+      }
+    }
+    if (!login?.ok) {
       appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "failed", dryRun: true, summary: "phpPgAdmin app-scoped login failed without exposing credentials." });
       renderTransientMessage(res, 502, "Login phpPgAdmin fallito", "phpPgAdmin non ha accettato la credenziale limitata PostgreSQL. Controlla utente DB e grants.");
       return;
@@ -1439,7 +1641,7 @@ async function handleVaultCommand(req, res, context) {
     json(res, operation, 202);
     return;
   }
-  redirect(res, `/?section=vault#vault-${encodeURIComponent(operation.details?.itemId || operation.item?.id || "")}`);
+  redirect(res, "/?section=secrets");
 }
 
 async function handleWorkerJobCommand(req, res, context) {
@@ -1509,6 +1711,10 @@ async function handleBackupCommand(req, res, context) {
     if (action === "backup") operation = queueBackupRun(payload, context);
     else if (action === "restore") operation = queueRestoreDrill(payload, context);
     else if (action === "delete-file") operation = applyBackupFileDelete(payload, context);
+    else if (action === "delete-application") {
+      if (String(req.url || "").split("?", 1)[0] !== "/actions/backup-delete-command") throw new RejectedOperationError("Backup deletion requires the passkey-protected endpoint.");
+      operation = deleteApplicationBackup(payload, context);
+    }
     else throw new ValidationError("Unsupported backup action.");
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -1535,6 +1741,102 @@ function backupCommandRedirect(payload, operation) {
     return `/?section=projects&project=${encodeURIComponent(projectId)}#project-backups`;
   }
   return "/?section=projects";
+}
+
+async function handleRedisBackupCommand(req, res, context) {
+  const payload = await readPayload(req);
+  if (String(payload.action || "") !== "backup") {
+    json(res, { error: "validation_failed", message: "Azione backup Redis non valida." }, 422);
+    return;
+  }
+  try {
+    const document = await redisOperations.captureBackup();
+    const backup = writeRedisBackupArtifact(document);
+    appendAudit({
+      action: "redis.backup.create",
+      target: backup.id,
+      environment: context.environment,
+      risk: "medium",
+      result: "success",
+      dryRun: false,
+      summary: `Backup Redis indipendente creato e verificato (${backup.keyCount} chiavi).`,
+    });
+    if (wantsJson(req)) {
+      json(res, { ok: true, backup }, 201);
+      return;
+    }
+    redirect(res, "/?section=redis#redis-backups");
+  } catch (error) {
+    writeRedisOperationError(res, error, "Backup Redis non riuscito.");
+  }
+}
+
+async function handleRedisRestoreCommand(req, res, context) {
+  const payload = await readPayload(req);
+  if (String(payload.action || "") !== "restore") {
+    json(res, { error: "validation_failed", message: "Azione restore Redis non valida." }, 422);
+    return;
+  }
+  try {
+    const verified = readVerifiedRedisBackup(payload.backupId || payload.id || "");
+    const restored = await redisOperations.restoreBackup(verified.document);
+    appendAudit({
+      action: "redis.backup.restore",
+      target: verified.id,
+      environment: context.environment,
+      risk: "high",
+      result: "success",
+      dryRun: false,
+      summary: `Restore Redis completato da backup verificato (${restored.restoredKeys} chiavi).`,
+    });
+    if (wantsJson(req)) {
+      json(res, { ok: true, backupId: verified.id, restored }, 200);
+      return;
+    }
+    redirect(res, "/?section=redis#redis-backups");
+  } catch (error) {
+    writeRedisOperationError(res, error, "Restore Redis non riuscito.");
+  }
+}
+
+async function handleRedisBackupDeleteCommand(req, res, context) {
+  const payload = await readPayload(req);
+  if (String(payload.action || "") !== "delete") {
+    json(res, { error: "validation_failed", message: "Azione eliminazione backup Redis non valida." }, 422);
+    return;
+  }
+  try {
+    const deleted = deleteRedisBackupArtifact(payload.backupId || payload.id || "");
+    appendAudit({
+      action: "redis.backup.delete",
+      target: deleted.id,
+      environment: context.environment,
+      risk: "high",
+      result: "success",
+      dryRun: false,
+      summary: "Backup Redis indipendente eliminato con checksum e firma associati.",
+    });
+    if (wantsJson(req)) {
+      json(res, { ok: true, deleted }, 200);
+      return;
+    }
+    redirect(res, "/?section=redis#redis-backups");
+  } catch (error) {
+    writeRedisOperationError(res, error, "Eliminazione backup Redis non riuscita.");
+  }
+}
+
+function writeRedisOperationError(res, error, fallbackMessage) {
+  if (error instanceof RedisOperationsError) {
+    const status = error.code === "redis_backup_invalid" ? 422 : 409;
+    json(res, { error: error.code, message: sanitizeMessage(error.message) }, status);
+    return;
+  }
+  if (error instanceof ValidationError || error instanceof RejectedOperationError) {
+    json(res, { error: error instanceof ValidationError ? "validation_failed" : "operation_rejected", message: sanitizeMessage(error.message) }, error instanceof ValidationError ? 422 : 409);
+    return;
+  }
+  json(res, { error: "redis_operation_failed", message: fallbackMessage }, 500);
 }
 
 async function handleSecurityCommand(req, res, context) {
@@ -1720,8 +2022,13 @@ async function buildContext({ projects, state }) {
     .filter((item) => item && !item.deletedAt)
     .map((item) => vaultItemRecord(item))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`));
-  const existingVaultCandidates = readExistingSecretCandidates();
+  const existingVaultCandidates = readExistingSecretCandidates(projects);
   const existingVaultImport = summarizeExistingSecretImport(existingVaultCandidates, vaultItems);
+  const secretInventory = buildSecretInventory({
+    candidates: existingVaultCandidates,
+    sensitiveMaterials,
+    vaultItems,
+  });
   const workerJobsState = readWorkerJobsState();
   const defaultWorkerRuntimes = [
     workerRuntimeRecord({
@@ -1801,7 +2108,14 @@ async function buildContext({ projects, state }) {
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
   const archivedProjects = projects.filter((project) => project.status === "archived").length;
   const onlineApps = applications.filter((app) => app.status === "online").length;
-  const liveResources = await collectLiveResourceUsage({ projects, applications, webspaces });
+  const [liveResources, redisSnapshot] = await Promise.all([
+    collectLiveResourceUsage({ projects, applications, webspaces }),
+    redisOperations.snapshot(),
+  ]);
+  const redis = {
+    ...redisSnapshot,
+    backups: readRedisBackupInventory(),
+  };
   const resources = {
     mode: environment,
     source: liveResources.source,
@@ -1820,10 +2134,12 @@ async function buildContext({ projects, state }) {
     scope: "global",
     wafMode: "configured",
     rateLimitTier: "configured",
-    adminProtection: controlAuth.enabled ? "oidc-passkey-required" : "test-only-disabled",
+    adminProtection: controlAuth.enabled
+      ? (controlAuth.mode === "app-passkey" ? "app-passkey-required" : "oidc-passkey-required")
+      : "test-only-disabled",
     securityHeaders: "configured",
     cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
-    passkeyAdminAuth: "external-idp-or-passkey-app",
+    passkeyAdminAuth: controlAuth.mode === "app-passkey" ? "application-owned-webauthn" : "external-idp-or-passkey-app",
     status: "discovered",
     source: "control-center-default",
   });
@@ -1928,9 +2244,11 @@ async function buildContext({ projects, state }) {
     network: { routers: network.routers.length, middlewares: network.middlewares.length, exposedPorts: network.exposedPorts.length, routeTests: network.routeTests.length },
     monitoring: { scrapeJobs: monitoring.scrapeJobs.length, dashboardPanels: monitoring.dashboardPanels.length, alertRules: monitoring.alertRules.length, signals: monitoring.signals.length },
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
+    redis: { available: redis.available, status: redis.status, keys: redis.keyCount, backups: redis.backups.length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
     vault: { total: vaultItems.length, rotationDue: vaultItems.filter((item) => item.rotationStatus === "due").length, encryptedAtRest: true, importableExisting: existingVaultImport.importableCount },
+    secrets: secretInventorySummary(secretInventory),
     workersJobs: { workers: workerRuntimes.length, queues: jobQueues.length, failedJobs: jobRecords.filter((job) => job.status === "failed").length, schedules: jobSchedules.length },
     identityAccess: { adminUsers: identityAccess.adminUsers.length, roles: identityAccess.roles.length, sessions: identityAccess.sessionPolicies.length },
     designSystem: { package: uiPackage.name, version: uiPackage.version, source: uiPackage.source, manifestLoaded: uiPackage.apiManifestLoaded },
@@ -1970,6 +2288,7 @@ async function buildContext({ projects, state }) {
     storageBuckets,
     materialStores,
     sensitiveMaterials,
+    secretInventory,
     vaultItems,
     existingVaultCandidates,
     existingVaultImport,
@@ -1978,6 +2297,7 @@ async function buildContext({ projects, state }) {
     jobRecords,
     jobSchedules,
     resources,
+    redis,
     security,
     backups,
     logsAlerts,
@@ -2000,11 +2320,15 @@ async function buildContext({ projects, state }) {
     advancedServices: advancedServices(),
   };
   context.statusRows = opsStatusRows(context);
+  context.statusTests = statusTestRegistry(context);
+  context.statusTestSummary = statusTestSummary(context.statusTests);
+  context.overview.statusTests = context.statusTestSummary;
   return context;
 }
 
-function controlContextKey({ projects, state }) {
+function controlContextKey({ projects, state }, generation = 0) {
   return sha256(JSON.stringify({
+    generation,
     projects: projects.map((project) => ({
       enabled: project.enabled,
       host: project.host,
@@ -2016,34 +2340,80 @@ function controlContextKey({ projects, state }) {
   }));
 }
 
-function invalidateControlContextCache() {
+async function currentControlCacheGeneration() {
+  const now = Date.now();
+  if (controlCacheGeneration.expiresAt > now) return controlCacheGeneration.value;
+  const remote = await redisOperations.cacheCounter("portal:generation");
+  if (Number.isSafeInteger(remote) && remote >= 0) controlCacheGeneration.value = remote;
+  controlCacheGeneration.expiresAt = now + 2_000;
+  return controlCacheGeneration.value;
+}
+
+async function invalidateControlContextCache() {
+  const previousKey = controlContextCache.key;
   controlContextCache.key = "";
   controlContextCache.value = null;
   controlContextCache.expiresAt = 0;
   controlContextCache.pending = null;
+  const remote = await redisOperations.cacheIncrement("portal:generation");
+  controlCacheGeneration.value = Number.isSafeInteger(remote) && remote >= 0
+    ? remote
+    : controlCacheGeneration.value + 1;
+  controlCacheGeneration.expiresAt = Date.now() + 2_000;
+  if (previousKey) await redisOperations.cacheDelete(`context:${previousKey}`);
 }
 
 async function buildCachedContext(input) {
-  const key = controlContextKey(input);
+  const generation = await currentControlCacheGeneration();
+  const key = controlContextKey(input, generation);
   const now = Date.now();
   if (controlContextCache.value && controlContextCache.key === key && controlContextCache.expiresAt > now) {
     return controlContextCache.value;
   }
   if (controlContextCache.pending && controlContextCache.key === key) return controlContextCache.pending;
   controlContextCache.key = key;
-  const pending = buildContext(input).then((context) => {
+  const pending = (async () => {
+    const cached = await redisOperations.cacheGetJson(`context:${key}`);
+    if (validCachedControlContext(cached)) return cached;
+    const context = await buildContext(input);
+    await redisOperations.cacheSetJson(`context:${key}`, context, controlContextCacheTtlMs);
+    return context;
+  })().then((context) => {
     if (controlContextCache.pending === pending && controlContextCache.key === key) {
       controlContextCache.value = context;
       controlContextCache.expiresAt = Date.now() + controlContextCacheTtlMs;
       controlContextCache.pending = null;
     }
+    attachControlContextCacheKey(context, key);
     return context;
   }, (error) => {
-    if (controlContextCache.pending === pending) invalidateControlContextCache();
+    if (controlContextCache.pending === pending) {
+      controlContextCache.key = "";
+      controlContextCache.value = null;
+      controlContextCache.expiresAt = 0;
+      controlContextCache.pending = null;
+    }
     throw error;
   });
   controlContextCache.pending = pending;
   return pending;
+}
+
+function validCachedControlContext(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && value.overview && typeof value.overview === "object"
+    && Array.isArray(value.projects)
+    && Array.isArray(value.applications)
+    && value.environment === environment);
+}
+
+function attachControlContextCacheKey(context, key) {
+  if (!context || typeof context !== "object") return;
+  Object.defineProperty(context, "cacheIdentity", {
+    configurable: true,
+    enumerable: false,
+    value: key,
+  });
 }
 
 function adapterRegistry(context) {
@@ -2481,7 +2851,7 @@ function advancedSectionData(section, context) {
     case "identity":
       return {
         adminAuthRequired: controlAuth.enabled,
-        adminVerifierConfigured: controlAuth.mode === "oidc-passkey",
+        adminVerifierConfigured: ["oidc-passkey", "app-passkey"].includes(controlAuth.mode),
         sessionPolicy: "PostgreSQL-backed; revocable; HttpOnly; Secure; SameSite=Lax",
         passkeyAdminAuth: context.security.passkeyAdminAuth,
         adminUsers: context.identityAccess.adminUsers,
@@ -2494,10 +2864,12 @@ function advancedSectionData(section, context) {
     case "secrets":
       return {
         stores: context.materialStores,
-        inventory: context.sensitiveMaterials,
+        inventory: context.secretInventory,
+        sensitiveMaterials: context.sensitiveMaterials,
+        summary: context.overview.secrets,
         providerConnections: context.providerConnections.map((connection) => ({ id: connection.id, materialConfigured: connection.privateMaterialConfigured, valueExposed: connection.credentialValueExposed })),
         rotation: "metadata tracked locally; real rotation remains in infra-ops/private material",
-        usageMap: context.sensitiveMaterials.map((item) => ({ id: item.id, projectId: item.projectId, usageTargets: item.usageTargets, valueExposed: item.valueExposed })),
+        usageMap: context.secretInventory.map((item) => ({ id: item.id, projectId: item.projectId, usageTargets: item.usageTargets, valueExposed: item.valueExposed })),
       };
     case "audit":
       return {
@@ -5117,15 +5489,21 @@ function resolveBackupRestoreRequest(payload, context) {
 
 function queueBackupRun(payload, context) {
   const { scopeLabel, scope, resources, project, mode } = resolveBackupRunRequest(payload, context);
-  const job = createBackupJob({ operation: "backup", scope, resources, context });
+  let job = createBackupJob({ operation: "backup", scope, resources, context });
   appendAudit({ action: "backup.run.queue", target: scopeLabel, environment: context.environment, risk: "medium", result: "accepted", dryRun: false, summary: project ? `Typed application backup queued for ${project.slug} (${mode || "all"}).` : "Typed platform backup queued for backup scheduler execution." });
-  const operation = operationPlan("backup.run", context.environment, false, ["write versioned typed job", "backup scheduler validates schema", "execute exact resource IDs", "write signed manifest"], {
+  const direct = Boolean(project && directApplicationBackups);
+  const execution = direct ? executeDirectApplicationBackup({ job, project, context }) : null;
+  if (execution?.job) job = execution.job;
+  const operation = operationPlan("backup.run", context.environment, false, direct
+    ? ["write versioned typed job", "execute exact application resources", "write artifact checksums and signatures", "write signed manifest"]
+    : ["write versioned typed job", "backup scheduler validates schema", "execute exact resource IDs", "write signed manifest"], {
     scope: scopeLabel,
     projectId: project?.slug || "",
     backupMode: mode || "",
     jobId: job.id,
-    executor: "enterprise-backup-scheduler",
+    executor: direct ? "control-center-direct-application-backup" : "enterprise-backup-scheduler",
     resourceIds: resources.map((resource) => resource.id),
+    manifestPath: execution?.manifestPath || "",
     productionEvidence: false,
   });
   const backup = backupRecord({
@@ -5134,12 +5512,368 @@ function queueBackupRun(payload, context) {
     action: "backup",
     scope: scopeLabel,
     environment: context.environment,
-    status: "queued",
+    status: execution?.job?.status || "queued",
     dryRun: false,
-    resultSummary: project ? `Backup applicazione ${project.name} accodato al backup scheduler (${mode || "all"}).` : "Backup queued for backup scheduler execution.",
+    backupRef: execution?.manifestPath || "",
+    resultSummary: execution?.job?.resultSummary || (project ? `Backup applicazione ${project.name} accodato al backup scheduler (${mode || "all"}).` : "Backup queued for backup scheduler execution."),
   });
   appendBackupRecord(backup);
   return { ...operation, backup, job };
+}
+
+function executeDirectApplicationBackup({ job, project, context }) {
+  const queuedPath = path.join(backupJobsDir, "queued", `${job.id}.json`);
+  const runningPath = path.join(backupJobsDir, "running", `${job.id}.json`);
+  const donePath = path.join(backupJobsDir, "done", `${job.id}.json`);
+  const failedPath = path.join(backupJobsDir, "failed", `${job.id}.json`);
+  const startedAt = new Date().toISOString();
+  const createdFiles = [];
+  mkdirSync(path.dirname(runningPath), { recursive: true, mode: 0o700 });
+  mkdirSync(path.dirname(donePath), { recursive: true, mode: 0o700 });
+  mkdirSync(path.dirname(failedPath), { recursive: true, mode: 0o700 });
+  try {
+    renameSync(queuedPath, runningPath);
+    writePrivateJsonAtomic(runningPath, {
+      ...job,
+      status: "running",
+      startedAt,
+      updatedAt: startedAt,
+      resultSummary: `Backup diretto di ${project.slug} in esecuzione.`,
+    });
+    const artifacts = job.resources.map((resource, index) => {
+      const artifact = resource.kind === "source"
+        ? createDirectSourceBackupArtifact(resource, project, job, index)
+        : resource.kind === "database"
+          ? createDirectDatabaseBackupArtifact(resource, context, job, index)
+          : null;
+      if (!artifact) throw new RejectedOperationError(`Backup diretto non supportato per ${resource.kind}.`);
+      createdFiles.push(artifact.absolutePath, `${artifact.absolutePath}.sha256`, `${artifact.absolutePath}.sig.json`);
+      return artifact.manifest;
+    });
+    const manifestId = directBackupManifestId(project.slug, job.id);
+    const manifest = createBackupManifestDocument({ id: manifestId, job, artifacts, createdAt: new Date().toISOString() });
+    const signed = signDirectBackupManifest(manifest);
+    const manifestPath = joinRelativePath("manifests", `${manifestId}.json`);
+    const absoluteManifestPath = path.join(path.resolve(backupRoot), ...manifestPath.split("/"));
+    mkdirSync(path.dirname(absoluteManifestPath), { recursive: true, mode: 0o700 });
+    writePrivateJsonAtomic(absoluteManifestPath, signed);
+    createdFiles.push(absoluteManifestPath);
+    const finishedAt = new Date().toISOString();
+    const completed = parseBackupJobDocument({
+      ...job,
+      status: "done",
+      startedAt,
+      finishedAt,
+      updatedAt: finishedAt,
+      resultSummary: `Backup applicazione ${project.name} completato: ${artifacts.length} risorse.`,
+      manifestPath,
+    });
+    writePrivateJsonAtomic(donePath, completed);
+    rmSync(runningPath, { force: true });
+    appendAudit({ action: "backup.run.direct.complete", target: project.slug, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: `Backup diretto completato con ${artifacts.length} risorse e manifest firmato.` });
+    return { job: completed, manifestPath };
+  } catch (error) {
+    for (const filePath of createdFiles.reverse()) rmSync(filePath, { force: true });
+    const finishedAt = new Date().toISOString();
+    const failed = parseBackupJobDocument({
+      ...job,
+      status: "failed",
+      startedAt,
+      finishedAt,
+      updatedAt: finishedAt,
+      resultSummary: `Backup fallito: ${sanitizeMessage(error instanceof Error ? error.message : String(error))}`,
+    });
+    writePrivateJsonAtomic(failedPath, failed);
+    rmSync(queuedPath, { force: true });
+    rmSync(runningPath, { force: true });
+    appendAudit({ action: "backup.run.direct.failed", target: project.slug, environment: context.environment, risk: "medium", result: "failed", dryRun: false, summary: failed.resultSummary });
+    return { job: failed, manifestPath: "" };
+  }
+}
+
+function createDirectSourceBackupArtifact(resource, project, job, index) {
+  const root = realpathSync(path.resolve(projectsRoot));
+  const source = realpathSync(path.resolve(projectsRoot, project.relativePath || project.slug));
+  if (!(source === root || source.startsWith(`${root}${path.sep}`)) || !statSync(source).isDirectory()) {
+    throw new RejectedOperationError("Directory sorgente applicazione non ammessa.");
+  }
+  const stamp = directBackupTimestamp();
+  const relativePath = ["applications", project.slug, `${project.slug}-source-${stamp}-${job.id.slice(-8)}.tar.gz`].join("/");
+  const absolutePath = prepareDirectBackupArtifactPath(relativePath);
+  const temporary = `${absolutePath}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    const result = spawnSync("tar", ["-czf", temporary, "-C", path.dirname(source), path.basename(source)], {
+      encoding: "utf8",
+      timeout: 300000,
+      maxBuffer: 1024 * 1024,
+    });
+    assertDirectBackupCommand(result, "Archivio sorgenti");
+    renameSync(temporary, absolutePath);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  return finalizeDirectBackupArtifact({ resource, absolutePath, relativePath, index });
+}
+
+function createDirectDatabaseBackupArtifact(resource, context, job, index) {
+  const database = context.databases.find((item) => item.id === resource.externalId
+    || (item.engine === resource.engine && item.name === resource.name));
+  if (!database) throw new RejectedOperationError(`Database ${resource.name} non presente nel catalogo applicazione.`);
+  const stamp = directBackupTimestamp();
+  const extension = resource.engine === "postgres" ? "dump" : "sql.gz";
+  const relativePath = joinRelativePath(resource.engine, `${resource.projectId}-${resource.name}-${stamp}-${job.id.slice(-8)}.${extension}`);
+  const absolutePath = prepareDirectBackupArtifactPath(relativePath);
+  const temporary = `${absolutePath}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    if (resource.engine === "postgres") {
+      const password = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+      const result = spawnSync("pg_dump", [
+        "-h", postgresHost,
+        "-p", String(postgresPort),
+        "-U", postgresSuperuser,
+        "-d", database.name,
+        "-Fc",
+        "-f", temporary,
+      ], { encoding: "utf8", env: { ...process.env, PGPASSWORD: password }, timeout: 300000, maxBuffer: 1024 * 1024 });
+      assertDirectBackupCommand(result, "Dump PostgreSQL");
+    } else {
+      const password = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+      const result = spawnSync("mariadb-dump", [
+        "-h", mariadbHost,
+        "-P", String(mariadbPort),
+        "-u", mariadbRootUser,
+        "--single-transaction",
+        "--routines",
+        "--events",
+        "--triggers",
+        database.name,
+      ], { encoding: null, env: { ...process.env, MYSQL_PWD: password }, timeout: 300000, maxBuffer: 512 * 1024 * 1024 });
+      assertDirectBackupCommand(result, "Dump MariaDB");
+      writeFileSync(temporary, gzipSync(result.stdout, { level: 9 }), { mode: 0o600 });
+    }
+    renameSync(temporary, absolutePath);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  return finalizeDirectBackupArtifact({ resource, absolutePath, relativePath, index });
+}
+
+function prepareDirectBackupArtifactPath(relativePath) {
+  const root = path.resolve(backupRoot);
+  const absolutePath = path.resolve(root, ...relativePath.split("/"));
+  if (!absolutePath.startsWith(`${root}${path.sep}`)) throw new RejectedOperationError("Percorso backup non ammesso.");
+  mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o700 });
+  return absolutePath;
+}
+
+function finalizeDirectBackupArtifact({ resource, absolutePath, relativePath, index }) {
+  const stat = statSync(absolutePath);
+  if (!stat.isFile() || stat.size < 1) throw new RejectedOperationError(`Artefatto backup vuoto per ${resource.id}.`);
+  const hash = createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+  const signing = directBackupSigningKey();
+  writeFileSync(`${absolutePath}.sha256`, `${hash}  ${path.basename(absolutePath)}\n`, { mode: 0o600 });
+  const signature = createHmac("sha256", signing.secret)
+    .update(`platform-${resource.kind}-backup-v1\n${path.basename(absolutePath)}\n${hash}\n`)
+    .digest("base64url");
+  writePrivateJsonAtomic(`${absolutePath}.sig.json`, {
+    version: 1,
+    algorithm: "HMAC-SHA256",
+    keyId: signing.id,
+    artifact: path.basename(absolutePath),
+    sha256: hash,
+    signature,
+    signedAt: new Date().toISOString(),
+  });
+  return {
+    absolutePath,
+    manifest: {
+      id: `artifact-${hash.slice(0, 16)}-${index}`,
+      resourceId: resource.id,
+      path: relativePath,
+      sha256: hash,
+      sizeBytes: stat.size,
+      signatureKeyId: signing.id,
+    },
+  };
+}
+
+function signDirectBackupManifest(manifest) {
+  const signing = directBackupSigningKey();
+  const digest = backupDocumentDigest(manifest);
+  return {
+    ...manifest,
+    signature: {
+      algorithm: "HMAC-SHA256",
+      keyId: signing.id,
+      digest,
+      value: createHmac("sha256", signing.secret)
+        .update(`platform-backup-manifest-v1\n${manifest.id}\n${digest}\n`)
+        .digest("base64url"),
+    },
+  };
+}
+
+function directBackupSigningKey() {
+  let value = "";
+  try {
+    value = readFileSync(backupSigningKeysFile, "utf8").trim();
+  } catch {
+    throw new RejectedOperationError("Chiave firma backup non leggibile.");
+  }
+  const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) continue;
+    const id = entry.slice(0, separator).trim();
+    const secret = entry.slice(separator + 1).trim();
+    if (/^[a-z0-9](?:[a-z0-9._:-]{0,158}[a-z0-9])?$/.test(id) && secret.length >= 48) return { id, secret };
+  }
+  if (value.length >= 48) return { id: "legacy", secret: value };
+  throw new RejectedOperationError("Keyring firma backup non valido.");
+}
+
+function redisBackupPaths(value) {
+  const id = String(value || "").trim();
+  if (!/^redis-\d{14}-[a-f0-9]{8}$/.test(id)) throw new ValidationError("Identità backup Redis non valida.");
+  const root = path.resolve(redisBackupRoot);
+  const artifact = path.join(root, `${id}.json`);
+  return { id, root, artifact, checksum: `${artifact}.sha256`, signature: `${artifact}.sig.json` };
+}
+
+function writeRedisBackupArtifact(input) {
+  const document = validateRedisBackupDocument(input);
+  const paths = redisBackupPaths(document.id);
+  mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+  if ([paths.artifact, paths.checksum, paths.signature].some(existsSync)) {
+    throw new RejectedOperationError("Identità backup Redis già esistente.");
+  }
+  const created = [];
+  try {
+    writePrivateJsonAtomic(paths.artifact, document);
+    created.push(paths.artifact);
+    const bytes = readFileSync(paths.artifact);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(paths.checksum, `${hash}  ${path.basename(paths.artifact)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    created.push(paths.checksum);
+    const signing = directBackupSigningKey();
+    writePrivateJsonAtomic(paths.signature, {
+      version: 1,
+      algorithm: "HMAC-SHA256",
+      keyId: signing.id,
+      artifact: path.basename(paths.artifact),
+      sha256: hash,
+      signature: createHmac("sha256", signing.secret)
+        .update(`platform-redis-backup-v1\n${path.basename(paths.artifact)}\n${hash}\n`)
+        .digest("base64url"),
+      signedAt: new Date().toISOString(),
+    });
+    created.push(paths.signature);
+    return redisBackupMetadata(document, statSync(paths.artifact), hash);
+  } catch (error) {
+    for (const filePath of created.reverse()) rmSync(filePath, { force: true });
+    if (error instanceof ValidationError || error instanceof RejectedOperationError || error instanceof RedisOperationsError) throw error;
+    throw new RejectedOperationError("Impossibile salvare il backup Redis in modo atomico.");
+  }
+}
+
+function readVerifiedRedisBackup(value) {
+  const paths = redisBackupPaths(value);
+  for (const filePath of [paths.artifact, paths.checksum, paths.signature]) {
+    if (!existsSync(filePath)) throw new ValidationError("Backup Redis incompleto o non trovato.");
+    const stat = lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new ValidationError("Backup Redis non ammesso.");
+  }
+  const artifactStat = statSync(paths.artifact);
+  if (artifactStat.size < 1 || artifactStat.size > 128 * 1024 * 1024) throw new ValidationError("Dimensione backup Redis non ammessa.");
+  try {
+    const bytes = readFileSync(paths.artifact);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const checksum = readFileSync(paths.checksum, "utf8").trim();
+    if (checksum !== `${hash}  ${path.basename(paths.artifact)}`) throw new Error("checksum mismatch");
+    const signature = JSON.parse(readFileSync(paths.signature, "utf8"));
+    const signing = directBackupSigningKey();
+    if (signature?.version !== 1
+      || signature?.algorithm !== "HMAC-SHA256"
+      || signature?.keyId !== signing.id
+      || signature?.artifact !== path.basename(paths.artifact)
+      || signature?.sha256 !== hash) throw new Error("signature metadata mismatch");
+    const expected = createHmac("sha256", signing.secret)
+      .update(`platform-redis-backup-v1\n${path.basename(paths.artifact)}\n${hash}\n`)
+      .digest();
+    const supplied = Buffer.from(String(signature.signature || ""), "base64url");
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error("signature mismatch");
+    const document = validateRedisBackupDocument(JSON.parse(bytes.toString("utf8")));
+    if (document.id !== paths.id) throw new Error("identity mismatch");
+    return {
+      ...redisBackupMetadata(document, artifactStat, hash),
+      document,
+      paths,
+    };
+  } catch (error) {
+    if (error instanceof ValidationError || error instanceof RejectedOperationError || error instanceof RedisOperationsError) throw error;
+    throw new ValidationError("Backup Redis non autenticabile o non leggibile.");
+  }
+}
+
+function readRedisBackupInventory() {
+  if (!existsSync(redisBackupRoot)) return [];
+  let names;
+  try {
+    names = readdirSync(redisBackupRoot).filter((name) => /^redis-\d{14}-[a-f0-9]{8}\.json$/.test(name)).slice(0, 200);
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    try {
+      const verified = readVerifiedRedisBackup(name.slice(0, -5));
+      return [{
+        id: verified.id,
+        createdAt: verified.createdAt,
+        keyCount: verified.keyCount,
+        payloadBytes: verified.payloadBytes,
+        sizeBytes: verified.sizeBytes,
+        sha256: verified.sha256,
+        verified: true,
+      }];
+    } catch {
+      return [];
+    }
+  }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function deleteRedisBackupArtifact(value) {
+  const verified = readVerifiedRedisBackup(value);
+  for (const filePath of [verified.paths.artifact, verified.paths.checksum, verified.paths.signature]) rmSync(filePath, { force: true });
+  return { id: verified.id, filesRemoved: 3 };
+}
+
+function redisBackupMetadata(document, stat, hash) {
+  return {
+    id: document.id,
+    createdAt: document.createdAt,
+    database: document.database,
+    keyCount: document.keyCount,
+    payloadBytes: document.payloadBytes,
+    sizeBytes: stat.size,
+    sha256: hash,
+    verified: true,
+  };
+}
+
+function assertDirectBackupCommand(result, label) {
+  if (result.error?.code === "ENOENT") throw new RejectedOperationError(`${label}: comando non disponibile.`);
+  if (result.error) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.error.message)}`);
+  if (result.status !== 0) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.stderr || "comando fallito")}`);
+}
+
+function directBackupManifestId(projectId, jobId) {
+  return sanitizeIdentifier(`manifest-${projectId}-${directBackupTimestamp()}-${String(jobId).slice(-8)}`);
+}
+
+function directBackupTimestamp() {
+  return new Date().toISOString().replace(/\D/g, "").slice(0, 14);
 }
 
 function queueRestoreDrill(payload, context) {
@@ -5227,14 +5961,25 @@ function readBackupJobs() {
     .slice(0, 80);
 }
 
+async function renderCachedControlCenter(context, params) {
+  const section = params.get("section") || "projects";
+  if (section === "secrets" || !context?.cacheIdentity) return renderControlCenter(context, params);
+  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
+  const cached = await redisOperations.cacheGetJson(key);
+  if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
+  const rendered = renderControlCenter(context, params);
+  await redisOperations.cacheSetJson(key, rendered, controlHtmlCacheTtlMs);
+  return rendered;
+}
+
 function renderControlCenter(context, params) {
   const sections = operationsPortalSections();
-  const requestedSection = params.get("section") || "status";
-  const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "status";
+  const requestedSection = params.get("section") || "projects";
+  const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "projects";
   const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : context.projects[0]?.slug || "";
   const currentProject = context.projects.find((project) => project.slug === selectedProject) || null;
   const activeProject = section === "projects" && params.has("project") ? currentProject : null;
-  const title = sections.find((item) => item.id === section)?.label || "Status";
+  const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
   const hidePageHead = Boolean(activeProject);
   const pageHint = operationPageHint(section, context);
@@ -5256,13 +6001,23 @@ function renderControlCenter(context, params) {
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
-<body data-cc-theme="light">
+<body data-cc-theme="light" data-cc-preloading="true">
+<div class="cc-preload-screen" data-cc-preload-screen role="status" aria-live="polite" aria-label="Caricamento completo Control Center">
+  <span class="cc-preload-brand" aria-hidden="true">P</span>
+  <div class="cc-preload-copy">
+    <strong>Caricamento Control Center</strong>
+    <small data-cc-preload-message>Preparo tutte le pagine applicative.</small>
+  </div>
+  <div class="cc-preload-track" aria-hidden="true"><span data-cc-preload-bar></span></div>
+  <strong class="cc-preload-percent" data-cc-preload-percent>0%</strong>
+  <button class="ops-button primary compact" type="button" data-cc-preload-retry hidden>Riprova</button>
+</div>
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
-      <a class="ops-brand" href="/?section=status" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
+      <a class="ops-brand" href="/?section=projects" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
       ${renderOperationsNav(sections, section, context, activeProject, params)}
-      ${controlAuth.enabled ? '<form action="/logout" method="post" class="ops-logout-form"><button class="ops-icon-link" type="submit" aria-label="Logout">Logout</button></form>' : ""}
+      ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Logout" title="Logout">${controlIcon("logout")}</button></form>` : ""}
     </aside>
     <section class="ops-page" ${pageLabel}>
       ${pageHead}
@@ -5291,13 +6046,22 @@ function renderOperationsNavGroup(item, section, context, activeProject, params 
   const panelId = `ops-nav-panel-${item.id}`;
   const hasChildren = children.length > 0;
   const toggleLabel = locked ? `Sezione attuale: ${item.label}` : expanded ? `Chiudi ${item.label}` : `Apri ${item.label}`;
-  return `<div class="ops-nav-group ${expanded ? "expanded" : ""}" data-ops-nav-group="${escapeHtml(item.id)}" data-ops-nav-expanded="${expanded ? "true" : "false"}" data-ops-nav-has-active-child="${childActive ? "true" : "false"}" data-ops-nav-locked="${locked ? "true" : "false"}"${hasChildren ? ' data-ops-nav-collapsible="true"' : ""}>
-    <div class="ops-nav-row">
-      <button class="ops-nav-main" type="button" data-ops-nav-toggle aria-label="${escapeHtml(toggleLabel)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(panelId)}"${locked ? ' aria-disabled="true"' : ""}>
+  const directHref = item.id === "secrets"
+    ? "/?section=secrets"
+    : `/?section=${encodeURIComponent(item.id)}`;
+  const mainControl = hasChildren
+    ? `<button class="ops-nav-main" type="button" data-ops-nav-toggle aria-label="${escapeHtml(toggleLabel)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(panelId)}"${locked ? ' aria-disabled="true"' : ""}>
         ${controlIcon(item.icon)}
         <span class="ops-nav-main-label">${escapeHtml(item.label)}</span>
         <span class="ops-nav-chevron" aria-hidden="true">${controlIcon("chevron-down")}</span>
-      </button>
+      </button>`
+    : `<a class="ops-nav-main ops-nav-direct${currentSection ? " active" : ""}" href="${directHref}"${item.id === "secrets" ? ' data-passkey-return-to="/?section=secrets"' : ""}${currentSection ? ' aria-current="page"' : ""}>
+        ${controlIcon(item.icon)}
+        <span class="ops-nav-main-label">${escapeHtml(item.label)}</span>
+      </a>`;
+  return `<div class="ops-nav-group ${expanded ? "expanded" : ""}" data-ops-nav-group="${escapeHtml(item.id)}" data-ops-nav-expanded="${expanded ? "true" : "false"}" data-ops-nav-has-active-child="${childActive ? "true" : "false"}" data-ops-nav-locked="${locked ? "true" : "false"}"${hasChildren ? ' data-ops-nav-collapsible="true"' : ""}>
+    <div class="ops-nav-row">
+      ${mainControl}
     </div>
     ${children.length ? `<div class="ops-nav-sublist" id="${escapeHtml(panelId)}" aria-hidden="${expanded ? "false" : "true"}">
       ${children.map((child) => renderOperationsNavChild(child)).join("")}
@@ -5318,9 +6082,6 @@ function renderOperationsNavChild(child) {
 }
 
 function operationsNavChildren(section, context, activeProject, params = new URLSearchParams(), currentSection = false) {
-  if (section === "status") {
-    return statusNavChildren(context, params, currentSection);
-  }
   if (section === "projects") {
     return [
       {
@@ -5337,16 +6098,6 @@ function operationsNavChildren(section, context, activeProject, params = new URL
           tone: projectStatusTone(project, state),
         };
       }),
-    ];
-  }
-  if (section === "vault") {
-    return [
-      {
-        active: currentSection,
-        href: "/?section=vault",
-        label: "Secret",
-        tone: context.vaultItems?.length ? "good" : "warn",
-      },
     ];
   }
   return [];
@@ -5371,9 +6122,8 @@ function statusNavChildren(context, params = new URLSearchParams(), currentSecti
 
 function operationsPortalSections() {
   return [
-    { id: "status", label: "Stato", icon: "overview" },
     { id: "projects", label: "Applicazioni", icon: "projects" },
-    { id: "vault", label: "Vault", icon: "shield" },
+    { id: "secrets", label: "Secret", icon: "shield" },
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
   ];
@@ -5381,9 +6131,8 @@ function operationsPortalSections() {
 
 function operationPageHint(section, context) {
   const hints = {
-    status: "",
     projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
-    vault: "Secret cifrati: puoi aggiungerli e rimuoverli senza mostrare valori in chiaro.",
+    secrets: "Vault cifrato e inventario centralizzato dei secret.",
     files: "Inventario file applicazione in sola lettura.",
     databases: "Database collegati alle applicazioni e azioni metadata.",
   };
@@ -5392,10 +6141,117 @@ function operationPageHint(section, context) {
 
 function renderOperationsSection(section, context, params, currentProject) {
   if (section === "projects") return renderOpsProjects(context, params);
-  if (section === "vault") return renderOpsVault(context);
+  if (section === "secrets") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
-  return renderOpsStatus(context, params);
+  return renderOpsProjects(context, params);
+}
+
+function renderOpsRedis(context) {
+  const redis = context.redis || {};
+  const available = redis.available === true;
+  const backups = Array.isArray(redis.backups) ? redis.backups : [];
+  const workloads = Array.isArray(redis.workloads) ? redis.workloads : [];
+  const aclUsers = Array.isArray(redis.aclUsers) ? redis.aclUsers : [];
+  const memoryLimit = Number(redis.memory?.maxBytes || 0);
+  const memoryValue = available ? usageBytesLabel(redis.memory?.usedBytes) : "n.d.";
+  const memoryDetail = available
+    ? memoryLimit > 0 ? `su ${usageBytesLabel(memoryLimit)}` : `picco ${usageBytesLabel(redis.memory?.peakBytes)} · limite container`
+    : "metriche non disponibili";
+  const hitRate = Number.isFinite(redis.stats?.hitRate) ? percentLabel(redis.stats.hitRate) : "n.d.";
+  const metricRows = [
+    ["RAM usata", memoryValue, memoryDetail],
+    ["Chiavi", available ? String(redis.keyCount || 0) : "n.d.", "solo conteggio, contenuto mai mostrato"],
+    ["Client", available ? String(redis.clients || 0) : "n.d.", available ? `${redis.stats?.connections || 0} connessioni totali` : "metriche non disponibili"],
+    ["Cache hit", hitRate, available ? `${redis.stats?.hits || 0} hit · ${redis.stats?.misses || 0} miss` : "metriche non disponibili"],
+  ].map(([label, value, detail]) => `<article class="ops-redis-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </article>`).join("");
+  const backupRows = backups.map(renderRedisBackupRow).join("");
+  const workloadRows = workloads.map((workload) => `<div class="ops-redis-binding">
+      <span class="ops-redis-binding-icon" aria-hidden="true">${controlIcon("cube")}</span>
+      <span><strong>${escapeHtml(humanName(workload.id))}</strong><small>ACL ${escapeHtml(workload.username)} · prefisso isolato · ${escapeHtml(String(workload.commandCount))} comandi ammessi</small></span>
+    </div>`).join("");
+  const userChips = aclUsers.map((user) => `<span class="ops-redis-chip">${escapeHtml(user)}</span>`).join("");
+  const stateLabel = available ? (redis.status === "loading" ? "Caricamento" : "Operativa") : "Non raggiungibile";
+  return `<section class="ops-section ops-redis" data-redis-section>
+    <div class="ops-redis-hero ${available ? "available" : "unavailable"}">
+      <span class="ops-redis-mark" aria-hidden="true">${controlIcon("server")}</span>
+      <div class="ops-redis-hero-copy">
+        <span class="ops-redis-kicker">Istanza unica</span>
+        <h2>Redis</h2>
+        <p>${escapeHtml(available ? `Redis ${redis.version || ""} · ${redis.host}:${redis.port} · DB ${redis.database}` : redis.message || "Connessione live non disponibile.")}</p>
+      </div>
+      <span class="ops-redis-health ${available ? "good" : "bad"}"><i aria-hidden="true"></i>${escapeHtml(stateLabel)}</span>
+    </div>
+
+    <div class="ops-redis-metrics" aria-label="Metriche Redis">${metricRows}</div>
+
+    <div class="ops-redis-grid">
+      <article class="ops-panel ops-redis-panel">
+        <div class="ops-redis-panel-head"><div><span class="ops-redis-panel-icon" aria-hidden="true">${controlIcon("save")}</span><h3>Persistenza</h3></div><small>${escapeHtml(available ? `uptime ${redisUptimeLabel(redis.uptimeSeconds)}` : "stato non disponibile")}</small></div>
+        <div class="ops-redis-facts">
+          ${renderRedisFact("AOF", available && redis.persistence?.aofEnabled ? "Attivo" : available ? "Disattivo" : "n.d.", available && redis.persistence?.aofEnabled)}
+          ${renderRedisFact("Ultimo rewrite AOF", available ? redis.persistence?.aofLastStatus || "n.d." : "n.d.", available && redis.persistence?.aofLastStatus === "ok")}
+          ${renderRedisFact("Ultimo salvataggio RDB", available && redis.persistence?.rdbLastSaveAt ? italianDateTimeLabel(redis.persistence.rdbLastSaveAt) : "n.d.", available && redis.persistence?.rdbLastStatus === "ok")}
+          ${renderRedisFact("Eviction", available ? `${redis.stats?.evictedKeys || 0} chiavi` : "n.d.", available && Number(redis.stats?.evictedKeys || 0) === 0)}
+        </div>
+      </article>
+
+      <article class="ops-panel ops-redis-panel">
+        <div class="ops-redis-panel-head"><div><span class="ops-redis-panel-icon" aria-hidden="true">${controlIcon("shield")}</span><h3>ACL e applicazioni</h3></div><small>Nessun secret esposto</small></div>
+        <div class="ops-redis-chips" aria-label="Utenti ACL">${userChips || '<span class="ops-redis-chip muted">Nessun utente rilevato</span>'}</div>
+        <div class="ops-redis-bindings">${workloadRows || empty("Nessuna ACL applicativa dedicata", "L’accesso corrente è condiviso dai servizi di piattaforma autorizzati.")}</div>
+      </article>
+    </div>
+
+    <article class="ops-panel ops-redis-backups" id="redis-backups">
+      <div class="ops-redis-backups-head">
+        <div><span class="ops-redis-panel-icon" aria-hidden="true">${controlIcon("backups")}</span><div><h3>Backup Redis</h3><p>Ogni backup è firmato, indipendente e cancellabile. Chiavi e valori restano solo nell’artefatto privato.</p></div></div>
+        <form method="post" action="/actions/redis-backup-command">
+          <input type="hidden" name="action" value="backup">
+          <button class="ops-button primary" type="submit"${available ? "" : " disabled"}>${controlIcon("backups")} Crea backup</button>
+        </form>
+      </div>
+      <div class="ops-redis-backup-list" aria-label="Backup Redis disponibili">
+        ${backupRows || empty("Nessun backup Redis", "Crea il primo backup indipendente dell’istanza.")}
+      </div>
+    </article>
+  </section>`;
+}
+
+function renderRedisFact(label, value, good = false) {
+  return `<div class="ops-redis-fact"><span>${escapeHtml(label)}</span><strong class="${good ? "good" : ""}">${escapeHtml(value)}</strong></div>`;
+}
+
+function renderRedisBackupRow(backup) {
+  return `<div class="ops-redis-backup-row" data-redis-backup-id="${escapeHtml(backup.id)}">
+    <span class="ops-redis-backup-icon" aria-hidden="true">${controlIcon("archive")}</span>
+    <span class="ops-redis-backup-copy"><strong>${escapeHtml(italianDateTimeLabel(backup.createdAt))}</strong><small>${escapeHtml(`${backup.keyCount} chiavi · ${usageBytesLabel(backup.payloadBytes)} · firma verificata`)}</small></span>
+    <div class="ops-redis-backup-actions">
+      <form method="post" action="/actions/redis-restore-command" data-passkey-submit data-passkey-success-url="/?section=redis#redis-backups">
+        <input type="hidden" name="action" value="restore">
+        <input type="hidden" name="backupId" value="${escapeHtml(backup.id)}">
+        <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Ripristina</button>
+      </form>
+      <form method="post" action="/actions/redis-backup-delete-command" data-passkey-submit data-passkey-success-url="/?section=redis#redis-backups">
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="backupId" value="${escapeHtml(backup.id)}">
+        <button class="ops-button danger compact ops-redis-delete" type="submit">${controlIcon("trash")} Elimina</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+function redisUptimeLabel(value) {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  if (days > 0) return `${days}g ${hours}h`;
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
 function renderOpsStatus(context, params = new URLSearchParams()) {
@@ -5434,6 +6290,8 @@ function renderOpsStatus(context, params = new URLSearchParams()) {
       </form>
     </div>
 
+    ${renderStatusTestRegistry(context.statusTests || [])}
+
     <div class="ops-status-workspace">
       <div class="ops-status-main">
         <details class="ops-status-runner" data-status-run-console>
@@ -5469,6 +6327,65 @@ function renderOpsStatus(context, params = new URLSearchParams()) {
   </section>`;
 }
 
+function renderStatusTestRegistry(rows) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    const lane = row.lane || "evidence";
+    if (!groups.has(lane)) groups.set(lane, []);
+    groups.get(lane).push(row);
+  }
+  const order = ["go-no-go", "local", "live", "runtime", "protected", "provider", "evidence"];
+  const total = (rows || []).length;
+  const passed = (rows || []).filter((row) => ["passed", "success", "go"].includes(row.status)).length;
+  const sections = [...groups.entries()]
+    .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+    .map(([laneId, laneRows]) => {
+      const meta = statusTestLaneMeta(laneId);
+      const lanePassed = laneRows.filter((row) => ["passed", "success", "go"].includes(row.status)).length;
+      return `<details class="ops-status-lane" open>
+        <summary>
+          <span><strong>${escapeHtml(meta.label)}</strong><small>${escapeHtml(meta.description)}</small></span>
+          <span class="ops-status-lane-count"><strong>${escapeHtml(String(lanePassed))}</strong>/${escapeHtml(String(laneRows.length))} OK</span>
+        </summary>
+        <div class="ops-status-lane-list">
+          ${laneRows.map((row) => renderStatusRegistryRow(row)).join("")}
+        </div>
+      </details>`;
+    }).join("");
+  return `<section class="ops-panel ops-status-test-registry" aria-labelledby="ops-status-test-registry-title">
+    <div class="ops-status-test-registry-head">
+      <div>
+        <h2 id="ops-status-test-registry-title">Registro completo test</h2>
+        <p>${escapeHtml(`${total} controlli disponibili: ${passed} superati, ${Math.max(0, total - passed)} aperti. Separati per GO/NO-GO, local, runtime, protetti e provider.`)}</p>
+      </div>
+      <span class="ops-state ${passed === total && total > 0 ? "good" : "warn"}">${escapeHtml(`${passed}/${total}`)}</span>
+    </div>
+    <div class="ops-status-lane-grid">${sections || empty("Nessun test disponibile", "Il catalogo Stato non contiene controlli.")}</div>
+  </section>`;
+}
+
+function renderStatusRegistryRow(row) {
+  const tone = statusClass(row.status);
+  const mode = statusExecutionModeLabel(row.executionMode);
+  return `<div class="ops-status-registry-row">
+    <span class="ops-status-check-dot ${escapeHtml(tone)}" aria-hidden="true"></span>
+    <span class="ops-status-registry-main">
+      <strong>${escapeHtml(row.control)}</strong>
+      <small>${escapeHtml(`${row.categoryLabel || row.category} / ${mode} / ${row.source}`)}</small>
+    </span>
+    <span class="ops-state ${escapeHtml(tone)}">${escapeHtml(row.statusLabel || friendlyGoNoGoStatus(row.status))}</span>
+  </div>`;
+}
+
+function statusExecutionModeLabel(mode) {
+  switch (String(mode || "")) {
+    case "probe": return "probe live";
+    case "external-required": return "provider esterno";
+    case "evidence-validation": return "validazione evidence";
+    default: return "catalogo";
+  }
+}
+
 function selectedStatusGroup(groups, params = new URLSearchParams()) {
   const requestedCategory = sanitizeIdentifier(params.get("statusCategory") || "");
   return groups.find((group) => group.meta.id === requestedCategory)
@@ -5493,9 +6410,255 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
   </section>`;
 }
 
+function vaultSecretUsageAnalysis(context) {
+  if (context?.vaultSecretUsage && validVaultSecretUsage(context.vaultSecretUsage)) return context.vaultSecretUsage;
+  const cacheKey = vaultSecretUsageCacheKey(context);
+  if (vaultSecretUsageCache.key === cacheKey && vaultSecretUsageCache.value && vaultSecretUsageCache.expiresAt > Date.now()) {
+    return vaultSecretUsageCache.value;
+  }
+  const items = Array.isArray(context.vaultItems) ? context.vaultItems : [];
+  const projects = Array.isArray(context.projects) ? context.projects : [];
+  const databases = Array.isArray(context.databases) ? context.databases : [];
+
+  const byId = Object.fromEntries(items.map((item) => [item.id, {
+    applications: [],
+    evidence: [],
+    platformReferenced: false,
+    referenceCount: 0,
+  }]));
+  const matchers = items.map((item) => {
+    const token = String(item.itemKey || "").trim().toLowerCase();
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return {
+      item,
+      pattern: new RegExp(`(^|[^a-z0-9_])${escaped}(?=$|[^a-z0-9_]|_file\\b)`, "i"),
+    };
+  }).filter((entry) => entry.item.itemKey);
+  const evidenceSeen = new Set();
+  const stats = { bytesScanned: 0, complete: true, filesScanned: 0, rootsScanned: 0 };
+  const limits = { bytes: 256 * 1024 * 1024, files: 30_000, nodes: 200_000 };
+  let nodes = 0;
+
+  const addEvidence = (item, { file, scope, targetId, targetName, type }) => {
+    const usage = byId[item.id];
+    if (!usage) return;
+    const cleanFile = sanitizeRef(file || "");
+    const cleanTargetId = sanitizeIdentifier(targetId || "platform") || "platform";
+    const dedupeKey = `${item.id}:${scope}:${cleanTargetId}:${type}:${cleanFile}`;
+    if (evidenceSeen.has(dedupeKey)) return;
+    evidenceSeen.add(dedupeKey);
+    if (scope === "application" && !usage.applications.some((entry) => entry.id === cleanTargetId)) {
+      usage.applications.push({ id: cleanTargetId, name: sanitizeMessage(targetName || cleanTargetId) });
+    }
+    if (scope === "platform") usage.platformReferenced = true;
+    usage.referenceCount += 1;
+    if (usage.evidence.length < 8) {
+      usage.evidence.push({ file: cleanFile, scope, targetId: cleanTargetId, targetName: sanitizeMessage(targetName || cleanTargetId), type });
+    }
+  };
+
+  const textFileAllowed = (name) => {
+    const value = String(name || "");
+    return value === "Dockerfile"
+      || value.startsWith(".env")
+      || /(?:^|\/)(?:compose[^/]*|package|composer|project)\.json$/i.test(value)
+      || /\.(?:cjs|conf|env|go|ini|js|json|jsx|mjs|php|properties|py|rb|sh|sql|toml|ts|tsx|xml|ya?ml)$/i.test(value);
+  };
+  const skippedDirectories = new Set([
+    ".git", ".cache", ".next", ".nuxt", ".output", ".turbo", "backups", "cache", "coverage", "database-credentials",
+    "dist", "build", "logs", "node_modules", "reports", "secret", "secrets", "storage", "temp", "test", "tests", "tmp", "uploads", "vendor",
+  ]);
+
+  const scanRoot = (root, scope, targetId, targetName, prefix = "") => {
+    if (!root || !existsSync(root) || !safeIsDirectory(root)) return;
+    const rootRealPath = safeRealpath(root);
+    if (!rootRealPath) return;
+    stats.rootsScanned += 1;
+    const stack = [{ directory: rootRealPath, depth: 0 }];
+    while (stack.length) {
+      if (nodes >= limits.nodes || stats.filesScanned >= limits.files || stats.bytesScanned >= limits.bytes) {
+        stats.complete = false;
+        break;
+      }
+      const current = stack.pop();
+      let entries = [];
+      try {
+        entries = readdirSync(current.directory, { withFileTypes: true });
+      } catch {
+        stats.complete = false;
+        continue;
+      }
+      for (const entry of entries) {
+        nodes += 1;
+        if (nodes >= limits.nodes) {
+          stats.complete = false;
+          break;
+        }
+        const name = String(entry.name || "");
+        const fullPath = path.join(current.directory, name);
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          if (current.depth < 16 && !skippedDirectories.has(name.toLowerCase())) stack.push({ directory: fullPath, depth: current.depth + 1 });
+          else if (current.depth >= 16) stats.complete = false;
+          continue;
+        }
+        if (!entry.isFile() || !textFileAllowed(name)) continue;
+        let fileStat;
+        try {
+          fileStat = statSync(fullPath);
+        } catch {
+          stats.complete = false;
+          continue;
+        }
+        if (fileStat.size > 1024 * 1024) continue;
+        if (stats.filesScanned >= limits.files || stats.bytesScanned + fileStat.size > limits.bytes) {
+          stats.complete = false;
+          break;
+        }
+        let text;
+        try {
+          text = readFileSync(fullPath, "utf8");
+        } catch {
+          stats.complete = false;
+          continue;
+        }
+        stats.filesScanned += 1;
+        stats.bytesScanned += fileStat.size;
+        const relative = path.relative(rootRealPath, fullPath).split(path.sep).join("/");
+        const evidencePath = prefix ? `${prefix}/${relative}` : relative;
+        for (const matcher of matchers) {
+          if (!matcher.pattern.test(text)) continue;
+          addEvidence(matcher.item, { file: evidencePath, scope, targetId, targetName, type: "source-reference" });
+        }
+      }
+    }
+  };
+
+  const projectRootRealPath = existsSync(projectsRoot) ? safeRealpath(projectsRoot) : "";
+  for (const project of projects) {
+    if (!project.filesAvailable || !project.relativePath || !projectRootRealPath) continue;
+    const root = path.resolve(projectsRoot, project.relativePath);
+    const realRoot = safeRealpath(root);
+    if (!realRoot || !(realRoot === projectRootRealPath || realRoot.startsWith(`${projectRootRealPath}${path.sep}`))) {
+      stats.complete = false;
+      continue;
+    }
+    scanRoot(realRoot, "application", project.slug, project.name, project.relativePath);
+  }
+
+  scanRoot(docsRoot, "platform", "platform", "Piattaforma V1", "infrastruttura");
+
+  for (const database of databases) {
+    const references = [database.credentialRef, database.credentialFile, database.adminPasswordFile, database.passwordFile]
+      .filter(Boolean)
+      .join("\n");
+    if (!references) continue;
+    for (const matcher of matchers) {
+      if (!matcher.pattern.test(references)) continue;
+      const project = resolveContextProject(context, database.projectId);
+      addEvidence(matcher.item, {
+        file: `catalogo-database/${database.engine}/${database.name}`,
+        scope: project ? "application" : "platform",
+        targetId: project?.slug || "platform",
+        targetName: project?.name || "Piattaforma V1",
+        type: "database-binding",
+      });
+    }
+  }
+
+  for (const usage of Object.values(byId)) usage.applications.sort((a, b) => a.name.localeCompare(b.name));
+  const value = {
+    byId,
+    stats: {
+      ...stats,
+      referencedSecrets: Object.values(byId).filter((usage) => usage.referenceCount > 0).length,
+      totalSecrets: items.length,
+    },
+  };
+  vaultSecretUsageCache.key = cacheKey;
+  vaultSecretUsageCache.value = value;
+  vaultSecretUsageCache.expiresAt = Date.now() + 60_000;
+  return value;
+}
+
+function vaultSecretUsageCacheKey(context) {
+  const items = Array.isArray(context?.vaultItems) ? context.vaultItems : [];
+  const projects = Array.isArray(context?.projects) ? context.projects : [];
+  const databases = Array.isArray(context?.databases) ? context.databases : [];
+  return createHash("sha256").update(JSON.stringify({
+    items: items.map((item) => [item.id, item.itemKey, item.projectId, item.updatedAt || ""]),
+    projects: projects.map((project) => [project.slug, project.relativePath, project.updatedAt || ""]),
+    databases: databases.map((database) => [database.id, database.projectId, database.credentialRef, database.credentialFile]),
+  })).digest("hex");
+}
+
+function validVaultSecretUsage(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && value.byId && typeof value.byId === "object" && !Array.isArray(value.byId)
+    && value.stats && typeof value.stats === "object");
+}
+
+async function cachedVaultSecretUsageAnalysis(context) {
+  const cacheKey = vaultSecretUsageCacheKey(context);
+  if (vaultSecretUsageCache.key === cacheKey && validVaultSecretUsage(vaultSecretUsageCache.value)
+      && vaultSecretUsageCache.expiresAt > Date.now()) return vaultSecretUsageCache.value;
+  const cached = await redisOperations.cacheGetJson(`vault-usage:${cacheKey}`);
+  if (validVaultSecretUsage(cached)) {
+    vaultSecretUsageCache.key = cacheKey;
+    vaultSecretUsageCache.value = cached;
+    vaultSecretUsageCache.expiresAt = Date.now() + 60_000;
+    return cached;
+  }
+  const value = vaultSecretUsageAnalysis(context);
+  await redisOperations.cacheSetJson(`vault-usage:${cacheKey}`, value, 5 * 60_000);
+  return value;
+}
+
+function renderVaultFieldGuide() {
+  const fields = [
+    ["Nome secret", "Chiave tecnica stabile. È il nome cercato nei sorgenti, nelle variabili *_FILE e nei mount /run/secrets."],
+    ["Etichetta", "Nome leggibile mostrato nel Control Center; non cambia il collegamento tecnico."],
+    ["Applicazione", "Proprietario dichiarato del secret. Non viene considerato prova d'uso: sotto ogni secret mostro le app trovate davvero."],
+    ["Ambiente", "Ambito previsto del valore: local, staging o production."],
+    ["Tipo", "Classifica il secret per database, provider, storage, Docker, KMS o applicazione."],
+    ["Utente / account", "Identità facoltativa a cui appartiene la credenziale; non è il valore segreto."],
+    ["URL / host", "Endpoint facoltativo presso cui la credenziale viene utilizzata."],
+    ["Giorni rotazione", "Scadenza organizzativa per la sostituzione. Non ruota automaticamente il valore."],
+    ["Valore secret", "Dato cifrato nel Vault, leggibile solo dopo conferma passkey."],
+  ];
+  return `<details class="ops-vault-field-guide" open>
+    <summary>Cosa significano i campi</summary>
+    <dl>${fields.map(([name, description]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(description)}</dd></div>`).join("")}</dl>
+  </details>`;
+}
+
+function renderOpsVaultUsage(item, usage, scanComplete) {
+  const applications = Array.isArray(usage?.applications) ? usage.applications : [];
+  const targets = [
+    ...applications.map((application) => application.name),
+    ...(usage?.platformReferenced ? ["Piattaforma V1"] : []),
+  ];
+  const evidence = Array.isArray(usage?.evidence) ? usage.evidence : [];
+  const declaredOwner = item.projectId === "platform" ? "Piattaforma" : item.projectId;
+  if (!targets.length) {
+    return `<span class="ops-vault-usage warn" data-secret-usage-status="not-found">
+      <strong>Nessun utilizzo reale trovato</strong>
+      <small>${escapeHtml(scanComplete ? `Nessun riferimento alla chiave nei sorgenti/config attuali. Proprietario dichiarato: ${declaredOwner}.` : `Scansione incompleta; nessun riferimento trovato finora. Proprietario dichiarato: ${declaredOwner}.`)}</small>
+    </span>`;
+  }
+  return `<span class="ops-vault-usage good" data-secret-usage-status="verified">
+    <strong>Usato realmente da: ${escapeHtml(targets.join(", "))}</strong>
+    <small>${escapeHtml(evidence.slice(0, 4).map((entry) => `${entry.targetName}: ${entry.file}`).join(" · "))}</small>
+  </span>`;
+}
+
 function renderOpsVault(context) {
-  const itemRows = context.vaultItems.map((item) => renderOpsVaultItem(item)).join("");
-  return `<section class="ops-section ops-projects-redesign ops-vault-section">
+  const usageAnalysis = vaultSecretUsageAnalysis(context);
+  const itemRows = context.vaultItems.map((item) => renderOpsVaultItem(item, {
+    usage: usageAnalysis.byId[item.id],
+    usageScanComplete: usageAnalysis.stats.complete,
+  })).join("");
+  return `<section class="ops-section ops-projects-redesign ops-vault-section" data-secret-scan-complete="${usageAnalysis.stats.complete ? "true" : "false"}" data-secret-scan-files="${escapeHtml(String(usageAnalysis.stats.filesScanned))}" data-secret-scan-bytes="${escapeHtml(String(usageAnalysis.stats.bytesScanned))}">
     <div class="ops-vault-grid">
       <form method="post" action="/actions/vault-command" class="ops-vault-panel ops-vault-form" autocomplete="off">
         <input type="hidden" name="action" value="create">
@@ -5518,13 +6681,14 @@ function renderOpsVault(context) {
           <input type="number" min="0" max="3650" name="rotationDays" value="90" aria-label="Giorni rotazione">
           <input type="password" name="value" placeholder="Valore secret" aria-label="Valore secret" autocomplete="new-password" required>
         </div>
+        ${renderVaultFieldGuide()}
         <button class="ops-button primary" type="submit">${controlIcon("save")} Salva secret</button>
       </form>
       <div class="ops-vault-panel ops-vault-inventory">
         <div class="ops-vault-list-head">
           <div>
             <h2>Secret salvati</h2>
-            <p>${escapeHtml(context.existingVaultImport?.importableCount ? `${context.existingVaultImport.importableCount} secret esistenti importabili` : "Secret esistenti gia indicizzati o non presenti.")}</p>
+            <p>${escapeHtml(`Scansione ${usageAnalysis.stats.complete ? "completa" : "parziale"}: ${usageAnalysis.stats.referencedSecrets}/${usageAnalysis.stats.totalSecrets} secret con riferimenti reali in ${usageAnalysis.stats.filesScanned} file.`)}</p>
           </div>
           <form method="post" action="/actions/vault-command" class="ops-vault-import-form">
             <input type="hidden" name="action" value="import-existing">
@@ -5541,28 +6705,36 @@ function renderOpsVault(context) {
   </section>`;
 }
 
-function renderOpsVaultItem(item) {
+function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageScanComplete = true } = {}) {
   const deleteConfirm = `DELETE-VAULT-SECRET:${item.id}`;
   const revealConfirm = `REVEAL-VAULT-SECRET:${item.id}`;
-  const project = item.projectId === "platform" ? "Platform" : item.projectId;
+  const project = item.projectId === "platform" ? "Platform condiviso" : item.projectId;
   const rotation = item.rotationDays ? `rotazione ${item.rotationDays} giorni` : "rotazione non impostata";
   return `<article class="ops-vault-item" id="vault-${escapeHtml(item.id)}">
     <span class="ops-project-row-icon static" aria-hidden="true">${controlIcon("shield")}</span>
-    <span class="ops-vault-item-main">
-      <strong>${escapeHtml(item.label || item.itemKey)}</strong>
-      <small>${escapeHtml(`${item.itemKey} / ${project} / ${item.environment} / ${item.kind}`)}</small>
-      <small>${escapeHtml(`${item.username || "utente non impostato"} / ${item.url || "host non impostato"} / ${rotation}`)}</small>
-      <small>Valore protetto. Premi mostra per leggerlo.</small>
+    <div class="ops-vault-item-main">
+      <div class="ops-vault-item-title">
+        <strong>${escapeHtml(item.label || item.itemKey)}</strong>
+        <code>${escapeHtml(item.itemKey)}</code>
+      </div>
+      <div class="ops-vault-item-meta" aria-label="Applicazione, ambiente e tipo">
+        <span>${escapeHtml(project)}</span>
+        <span>${escapeHtml(item.environment)}</span>
+        <span>${escapeHtml(item.kind)}</span>
+      </div>
+      <small class="ops-vault-item-details">${escapeHtml(`${item.username || "utente non impostato"} · ${item.url || "host non impostato"} · ${rotation}`)}</small>
+      ${renderOpsVaultUsage(item, usage, usageScanComplete)}
       <span class="ops-vault-reveal" data-vault-reveal-box>
         <input type="password" value="" placeholder="Protetto" readonly aria-label="Valore ${escapeHtml(item.label || item.itemKey)}" data-vault-reveal-value>
         <button class="ops-button secondary compact" type="button" data-vault-reveal-action data-vault-id="${escapeHtml(item.id)}" data-vault-confirm="${escapeHtml(revealConfirm)}">${controlIcon("eye")} Mostra</button>
         <button class="ops-button secondary compact" type="button" data-vault-copy-action disabled>${controlIcon("copy")} Copia</button>
       </span>
-    </span>
-    <form method="post" action="/actions/vault-command" class="ops-vault-delete-form">
+    </div>
+    <form method="post" action="/actions/vault-command" class="ops-vault-delete-form" data-passkey-submit data-passkey-success-url="/?section=secrets">
       <input type="hidden" name="action" value="delete">
       <input type="hidden" name="id" value="${escapeHtml(item.id)}">
       <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
+      ${returnProjectId ? `<input type="hidden" name="projectId" value="${escapeHtml(returnProjectId)}"><input type="hidden" name="returnTo" value="project-detail">` : ""}
       <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
     </form>
   </article>`;
@@ -5594,13 +6766,13 @@ function renderOpsProjectRow(project) {
 }
 
 function renderOpsProjectDetailScreen(project, context, resourceSummary, params = new URLSearchParams()) {
-  const databases = projectDatabases(context, project);
+  const databases = portalProjectDatabases(context, project);
   const summary = resourceSummary || projectResourceSummary(context, project);
   const state = projectOpsState(project);
   const fileManager = renderProjectDetailFileManager(context, project, params);
-  const databaseList = renderProjectDetailDatabaseList(context, project, databases);
+  const databaseList = renderProjectDetailDatabaseList(context, project, databases, params);
   const resourcePanel = renderProjectDetailResources(summary, project);
-  const backupPanel = renderProjectDetailBackups(context, project);
+  const backupPanel = renderProjectDetailBackups(context, project, params);
   return `<section class="ops-section ops-projects-redesign ops-project-detail-screen" id="project-${escapeHtml(project.slug)}">
     <div class="ops-project-detail-hero">
       <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
@@ -5627,8 +6799,8 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
   </section>`;
 }
 
-function renderProjectDetailDatabaseList(context, project, databases) {
-  const databaseItems = databases.map((database) => renderProjectDetailDatabaseRow(context, project, database)).join("");
+function renderProjectDetailDatabaseList(context, project, databases, params = new URLSearchParams()) {
+  const databaseItems = databases.map((database) => renderProjectDetailDatabaseRow(context, project, database, params)).join("");
   return `<div class="ops-project-detail-panel" id="project-databases">
     <div class="ops-project-detail-panel-head">
       <h3>Database</h3>
@@ -5639,12 +6811,10 @@ function renderProjectDetailDatabaseList(context, project, databases) {
   </div>`;
 }
 
-function renderProjectDetailDatabaseRow(context, project, database) {
+function renderProjectDetailDatabaseRow(context, project, database, params = new URLSearchParams()) {
   const adminAction = databaseAdminAction(database);
   const updateConfirm = `UPDATE-DATABASE:${database.id}`;
   const credentialConfirm = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
-  const deleteConfirm = databaseDeleteConfirmation(database, "REQUEST");
-  const deleteOperation = context.databaseDeleteOperations.find((operation) => operation.database.id === database.id) || null;
   const credentialLabel = databaseCredentialDisplayLabel(database, project);
   return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}">
     <div class="ops-project-database-main">
@@ -5675,16 +6845,15 @@ function renderProjectDetailDatabaseRow(context, project, database) {
       <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Password</button>
     </form>
     <div class="ops-project-database-actions">
-      ${deleteOperation ? renderDatabaseDeleteOperationControls(database, project, deleteOperation) : `<form method="post" action="/actions/database-command">
-        <input type="hidden" name="action" value="delete">
+      <form method="post" action="/actions/database-delete-command" data-passkey-submit data-passkey-success-url="/?section=projects&amp;project=${encodeURIComponent(project.slug)}#project-databases">
+        <input type="hidden" name="action" value="delete-now">
         <input type="hidden" name="id" value="${escapeHtml(database.id)}">
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="returnTo" value="project-detail">
-        <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
+        <input type="hidden" name="confirm" value="${escapeHtml(`DELETE-DATABASE-NOW:${database.id}`)}">
         <input type="hidden" name="idempotencyKey" value="${escapeHtml(rid())}">
-        <input name="typedName" value="" placeholder="Digita ${escapeHtml(database.name)}" aria-label="Nome database da eliminare" autocomplete="off" required>
-        <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Richiedi eliminazione</button>
-      </form>`}
+        <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
+      </form>
     </div>
   </div>`;
 }
@@ -5711,7 +6880,6 @@ function renderDatabaseDeleteOperationControls(database, project, operation) {
     <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
     <input type="hidden" name="returnTo" value="project-detail">
     <input type="hidden" name="confirm" value="${escapeHtml(databaseDeleteConfirmation(database, phase, operation.id))}">
-    <input name="typedName" value="" placeholder="Digita ${escapeHtml(database.name)}" aria-label="Conferma nome database" autocomplete="off" required>
     <span class="ops-state warn">${escapeHtml(statusLabel)}</span>
     <button class="ops-button danger compact" type="submit">${controlIcon(approve ? "shield" : "trash")} ${escapeHtml(label)}</button>
   </form>`;
@@ -5773,10 +6941,10 @@ function renderProjectDetailResources(summary) {
   </div>`;
 }
 
-function renderProjectDetailBackups(context, project) {
+function renderProjectDetailBackups(context, project, params = new URLSearchParams()) {
   const inventory = applicationBackupInventory(context, project);
   const restoreOptions = inventory.restoreOptions || [];
-  const backupRows = restoreOptions.slice(0, 18).map(renderProjectDetailBackupRow).join("");
+  const backupRows = restoreOptions.slice(0, 18).map((option) => renderProjectDetailBackupRow(option, project)).join("");
   const optionRows = restoreOptions.map((option) => `<option value="${escapeHtml(option.path)}">${escapeHtml(option.label)}</option>`).join("");
   const restoreDisabled = restoreOptions.length ? "" : " disabled";
   return `<div class="ops-project-detail-panel" id="project-backups">
@@ -5808,13 +6976,22 @@ function renderProjectDetailBackups(context, project) {
   </div>`;
 }
 
-function renderProjectDetailBackupRow(option) {
+function renderProjectDetailBackupRow(option, project) {
+  const deleteControl = `<form method="post" action="/actions/backup-delete-command" class="ops-project-backup-delete-form" data-passkey-submit data-passkey-success-url="/?section=projects&amp;project=${encodeURIComponent(project.slug)}#project-backups">
+        <input type="hidden" name="action" value="delete-application">
+        <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="path" value="${escapeHtml(option.path)}">
+        <input type="hidden" name="returnTo" value="project-detail">
+        <input type="hidden" name="confirm" value="${escapeHtml(`DELETE-APPLICATION-BACKUP:${option.manifest.id}`)}">
+        <button class="ops-button compact ops-project-backup-delete" type="submit">${controlIcon("trash")} Elimina</button>
+      </form>`;
   return `<div class="ops-project-backup-row" data-backup-ref="${escapeHtml(option.path)}">
     <span class="ops-project-detail-item-icon" aria-hidden="true">${controlIcon("backups")}</span>
     <span>
       <strong>${escapeHtml(option.name)}</strong>
       <small>${escapeHtml(`${option.kind} / ${option.modifiedAt || "data non disponibile"} / ${option.sizeLabel || "-"}`)}</small>
     </span>
+    ${deleteControl}
   </div>`;
 }
 
@@ -6004,11 +7181,11 @@ function renderOpsFiles(context, params, currentProject) {
 function renderOpsDatabases(context) {
   const projectInventories = context.projects.map((project) => ({
     project,
-    databases: projectDatabases(context, project),
+    databases: portalProjectDatabases(context, project),
     storage: projectStorage(context, project),
   }));
   const databaseInventories = projectInventories.filter((item) => item.databases.length > 0);
-  const linkedDatabaseIds = new Set(projectInventories.flatMap((item) => item.databases.map((database) => database.id)));
+  const linkedDatabaseIds = new Set(context.projects.flatMap((project) => projectDatabases(context, project).map((database) => database.id)));
   const unlinkedDatabases = context.databases.filter((database) => !linkedDatabaseIds.has(database.id));
   const projectOptions = databaseInventories.map(({ project }) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
   const appsWithDatabases = databaseInventories.length;
@@ -6136,7 +7313,7 @@ function databaseAdminAction(database) {
   return {
     ...admin,
     href,
-    ariaLabel: `Apri ${databaseDisplayName(database)} in ${admin.label} con accesso limitato`,
+    ariaLabel: `Apri ${databaseDisplayName(database)} in ${admin.label} con accesso amministrativo protetto`,
   };
 }
 
@@ -6172,6 +7349,24 @@ function resolvePostgresCredential(database, project) {
   const metadataPassword = readCredentialPasswordFile(database.credentialFile || database.adminPasswordFile || database.passwordFile || "", project);
   if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
   return null;
+}
+
+function databaseAdminCredentials(database, project) {
+  const primary = database.engine === "postgres"
+    ? resolvePostgresCredential(database, project)
+    : resolveMariaDbCredential(database, project);
+  const fallback = resolvePlatformDatabaseAdminCredential(database);
+  const credentials = [primary, fallback].filter(Boolean);
+  return credentials.filter((credential, index) => credentials.findIndex((candidate) => candidate.user === credential.user) === index);
+}
+
+function resolvePlatformDatabaseAdminCredential(database) {
+  const postgres = database.engine === "postgres";
+  const user = postgres ? postgresSuperuser : mariadbRootUser;
+  const passwordFile = postgres ? postgresSuperuserPasswordFile : mariadbRootPasswordFile;
+  const password = readCredentialPasswordFile(passwordFile, null);
+  if (!user || !password) return null;
+  return { user, password, source: postgres ? "platform-postgres-admin-secret" : "platform-mariadb-admin-secret" };
 }
 
 function databaseAllowsGenericProjectCredential(database, project) {
@@ -6815,6 +8010,152 @@ function statusRowsForContext(context) {
   return Array.isArray(context.statusRows) ? context.statusRows : opsStatusRows(context);
 }
 
+function statusTestLane({ technicalId = "", category = "", source = "", status = "", executionMode = "" } = {}) {
+  const id = sanitizeIdentifier(technicalId || "");
+  const cleanCategory = sanitizeIdentifier(category || "");
+  const text = `${id} ${cleanCategory} ${source || ""}`.toLowerCase();
+  if (id.includes("go-no-go") || id.includes("pre-go-live") || id.includes("production-readiness") || cleanCategory === "go-live" || text.includes("decisione produzione")) {
+    return { id: "go-no-go", label: "GO/NO-GO" };
+  }
+  if (cleanCategory === "provider" || executionMode === "external-required" || status === "pending-provider" || text.includes("provider esterno") || text.includes("verifyremote")) {
+    return { id: "provider", label: "Provider / esterno" };
+  }
+  if (cleanCategory === "protected-runtime" || text.includes("protetto") || text.includes("restore drill") || text.includes("fault injection") || text.includes("chaos")) {
+    return { id: "protected", label: "Protetti / manutenzione" };
+  }
+  if (cleanCategory === "runtime-evidence" || text.includes("runtime") || text.includes("vps") || text.includes("produzione live")) {
+    return { id: "runtime", label: "Runtime / live" };
+  }
+  if (executionMode === "probe" || text.includes("test reale")) {
+    return { id: "live", label: "Probe live" };
+  }
+  if (cleanCategory === "local-policy" || cleanCategory === "local-quality" || cleanCategory === "secret-protected" || text.includes("locale") || text.includes("repo")) {
+    return { id: "local", label: "Local / repository" };
+  }
+  return { id: "evidence", label: "Evidence" };
+}
+
+function statusTestLaneMeta(id) {
+  const lanes = {
+    "go-no-go": ["GO/NO-GO", "Decisione finale e pacchetto di ammissione."],
+    local: ["Local / repository", "Test eseguibili localmente o validazioni statiche del repository."],
+    live: ["Probe live", "Probe HTTP e verifiche contro il runtime in esecuzione."],
+    runtime: ["Runtime / live", "Evidence raccolta sul VPS/runtime reale."],
+    protected: ["Protetti / manutenzione", "Restore, chaos, deploy e controlli che richiedono finestra operativa."],
+    provider: ["Provider / esterno", "Controlli che richiedono Cloudflare, GitHub, dominio o servizi esterni."],
+    evidence: ["Evidence", "Controlli di evidence senza ambito piu specifico."],
+  };
+  const [label, description] = lanes[id] || lanes.evidence;
+  return { id: id || "evidence", label, description };
+}
+
+function statusTestRegistry(context) {
+  const rows = [];
+  const seen = new Set();
+  const add = ({ id, title, category, source, status, reason, action, required, reportPath, executionMode }) => {
+    const technicalId = sanitizeIdentifier(id || title || "status-check");
+    if (!technicalId || seen.has(technicalId) || isControlCenterOnlyStatusCheck(technicalId)) return;
+    seen.add(technicalId);
+    rows.push(statusTableRow({
+      id: `registry:${technicalId}`,
+      control: sanitizeMessage(title || friendlyCheckName(technicalId)),
+      technicalId,
+      category,
+      source: source || "Evidence",
+      status: status || "pending-live-proof",
+      reason: reason || "Controllo disponibile nel catalogo Stato.",
+      action: action || "Esegui il controllo nel suo ambito e conserva evidence non-secret.",
+      required,
+      reportPath,
+      executionMode: executionMode || "evidence-validation",
+    }));
+  };
+
+  for (const check of context.statusRun?.checks || []) {
+    add({
+      id: check.id,
+      title: statusRunControlTitle(check),
+      category: check.category,
+      source: check.source || "Test reale",
+      status: check.status,
+      reason: check.detail,
+      action: check.nextAction,
+      required: check.required,
+      reportPath: check.reportPath,
+      executionMode: check.executionMode,
+    });
+  }
+  for (const check of context.goNoGo?.checks || []) {
+    const displayCheck = goNoGoDisplayCheck(check);
+    add({
+      id: displayCheck.name,
+      title: friendlyCheckName(displayCheck.name),
+      category: displayCheck.category || "go-live",
+      source: "Go live",
+      status: displayCheck.status,
+      reason: displayCheck.detail || simpleBlockerReason(displayCheck),
+      action: displayCheck.status === "passed" ? "Mantieni il report aggiornato dopo ogni modifica." : simpleBlockerAction(displayCheck),
+      required: displayCheck.required,
+      reportPath: displayCheck.reportPath,
+      executionMode: "evidence-validation",
+    });
+  }
+  for (const check of documentedStatusChecks(context)) {
+    add({
+      id: check.id,
+      title: check.title || documentedStatusTitles[check.id] || friendlyCheckName(check.id),
+      category: check.category,
+      source: check.source || "Documentazione",
+      status: check.status,
+      reason: check.detail,
+      action: check.nextAction,
+      required: check.required,
+      reportPath: check.reportPath,
+      executionMode: "evidence-validation",
+    });
+  }
+  for (const check of statusRunCheckRunners(context)) {
+    add({
+      id: check.id,
+      title: check.title || friendlyCheckName(check.id),
+      category: check.category,
+      source: "Catalogo executor",
+      status: "pending-live-proof",
+      reason: "Controllo disponibile; non ancora presente nell'ultimo run.",
+      action: "Avvia il run Stato per eseguirlo e registrare il risultato.",
+      required: check.required,
+      executionMode: check.executionMode,
+    });
+  }
+  return rows.sort((a, b) => {
+    const laneOrder = ["go-no-go", "local", "live", "runtime", "protected", "provider", "evidence"];
+    const laneCompare = laneOrder.indexOf(a.lane) - laneOrder.indexOf(b.lane);
+    return laneCompare || String(a.control).localeCompare(String(b.control));
+  });
+}
+
+function statusTestSummary(rows = []) {
+  const items = Array.isArray(rows) ? rows : [];
+  const lanes = new Map();
+  for (const row of items) {
+    const lane = row.lane || "evidence";
+    if (!lanes.has(lane)) lanes.set(lane, { ...statusTestLaneMeta(lane), total: 0, passed: 0, open: 0 });
+    const summary = lanes.get(lane);
+    summary.total += 1;
+    if (["passed", "success", "go"].includes(row.status)) summary.passed += 1;
+    else summary.open += 1;
+  }
+  const total = items.length;
+  const passed = items.filter((row) => ["passed", "success", "go"].includes(row.status)).length;
+  return {
+    total,
+    passed,
+    open: total - passed,
+    lanes: [...lanes.values()],
+    valueExposed: false,
+  };
+}
+
 function dedupeStatusRows(rows) {
   const groups = new Map();
   for (const row of rows) {
@@ -7066,8 +8407,9 @@ function statusRunControlTitle(check) {
   return check?.title || friendlyCheckName(check?.id);
 }
 
-function statusTableRow({ id, control, technicalId, category = "", source, status, reason, action, required = true, reportPath = "" }) {
+function statusTableRow({ id, control, technicalId, category = "", source, status, reason, action, required = true, reportPath = "", executionMode = "" }) {
   const categoryMeta = statusCategoryMeta(statusCategoryKey({ technicalId, category, source, reason, action }));
+  const lane = statusTestLane({ technicalId, category, source, status, executionMode });
   return sanitizeEvent({
     id,
     control,
@@ -7078,6 +8420,9 @@ function statusTableRow({ id, control, technicalId, category = "", source, statu
     source,
     status,
     statusLabel: operationalStatusLabel(status, technicalId, source, reason, action),
+    executionMode: executionMode || "evidence-validation",
+    lane: lane.id,
+    laneLabel: lane.label,
     reason,
     action,
     required,
@@ -7546,6 +8891,29 @@ function projectDatabases(context, projectOrId) {
   });
 }
 
+function portalProjectDatabases(context, projectOrId) {
+  const databases = projectDatabases(context, projectOrId);
+  const groups = new Map();
+  for (const database of databases) {
+    const key = `${database.engine}:${databasePortalFamily(database)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(database);
+  }
+  return [...groups.values()].map((variants) => variants.find((database) => !databasePortalVariant(database)) || variants[0]);
+}
+
+function databasePortalFamily(database) {
+  return databaseDisplayName(database)
+    .toLowerCase()
+    .replace(/\b(?:legacy|new|nuov[oa])\b/giu, " ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || database.name;
+}
+
+function databasePortalVariant(database) {
+  return /\b(?:legacy|new|nuov[oa])\b/iu.test(databaseDisplayName(database));
+}
+
 function projectStorage(context, projectOrId) {
   const project = resolveContextProject(context, projectOrId);
   if (!project) return { webspaces: [], buckets: [] };
@@ -7955,6 +9323,13 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
 async function readPrometheusResourceSnapshot() {
   const now = Date.now();
   if (resourceMetricsCache.value && resourceMetricsCache.expiresAt > now) return resourceMetricsCache.value;
+  const shared = await redisOperations.cacheGetJson("metrics:prometheus");
+  if (validPrometheusResourceSnapshot(shared)) {
+    resourceMetricsCache.value = shared;
+    resourceMetricsCache.expiresAt = now + resourceMetricsTtlMs;
+    resourceMetricsCache.failedUntil = 0;
+    return shared;
+  }
   if (resourceMetricsCache.failedUntil > now) return unavailableResourceSnapshot("Prometheus non disponibile o non raggiungibile.");
   if (!prometheusUrl) return unavailableResourceSnapshot("Prometheus non configurato.");
 
@@ -8037,7 +9412,17 @@ async function readPrometheusResourceSnapshot() {
   }
   resourceMetricsCache.value = snapshot;
   resourceMetricsCache.expiresAt = now + resourceMetricsTtlMs;
+  await redisOperations.cacheSetJson("metrics:prometheus", snapshot, resourceMetricsTtlMs);
   return snapshot;
+}
+
+function validPrometheusResourceSnapshot(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && typeof value.available === "boolean"
+    && value.cpu && typeof value.cpu === "object"
+    && value.memory && typeof value.memory === "object"
+    && value.disk && typeof value.disk === "object"
+    && Array.isArray(value.containers));
 }
 
 async function prometheusQuery(query) {
@@ -8180,10 +9565,29 @@ async function readProjectDiskUsage(project) {
     const anchorRoot = safeRealpath(path.resolve(projectsRoot));
     const root = resolveProjectRoot(project);
     const key = `${project.slug}:${root}`;
-    return await projectDiskUsageReader.read(key, root, { anchorRoot });
+    const sharedKey = `disk:${sha256(key)}`;
+    const cached = await redisOperations.cacheGetJson(sharedKey);
+    if (validProjectDiskUsage(cached)) return cached;
+    const usage = await projectDiskUsageReader.read(key, root, { anchorRoot });
+    if (validProjectDiskUsage(usage) && usage.available) {
+      await redisOperations.cacheSetJson(
+        sharedKey,
+        usage,
+        usage.complete === true ? projectDiskUsageTtlMs : projectDiskUsagePartialTtlMs,
+      );
+    }
+    return usage;
   } catch {
     return unavailableProjectDiskUsage("source-unavailable");
   }
+}
+
+function validProjectDiskUsage(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && typeof value.available === "boolean"
+    && typeof value.complete === "boolean"
+    && Number.isSafeInteger(Number(value.bytes))
+    && Number(value.bytes) >= 0);
 }
 
 function matchApplicationContainers(app, project, containers) {
@@ -8211,6 +9615,217 @@ function statusClass(status) {
   if (["warning", "warn", "pending", "queued", "accepted", "pending-live-proof", "pending-provider", "plan-only", "degraded", "local-estimate", "symlink"].includes(clean)) return "warn";
   if (["error", "failed", "critical", "needs-work", "disabled", "offline", "archived", "bad", "no-go"].includes(clean)) return "bad";
   return "info";
+}
+
+const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
+  "use strict";
+  const button = document.getElementById("app-passkey-register");
+  const status = document.getElementById("app-passkey-status");
+  const b64 = (value) => {
+    const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/") + "===";
+    const raw = atob(normalized.slice(0, normalized.length - (normalized.length % 4)));
+    return Uint8Array.from(raw, (character) => character.charCodeAt(0)).buffer;
+  };
+  const b64url = (value) => {
+    const bytes = new Uint8Array(value);
+    let raw = "";
+    for (const byte of bytes) raw += String.fromCharCode(byte);
+    return btoa(raw).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+  };
+  const serialize = (credential) => {
+    if (typeof credential.toJSON === "function") return credential.toJSON();
+    const response = credential.response;
+    return {
+      id: credential.id,
+      rawId: b64url(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment || undefined,
+      clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+      response: {
+        clientDataJSON: b64url(response.clientDataJSON),
+        attestationObject: b64url(response.attestationObject),
+        transports: response.getTransports ? response.getTransports() : [],
+      },
+    };
+  };
+  const request = async (url, body) => fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    status.textContent = "Preparazione della passkey…";
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
+      const optionsResponse = await request("/auth/passkey/register/options", {});
+      const optionsPayload = await optionsResponse.json();
+      if (!optionsResponse.ok) throw new Error(optionsPayload.message || "Registrazione non disponibile.");
+      const options = optionsPayload.options;
+      const publicKey = {
+        ...options,
+        challenge: b64(options.challenge),
+        user: { ...options.user, id: b64(options.user.id) },
+        excludeCredentials: (options.excludeCredentials || []).map((item) => ({ ...item, id: b64(item.id) })),
+      };
+      const credential = await navigator.credentials.create({ publicKey });
+      if (!credential) throw new Error("Registrazione annullata.");
+      const verifyResponse = await request("/auth/passkey/register/verify", {
+        challenge: options.challenge,
+        credential: serialize(credential),
+      });
+      const result = await verifyResponse.json();
+      if (!verifyResponse.ok || result.ok !== true) throw new Error(result.message || "La passkey non è stata verificata.");
+      window.location.assign(result.redirect || "/");
+    } catch (error) {
+      button.disabled = false;
+      status.textContent = error?.message || "Registrazione passkey non riuscita.";
+    }
+  });
+})();`;
+
+const APP_PASSKEY_LOGIN_SCRIPT = `(() => {
+  "use strict";
+  const button = document.getElementById("app-passkey-login");
+  const status = document.getElementById("app-passkey-login-status");
+  const b64 = (value) => {
+    const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/") + "===";
+    const raw = atob(normalized.slice(0, normalized.length - (normalized.length % 4)));
+    return Uint8Array.from(raw, (character) => character.charCodeAt(0)).buffer;
+  };
+  const b64url = (value) => {
+    const bytes = new Uint8Array(value);
+    let raw = "";
+    for (const byte of bytes) raw += String.fromCharCode(byte);
+    return btoa(raw).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+  };
+  const serialize = (credential) => {
+    if (typeof credential.toJSON === "function") return credential.toJSON();
+    const response = credential.response;
+    return {
+      id: credential.id,
+      rawId: b64url(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment || undefined,
+      clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+      response: {
+        clientDataJSON: b64url(response.clientDataJSON),
+        authenticatorData: b64url(response.authenticatorData),
+        signature: b64url(response.signature),
+        userHandle: response.userHandle ? b64url(response.userHandle) : undefined,
+      },
+    };
+  };
+  const request = async (url, body) => fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const verifyUrl = () => {
+    const endpoint = new URL("/auth/passkey/login/verify", window.location.origin);
+    const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+    if (returnTo) endpoint.searchParams.set("returnTo", returnTo);
+    return endpoint.pathname + endpoint.search;
+  };
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    status.textContent = "Richiesta della passkey…";
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
+      const optionsResponse = await request("/auth/passkey/login/options", {});
+      const optionsPayload = await optionsResponse.json();
+      if (!optionsResponse.ok) throw new Error(optionsPayload.message || "Login non disponibile.");
+      const options = optionsPayload.options;
+      const publicKey = {
+        ...options,
+        challenge: b64(options.challenge),
+        allowCredentials: (options.allowCredentials || []).map((item) => ({ ...item, id: b64(item.id) })),
+      };
+      const credential = await navigator.credentials.get({ publicKey });
+      if (!credential) throw new Error("Autenticazione annullata.");
+      const verifyResponse = await request(verifyUrl(), {
+        challenge: options.challenge,
+        credential: serialize(credential),
+      });
+      const result = await verifyResponse.json();
+      if (!verifyResponse.ok || result.ok !== true) throw new Error(result.message || "Autenticazione passkey non riuscita.");
+      window.location.assign(result.redirect || "/");
+    } catch (error) {
+      button.disabled = false;
+      status.textContent = error?.message || "Autenticazione passkey non riuscita.";
+    }
+  });
+})();`;
+
+function passkeyScriptHash(script) {
+  return `sha256-${createHash("sha256").update(script).digest("base64")}`;
+}
+
+function safeAppPasskeyReturnTo(value) {
+  const raw = String(value || "");
+  if (raw === "/?section=secrets") return raw;
+  return "/";
+}
+
+function renderAppPasskeyFirstConfiguration(state) {
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<link rel="icon" href="data:,">
+<title>Prima configurazione / Control Center</title>
+${controlCenterStylesheetLinks()}
+</head>
+<body data-cc-theme="light">
+<main class="first-configuration-shell">
+  <section class="first-configuration-panel ui-panel-stack" aria-labelledby="app-passkey-title">
+    <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
+    <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
+    <h1 id="app-passkey-title">Configura l’accesso amministrativo</h1>
+    <p class="first-configuration-lead">Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno.</p>
+    <section class="first-configuration-card">
+      <p class="eyebrow">UNA PASSKEY</p>
+      <h2>Registra la passkey</h2>
+      <p>La credenziale pubblica resta registrata nel PostgreSQL del Control Center. La sessione termina automaticamente dopo 24 ore.</p>
+      <button id="app-passkey-register" class="button open" type="button">Registra la passkey</button>
+      <p id="app-passkey-status" class="first-configuration-note" role="status"></p>
+    </section>
+  </section>
+</main>
+<script>${APP_PASSKEY_REGISTRATION_SCRIPT}</script>
+</body>
+</html>`;
+}
+
+function renderAppPasskeyLogin(message = "") {
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<link rel="icon" href="data:,">
+<title>Accesso Control Center</title>
+${controlCenterStylesheetLinks()}
+</head>
+<body data-cc-theme="light">
+<main class="login-shell">
+  <section class="login-panel ui-panel-stack">
+    <span class="brand-mark">P</span>
+    <p class="eyebrow">${escapeHtml(environment.toUpperCase())}</p>
+    <h1>Accesso amministrativo</h1>
+    <p class="login-copy">${escapeHtml(message || "Autenticazione passkey richiesta.")}</p>
+    <button id="app-passkey-login" class="button open" type="button">Accedi con passkey</button>
+    <p id="app-passkey-login-status" class="first-configuration-note" role="status"></p>
+  </section>
+</main>
+<script>${APP_PASSKEY_LOGIN_SCRIPT}</script>
+</body>
+</html>`;
 }
 
 function renderFirstConfigurationEntry(message = "") {
@@ -8424,6 +10039,7 @@ function firstConfigurationStateLabel(state) {
 }
 
 function renderLogin(message) {
+  if (controlAuth.mode === "app-passkey") return renderAppPasskeyLogin(message);
   return `<!doctype html>
 <html lang="it">
 <head>
@@ -9522,10 +11138,9 @@ function planDatabaseCredentialUpdate(id, payload, context) {
 function planDatabaseDelete(id, payload, context) {
   const database = findById(context.databases, id, "Database");
   const confirmation = databaseDeleteConfirmation(database, "REQUEST");
-  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
   if (payload.confirm !== confirmation) {
-    appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; exact fresh local/off-site backup and restore drill are mandatory." });
-    return operationPlan("database.delete", context.environment, true, ["type the exact database name", "verify exact signed backup manifest", "verify exact disposable restore drill", "verify fresh off-site snapshot receipt", "create idempotent delete request", "approve in a separate owner action", "execute through the checkpointed state machine"], {
+    appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; a fresh passkey is required and backup evidence is optional by operator policy." });
+    return operationPlan("database.delete", context.environment, true, ["require fresh passkey", "bind the exact database identity", "record the explicit backup waiver", "execute through the checkpointed state machine"], {
       databaseId: database.id,
       projectId: database.projectId,
       engine: database.engine,
@@ -9533,15 +11148,14 @@ function planDatabaseDelete(id, payload, context) {
       databaseTouched: false,
       dataDeleted: false,
       credentialsExposed: false,
-      backupRequiredBeforeLiveDelete: true,
-      restorePointReady: restorePoint.ready,
-      evidenceBlockers: restorePoint.blockers,
+      backupRequiredBeforeLiveDelete: false,
+      restorePointReady: false,
+      evidenceBlockers: [],
       productionEvidence: false,
       confirmationRequired: confirmation,
-      typedNameRequired: database.name,
+      typedNameRequired: false,
     });
   }
-  if (String(payload.typedName || "") !== database.name) throw new RejectedOperationError(`Type the exact database name '${database.name}' to request deletion.`);
   const idempotencyKey = String(payload.idempotencyKey || "").trim();
   if (!idempotencyKey) throw new RejectedOperationError("Database delete request requires an idempotency key.");
   const state = readDatabaseDeleteOperationsState();
@@ -9551,19 +11165,47 @@ function planDatabaseDelete(id, payload, context) {
     if (parsed.database.id !== database.id) throw new RejectedOperationError("Idempotency key is already bound to another database.");
     return databaseDeleteOperationResponse("database.delete.requested", parsed, context, true);
   }
-  if (!restorePoint.ready) throw new RejectedOperationError(`Database delete blocked: ${restorePoint.blockers.join(", ")}.`);
   const identity = requestIdentity.getStore();
+  const waiver = databaseDeleteWaiverEvidence(database);
   const operation = createDatabaseDeleteOperation({
     id: rid(),
     database,
-    evidence: restorePoint.evidence,
+    evidence: waiver,
     idempotencyKey,
     requestedBy: identity?.subject || "unknown-admin",
   });
   state.operations[operation.id] = operation;
   writeDatabaseDeleteOperationsState(state);
-  appendAudit({ action: "database.delete.request", actor: identity?.subject, target: database.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Checkpointed database delete request created after exact backup, restore and off-site evidence verification." });
+  appendAudit({ action: "database.delete.request", actor: identity?.subject, target: database.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Checkpointed database delete request created after fresh passkey verification with an explicit backup-evidence waiver." });
   return databaseDeleteOperationResponse("database.delete.requested", operation, context, false);
+}
+
+function databaseDeleteWaiverEvidence(database) {
+  const evidence = {
+    resourceId: backupResourceId("database", database.id),
+    manifest: { status: "waived", databaseId: database.id },
+    restoreReport: { status: "waived" },
+    offsiteReceipt: { status: "waived" },
+    maxAgeMs: 0,
+    waived: true,
+  };
+  return { ...evidence, fingerprint: databaseDeleteEvidenceFingerprint(evidence) };
+}
+
+function deleteDatabaseNow(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  if (payload.confirm !== `DELETE-DATABASE-NOW:${database.id}`) throw new RejectedOperationError("Database deletion confirmation is invalid.");
+  const requested = planDatabaseDelete(database.id, {
+    ...payload,
+    confirm: databaseDeleteConfirmation(database, "REQUEST"),
+  }, context);
+  const operation = requested.deleteOperation;
+  const approved = approveDatabaseDelete(operation.id, {
+    confirm: databaseDeleteConfirmation(database, "APPROVE", operation.id),
+  }, context);
+  return executeDatabaseDelete(operation.id, {
+    confirm: databaseDeleteConfirmation(database, "EXECUTE", approved.deleteOperation.id),
+  }, context);
 }
 
 function approveDatabaseDelete(operationId, payload, context) {
@@ -9571,11 +11213,12 @@ function approveDatabaseDelete(operationId, payload, context) {
   const operation = findDatabaseDeleteOperation(state, operationId);
   const database = findById(context.databases, operation.database.id, "Database");
   if (payload.confirm !== databaseDeleteConfirmation(database, "APPROVE", operation.id)) throw new RejectedOperationError("Database delete approval confirmation is invalid.");
-  if (String(payload.typedName || "") !== database.name) throw new RejectedOperationError(`Type the exact database name '${database.name}' to approve deletion.`);
   if (operation.status === "approved") return databaseDeleteOperationResponse("database.delete.approved", operation, context, true);
   if (!new Set(["evidence-verified", "failed"]).has(operation.status)) throw new RejectedOperationError(`Database delete cannot be approved from state ${operation.status}.`);
-  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
-  if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete. Create a new request.");
+  if (!operation.evidence?.waived) {
+    const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
+    if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete. Create a new request.");
+  }
   const identity = requestIdentity.getStore();
   const approved = transitionDatabaseDeleteOperation(operation, "approved", { approvedBy: identity?.subject || "unknown-admin" });
   state.operations[approved.id] = approved;
@@ -9590,7 +11233,6 @@ function executeDatabaseDelete(operationId, payload, context) {
   if (operation.status === "completed") return databaseDeleteOperationResponse("database.delete.completed", operation, context, true);
   if (operation.status !== "approved") throw new RejectedOperationError(`Database delete execution requires approved state, not ${operation.status}.`);
   if (payload.confirm !== databaseDeleteConfirmation(operation.database, "EXECUTE", operation.id)) throw new RejectedOperationError("Database delete execution confirmation is invalid.");
-  if (String(payload.typedName || "") !== operation.database.name) throw new RejectedOperationError(`Type the exact database name '${operation.database.name}' to execute deletion.`);
   if (!databaseLiveApply) throw new RejectedOperationError("Database delete executor is disabled; metadata and credentials were preserved.");
 
   const databases = readDatabasesState();
@@ -9598,8 +11240,10 @@ function executeDatabaseDelete(operationId, payload, context) {
   if (!database || database.engine !== operation.database.engine || database.name !== operation.database.name || database.projectId !== operation.database.projectId) {
     throw new RejectedOperationError("Database metadata no longer matches the approved delete operation.");
   }
-  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
-  if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete.");
+  if (!operation.evidence?.waived) {
+    const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
+    if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete.");
+  }
 
   const registry = readDatabasePrincipalsState();
   let current = transitionDatabaseDeleteOperation(operation, "executing");
@@ -9646,12 +11290,13 @@ function executeDatabaseDelete(operationId, payload, context) {
 }
 
 function databaseDeleteOperationResponse(type, operation, context, idempotent = false, liveResult = null) {
+  const backupEvidenceWaived = operation.evidence?.waived === true;
   const publicOperation = {
     ...operation,
     database: { ...operation.database, credentialFile: "" },
   };
   return {
-    ...operationPlan(type, context.environment, false, ["preserve exact evidence fingerprint", "persist every destructive checkpoint", "never auto-retry after database drop"], {
+    ...operationPlan(type, context.environment, false, [backupEvidenceWaived ? "preserve the explicit backup waiver fingerprint" : "preserve exact evidence fingerprint", "persist every destructive checkpoint", "never auto-retry after database drop"], {
       databaseId: operation.database.id,
       projectId: operation.database.projectId,
       engine: operation.database.engine,
@@ -9660,8 +11305,9 @@ function databaseDeleteOperationResponse(type, operation, context, idempotent = 
       operationStatus: operation.status,
       resourceId: operation.resourceId,
       evidenceFingerprint: operation.evidenceFingerprint,
-      backupRequiredBeforeLiveDelete: true,
-      restorePointReady: true,
+      backupRequiredBeforeLiveDelete: !backupEvidenceWaived,
+      restorePointReady: !backupEvidenceWaived,
+      backupEvidenceWaived,
       databaseTouched: operation.status === "completed",
       dataDeleted: operation.status === "completed",
       credentialsExposed: false,
@@ -10008,7 +11654,7 @@ function planVaultSecretCreate(payload, context) {
 
 function planVaultSecretImportExisting(payload, context) {
   const state = readVaultState();
-  const candidates = readExistingSecretCandidates();
+  const candidates = readExistingSecretCandidates(context.projects);
   const replaceExisting = parseBoolean(payload.replaceExisting || "");
   const importable = candidates.filter((candidate) => replaceExisting || !state.items[candidate.id] || state.items[candidate.id]?.deletedAt);
   if (payload.confirm === "IMPORT-EXISTING-SECRETS") {
@@ -10044,6 +11690,7 @@ function planVaultSecretImportExisting(payload, context) {
         url: candidate.sourceLabel,
         rotationDays: candidate.rotationDays,
         rotationStatus: candidate.rotationDays > 0 ? "planned" : "not-set",
+        linkedApps: candidate.linkedApps,
         valueStored: true,
         valueFingerprint: sha256(rawValue),
         sealedValue: sealVaultValue(rawValue, candidate.id),
@@ -10668,6 +12315,96 @@ function applyBackupFileDelete(payload, context) {
   return { ...operation, backup, deletedFile };
 }
 
+function deleteApplicationBackup(payload, context) {
+  const projectId = sanitizeIdentifier(payload.projectId || "");
+  const project = resolveContextProject(context, projectId);
+  if (!project) throw new ValidationError("Applicazione backup non trovata.");
+  const manifestPath = safeRelativeBackupPath(payload.path || payload.manifestPath || "");
+  if (!manifestPath.startsWith("manifests/")) throw new ValidationError("Manifest backup non valido.");
+  const selected = applicationBackupRestoreOptions(applicationBackupManifests(project))
+    .find((option) => option.path === manifestPath);
+  if (!selected) throw new ValidationError("Backup applicazione non trovato o non valido.");
+  if (String(payload.confirm || "") !== `DELETE-APPLICATION-BACKUP:${selected.manifest.id}`) {
+    throw new RejectedOperationError("Conferma eliminazione backup applicazione non valida.");
+  }
+
+  const otherManifests = readBackupManifests().filter((manifest) => manifest.path !== selected.path);
+  const sharedArtifactPaths = new Set(selected.manifest.artifacts
+    .filter((artifact) => otherManifests.some((manifest) => manifest.artifacts.some((candidate) => candidate.path === artifact.path)))
+    .map((artifact) => artifact.path));
+
+  const root = backupRealpath(path.resolve(backupRoot));
+  const relativeTargets = [];
+  for (const artifact of selected.manifest.artifacts) {
+    const artifactPath = safeRelativeBackupPath(artifact.path);
+    if (sharedArtifactPaths.has(artifactPath)) continue;
+    relativeTargets.push(artifactPath);
+    for (const suffix of [".sha256", ".sig.json"]) {
+      const sidecar = `${artifactPath}${suffix}`;
+      if (existsSync(path.resolve(root, sidecar))) relativeTargets.push(sidecar);
+    }
+  }
+  relativeTargets.push(selected.path);
+
+  const targets = [...new Set(relativeTargets)].map((relativePath) => {
+    const absolutePath = path.resolve(root, relativePath);
+    if (!absolutePath.startsWith(`${root}${path.sep}`) || !existsSync(absolutePath)) {
+      throw new ValidationError("Un file del backup applicazione non e' disponibile.");
+    }
+    assertNoBackupPathSymlink(root, relativePath);
+    const stat = lstatSync(absolutePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new RejectedOperationError("Il backup applicazione contiene un target non eliminabile.");
+    }
+    return { relativePath, absolutePath, sizeBytes: stat.size };
+  });
+
+  const stagingRoot = path.join(root, ".delete-staging", rid());
+  const staged = [];
+  mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
+  try {
+    targets.forEach((target, index) => {
+      const stagedPath = path.join(stagingRoot, `${String(index).padStart(4, "0")}-${path.basename(target.relativePath)}`);
+      renameSync(target.absolutePath, stagedPath);
+      staged.push({ ...target, stagedPath });
+    });
+  } catch (error) {
+    for (const target of [...staged].reverse()) {
+      if (existsSync(target.stagedPath) && !existsSync(target.absolutePath)) renameSync(target.stagedPath, target.absolutePath);
+    }
+    rmSync(stagingRoot, { recursive: true, force: true });
+    throw new RejectedOperationError(`Eliminazione backup interrotta prima della rimozione: ${sanitizeMessage(error?.message || error)}`);
+  }
+  rmSync(stagingRoot, { recursive: true, force: false });
+
+  const totalBytes = targets.reduce((sum, target) => sum + target.sizeBytes, 0);
+  appendAudit({ action: "backup.application.delete", target: selected.path, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: `Backup applicazione ${project.slug} eliminato dopo una nuova verifica passkey.` });
+  const operation = operationPlan("backup.application.delete", context.environment, false, ["require a fresh passkey", "bind the exact application manifest", "preserve artifacts still referenced by another manifest", "remove the manifest and exclusively owned artifacts with their integrity sidecars", "write audit event"], {
+    projectId: project.slug,
+    manifestId: selected.manifest.id,
+    manifestPath: selected.path,
+    artifactCount: selected.manifest.artifacts.length,
+    artifactsDeleted: selected.manifest.artifacts.length - sharedArtifactPaths.size,
+    sharedArtifactsPreserved: sharedArtifactPaths.size,
+    filesDeleted: targets.length,
+    sizeBytes: totalBytes,
+    backupDeleted: true,
+    productionEvidence: false,
+  });
+  const backup = backupRecord({
+    operationId: operation.id,
+    action: "delete-application",
+    scope: applicationBackupScope(project.slug),
+    environment: context.environment,
+    status: "deleted",
+    dryRun: false,
+    backupRef: selected.path,
+    resultSummary: `Backup applicazione ${project.slug} eliminato dopo una nuova verifica passkey.`,
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup };
+}
+
 function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
   const now = new Date().toISOString();
   const operationId = rid();
@@ -11044,7 +12781,7 @@ function writeVaultState(state) {
   }
 }
 
-function readExistingSecretCandidates() {
+function readExistingSecretCandidates(projects = []) {
   const roots = [
     { root: existingSecretsDir, origin: "repo-secrets" },
     ...(includeRunSecretsInVaultImport ? [{ root: "/run/secrets", origin: "docker-secrets" }] : []),
@@ -11064,6 +12801,7 @@ function readExistingSecretCandidates() {
         label: humanName(itemKey),
         kind: existingSecretKind(itemKey, file.relativePath),
         rotationDays: existingSecretRotationDays(itemKey),
+        linkedApps: [],
         source: `existing-${file.origin}:${file.relativePath}`,
         sourceLabel: `${file.origin}/${file.relativePath}`,
         filePath: file.filePath,
@@ -11080,6 +12818,158 @@ function summarizeExistingSecretImport(candidates, vaultItems) {
   return {
     candidateCount: candidates.length,
     importableCount: importable.length,
+  };
+}
+
+function buildSecretInventory({ candidates = [], sensitiveMaterials = [], vaultItems = [] } = {}) {
+  const records = new Map();
+  const vaultById = new Map((vaultItems || []).map((item) => [item.id, item]));
+  const merge = (input) => {
+    const projectId = sanitizeIdentifier(input.projectId || "platform") || "platform";
+    const targetEnv = normalizeEnvironment(input.environment || "local");
+    const itemKey = validateVaultItemKey(input.itemKey || "secret_value");
+    const id = sanitizeIdentifier(input.id || vaultItemId(projectId, targetEnv, itemKey));
+    const current = records.get(id) || {
+      id,
+      itemKey,
+      label: sanitizeVaultText(input.label || humanName(itemKey), 96),
+      projectId,
+      environment: targetEnv,
+      kind: "application",
+      usageTargets: [],
+      source: "",
+      sourceLabel: "",
+      available: false,
+      mounted: false,
+      vaultStored: false,
+      sizeBytes: null,
+      valueExposed: false,
+    };
+    const sources = uniqueStrings([current.source, input.source]);
+    const sourceLabels = uniqueStrings([current.sourceLabel, input.sourceLabel]);
+    const usageTargets = uniqueStrings([...(current.usageTargets || []), ...(input.usageTargets || [])]);
+    const sizeBytes = Number.isSafeInteger(Number(input.sizeBytes)) && Number(input.sizeBytes) > 0
+      ? Math.max(Number(current.sizeBytes) || 0, Number(input.sizeBytes))
+      : current.sizeBytes;
+    records.set(id, {
+      ...current,
+      label: sanitizeVaultText(input.label || current.label || humanName(itemKey), 96),
+      kind: input.kind || current.kind || "application",
+      usageTargets,
+      source: sources.join(" / "),
+      sourceLabel: sourceLabels.join(" / "),
+      available: Boolean(current.available || input.available),
+      mounted: Boolean(current.mounted || input.mounted),
+      vaultStored: Boolean(current.vaultStored || input.vaultStored),
+      sizeBytes,
+      valueExposed: false,
+    });
+  };
+
+  for (const candidate of candidates || []) {
+    const mounted = runtimeSecretMounted(candidate.itemKey);
+    const vaultItem = vaultById.get(candidate.id);
+    merge({
+      id: candidate.id,
+      itemKey: candidate.itemKey,
+      label: candidate.label,
+      projectId: "platform",
+      environment: "local",
+      kind: candidate.kind,
+      source: candidate.source,
+      sourceLabel: candidate.sourceLabel,
+      available: true,
+      mounted,
+      vaultStored: Boolean(vaultItem?.valueStored),
+      sizeBytes: candidate.sizeBytes,
+      usageTargets: candidate.linkedApps || [],
+    });
+  }
+
+  for (const item of vaultItems || []) {
+    merge({
+      id: item.id,
+      itemKey: item.itemKey,
+      label: item.label,
+      projectId: item.projectId,
+      environment: item.environment,
+      kind: item.kind,
+      source: item.source || "control-center-vault",
+      sourceLabel: "control-center-vault",
+      available: Boolean(item.valueStored),
+      mounted: runtimeSecretMounted(item.itemKey),
+      vaultStored: Boolean(item.valueStored),
+      usageTargets: [item.projectId || "platform"],
+    });
+  }
+
+  for (const material of sensitiveMaterials || []) {
+    const itemKey = String(material.materialName || "APP_CONFIG").toLowerCase();
+    merge({
+      id: material.id,
+      itemKey,
+      label: material.materialName,
+      projectId: material.projectId,
+      environment: material.environment,
+      kind: material.materialKind,
+      source: material.source || "control-center-state",
+      sourceLabel: "sensitive-materials",
+      available: Boolean(material.materialConfigured),
+      mounted: runtimeSecretMounted(itemKey),
+      vaultStored: false,
+      usageTargets: material.usageTargets || [material.projectId || "platform"],
+    });
+  }
+
+  return [...records.values()]
+    .map((item) => ({
+      ...item,
+      status: secretInventoryStatus(item),
+      statusLabel: secretInventoryStatusLabel(secretInventoryStatus(item)),
+    }))
+    .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`))
+    .map((item) => sanitizeEvent(item));
+}
+
+function runtimeSecretMounted(itemKey) {
+  const name = String(itemKey || "").trim();
+  if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(name)) return false;
+  const target = path.join("/run/secrets", name);
+  try {
+    return statSync(target).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function secretInventoryStatus(item) {
+  if (item.mounted && item.vaultStored) return "mounted-and-vaulted";
+  if (item.mounted) return "mounted";
+  if (item.vaultStored) return "vault-encrypted";
+  if (item.available) return "available-on-disk";
+  return "missing";
+}
+
+function secretInventoryStatusLabel(status) {
+  switch (String(status || "")) {
+    case "mounted-and-vaulted": return "Montato + cifrato";
+    case "mounted": return "Montato runtime";
+    case "vault-encrypted": return "Vault cifrato";
+    case "available-on-disk": return "Disponibile PRE Mac";
+    case "missing": return "Non rilevato";
+    default: return "Metadata rilevati";
+  }
+}
+
+function secretInventorySummary(inventory = []) {
+  const items = Array.isArray(inventory) ? inventory : [];
+  return {
+    total: items.length,
+    mounted: items.filter((item) => item.mounted).length,
+    available: items.filter((item) => item.available).length,
+    vaulted: items.filter((item) => item.vaultStored).length,
+    missing: items.filter((item) => item.status === "missing").length,
+    valueExposed: false,
   };
 }
 
@@ -11664,12 +13554,16 @@ function databaseRecord({
   const fallbackProject = cleanProjectId || "platform";
   const cleanName = validateDatabaseName(name || `${fallbackProject}_${cleanEngine}`);
   const cleanOwnerRole = validateDatabaseName(ownerRole || `${fallbackProject}_app`);
+  const requestedDisplayName = sanitizeOptionalDescription(displayName || "");
+  const cleanDisplayName = requestedDisplayName.toLowerCase() === cleanName.toLowerCase()
+    ? cleanName
+    : requestedDisplayName;
   return sanitizeEvent({
     id: sanitizeIdentifier(id || databaseId(cleanProjectId, cleanEngine, cleanName)),
     projectId: cleanProjectId,
     engine: cleanEngine,
     name: cleanName,
-    displayName: sanitizeOptionalDescription(displayName || ""),
+    displayName: cleanDisplayName,
     ownerRole: cleanOwnerRole,
     principalBindingId: sanitizeIdentifier(principalBindingId),
     principalManaged: Boolean(principalManaged),
@@ -11813,6 +13707,7 @@ function vaultItemRecord({
   url = "",
   rotationDays = 90,
   rotationStatus = "",
+  linkedApps = [],
   valueStored = false,
   valueFingerprint = "",
   sealedValue = null,
@@ -11837,6 +13732,7 @@ function vaultItemRecord({
     url: sanitizeVaultText(url, 200),
     rotationDays: cleanRotationDays,
     rotationStatus: rotationStatus || (cleanRotationDays > 0 ? "planned" : "not-set"),
+    linkedApps: Array.isArray(linkedApps) ? [...new Set(linkedApps.map((item) => sanitizeIdentifier(item)).filter(Boolean))].slice(0, 100) : [],
     valueStored: Boolean(valueStored || sealedValue),
     fingerprintStored: Boolean(cleanFingerprint),
     valueFingerprint: includeSealed ? cleanFingerprint : "",
@@ -12958,7 +14854,7 @@ function defaultMaterialStores(notificationChannels = []) {
   return [
     { id: "docker-compose-files", name: "Docker secrets", status: "configured by compose files", materialConfigured: true, valueExposed: false, productionEvidence: false },
     { id: "control-center-session", name: "Control Center session store", status: controlAuth.enabled ? "PostgreSQL-backed" : "test-only disabled", materialConfigured: controlAuth.enabled, valueExposed: false, productionEvidence: false },
-    { id: "admin-identity", name: "Admin identity provider", status: controlAuth.mode === "oidc-passkey" ? "OIDC passkey-only" : "test-only disabled", materialConfigured: controlAuth.mode === "oidc-passkey", valueExposed: false, productionEvidence: false },
+    { id: "admin-identity", name: "Admin identity provider", status: controlAuth.mode === "app-passkey" ? "Application passkey in Control Center PostgreSQL" : controlAuth.mode === "oidc-passkey" ? "OIDC passkey-only" : "test-only disabled", materialConfigured: ["oidc-passkey", "app-passkey"].includes(controlAuth.mode), valueExposed: false, productionEvidence: false },
     { id: "alert-delivery", name: "Alert delivery material", status: alertDeliveryConfigured ? "partially configured" : "metadata only", materialConfigured: alertDeliveryConfigured, valueExposed: false, productionEvidence: false },
     { id: "provider-private-material", name: "Provider private material", status: "tracked by provider connections", materialConfigured: false, valueExposed: false, productionEvidence: false },
     { id: "kms-metadata", name: "Platform Local KMS metadata", status: "evidence through infra-ops", materialConfigured: false, valueExposed: false, productionEvidence: false },

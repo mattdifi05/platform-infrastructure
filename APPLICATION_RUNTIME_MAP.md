@@ -1,84 +1,67 @@
 # Application Runtime Map
 
-Snapshot UTC: 2026-07-10T03:48:01Z
-Source of truth: live Docker runtime, effective Compose, Control Center discovery, source directories, database catalogs, backup inventory and functional HTTP probes.
+Snapshot UTC: 2026-08-30T13:51:06Z
 
-This map is a migration gate. A resource must not be renamed, moved, recreated, rotated or deleted until its row has an exact rollback and a fresh resource-specific backup.
+Source of truth: effective live Compose, running containers, Control Center
+state, database catalogs, source manifests and functional host probes. The
+immutable source coordinates are in `config/v1-local-private-source-lock.json`.
 
 ## Platform boundary
 
-The repository is the hosting and control-plane layer. Hosted application source remains outside this repository under `/home/platform_infrastructure/src`.
+The platform repository owns Compose, networks, routers, WAF, common runtime
+images and Control Center. Application source is versioned in its owning
+private repository and materialized on the host under
+`/home/platform_infrastructure/v1-fresh-data/src`. Application `.env` files,
+uploads, logs, caches and persistent data are external state.
 
-The services `enterprise-backend`, `enterprise-web`, `enterprise-worker-jobs`
-and `enterprise-worker-notifications` are currently built from the external
-Stexor source tree. They are Stexor workload components, not generic platform
-core. T18 has removed this ownership ambiguity in repository candidates: the
-platform core no longer defines them, while the isolated Stexor candidate owns
-five renamed workload services, images, environment, schema and migrations.
-The live containers in this map remain unchanged until an approved cutover.
+## Published host matrix
 
-## Authoritative application map
-
-| Application ID | Source | Runtime | Host | Database and principal | Storage | Network | Backup identity | Dependencies | Functional state |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| anniversary | `/home/platform_infrastructure/src/anniversary` | `php-anniversary`; image `sha256:a1d1c9cab77a...` | `anniversary.platform-infrastructure.com` | MariaDB `anniversary`; runtime user `anniversary_user`; state currently declares stale owner `anniversary_app` | No MinIO bucket registered | `enterprise_net` | source `applications/anniversary`; DB inside global MariaDB dump | project-router, WAF, Traefik, MariaDB | HTTP 200 |
-| fiplatform | `/home/platform_infrastructure/src/fiplatform`; legacy symlink `fireport -> fiplatform` | `php-fiplatform`; image `sha256:a1d1c9cab77a...` | `fiplatform.platform-infrastructure.com`; alias `fireport` | MariaDB `fiplatform`; runtime user `app_runtime` | No MinIO bucket registered | `enterprise_net` | source `applications/fiplatform`; DB inside global MariaDB dump | project-router, WAF, Traefik, MariaDB | HTTP 200 |
-| matthewdifilippo | `/home/platform_infrastructure/src/matthewdifilippo` | `php-matthewdifilippo`; image `sha256:a1d1c9cab77a...` | `matthewdifilippo.platform-infrastructure.com` | No application DB found or declared | No MinIO bucket registered | `enterprise_net` | source `applications/matthewdifilippo` | project-router, WAF, Traefik | HTTP 200 |
-| stream | `/home/platform_infrastructure/src/stream` | `php-stream`; image `sha256:a1d1c9cab77a...` | `stream.platform-infrastructure.com` | MariaDB `stream`; runtime user `stream_user` | No MinIO bucket registered | `enterprise_net` | source `applications/stream`; DB inside global MariaDB dump | project-router, WAF, Traefik, MariaDB | HTTP 303 redirect |
-| workcalendar | `/home/platform_infrastructure/src/workcalendar` | `php-workcalendar`; image `sha256:a1d1c9cab77a...` | `workcalendar.platform-infrastructure.com` | MariaDB `workcalendar`; runtime user `workcalendar_user`; state currently declares stale owner `workcalendar_app` | No MinIO bucket registered | `enterprise_net` | source `applications/workcalendar`; DB inside global MariaDB dump | project-router, WAF, Traefik, MariaDB | HTTP 302 redirect |
-| account | `/home/platform_infrastructure/src/stexor` project surface `account` | `node-account`; shared Stexor backend/workers listed below | `account.platform-infrastructure.com` | PostgreSQL `stexor`; owner `stexor_owner`; runtime login `app_user` | No MinIO bucket registered; Stexor backend currently has MinIO root material mounted | `enterprise_net` | shared source artifact `applications/stexor`; DB `postgres/stexor-*.dump` | Stexor UI, Stexor backend, PostgreSQL, Redis, NATS, Keycloak, MinIO | HTTP 200 |
-| ui | `/home/platform_infrastructure/src/stexor` project surface `ui` | `node-ui`; shared Stexor backend/workers listed below | `ui.platform-infrastructure.com` | Uses Stexor services and PostgreSQL `stexor`; no independent DB | No MinIO bucket registered | `enterprise_net` | shared source artifact `applications/stexor`; DB follows account dependency | Stexor account/backend, PostgreSQL, Redis, NATS, Keycloak, MinIO | HTTP 200 |
-| public | `/home/platform_infrastructure/src/public` | No registered runtime; directory is explicitly excluded by current discovery | expected `public.platform-infrastructure.com` | None found | None registered | None assigned | source `applications/public` exists | unresolved | HTTP 404; OPEN mapping defect |
-
-## Stexor workload components
-
-| Component | Runtime image ID | Current ownership | Data dependencies |
+| Host | Runtime target | Source owner | Persistent dependency |
 | --- | --- | --- | --- |
-| `enterprise-backend` | `sha256:ac1f6769fcb1...` | External Stexor source, currently named as platform service | Live: PostgreSQL `stexor` as `app_user`, Redis, NATS, MinIO root, SMTP and Turnstile. T14 candidate: `app_backend_runtime`, no MinIO credential. |
-| `enterprise-web` | `sha256:e1214bb57666...` | External Stexor source; appears redundant with the dedicated account/UI runtimes and requires T18 verification | Stexor API and identity |
-| `enterprise-worker-jobs` | `sha256:e1685e2c4047...` | External Stexor source | Live union DB credential; T14 candidate limits `app_worker_jobs_runtime` to audit outbox update and backup/restore metrics read, plus Redis and NATS. |
-| `enterprise-worker-notifications` | `sha256:960788c6ebf1...` | External Stexor source | Live union DB credential; T14 candidate uses a connect-only DB identity with no table privileges, plus Redis, NATS compatibility, SMTP and Alertmanager webhook. |
+| `portal.platform-infrastructure.com` | `control-center:8080` | platform repository | PostgreSQL `control_auth` schema and Control Center state |
+| `auth.platform-infrastructure.com` | `keycloak:8080` | pinned Keycloak image plus platform config | PostgreSQL `keycloak` |
+| `api.platform-infrastructure.com` | `backend:3000` | `mattdifi05/Stexor-account` | PostgreSQL `stexor`, Redis and NATS |
+| `account.platform-infrastructure.com` | `node-account:3000` | `mattdifi05/Stexor-account` | Stexor backend/PostgreSQL `stexor` |
+| `ui.platform-infrastructure.com` | `node-ui:3000` | `mattdifi05/Stexor-account` | Stexor backend/PostgreSQL `stexor` |
+| `opstudents.platform-infrastructure.com` | `node-opstudents:3000` | `mattdifi05/Platform-hosted-applications` | no application database |
+| `anniversary.platform-infrastructure.com` | `php-anniversary:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `anniversary` |
+| `fiplatform.platform-infrastructure.com` | `php-fiplatform:80` | `mattdifi05/FeI-Platform` | MariaDB `fiplatform` |
+| `fireport.platform-infrastructure.com` | alias of `php-fiplatform:80` | `mattdifi05/FeI-Platform` | MariaDB `fiplatform` |
+| `matthewdifilippo.platform-infrastructure.com` | `php-matthewdifilippo:80` | `mattdifi05/Platform-hosted-applications` | no application database |
+| `stream.platform-infrastructure.com` | `php-stream:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `stream` |
+| `workcalendar.platform-infrastructure.com` | `php-workcalendar:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `workcalendar` |
 
-## Database inventory
+The 2026-08-30 live probe passed all 12 hosts. CoreDNS is authoritative for
+`platform-infrastructure.com` on the LAN and maps the apex and wildcard to
+`192.168.1.164`; Traefik routes the explicit portal/auth/API surfaces and the
+project-router resolves registered application hosts.
 
-PostgreSQL databases: `keycloak`, `postgres`, `stexor`, and legacy restore-test database `platform_restore_test_20260625203102`.
+## Workload components
 
-MariaDB application databases: `anniversary`, `fiplatform`, `stream`, and `workcalendar`.
+| Source | Runtime services | Build/runtime contract |
+| --- | --- | --- |
+| FeI Platform | `php-fiplatform` (`fireport` is an alias) | common pinned PHP-Apache image, bind-mounted locked source |
+| Stexor | `backend`, `web`, `worker-jobs`, `worker-notifications`, `node-account`, `node-ui` | four local images built by `compose.local-private-applications-build.yaml`; account/UI bind-mounted from the same locked checkout |
+| Hosted applications | `node-opstudents`, `php-anniversary`, `php-matthewdifilippo`, `php-stream`, `php-workcalendar` | pinned Node or common pinned PHP-Apache runtime, bind-mounted locked source |
 
-MariaDB drift requiring classification before any delete: `node_demo_app`, `phpmyadmin`, `stexor_auth`, and `u778675014_fip`. No deletion is authorized by this document.
+The broad shared `php-apache` service is disabled by the current application
+overlay. No application source is recovered from a mutable image alone.
 
-## Isolation gaps observed
+## Persistent state boundary
 
-All workloads currently share `enterprise_net`. PHP runtimes still receive broad repository/control-state mounts and shared SMTP/signing material. The legacy `php-apache` shared runtime is still running despite its disabled profile. The project-router has broad source and host-parent mounts. Control Center has DB superuser material. Backup scheduler has the production Docker socket.
+PostgreSQL persistent databases are `keycloak` and `stexor`; Control Center
+authentication lives in its PostgreSQL `control_auth` schema. MariaDB
+application databases are `anniversary`, `fiplatform`, `stream` and
+`workcalendar`. Redis/NATS operational state, certificates, Docker volumes,
+Control Center catalog/Vault/backup metadata, application uploads and every
+secret remain outside Git and must be restored from the recovery material.
 
-These remain the live state. The T12/T13 candidate removes broad hosted mounts,
-shared PHP gateway/SMTP secrets and raw scheduler socket; adds per-app networks,
-read-only source/runtime boundaries and cgroup ceilings; and passed disposable
-startup/connectivity tests. It is not live until an approved progressive
-rollout. The T14 candidate adds per-service PostgreSQL credentials, an explicit
-dual-credential revoke/rollback sequence, removes MinIO root from the backend
-and provides a prefix-scoped service-account bootstrap. Sandbox positive and
-negative tests are required before any live credential cutover. T18 moves the
-Stexor-specific T14 SQL and rollout commands into the Stexor repository and
-adds a verified core/combined workload lock; no app migration remains in the
-platform candidate.
+No user MinIO object set is required by the current application inventory.
+MinIO configuration and any required empty bucket/policy are runtime state,
+not application source.
 
-T11 live adoption on 2026-07-10 moved project-router and the local registry under the single `platform_infra_vps` Compose project. The registry retained the exact `enterprise_local_registry_data` volume and catalog. Other services were not recreated; their historical Compose labels still mention the old ignored overlays, but all future deploy commands use `compose.runtime.yaml` and the canonical wrapper.
+## Reproduction gate
 
-## Backup and restore coverage
-
-Fresh local source archives exist for anniversary, fiplatform, matthewdifilippo, public, stexor, stream and workcalendar. Fresh MariaDB global dumps and a Stexor PostgreSQL dump exist.
-
-Current gaps:
-
-- PostgreSQL backup does not prove coverage for the Keycloak identity database.
-- Keycloak backup is configuration-only.
-- account and ui share one Stexor source artifact and need explicit restore manifests.
-- Control Center/Vault state portability is not yet proven.
-- off-site evidence is older and predates the current runtime fingerprint.
-- no empty-host Ubuntu restore has been executed for this baseline.
-- no MinIO buckets exist in the live catalog.
-
-## Health evidence
-
-The probes used the local CA and forced the public host to the local edge. A generic HTTP success is not sufficient for final closure; application login, controlled DB read/write, jobs and storage remain required after each affected rollout.
+No application, source directory, database, alias, route or external-state
+class in this map may be removed during V1.1 cleanup until the clean-checkout
+proof in `V1.0-LIVE-PARITY.md` is PASS. This map authorizes no deletion.

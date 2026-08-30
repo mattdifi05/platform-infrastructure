@@ -27,9 +27,8 @@
     ],
     "secrets": [
       "alertmanager_webhook_token",
+      "backup_signing_keys",
       "control_center_database_url",
-      "control_center_first_configuration_bootstrap_token",
-      "control_center_first_configuration_keycloak_client_secret",
       "control_center_vault_keys",
       "docker_action_backup_catalog",
       "docker_action_backup_job_execute",
@@ -59,6 +58,7 @@
       "docker-action-broker",
       "grafana",
       "keycloak",
+      "local-dns",
       "loki",
       "mariadb",
       "minio",

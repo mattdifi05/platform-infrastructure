@@ -22,9 +22,18 @@ export async function createFirstConfiguration({
   env = process.env,
   store,
   keycloak,
+  oidc,
   fetchImpl = fetch,
   now = () => Date.now(),
 } = {}) {
+  const authMode = String(env.CONTROL_CENTER_AUTH_MODE || "").trim().toLowerCase();
+  if (authMode === "app-passkey") {
+    const mode = String(env.CONTROL_CENTER_FIRST_CONFIGURATION_MODE || "disabled").trim().toLowerCase();
+    if (mode === "disabled") return new DisabledFirstConfiguration();
+    if (mode !== "required") throw new FirstConfigurationError("CONTROL_CENTER_FIRST_CONFIGURATION_MODE must be required or disabled.", 500, "first_configuration_config_invalid");
+    if (!oidc || oidc.mode !== "app-passkey") throw new FirstConfigurationError("Application passkey authentication is unavailable.", 503, "first_configuration_app_passkey_unavailable");
+    return new DirectFirstConfiguration({ auth: oidc });
+  }
   const config = readFirstConfigurationConfig(env);
   if (!config.enabled) return new DisabledFirstConfiguration();
 
@@ -238,6 +247,63 @@ class FirstConfiguration {
   }
 
   async close() { await this.store.close(); }
+}
+
+/**
+ * Application-owned onboarding. The first visit is intentionally a single
+ * WebAuthn registration action: there is no bootstrap code, Keycloak handoff,
+ * impersonation cookie, or external identity-origin callback.
+ */
+class DirectFirstConfiguration {
+  constructor({ auth }) {
+    this.enabled = true;
+    this.direct = true;
+    this.auth = auth;
+    this.config = auth.config;
+  }
+
+  async status() {
+    const passkeys = await this.auth.store.listPasskeys(this.config.adminSubject);
+    const passkeyCount = passkeys.length;
+    const complete = passkeyCount >= 1;
+    return {
+      state: complete ? FIRST_CONFIGURATION_STATES.COMPLETE : FIRST_CONFIGURATION_STATES.REQUIRED,
+      complete,
+      adminSubject: this.config.adminSubject,
+      adminUsername: this.config.adminUsername,
+      adminEmail: this.config.adminEmail,
+      passkeyCount,
+      minimumPasskeys: 1,
+      passkeys: passkeys.map((item) => ({ id: item.id, createdAt: item.createdAt, expiresAt: item.expiresAt })),
+      publicOrigin: this.config.publicOrigin,
+      identityOrigin: this.config.publicOrigin,
+      rpId: this.config.rpId,
+    };
+  }
+
+  async authenticate(req) {
+    const state = await this.status();
+    if (state.complete) {
+      const session = await this.auth.authenticate(req);
+      return session.ok ? { ...session, state } : {
+        ok: false,
+        status: 401,
+        code: "first_configuration_auth_required",
+        message: "Control Center passkey authentication required.",
+      };
+    }
+    return {
+      ok: false,
+      status: 401,
+      code: "first_configuration_auth_required",
+      message: "Register the Control Center passkey to continue.",
+      state,
+    };
+  }
+
+  async notePasskeyLogin() { return this.status(); }
+  async validateMutation(_req, identity) { return identity; }
+  async close() {}
 }
 
 class DisabledFirstConfiguration {

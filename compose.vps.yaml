@@ -62,7 +62,7 @@ services:
   control-center:
     restart: always
     environment:
-      CONTROL_CENTER_AUTH_MODE: oidc-passkey
+      CONTROL_CENTER_AUTH_MODE: app-passkey
       CONTROL_CENTER_AUTH_STORE: postgres
       CONTROL_CENTER_DATABASE_LIVE_APPLY: ${CONTROL_CENTER_DATABASE_LIVE_APPLY:-true}
 

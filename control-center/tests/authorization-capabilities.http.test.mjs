@@ -194,7 +194,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       assert.equal((await response.json()).error, "endpoint_capability_denied", pathname);
     }
   }
-  for (const pathname of ["/", "/?section=vault", "/?section=projects&project=example", "/index.html?section=vault"]) {
+  for (const pathname of ["/?section=secrets"]) {
     assert.equal((await request(baseUrl, "GET", pathname)).status, 401, `anonymous UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.viewer)).status, 403, `viewer UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.admin)).status, 403, `admin UI ${pathname}`);
@@ -202,6 +202,27 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     assert.equal(stale.status, 428, `stale owner UI ${pathname}`);
     assert.equal((await stale.json()).error, "admin_reauthentication_required");
   }
+  const staleBrowserPage = await fetch(`${baseUrl}/?section=secrets`, {
+    headers: { accept: "text/html", cookie: identities.owner301.cookie },
+    redirect: "manual",
+  });
+  assert.equal(staleBrowserPage.status, 303);
+  assert.equal(staleBrowserPage.headers.get("location"), "/auth/login?returnTo=%2F%3Fsection%3Dsecrets");
+  const staleBrowserMutation = await fetch(`${baseUrl}/actions/vault-command`, {
+    method: "POST",
+    headers: {
+      accept: "text/html",
+      cookie: identities.owner301.cookie,
+      origin: "https://portal.example.test",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/x-www-form-urlencoded",
+      "x-csrf-token": identities.owner301.csrf,
+    },
+    body: new URLSearchParams({ action: "reveal", _csrf: identities.owner301.csrf }),
+    redirect: "manual",
+  });
+  assert.equal(staleBrowserMutation.status, 303);
+  assert.equal(staleBrowserMutation.headers.get("location"), "/auth/login");
   for (const [method, pathname] of [
     ["HEAD", "/"],
     ["OPTIONS", "/index.html"],

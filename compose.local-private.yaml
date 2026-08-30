@@ -1,8 +1,9 @@
 # V1 LOCAL_PRIVATE filesystem/setup overlay. Load after every canonical
 # runtime overlay so immutable release sources stay read-only while mutable
-# state, TLS material and one-time bootstrap secrets remain deployment-owned.
-# Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR and the three
-# setup file sources below must be absolute paths outside the release tree.
+# state, TLS material and the runtime secret store remain deployment-owned.
+# Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR,
+# PLATFORM_SECRETS_ROOT and CONTROL_CENTER_LOCAL_CA_CERT_SOURCE must be
+# absolute paths outside the release tree.
 # The current immutable backup scheduler is broker-only. This overlay does not
 # grant it docker.sock; LOCAL_PRIVATE reconciliation keeps it READY_BUT_DISABLED
 # until the separately admitted broker/provider material is available.
@@ -31,33 +32,25 @@ services:
     environment:
       CONTROL_CENTER_ENV: local_private
       CONTROL_CENTER_FIRST_CONFIGURATION_MODE: required
-      CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE: /run/secrets/control_center_first_configuration_bootstrap_token
-      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: ${CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID:-platform-first-configuration}
-      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: /run/secrets/control_center_first_configuration_keycloak_client_secret
       CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME:-admin}
       CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL:-${PROJECTS_GATEWAY_EMAIL:-admin@example.com}}
-      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:-192.168.1.0/24,127.0.0.0/8,::1/128}
       CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12,127.0.0.0/8,::1/128}
-      CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/account/}
-      CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT: ${CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}
-      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/admin/realms/platform}
-      CONTROL_CENTER_MIN_PASSKEYS: ${CONTROL_CENTER_MIN_PASSKEYS:-2}
+      CONTROL_CENTER_MIN_PASSKEYS: ${CONTROL_CENTER_MIN_PASSKEYS:-1}
+      CONTROL_CENTER_PASSKEY_TTL_SECONDS: ${CONTROL_CENTER_PASSKEY_TTL_SECONDS:-315360000}
+      CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: ${CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS:-true}
+      CONTROL_CENTER_REDIS_LIVE_APPLY: "true"
       NODE_EXTRA_CA_CERTS: /run/platform/tls/control-center-local-ca.pem
     volumes: !override
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
       - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
       - ${CONTROL_CENTER_LOCAL_CA_CERT_SOURCE:?set CONTROL_CENTER_LOCAL_CA_CERT_SOURCE}:/run/platform/tls/control-center-local-ca.pem:ro
-    secrets:
-      - control_center_first_configuration_bootstrap_token
-      - control_center_first_configuration_keycloak_client_secret
-    extra_hosts:
-      - "${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}:${CONTROL_CENTER_IDENTITY_EDGE_IP:-host-gateway}"
-
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:?set exact LOCAL_PRIVATE runtime lock}:/run/platform/hosted-workloads.lock.json:ro
   project-router:
     environment:
       PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e
       PROJECT_HOST_SUFFIX: .platform-infrastructure.com
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
       NODE_PROJECT_HOSTS: ""
@@ -82,10 +75,27 @@ services:
       - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/mysql/ssl:ro
 
   phpmyadmin:
+    profiles: !override
+      - admin
+    pids_limit: 256
+    restart: unless-stopped
+    environment: !override
+      PMA_HOST: platform.local
+      PMA_PORT: 3306
+      PMA_SSL_CA: /etc/phpmyadmin/certs/ca.pem
+      PMA_SSL_VERIFIES: "1"
+      UPLOAD_LIMIT: 256M
+    secrets: !reset []
     volumes: !override
       - ./phpmyadmin/apache-forwarded-proto.conf:/etc/apache2/conf-enabled/forwarded-proto.conf:ro
       - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
       - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/phpmyadmin/certs:ro
+
+  phppgadmin:
+    profiles: !override
+      - admin
+    pids_limit: 256
+    restart: unless-stopped
 
   node-exporter:
     volumes: !override
@@ -93,14 +103,13 @@ services:
       - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
 
 secrets:
+  phpmyadmin_control_password: !reset null
+  backup_signing_keys:
+    file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/backup_signing_keys.txt
   alertmanager_webhook_token:
     file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/alertmanager_webhook_token.txt
   control_center_database_url:
     file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/control_center_database_url.txt
-  control_center_first_configuration_bootstrap_token:
-    file: ${CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE:?set CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE}
-  control_center_first_configuration_keycloak_client_secret:
-    file: ${CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:?set CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE}
   control_center_vault_keys:
     file: ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/control_center_vault_keys.txt
   docker_action_backup_catalog:

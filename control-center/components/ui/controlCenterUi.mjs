@@ -1,14 +1,12 @@
 export const controlCenterComponents = [
   "OperationsShell",
   "OperationsTopbar",
-  "StatusGate",
   "ProjectTable",
   "ProjectActions",
   "ProjectFileBrowser",
   "DatabaseInventory",
   "ResourceUsageTable",
   "MetricTile",
-  "StatusPill",
   "ActionButton",
   "ProjectSwitcher",
   "EmptyState",
@@ -22,7 +20,10 @@ export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
 ];
 
-const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260711-0110";
+// Keep the default version in sync with the current UI contract so browsers
+// revalidate the stylesheet/script after a Control Center image update. Hosts
+// may still override it explicitly through CONTROL_CENTER_ASSET_VERSION.
+const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260830-sidebar-logout-2";
 
 function versionedAssetHref(href) {
   return `${href}${href.includes("?") ? "&" : "?"}v=${encodeURIComponent(controlCenterAssetVersion)}`;

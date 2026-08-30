@@ -205,7 +205,7 @@ export function safeEqual(left, right) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function parseCidrs(value) {
+export function parseCidrs(value) {
   const cidrs = String(value || "").split(",").map((item) => item.trim()).filter(Boolean).map(parseCidr);
   if (cidrs.length === 0 || cidrs.length > 32) throw new FirstConfigurationConfigError("First-configuration CIDR lists cannot be empty.");
   return cidrs;

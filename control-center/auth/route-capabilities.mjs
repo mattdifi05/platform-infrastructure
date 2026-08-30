@@ -129,17 +129,21 @@ const CONTROL_ROUTES = Object.freeze([
 ]);
 
 const LEGACY_SENSITIVE_ROUTES = Object.freeze([
-  // The HTML shell builds one monolithic operational context containing Vault
-  // and backup metadata, so it must cross the same fresh-owner boundary before
-  // any context reads occur.
-  ownerFresh("GET", "ui.control-center"),
-  ownerFresh("GET", "ui.control-center.index", "index.html"),
+  // A valid application session keeps the shell available for its full hard
+  // lifetime. Fresh passkey proof remains attached to sensitive operations.
+  viewer("ui.control-center"),
+  viewer("ui.control-center.index", "index.html"),
   ownerFresh("POST", "legacy.vault", "actions", "vault-command"),
   ownerFresh("POST", "legacy.database", "actions", "database-command"),
+  ownerFresh("POST", "legacy.database-delete", "actions", "database-delete-command"),
   ownerFresh("POST", "legacy.database-admin-login", "actions", "database-admin-login"),
   ownerFresh("GET", "legacy.phpmyadmin-login", "actions", "phpmyadmin-login"),
   ownerFresh("GET", "legacy.phppgadmin-login", "actions", "phppgadmin-login"),
   ownerFresh("POST", "legacy.backup", "actions", "backup-command"),
+  ownerFresh("POST", "legacy.backup-delete", "actions", "backup-delete-command"),
+  admin("legacy.redis-backup", "actions", "redis-backup-command"),
+  ownerFresh("POST", "legacy.redis-restore", "actions", "redis-restore-command"),
+  ownerFresh("POST", "legacy.redis-backup-delete", "actions", "redis-backup-delete-command"),
   ownerFresh("POST", "legacy.identity", "actions", "identity-command"),
   ownerFresh("POST", "legacy.settings", "actions", "settings-command"),
 ]);

@@ -2,9 +2,10 @@
   "use strict";
 
   var appSelector = ".cc-app-shell, .login-shell";
-  var cacheLimit = 32;
-  var cacheTtlMs = 15000;
-  var prefetchTimeoutMs = 1200;
+  var cacheLimit = 64;
+  var cacheTtlMs = 300000;
+  var prefetchTimeoutMs = 15000;
+  var preloadWorkerCount = 4;
   var sidebarStateKey = "platform-control-center-sidebar";
   var htmlCache = new Map();
   var activeRequest = null;
@@ -20,6 +21,7 @@
   var pendingSidebarScrollTop = null;
   var pendingSidebarScrollAt = 0;
   var selectedFileEntry = null;
+  var passkeyActionInFlight = false;
 
   function sameOriginUrl(value) {
     try {
@@ -32,6 +34,32 @@
 
   function canRenderPath(url) {
     return url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/login" || url.pathname === "/logout";
+  }
+
+  function isSensitivePortalUrl(url) {
+    return Boolean(url && (
+      url.pathname === "/auth/login"
+      || ((url.pathname === "/" || url.pathname === "/index.html") && url.searchParams.get("section") === "secrets")
+    ));
+  }
+
+  function redirectForReauthentication(response, payload) {
+    var candidate = payload && payload.error === "admin_reauthentication_required"
+      ? payload.reauthUrl
+      : response && response.redirected
+        ? response.url
+        : "";
+    var target = sameOriginUrl(candidate || "");
+    if (!target || target.pathname !== "/auth/login") return false;
+    clearCache();
+    window.location.assign(target.href);
+    return true;
+  }
+
+  function reauthenticationRedirectError() {
+    var error = new Error("Reauthentication redirect started.");
+    error.name = "ReauthenticationRedirect";
+    return error;
   }
 
   function isPlainClick(event) {
@@ -104,6 +132,131 @@
     if (csrf) headers.set("X-CSRF-Token", csrf);
   }
 
+  function base64UrlToBuffer(value) {
+    var normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+    while (normalized.length % 4) normalized += "=";
+    var raw = atob(normalized);
+    return Uint8Array.from(raw, function (character) { return character.charCodeAt(0); }).buffer;
+  }
+
+  function bufferToBase64Url(value) {
+    var bytes = new Uint8Array(value);
+    var raw = "";
+    for (var index = 0; index < bytes.length; index += 1) raw += String.fromCharCode(bytes[index]);
+    return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function serializePasskeyAssertion(credential) {
+    if (typeof credential.toJSON === "function") return credential.toJSON();
+    var response = credential.response;
+    return {
+      id: credential.id,
+      rawId: bufferToBase64Url(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment || undefined,
+      clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+      response: {
+        clientDataJSON: bufferToBase64Url(response.clientDataJSON),
+        authenticatorData: bufferToBase64Url(response.authenticatorData),
+        signature: bufferToBase64Url(response.signature),
+        userHandle: response.userHandle ? bufferToBase64Url(response.userHandle) : undefined,
+      },
+    };
+  }
+
+  async function passkeyJsonRequest(url, body) {
+    var response = await fetch(url, {
+      body: JSON.stringify(body || {}),
+      credentials: "same-origin",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      method: "POST",
+    });
+    var payload = await response.json();
+    if (!response.ok) throw new Error(payload.message || payload.error || "Autenticazione passkey non disponibile.");
+    return payload;
+  }
+
+  async function authenticateWithSystemPasskey() {
+    if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
+    var optionsPayload = await passkeyJsonRequest("/auth/passkey/login/options", {});
+    var options = optionsPayload.options;
+    var publicKey = Object.assign({}, options, {
+      challenge: base64UrlToBuffer(options.challenge),
+      allowCredentials: (options.allowCredentials || []).map(function (item) {
+        return Object.assign({}, item, { id: base64UrlToBuffer(item.id) });
+      }),
+    });
+    var credential = await navigator.credentials.get({ publicKey: publicKey });
+    if (!credential) throw new Error("Autenticazione annullata.");
+    var result = await passkeyJsonRequest("/auth/passkey/login/verify", {
+      challenge: options.challenge,
+      credential: serializePasskeyAssertion(credential),
+    });
+    if (result.ok !== true) throw new Error(result.message || "Autenticazione passkey non riuscita.");
+  }
+
+  async function runPasskeyNavigation(link) {
+    if (passkeyActionInFlight) return;
+    var target = sameOriginUrl(link.getAttribute("data-passkey-return-to") || "");
+    if (!target || !canRenderPath(target)) return;
+    passkeyActionInFlight = true;
+    link.setAttribute("aria-busy", "true");
+    try {
+      await authenticateWithSystemPasskey();
+      clearCache();
+      await navigate(target, { history: "push" });
+    } catch (error) {
+      showError(error && error.message ? error.message : "Autenticazione passkey non riuscita.");
+    } finally {
+      passkeyActionInFlight = false;
+      if (link.isConnected) link.removeAttribute("aria-busy");
+    }
+  }
+
+  async function submitPasskeyForm(form, submitter) {
+    if (passkeyActionInFlight || formSubmissions.has(form)) return true;
+    var action = sameOriginUrl(form.getAttribute("action") || "");
+    var allowedActions = new Set(["/actions/backup-delete-command", "/actions/database-delete-command", "/actions/vault-command", "/actions/redis-restore-command", "/actions/redis-backup-delete-command"]);
+    if (!action || !allowedActions.has(action.pathname)) return false;
+    passkeyActionInFlight = true;
+    formSubmissions.add(form);
+    var pageScrollTop = currentPageScrollTop();
+    if (submitter) {
+      submitter.disabled = true;
+      submitter.setAttribute("aria-busy", "true");
+    }
+    try {
+      await authenticateWithSystemPasskey();
+      var headers = new Headers();
+      headers.set("Accept", "application/json");
+      headers.set("Content-Type", "application/x-www-form-urlencoded");
+      headers.set("X-Requested-With", "platform-control-center");
+      addMutationHeaders(headers, "POST");
+      var response = await fetch(action.href, {
+        body: payloadFromForm(form, submitter),
+        credentials: "same-origin",
+        headers: headers,
+        method: "POST",
+      });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || payload.error || "Azione non riuscita.");
+      clearCache();
+      var successUrl = sameOriginUrl(form.getAttribute("data-passkey-success-url") || window.location.href);
+      if (successUrl && canRenderPath(successUrl)) await navigate(successUrl, { history: "replace", pageScrollTop: pageScrollTop });
+      return true;
+    } catch (error) {
+      showError(error && error.message ? error.message : "Azione non riuscita.");
+      return false;
+    } finally {
+      passkeyActionInFlight = false;
+      formSubmissions.delete(form);
+      if (submitter && submitter.isConnected) {
+        submitter.disabled = false;
+        submitter.removeAttribute("aria-busy");
+      }
+    }
+  }
+
   async function requestHtml(url, options) {
     var method = (options && options.method ? options.method : "GET").toUpperCase();
     var useCache = method === "GET";
@@ -134,6 +287,8 @@
         signal: controller.signal,
       });
 
+      if (redirectForReauthentication(response)) throw reauthenticationRedirectError();
+
       if (response.status === 304 && staleCache) {
         staleCache.storedAt = Date.now();
         return { html: staleCache.html, url: cacheKey, fromCache: true, revalidated: true };
@@ -142,6 +297,7 @@
       var contentType = response.headers.get("content-type") || "";
       if (contentType.indexOf("application/json") !== -1) {
         var payload = await response.json();
+        if (redirectForReauthentication(response, payload)) throw reauthenticationRedirectError();
         if (!response.ok) throw new Error(payload.message || payload.error || "Request failed.");
         throw new Error(payload.message || "The server returned JSON instead of a page update.");
       }
@@ -164,7 +320,7 @@
   }
 
   async function prefetchHtml(url) {
-    if (!url || !canRenderPath(url) || prefetchInFlight.has(url.href)) return null;
+    if (!url || !canRenderPath(url) || isSensitivePortalUrl(url) || prefetchInFlight.has(url.href)) return null;
     var cached = cachedPage(url.href, false);
     if (cached) return { html: cached.html, url: url.href, fromCache: true };
     prefetchInFlight.add(url.href);
@@ -190,6 +346,8 @@
         window.clearTimeout(timeout);
       }
       if (!response.ok) return null;
+      var responseUrl = sameOriginUrl(response.url || "");
+      if (response.redirected && responseUrl && responseUrl.pathname === "/auth/login") return null;
       var contentType = response.headers.get("content-type") || "";
       if (contentType.indexOf("application/json") !== -1) return null;
       var html = await response.text();
@@ -218,12 +376,12 @@
 
   function syncBodyAttributes(nextBody) {
     Array.from(document.body.attributes).forEach(function (attribute) {
-      if (attribute.name.indexOf("data-cc-") === 0 && attribute.name !== "data-cc-navigation" && attribute.name !== "data-cc-enhanced" && attribute.name !== "data-cc-boot-id") {
+      if (attribute.name.indexOf("data-cc-") === 0 && attribute.name !== "data-cc-navigation" && attribute.name !== "data-cc-enhanced" && attribute.name !== "data-cc-boot-id" && attribute.name !== "data-cc-preloading" && attribute.name !== "data-cc-preload-complete") {
         document.body.removeAttribute(attribute.name);
       }
     });
     Array.from(nextBody.attributes).forEach(function (attribute) {
-      if (attribute.name.indexOf("data-cc-") === 0) {
+      if (attribute.name.indexOf("data-cc-") === 0 && attribute.name !== "data-cc-preloading" && attribute.name !== "data-cc-preload-complete") {
         document.body.setAttribute(attribute.name, attribute.value);
       }
     });
@@ -253,6 +411,7 @@
 
   function applyHtml(html, finalUrl, mode, options) {
     var previousSidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : currentSidebarScrollTop();
+    var previousPageScrollTop = options && typeof options.pageScrollTop === "number" ? options.pageScrollTop : null;
     var previousOpsNavExpandedState = captureOpsNavExpandedState();
     var previousPillRect = captureOpsNavPillRect() || opsNavLastPillRect;
     var parsed = new DOMParser().parseFromString(html, "text/html");
@@ -302,11 +461,27 @@
     startFileManagers();
     fitSingleLineText();
     scrollAfterRender(target);
+    restorePageScrollTop(previousPageScrollTop);
     restoreSidebarScrollTop(previousSidebarScrollTop);
     positionOpsNavPill({ fromViewportRect: previousPillRect });
     restoreNavigationFocus();
     opsNavLastPillRect = null;
     document.dispatchEvent(new CustomEvent("cc:navigation-complete", { detail: { url: target.href } }));
+    scheduleControlCenterPreload();
+  }
+
+  function currentPageScrollTop() {
+    return Math.max(0, Number(window.scrollY || document.documentElement.scrollTop || 0));
+  }
+
+  function restorePageScrollTop(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return;
+    var apply = function () {
+      var maxScrollTop = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      window.scrollTo({ left: window.scrollX, top: Math.min(Math.max(0, value), maxScrollTop), behavior: "instant" });
+    };
+    apply();
+    window.requestAnimationFrame(apply);
   }
 
   function restoreNavigationFocus() {
@@ -632,7 +807,7 @@
 
   function rememberSidebarScrollBeforePointer(event) {
     if (!event || !event.target || !event.target.closest) return;
-    if (!event.target.closest(".ops-nav-subitem[href]")) return;
+    if (!event.target.closest(".ops-nav-subitem[href], .ops-nav-direct[href]")) return;
     pendingSidebarScrollTop = currentSidebarScrollTop();
     pendingSidebarScrollAt = Date.now();
   }
@@ -681,7 +856,7 @@
 
   function opsNavActiveItem(nav) {
     if (!nav) return null;
-    var items = Array.from(nav.querySelectorAll(".ops-nav-subitem[aria-current='page'], .ops-nav-subitem.active"));
+    var items = Array.from(nav.querySelectorAll(".ops-nav-subitem[aria-current='page'], .ops-nav-subitem.active, .ops-nav-direct[aria-current='page'], .ops-nav-direct.active"));
     return items.find(function (item) {
       var group = item.closest("[data-ops-nav-group]");
       if (!group || group.dataset.opsNavExpanded !== "true") return false;
@@ -795,7 +970,7 @@
   }
 
   function moveOpsNavPillTowardLink(link) {
-    if (!link || !link.matches || !link.matches(".ops-nav-subitem[href]")) return false;
+    if (!link || !link.matches || !link.matches(".ops-nav-subitem[href], .ops-nav-direct[href]")) return false;
     var nav = link.closest(".ops-nav");
     var group = link.closest("[data-ops-nav-group]");
     if (!nav || !group || group.dataset.opsNavExpanded !== "true") return false;
@@ -1009,18 +1184,24 @@
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
     try {
-      var headers = new Headers();
-      headers.set("Accept", "application/json");
-      headers.set("Content-Type", "application/x-www-form-urlencoded");
-      headers.set("X-Requested-With", "platform-control-center");
-      addMutationHeaders(headers, "POST");
-      var response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", {
-        body: new URLSearchParams({ confirm: confirm }),
-        credentials: "same-origin",
-        headers: headers,
-        method: "POST",
-      });
-      var payload = await response.json();
+      var response;
+      var payload;
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        var headers = new Headers();
+        headers.set("Accept", "application/json");
+        headers.set("Content-Type", "application/x-www-form-urlencoded");
+        headers.set("X-Requested-With", "platform-control-center");
+        addMutationHeaders(headers, "POST");
+        response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", {
+          body: new URLSearchParams({ confirm: confirm }),
+          credentials: "same-origin",
+          headers: headers,
+          method: "POST",
+        });
+        payload = await response.json();
+        if (payload.error !== "admin_reauthentication_required" || attempt > 0) break;
+        await authenticateWithSystemPasskey();
+      }
       if (!response.ok) throw new Error(payload.message || payload.error || "Reveal failed.");
       input.type = "text";
       input.value = payload.value || "";
@@ -1059,16 +1240,17 @@
     var sequence = ++navigationSequence;
     var historyMode = options && options.history ? options.history : "push";
     var sidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : null;
+    var pageScrollTop = options && typeof options.pageScrollTop === "number" ? options.pageScrollTop : null;
     captureOpsNavPillRect();
     setBusy(true);
     try {
       var result = await requestHtml(url, { method: "GET" });
       if (sequence !== navigationSequence) return true;
-      applyHtml(result.html, result.url || url.href, historyMode, { sidebarScrollTop: sidebarScrollTop });
+      applyHtml(result.html, result.url || url.href, historyMode, { sidebarScrollTop: sidebarScrollTop, pageScrollTop: pageScrollTop });
       return true;
     } catch (error) {
       setBusy(false);
-      if (error && error.name === "AbortError") return true;
+      if (error && (error.name === "AbortError" || error.name === "ReauthenticationRedirect")) return true;
       showError(error && error.message ? error.message : "Navigation failed.");
       return false;
     }
@@ -1083,6 +1265,7 @@
     }
     if (formSubmissions.has(form)) return true;
     formSubmissions.add(form);
+    var pageScrollTop = currentPageScrollTop();
     if (submitter) {
       submitter.disabled = true;
       submitter.setAttribute("aria-busy", "true");
@@ -1102,11 +1285,11 @@
         body: payloadFromForm(form, submitter),
         method: method,
       });
-      applyHtml(result.html, result.url || window.location.href, "push");
+      applyHtml(result.html, result.url || window.location.href, "push", { pageScrollTop: pageScrollTop });
       return true;
     } catch (error) {
       setBusy(false);
-      if (error && error.name === "AbortError") return true;
+      if (error && (error.name === "AbortError" || error.name === "ReauthenticationRedirect")) return true;
       showError(error && error.message ? error.message : "Action failed.");
       return false;
     } finally {
@@ -1119,8 +1302,92 @@
   }
 
   function prefetch(url) {
-    if (!url || !canRenderPath(url) || cachedPage(url.href, false)) return;
+    if (!url || !canRenderPath(url) || isSensitivePortalUrl(url) || cachedPage(url.href, false)) return;
     prefetchHtml(url);
+  }
+
+  function portalPageUrlsForPreload() {
+    var seen = new Set();
+    return Array.from(document.querySelectorAll("a[href]")).map(function (link) {
+      if (link.target || link.hasAttribute("download")) return null;
+      var url = sameOriginUrl(link.getAttribute("href") || "");
+      if (!url || !canRenderPath(url) || isSensitivePortalUrl(url) || seen.has(url.href)) return null;
+      seen.add(url.href);
+      return url;
+    }).filter(Boolean);
+  }
+
+  async function preloadControlCenterPages(urls, onProgress) {
+    var queue = Array.isArray(urls) ? urls.slice() : portalPageUrlsForPreload();
+    var total = queue.length;
+    var completed = 0;
+    var failed = [];
+    if (!total) return { total: 0, completed: 0, failed: [] };
+    var workers = Array.from({ length: Math.min(preloadWorkerCount, queue.length) }, async function () {
+      while (queue.length) {
+        var url = queue.shift();
+        if (!url) continue;
+        var result = await prefetchHtml(url);
+        completed += 1;
+        if (!result) failed.push(url);
+        if (typeof onProgress === "function") onProgress(completed, total, url, Boolean(result));
+      }
+    });
+    await Promise.all(workers);
+    return { total: total, completed: completed, failed: failed };
+  }
+
+  function scheduleControlCenterPreload() {
+    Promise.resolve().then(preloadControlCenterPages);
+  }
+
+  function updateInitialPreloadProgress(completed, total, message) {
+    var safeTotal = Math.max(1, Number(total) || 1);
+    var percent = Math.max(0, Math.min(100, Math.round((Number(completed) || 0) / safeTotal * 100)));
+    var bar = document.querySelector("[data-cc-preload-bar]");
+    var value = document.querySelector("[data-cc-preload-percent]");
+    var detail = document.querySelector("[data-cc-preload-message]");
+    if (bar) bar.style.width = percent + "%";
+    setText(value, percent + "%");
+    if (message) setText(detail, message);
+  }
+
+  function revealFullyPreloadedControlCenter(total) {
+    updateInitialPreloadProgress(total, total, "Control Center pronto.");
+    document.body.dataset.ccPreloadComplete = "true";
+    delete document.body.dataset.ccPreloading;
+    var screen = document.querySelector("[data-cc-preload-screen]");
+    if (screen) screen.hidden = true;
+  }
+
+  async function runInitialControlCenterPreload() {
+    var screen = document.querySelector("[data-cc-preload-screen]");
+    if (!screen || document.body.dataset.ccPreloading !== "true") return;
+    var retry = screen.querySelector("[data-cc-preload-retry]");
+    if (retry) retry.hidden = true;
+    var urls = portalPageUrlsForPreload();
+    updateInitialPreloadProgress(0, urls.length, "Carico tutte le pagine applicative...");
+    var result = await preloadControlCenterPages(urls, function (completed, total) {
+      updateInitialPreloadProgress(completed, total, "Caricate " + completed + " di " + total + " pagine.");
+    });
+    if (result.failed.length) {
+      updateInitialPreloadProgress(result.completed - result.failed.length, result.total, "Riprovo le pagine non ancora disponibili...");
+      result = await preloadControlCenterPages(result.failed, function (completed, total) {
+        updateInitialPreloadProgress(completed, total, "Verifica finale " + completed + " di " + total + ".");
+      });
+    }
+    if (!result.failed.length) {
+      revealFullyPreloadedControlCenter(urls.length);
+      return;
+    }
+    updateInitialPreloadProgress(0, result.failed.length, "Non posso mostrare un portale caricato solo in parte.");
+    if (retry) {
+      retry.hidden = false;
+      retry.onclick = function () {
+        retry.hidden = true;
+        runInitialControlCenterPreload();
+      };
+    }
   }
 
   function linkFromEvent(event) {
@@ -1354,6 +1621,7 @@
     startFileManagers();
     fitSingleLineText();
     storeCache(window.location.href, document.documentElement.outerHTML, "");
+    runInitialControlCenterPreload();
 
     document.addEventListener("click", function (event) {
       var inlineStatusRun = event.target.closest ? event.target.closest("[data-status-run-inline]") : null;
@@ -1416,6 +1684,12 @@
       if (toggle) {
         event.preventDefault();
         toggleSidebarGroup(toggle);
+        return;
+      }
+      var passkeyLink = event.target.closest ? event.target.closest("[data-passkey-return-to]") : null;
+      if (passkeyLink && isPlainClick(event)) {
+        event.preventDefault();
+        runPasskeyNavigation(passkeyLink);
         return;
       }
       if (!isPlainClick(event)) return;
@@ -1499,6 +1773,11 @@
     document.addEventListener("submit", function (event) {
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-passkey-submit")) {
+        event.preventDefault();
+        submitPasskeyForm(form, event.submitter || null);
+        return;
+      }
       if (form.hasAttribute("data-cc-native-submit") || form.target) return;
       var action = sameOriginUrl(form.getAttribute("action") || window.location.href);
       if (!action) return;

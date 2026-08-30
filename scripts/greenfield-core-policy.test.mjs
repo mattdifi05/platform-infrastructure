@@ -132,6 +132,20 @@ function buildAcceptRender() {
       networks: { platform_edge: { ipv4_address: "172.30.250.2" } },
       healthcheck: { test: ["CMD-SHELL", "nginx -t"], interval: "20s", timeout: "5s", retries: 10 },
     },
+    "local-dns": {
+      image: image("local-dns"),
+      container_name: "gf-local-dns",
+      init: true,
+      logging: { driver: "json-file", options: { "max-size": "10m", "max-file": "5" } },
+      security_opt: ["no-new-privileges:true"],
+      restart: "unless-stopped",
+      ...coreResources("0.10", "64m", "16m", 64),
+      command: ["-conf", "/etc/coredns/Corefile"],
+      volumes: [bindMount("./dns", "/etc/coredns")],
+      expose: ["53/tcp", "53/udp"],
+      networks: { platform_egress: null },
+      healthcheck: { test: ["CMD", "/coredns", "-version"], interval: "30s", timeout: "5s", retries: 5 },
+    },
     postgres: {
       image: image("postgres"),
       container_name: "gf-postgres",
@@ -180,7 +194,7 @@ function buildAcceptRender() {
       restart: "always",
       ...coreResources("0.50", "256m", "64m", 192),
       environment: { REDIS_USERNAME: "platform", REDIS_PASSWORD_FILE: "/run/secrets/redis_password" },
-      command: ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"],
+      command: ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && cd /data && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"],
       depends_on: { "broker-auth-bootstrap": { condition: "service_completed_successfully" } },
       secrets: [secretGrant("redis_password")],
       volumes: [volumeMount("enterprise_redis_data", "/data"), volumeMount("redis_auth_config", "/run/platform-broker", true)],
@@ -575,10 +589,10 @@ test("the complete greenfield render passes every semantic authority", () => {
   const result = evaluateGreenfieldCoreAuthority(structuredClone(LOCK), buildAcceptRender(), ENVIRONMENT);
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.normalizedSummary, {
-    serviceCount: 20,
+    serviceCount: 21,
     networkCount: 9,
     volumeCount: 17,
-    secretCount: 23,
+    secretCount: 22,
   });
 });
 
@@ -590,7 +604,7 @@ test("the committed lock stays bound to this policy file and the core service se
   assert.equal(LOCK.coreSemanticPolicy.schema, "platform-no-hosted-core-capability-policy/v2");
   assert.equal(LOCK.coreSemanticPolicy.sha256, selfDigest);
   assert.deepEqual([...LOCK.protectedResourceNames.services].sort(), [...GREENFIELD_CORE_SERVICES].sort());
-  assert.equal(LOCK.protectedResourceNames.secrets.length, 23);
+  assert.equal(LOCK.protectedResourceNames.secrets.length, 22);
   assert.equal(LOCK.protectedResourceNames.volumes.length, 17);
   assert.ok(GREENFIELD_ALL_SERVICES.length === 27);
 });
@@ -704,7 +718,7 @@ test("the policy CLI accepts the canonical fixture end-to-end", () => {
     const payload = JSON.parse(accepted.stdout);
     assert.deepEqual(payload.violations, []);
     assert.deepEqual(payload.normalizedSummary, {
-      serviceCount: 20, networkCount: 9, volumeCount: 17, secretCount: 23,
+      serviceCount: 21, networkCount: 9, volumeCount: 17, secretCount: 22,
     });
 
     fs.writeFileSync(configPath, `${JSON.stringify({

@@ -2910,7 +2910,7 @@ const CORE_SEMANTIC_POLICY = {
     },
   },
   controlCenterFixedSecurityEnvironment: {
-    CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+    CONTROL_CENTER_AUTH_MODE: "app-passkey",
     CONTROL_CENTER_AUTH_STORE: "postgres",
   },
   backupSchedulerBooleanEnvironment: {
@@ -3181,6 +3181,7 @@ const CURRENT_CORE_SERVICE_NAMES = [
   "docker-action-broker",
   "grafana",
   "keycloak",
+  "local-dns",
   "loki",
   "mariadb",
   "minio",
@@ -3268,6 +3269,100 @@ currentEnvironmentAuthority.nats = { present: false, entries: {} };
 currentEnvironmentAuthority.redis.entries.REDIS_USERNAME = { literal: "platform" };
 
 const controlCenterEnvironment = currentEnvironmentAuthority["control-center"].entries;
+for (const removed of [
+  "CONTROL_CENTER_OIDC_ADMIN_ROLE",
+  "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT",
+  "CONTROL_CENTER_OIDC_CLIENT_ID",
+  "CONTROL_CENTER_OIDC_ISSUER",
+  "CONTROL_CENTER_OIDC_JWKS_URI",
+  "CONTROL_CENTER_OIDC_OWNER_ROLE",
+  "CONTROL_CENTER_OIDC_REDIRECT_URI",
+  "CONTROL_CENTER_OIDC_REQUIRED_ACR",
+  "CONTROL_CENTER_OIDC_REQUIRED_AMR",
+  "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
+  "CONTROL_CENTER_OIDC_VIEWER_ROLE",
+]) delete controlCenterEnvironment[removed];
+Object.assign(controlCenterEnvironment, {
+  CONTROL_CENTER_AUTH_MODE: { literal: "app-passkey" },
+  CONTROL_CENTER_AUTH_RP_ID: {
+    variable: "CONTROL_CENTER_AUTH_RP_ID",
+    fallback: "${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}",
+    template: "${CONTROL_CENTER_AUTH_RP_ID:-${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}",
+  },
+  CONTROL_CENTER_AUTH_RP_NAME: {
+    variable: "CONTROL_CENTER_AUTH_RP_NAME",
+    fallback: "Platform Control Center",
+  },
+  CONTROL_CENTER_BACKUP_ROOT: { literal: "/var/www/project-state/backups" },
+  CONTROL_CENTER_BACKUP_SIGNING_KEYS_FILE: { literal: "/run/secrets/backup_signing_keys" },
+  CONTROL_CENTER_CONTEXT_CACHE_TTL_MS: {
+    variable: "CONTROL_CENTER_CONTEXT_CACHE_TTL_MS",
+    fallback: "15000",
+  },
+  CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: {
+    variable: "CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS",
+    fallback: "false",
+  },
+  CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: {
+    variable: "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL",
+    fallback: "admin@example.com",
+  },
+  CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: {
+    variable: "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME",
+    fallback: "admin",
+  },
+  CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: {
+    variable: "CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS",
+    fallback: "192.168.1.0/24,127.0.0.0/8,::1/128",
+  },
+  CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: {
+    variable: "CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS",
+    fallback: "172.16.0.0/12,127.0.0.0/8,::1/128",
+  },
+  CONTROL_CENTER_HOSTED_WORKLOAD_LOCK_FILE: {
+    literal: "/run/platform/hosted-workloads.lock.json",
+  },
+  CONTROL_CENTER_HTML_CACHE_TTL_MS: {
+    variable: "CONTROL_CENTER_HTML_CACHE_TTL_MS",
+    fallback: "15000",
+  },
+  CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS: {
+    variable: "CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS",
+    fallback: "300",
+  },
+  CONTROL_CENTER_PASSKEY_TTL_SECONDS: {
+    variable: "CONTROL_CENTER_PASSKEY_TTL_SECONDS",
+    fallback: "315360000",
+  },
+  CONTROL_CENTER_REDIS_CACHE_MAX_BYTES: {
+    variable: "CONTROL_CENTER_REDIS_CACHE_MAX_BYTES",
+    fallback: "4194304",
+  },
+  CONTROL_CENTER_REDIS_CACHE_PREFIX: {
+    variable: "CONTROL_CENTER_REDIS_CACHE_PREFIX",
+    fallback: "control-center:cache:v1",
+  },
+  CONTROL_CENTER_REDIS_DATABASE: { variable: "REDIS_DB", fallback: "0" },
+  CONTROL_CENTER_REDIS_HOST: { variable: "CONTROL_CENTER_REDIS_HOST", fallback: "redis" },
+  CONTROL_CENTER_REDIS_LIVE_APPLY: {
+    variable: "CONTROL_CENTER_REDIS_LIVE_APPLY",
+    fallback: "false",
+  },
+  CONTROL_CENTER_REDIS_PASSWORD_FILE: { literal: "/run/secrets/redis_password" },
+  CONTROL_CENTER_REDIS_PORT: { variable: "CONTROL_CENTER_REDIS_PORT", fallback: "6379" },
+  CONTROL_CENTER_REDIS_USERNAME: {
+    variable: "CONTROL_CENTER_REDIS_USERNAME",
+    fallback: "platform",
+  },
+  CONTROL_CENTER_SESSION_IDLE_SECONDS: {
+    variable: "CONTROL_CENTER_SESSION_IDLE_SECONDS",
+    fallback: "86400",
+  },
+  CONTROL_CENTER_SESSION_MAX_AGE_SECONDS: {
+    variable: "CONTROL_CENTER_SESSION_MAX_AGE_SECONDS",
+    fallback: "86400",
+  },
+});
 for (const [name, fallback] of Object.entries({
   BACKUP_QUEUE_LEDGER_MAX_ENTRIES: "4096",
   BACKUP_QUEUE_LOCK_TIMEOUT_MS: "2000",
@@ -3283,20 +3378,6 @@ for (const [name, fallback] of Object.entries({
 }
 controlCenterEnvironment.PROJECT_BACKUP_JOBS_DIR = {
   literal: "/var/www/project-state/backup-jobs",
-};
-controlCenterEnvironment.CONTROL_CENTER_OIDC_JWKS_URI = {
-  variable: "CONTROL_CENTER_OIDC_JWKS_URI",
-  fallback: "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs",
-  template: "${CONTROL_CENTER_OIDC_JWKS_URI:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs}",
-};
-controlCenterEnvironment.CONTROL_CENTER_OIDC_TOKEN_ENDPOINT = {
-  variable: "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
-  fallback: "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token",
-  template: "${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}",
-};
-controlCenterEnvironment.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS = {
-  variable: "CONTROL_CENTER_SESSION_MAX_AGE_SECONDS",
-  fallback: "900",
 };
 
 const projectRouterEnvironment = currentEnvironmentAuthority["project-router"].entries;
@@ -4979,7 +5060,7 @@ const CURRENT_CLOSED_AUTHORITY = {
       "command": [
         "sh",
         "-ec",
-        "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"
+        "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && cd /data && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"
       ]
     },
     "traefik": {
@@ -5251,6 +5332,93 @@ const CURRENT_CLOSED_AUTHORITY = {
   ]
 };
 
+// V1.0 live parity additions, closed against the same pinned Compose 5.3.1
+// render used by CI. These remain exact authorities, not permissive defaults.
+CURRENT_CLOSED_AUTHORITY.secretFields.backup_signing_keys = ["file", "name"];
+CURRENT_CLOSED_AUTHORITY.serviceFields["local-dns"] = [
+  "blkio_config",
+  "command",
+  "container_name",
+  "cpu_shares",
+  "cpus",
+  "entrypoint",
+  "expose",
+  "healthcheck",
+  "image",
+  "init",
+  "logging",
+  "mem_limit",
+  "mem_reservation",
+  "networks",
+  "pids_limit",
+  "ports",
+  "restart",
+  "security_opt",
+  "ulimits",
+  "volumes",
+];
+CURRENT_CLOSED_AUTHORITY.serviceResources["local-dns"] = {
+  blkio_config: { weight: 600 },
+  cpus: 0.1,
+  cpu_shares: 768,
+  expose: ["53/tcp", "53/udp"],
+  init: true,
+  mem_limit: "67108864",
+  mem_reservation: "16777216",
+  pids_limit: 64,
+  security_opt: ["no-new-privileges:true"],
+  ulimits: { nofile: { soft: 16384, hard: 16384 } },
+};
+CURRENT_CLOSED_AUTHORITY.serviceContainerNames["local-dns"] = "enterprise-local-dns";
+CURRENT_CLOSED_AUTHORITY.serviceRestartPolicies["local-dns"] = "unless-stopped";
+CURRENT_CLOSED_AUTHORITY.serviceProfiles["local-dns"] = null;
+CURRENT_CLOSED_AUTHORITY.serviceDependencies["local-dns"] = [];
+CURRENT_CLOSED_AUTHORITY.serviceNetworks["local-dns"] = ["platform_egress"];
+CURRENT_CLOSED_AUTHORITY.serviceHealthchecks["local-dns"] = {
+  test: ["CMD", "/coredns", "-version"],
+  interval: "30s",
+  timeout: "5s",
+  retries: 5,
+};
+CURRENT_CLOSED_AUTHORITY.serviceProcessModel["local-dns"] = {
+  command: ["-conf", "/etc/coredns/Corefile"],
+  entrypoint: null,
+};
+CURRENT_CLOSED_AUTHORITY.buildDockerfiles["local-dns"] = null;
+CURRENT_CLOSED_AUTHORITY.serviceBuildAuthority["local-dns"] = null;
+CURRENT_CLOSED_AUTHORITY.serviceSecretGrants["local-dns"] = [];
+CURRENT_CLOSED_AUTHORITY.serviceConfigGrants["local-dns"] = [];
+CURRENT_CLOSED_AUTHORITY.tmpfsRules["local-dns"] = [];
+CURRENT_CLOSED_AUTHORITY.serviceUsers["local-dns"] = null;
+CURRENT_CLOSED_AUTHORITY.servicesWithDefaultLogging.push("local-dns");
+CURRENT_CLOSED_AUTHORITY.servicesWithDefaultLogging.sort();
+CURRENT_CLOSED_AUTHORITY.requiredSecurityOpt.push("local-dns");
+CURRENT_CLOSED_AUTHORITY.requiredSecurityOpt.sort();
+
+CURRENT_CLOSED_AUTHORITY.serviceDependencies["control-center"] = ["postgres", "redis"];
+CURRENT_CLOSED_AUTHORITY.serviceNetworks["control-center"] = [
+  "platform_cache",
+  "platform_db_admin",
+  "platform_egress",
+  "platform_observability",
+  "platform_routing",
+];
+CURRENT_CLOSED_AUTHORITY.serviceSecretGrants["control-center"] = [
+  "backup_signing_keys",
+  "control_center_database_url",
+  "control_center_vault_keys",
+  "mariadb_root_password",
+  "postgres_superuser_password",
+  "projects_gateway_signing_keys",
+  "redis_password",
+];
+CORE_SEMANTIC_POLICY.bindSourceRules["control-center"][
+  "/run/platform/hosted-workloads.lock.json"
+] = ["root:config/no-hosted-workloads.lock.json"];
+CORE_SEMANTIC_POLICY.bindTargets["control-center"][
+  "/run/platform/hosted-workloads.lock.json"
+] = "read-only";
+
 CORE_SEMANTIC_POLICY.exactAuthorityShape = {
   topLevelFields: CURRENT_CLOSED_AUTHORITY.topLevelFields,
   configFields: CURRENT_CLOSED_AUTHORITY.configFields,
@@ -5333,7 +5501,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     "docker-action-activation-sidecar",
     "docker-action-broker",
   ],
-  serviceFieldCount: 427,
+  serviceFieldCount: 447,
   serviceBuildAuthority: CURRENT_CLOSED_AUTHORITY.serviceBuildAuthority,
   networkFields: {
     platform_bus: ["internal", "ipam", "labels", "name"],
@@ -5366,7 +5534,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     redis_auth_config: ["name"],
   },
   nodeBuildImageDefault: "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
-  normalizedRenderSha256: "16e4fb3d94692137fd463dc8ed6ae2957b77825a2cba5563161948743f420672",
+  normalizedRenderSha256: "54ae78ca46efb3b1e039807272aeded22f0feadbe41410a1a2482dd29eb94c30",
 };
 
 const CORE_SEMANTIC_POLICY_BYTES = `${JSON.stringify(CORE_SEMANTIC_POLICY)}\n`;
@@ -5376,9 +5544,10 @@ export const coreSemanticPolicySha256 = crypto
   .update(CORE_SEMANTIC_POLICY_BYTES)
   .digest("hex");
 
-export const LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES = Object.freeze([
-  "control_center_first_configuration_bootstrap_token",
-  "control_center_first_configuration_keycloak_client_secret",
+export const LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES = Object.freeze([]);
+export const LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES = Object.freeze([
+  "phpmyadmin",
+  "phppgadmin",
 ]);
 
 export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
@@ -5438,6 +5607,7 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
   basePolicySha256: coreSemanticPolicySha256,
   composeOverlay: "compose.local-private.yaml",
   projectedAuthoritySha256: CORE_SEMANTIC_POLICY.currentAuthority.normalizedRenderSha256,
+  additionalServices: LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES,
   additionalSecrets: LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES,
   baseSecrets: LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
   externalAuthority: Object.freeze({
@@ -5448,17 +5618,16 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
     tlsPrivateKeyGidVariable: "WAF_TLS_KEY_GID",
     secretsRootVariable: "PLATFORM_SECRETS_ROOT",
     localCaVariable: "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE",
-    bootstrapTokenVariable: "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE",
-    keycloakClientSecretVariable:
-      "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE",
   }),
   controlCenter: Object.freeze({
     environment: "local_private",
     firstConfigurationMode: "required",
-    minimumPasskeysDefault: "2",
-    identityHostVariable: "AUTH_HOST",
-    identityEdgeVariable: "CONTROL_CENTER_IDENTITY_EDGE_IP",
+    minimumPasskeysDefault: "1",
     localCaTarget: "/run/platform/tls/control-center-local-ca.pem",
+  }),
+  adminServiceProfiles: Object.freeze({
+    phpmyadmin: Object.freeze(["admin"]),
+    phppgadmin: Object.freeze(["admin"]),
   }),
   backupScheduler: Object.freeze({
     executionMode: "BROKER_ONLY",
@@ -6350,10 +6519,6 @@ function validateCoreCapabilityCeiling(config, rootDirectory, environment) {
           violations.push(`${serviceName}:environment-${key}`);
         }
       }
-      if (serviceEnvironment.CONTROL_CENTER_OIDC_ISSUER
-          !== expectedControlCenterOidcIssuer(environment)) {
-        violations.push(`${serviceName}:environment-CONTROL_CENTER_OIDC_ISSUER`);
-      }
     }
     if (serviceName === "waf") {
       for (const [key, value] of Object.entries(
@@ -7197,7 +7362,7 @@ function validateAndNormalizeServices(
       normalized.services[serviceName].image = `<validated-image:${serviceName}>`;
     }
 
-    if (serviceName === "waf") {
+    if (serviceName === "waf" || serviceName === "local-dns") {
       const allowed = projectedPortRules(serviceName, environment);
       const observed = Array.isArray(service.ports)
         ? service.ports.map(normalizedPort)
@@ -7207,9 +7372,9 @@ function validateAndNormalizeServices(
           || observed.some((port) => port === null)
           || !Array.isArray(allowed)
           || !sameJson(observed.map(key).sort(), allowed.map(key).sort())) {
-        violations.push("waf:ports-authority");
+        violations.push(`${serviceName}:ports-authority`);
       } else {
-        normalized.services.waf.ports = ["<validated-waf-ports>"];
+        normalized.services[serviceName].ports = [`<validated-${serviceName}-ports>`];
       }
     }
 
@@ -7403,22 +7568,10 @@ function validateAndProjectLocalPrivateMount(
 }
 
 function localPrivateExpectedEnvironment(environment) {
-  const domain = envOr(environment, "DOMAIN", "localhost.com");
-  const authHost = envOr(environment, "AUTH_HOST", `auth.${domain}`);
   return {
-    authHost,
     values: {
       CONTROL_CENTER_ENV: "local_private",
       CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "required",
-      CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE:
-        "/run/secrets/control_center_first_configuration_bootstrap_token",
-      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: envOr(
-        environment,
-        "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID",
-        "platform-first-configuration",
-      ),
-      CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:
-        "/run/secrets/control_center_first_configuration_keycloak_client_secret",
       CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: envOr(
         environment,
         "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME",
@@ -7432,32 +7585,178 @@ function localPrivateExpectedEnvironment(environment) {
       CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: envOr(
         environment,
         "CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS",
-        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128",
+        "192.168.1.0/24,127.0.0.0/8,::1/128",
       ),
       CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: envOr(
         environment,
         "CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS",
         "172.16.0.0/12,127.0.0.0/8,::1/128",
       ),
-      CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL: envOr(
+      CONTROL_CENTER_MIN_PASSKEYS: envOr(environment, "CONTROL_CENTER_MIN_PASSKEYS", "1"),
+      CONTROL_CENTER_PASSKEY_TTL_SECONDS: envOr(
         environment,
-        "CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL",
-        `https://${authHost}/realms/platform/account/`,
+        "CONTROL_CENTER_PASSKEY_TTL_SECONDS",
+        "315360000",
       ),
-      CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT: envOr(
-        environment,
-        "CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT",
-        `https://${authHost}/realms/platform/protocol/openid-connect/token`,
-      ),
-      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL: envOr(
-        environment,
-        "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL",
-        `https://${authHost}/admin/realms/platform`,
-      ),
-      CONTROL_CENTER_MIN_PASSKEYS: envOr(environment, "CONTROL_CENTER_MIN_PASSKEYS", "2"),
+      CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: "true",
+      CONTROL_CENTER_REDIS_LIVE_APPLY: "true",
       NODE_EXTRA_CA_CERTS: "/run/platform/tls/control-center-local-ca.pem",
     },
   };
+}
+
+function localPrivateAdminServiceAuthority(root, certificatesDirectory, environment) {
+  const logging = {
+    driver: "json-file",
+    options: { "max-file": "5", "max-size": "10m" },
+  };
+  const resources = {
+    blkio_config: { weight: 300 },
+    cpu_shares: 256,
+    cpus: 0.25,
+    expose: ["80"],
+    init: true,
+    logging,
+    mem_limit: "268435456",
+    mem_reservation: "50331648",
+    networks: { platform_db_admin: null, platform_routing: null },
+    pids_limit: 256,
+    profiles: ["admin"],
+    restart: "unless-stopped",
+    security_opt: ["no-new-privileges:true"],
+    ulimits: { nofile: { hard: 8192, soft: 8192 } },
+  };
+  return {
+    phpmyadmin: {
+      ...structuredClone(resources),
+      command: null,
+      container_name: "phpmyadmin",
+      depends_on: { mariadb: { condition: "service_healthy", required: true } },
+      entrypoint: null,
+      environment: {
+        PMA_HOST: "platform.local",
+        PMA_PORT: "3306",
+        PMA_SSL_CA: "/etc/phpmyadmin/certs/ca.pem",
+        PMA_SSL_VERIFIES: "1",
+        UPLOAD_LIMIT: "256M",
+      },
+      healthcheck: {
+        interval: "20s",
+        retries: 10,
+        test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/ >/dev/null"],
+        timeout: "5s",
+      },
+      image: envOr(
+        environment,
+        "PHPMYADMIN_IMAGE",
+        "phpmyadmin:5.2.3@sha256:b16dc88d6e62b186dc4864adac4996fe0238587aa9f5ed507dcfc3894903a3f6",
+      ),
+      volumes: [
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phpmyadmin/apache-forwarded-proto.conf"),
+          target: "/etc/apache2/conf-enabled/forwarded-proto.conf",
+          type: "bind",
+        },
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phpmyadmin/config.user.inc.php"),
+          target: "/etc/phpmyadmin/config.user.inc.php",
+          type: "bind",
+        },
+        {
+          bind: {},
+          read_only: true,
+          source: certificatesDirectory,
+          target: "/etc/phpmyadmin/certs",
+          type: "bind",
+        },
+      ],
+    },
+    phppgadmin: {
+      ...structuredClone(resources),
+      command: null,
+      container_name: "phppgadmin",
+      depends_on: { postgres: { condition: "service_healthy", required: true } },
+      entrypoint: null,
+      environment: {
+        PHPPGADMIN_HOST: envOr(environment, "CONTROL_CENTER_POSTGRES_HOST", "postgres"),
+        PHPPGADMIN_PORT: envOr(environment, "CONTROL_CENTER_POSTGRES_PORT", "5432"),
+      },
+      healthcheck: {
+        interval: "20s",
+        retries: 10,
+        test: [
+          "CMD-SHELL",
+          "php -r '$$h=@get_headers(\"http://127.0.0.1/phppgadmin/\"); exit(isset($$h[0]) && str_contains($$h[0], \" 200 \") ? 0 : 1);'",
+        ],
+        timeout: "5s",
+      },
+      image: envOr(
+        environment,
+        "PHPPGADMIN_IMAGE",
+        "tozd/phppgadmin@sha256:2c146e25719c3712dd3190c2b59689f20448c2fa7b595f89be06214ddc89f1fd",
+      ),
+      volumes: [
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phppgadmin/config.inc.php"),
+          target: "/etc/phppgadmin/config.inc.php",
+          type: "bind",
+        },
+      ],
+    },
+  };
+}
+
+function validateAndProjectLocalPrivateAdminServices(
+  projectedConfig,
+  root,
+  certificatesDirectory,
+  environment,
+  violations,
+) {
+  const authority = localPrivateAdminServiceAuthority(
+    root,
+    certificatesDirectory,
+    environment,
+  );
+  const runtimeIdentity = runtimeIdentityProjection(environment);
+  for (const serviceName of LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES) {
+    const expected = authority[serviceName];
+    const observed = projectedConfig.services?.[serviceName];
+    const comparable = plainObject(observed) ? structuredClone(observed) : observed;
+    if (!runtimeIdentity.valid
+        || (runtimeIdentity.active
+          ? !sameFlatObject(observed?.labels, runtimeIdentity.labels)
+          : Object.hasOwn(observed ?? {}, "labels"))) {
+      violations.push(`${serviceName}:local-private-runtime-identity-labels`);
+    } else if (runtimeIdentity.active) {
+      delete comparable.labels;
+    }
+    if (!plainObject(expected)
+        || !plainObject(observed)
+        || !/@sha256:[a-f0-9]{64}$/.test(expected.image)
+        || !sameStructuredJson(comparable, expected)) {
+      violations.push(`${serviceName}:local-private-exact-authority`);
+    }
+    delete projectedConfig.services?.[serviceName];
+  }
+  for (const relative of [
+    "phpmyadmin/apache-forwarded-proto.conf",
+    "phpmyadmin/config.user.inc.php",
+    "phppgadmin/config.inc.php",
+  ]) {
+    if (!filesystemPathAuthority(path.join(root, relative), root, {
+      expectedType: "file",
+      fileMode: [0o644, 0o444],
+    })) {
+      violations.push(`local-private:admin-bind-${relative}`);
+    }
+  }
 }
 
 export function projectLocalPrivateNoHostedAuthority(
@@ -7478,6 +7777,11 @@ export function projectLocalPrivateNoHostedAuthority(
   const additionalSecretSet = new Set(LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES);
   const baseSecretNames = Object.keys(CORE_SEMANTIC_POLICY.secretFiles).sort();
   const localPrivateSecretNames = [...baseSecretNames, ...additionalSecretSet].sort();
+  const additionalServiceSet = new Set(LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES);
+  const localPrivateServiceNames = [
+    ...CURRENT_CORE_SERVICE_NAMES,
+    ...additionalServiceSet,
+  ].sort();
 
   for (const kind of ["configs", "networks", "secrets", "services", "volumes"]) {
     if (!plainObject(config[kind])
@@ -7489,6 +7793,9 @@ export function projectLocalPrivateNoHostedAuthority(
   if (!sameJson(lock?.protectedResourceNames?.secrets, localPrivateSecretNames)) {
     violations.push("secrets:local-private-lock-inventory");
   }
+  if (!sameJson(lock?.protectedResourceNames?.services, localPrivateServiceNames)) {
+    violations.push("services:local-private-lock-inventory");
+  }
 
   const dataRoot = exactAbsoluteEnvironmentPath(environment, "PLATFORM_DATA_ROOT");
   const stateDirectory = exactAbsoluteEnvironmentPath(environment, "PLATFORM_STATE_DIR");
@@ -7497,14 +7804,6 @@ export function projectLocalPrivateNoHostedAuthority(
   const localCa = exactAbsoluteEnvironmentPath(
     environment,
     "CONTROL_CENTER_LOCAL_CA_CERT_SOURCE",
-  );
-  const bootstrapToken = exactAbsoluteEnvironmentPath(
-    environment,
-    "CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE",
-  );
-  const keycloakClientSecret = exactAbsoluteEnvironmentPath(
-    environment,
-    "CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE",
   );
   const certificate = certificatesDirectory
     ? path.join(certificatesDirectory, "local-cert.pem")
@@ -7563,6 +7862,13 @@ export function projectLocalPrivateNoHostedAuthority(
   if (!certificateAuthorityValid) {
     violations.push("local-private:certificate-authority");
   }
+  validateAndProjectLocalPrivateAdminServices(
+    projectedConfig,
+    root,
+    certificatesDirectory,
+    environment,
+    violations,
+  );
   const wafTlsKeyGid = environment.get("WAF_TLS_KEY_GID");
   let observedPrivateKeyGid = null;
   if (certificateAuthorityValid) {
@@ -7592,20 +7898,6 @@ export function projectLocalPrivateNoHostedAuthority(
       })) {
     violations.push("local-private:ca-authority");
   }
-  for (const [name, selected] of [
-    ["bootstrap-token", bootstrapToken],
-    ["keycloak-client-secret", keycloakClientSecret],
-  ]) {
-    if (selected === null
-        || secretsRoot === null
-        || !pathWithinRoot(selected, secretsRoot)
-        || !filesystemPathAuthority(selected, secretsRoot, {
-          expectedType: "file",
-          fileMode: 0o600,
-        })) {
-      violations.push(`local-private:${name}-authority`);
-    }
-  }
   const observedBaseSecretFiles = [];
   for (const secretName of baseSecretNames) {
     const definition = config.secrets?.[secretName];
@@ -7633,19 +7925,14 @@ export function projectLocalPrivateNoHostedAuthority(
     }
   }
   if (observedBaseSecretFiles.length !== baseSecretNames.length
-      || !allUnique([
-        ...observedBaseSecretFiles,
-        bootstrapToken,
-        keycloakClientSecret,
-      ])) {
+      || !allUnique(observedBaseSecretFiles)) {
     violations.push("secrets:local-private-file-path-collision");
   }
   for (const variable of Object.values(CORE_SEMANTIC_POLICY.secretFileVariables)) {
     projectedEnvironment.delete(variable);
   }
   if ([stateDirectory, certificatesDirectory, secretsRoot].some((value) => value === null)
-      || new Set([stateDirectory, certificatesDirectory, secretsRoot]).size !== 3
-      || bootstrapToken === keycloakClientSecret) {
+      || new Set([stateDirectory, certificatesDirectory, secretsRoot]).size !== 3) {
     violations.push("local-private:path-collision");
   }
   if (!filesystemPathAuthority(localLock, root, {
@@ -7714,19 +8001,6 @@ export function projectLocalPrivateNoHostedAuthority(
     mariadbNetworks[compatibilityNetwork] = null;
   }
 
-  for (const secretName of LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES) {
-    const definition = config.secrets?.[secretName];
-    const selectedFile = secretName.endsWith("bootstrap_token")
-      ? bootstrapToken
-      : keycloakClientSecret;
-    if (!exactKeys(definition, ["file", "name"])
-        || definition.file !== selectedFile
-        || definition.name !== `${lock.projectName}_${secretName}`) {
-      violations.push(`secret:${secretName}:local-private-authority`);
-    }
-    delete projectedConfig.secrets?.[secretName];
-  }
-
   const controlCenter = projectedConfig.services?.["control-center"];
   const expectedEnvironment = localPrivateExpectedEnvironment(environment);
   const observedEnvironment = controlCenter?.environment;
@@ -7738,11 +8012,7 @@ export function projectLocalPrivateNoHostedAuthority(
         violations.push(`control-center:local-private-environment-${key}`);
       }
     }
-    if (!validHostname(expectedEnvironment.authHost)
-        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(
-          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID,
-        )
-        || !/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/.test(
+    if (!/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/.test(
           expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME,
         )
         || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
@@ -7754,57 +8024,36 @@ export function projectLocalPrivateNoHostedAuthority(
         || !validCidrList(
           expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS,
         )
-        || !validLocalPrivateIdentityUrl(
-          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL,
-          expectedEnvironment.authHost,
-          "/realms/platform/account/",
+        || expectedEnvironment.values.CONTROL_CENTER_MIN_PASSKEYS !== "1"
+        || !/^[1-9][0-9]{0,9}$/.test(
+          expectedEnvironment.values.CONTROL_CENTER_PASSKEY_TTL_SECONDS,
         )
-        || !validLocalPrivateIdentityUrl(
-          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT,
-          expectedEnvironment.authHost,
-          "/realms/platform/protocol/openid-connect/token",
-        )
-        || !validLocalPrivateIdentityUrl(
-          expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL,
-          expectedEnvironment.authHost,
-          "/admin/realms/platform",
-        )
-        || !/^(?:[2-9]|10)$/.test(expectedEnvironment.values.CONTROL_CENTER_MIN_PASSKEYS)) {
+        || expectedEnvironment.values.CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS !== "true"
+        || expectedEnvironment.values.CONTROL_CENTER_REDIS_LIVE_APPLY !== "true") {
       violations.push("control-center:local-private-environment-values");
     }
+    const baseEnvironment = expectedServiceEnvironment("control-center", projectedEnvironment);
+    if (!baseEnvironment.valid || !baseEnvironment.present) {
+      violations.push("control-center:local-private-base-environment");
+    }
     for (const key of Object.keys(expectedEnvironment.values)) {
-      if (key === "CONTROL_CENTER_ENV") {
-        observedEnvironment[key] = envOr(environment, "CONTROL_CENTER_ENV", "local");
+      if (plainObject(baseEnvironment.value)
+          && Object.hasOwn(baseEnvironment.value, key)) {
+        observedEnvironment[key] = baseEnvironment.value[key];
       } else {
         delete observedEnvironment[key];
       }
     }
   }
 
-  const additionalGrants = new Set(LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES);
   if (!Array.isArray(controlCenter?.secrets)) {
     violations.push("control-center:local-private-secret-grants-shape");
-  } else {
-    for (const secretName of additionalGrants) {
-      const matches = controlCenter.secrets.filter((grant) => grant?.source === secretName);
-      if (matches.length !== 1
-          || !exactKeys(matches[0], ["source", "target"])
-          || matches[0].target !== `/run/secrets/${secretName}`) {
-        violations.push(`control-center:local-private-secret-grant-${secretName}`);
-      }
-    }
-    controlCenter.secrets = controlCenter.secrets
-      .filter((grant) => !additionalGrants.has(grant?.source));
   }
 
-  const edgeIp = envOr(environment, "CONTROL_CENTER_IDENTITY_EDGE_IP", "host-gateway");
-  const expectedExtraHost = `${expectedEnvironment.authHost}=${edgeIp}`;
-  if (!Array.isArray(controlCenter?.extra_hosts)
-      || !sameJson(controlCenter.extra_hosts, [expectedExtraHost])
-      || (edgeIp !== "host-gateway" && isIP(edgeIp) === 0)) {
-    violations.push("control-center:local-private-extra-hosts");
+  if (plainObject(controlCenter) && Object.hasOwn(controlCenter, "extra_hosts")) {
+    violations.push("control-center:local-private-extra-hosts-forbidden");
+    delete controlCenter.extra_hosts;
   }
-  if (plainObject(controlCenter)) delete controlCenter.extra_hosts;
 
   const wafCertificateMountValid = validateAndProjectLocalPrivateMount(
     projectedConfig,
@@ -7866,6 +8115,15 @@ export function projectLocalPrivateNoHostedAuthority(
   );
   validateAndProjectLocalPrivateMount(
     projectedConfig,
+    "control-center",
+    "/run/platform/hosted-workloads.lock.json",
+    localLock,
+    path.join(root, "config/no-hosted-workloads.lock.json"),
+    true,
+    violations,
+  );
+  validateAndProjectLocalPrivateMount(
+    projectedConfig,
     "broker-auth-bootstrap",
     "/run/platform/hosted-workloads.lock.json",
     localLock,
@@ -7919,6 +8177,9 @@ export function projectLocalPrivateNoHostedAuthority(
     projectedLock.protectedResourceNames.secrets =
       projectedLock.protectedResourceNames.secrets
         .filter((name) => !additionalSecretSet.has(name));
+    projectedLock.protectedResourceNames.services =
+      projectedLock.protectedResourceNames.services
+        .filter((name) => !additionalServiceSet.has(name));
   }
   if (plainObject(projectedLock)) {
     projectedLock.coreSemanticPolicy = {

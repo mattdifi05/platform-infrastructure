@@ -130,7 +130,7 @@ services:
     command:
       - sh
       - -ec
-      - cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl
+      - cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && cd /data && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl
     depends_on:
       broker-auth-bootstrap:
         condition: service_completed_successfully
@@ -330,23 +330,20 @@ services:
       CONTROL_CENTER_PORT: 8080
       CONTROL_CENTER_ENV: ${CONTROL_CENTER_ENV:-local}
       CONTROL_CENTER_BIND_HOST: 0.0.0.0
-      CONTROL_CENTER_AUTH_MODE: ${CONTROL_CENTER_AUTH_MODE:-oidc-passkey}
+      CONTROL_CENTER_AUTH_MODE: ${CONTROL_CENTER_AUTH_MODE:-app-passkey}
       CONTROL_CENTER_AUTH_STORE: postgres
       CONTROL_CENTER_AUTH_DATABASE_URL_FILE: /run/secrets/control_center_database_url
-      CONTROL_CENTER_OIDC_ISSUER: ${CONTROL_CENTER_OIDC_ISSUER:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform}
-      CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: ${CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth}
-      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: ${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}
-      CONTROL_CENTER_OIDC_JWKS_URI: ${CONTROL_CENTER_OIDC_JWKS_URI:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs}
-      CONTROL_CENTER_OIDC_REDIRECT_URI: ${CONTROL_CENTER_OIDC_REDIRECT_URI:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback}
       CONTROL_CENTER_PUBLIC_ORIGIN: ${CONTROL_CENTER_PUBLIC_ORIGIN:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}
-      CONTROL_CENTER_OIDC_CLIENT_ID: ${CONTROL_CENTER_OIDC_CLIENT_ID:-platform-control-center}
-      CONTROL_CENTER_OIDC_REQUIRED_ACR: ${CONTROL_CENTER_OIDC_REQUIRED_ACR:-urn:platform:loa:passkey}
-      CONTROL_CENTER_OIDC_REQUIRED_AMR: ${CONTROL_CENTER_OIDC_REQUIRED_AMR:-webauthn}
-      CONTROL_CENTER_OIDC_OWNER_ROLE: ${CONTROL_CENTER_OIDC_OWNER_ROLE:-owner}
-      CONTROL_CENTER_OIDC_ADMIN_ROLE: ${CONTROL_CENTER_OIDC_ADMIN_ROLE:-admin}
-      CONTROL_CENTER_OIDC_VIEWER_ROLE: ${CONTROL_CENTER_OIDC_VIEWER_ROLE:-viewer}
-      CONTROL_CENTER_SESSION_MAX_AGE_SECONDS: ${CONTROL_CENTER_SESSION_MAX_AGE_SECONDS:-900}
-      CONTROL_CENTER_SESSION_IDLE_SECONDS: ${CONTROL_CENTER_SESSION_IDLE_SECONDS:-1800}
+      CONTROL_CENTER_AUTH_RP_ID: ${CONTROL_CENTER_AUTH_RP_ID:-${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}
+      CONTROL_CENTER_AUTH_RP_NAME: ${CONTROL_CENTER_AUTH_RP_NAME:-Platform Control Center}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME:-admin}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: ${CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL:-admin@example.com}
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:-192.168.1.0/24,127.0.0.0/8,::1/128}
+      CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12,127.0.0.0/8,::1/128}
+      CONTROL_CENTER_PASSKEY_TTL_SECONDS: ${CONTROL_CENTER_PASSKEY_TTL_SECONDS:-315360000}
+      CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS: ${CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS:-300}
+      CONTROL_CENTER_SESSION_MAX_AGE_SECONDS: ${CONTROL_CENTER_SESSION_MAX_AGE_SECONDS:-86400}
+      CONTROL_CENTER_SESSION_IDLE_SECONDS: ${CONTROL_CENTER_SESSION_IDLE_SECONDS:-86400}
       CONTROL_CENTER_SESSION_POLICY_VERSION: ${CONTROL_CENTER_SESSION_POLICY_VERSION:-1}
       CONTROL_CENTER_FRESH_AUTH_SECONDS: ${CONTROL_CENTER_FRESH_AUTH_SECONDS:-300}
       CONTROL_CENTER_LOGIN_MAX_ATTEMPTS: ${CONTROL_CENTER_LOGIN_MAX_ATTEMPTS:-20}
@@ -363,6 +360,17 @@ services:
       CONTROL_CENTER_POSTGRES_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
       CONTROL_CENTER_POSTGRES_SUPERUSER: ${POSTGRES_SUPERUSER:-postgres}
       CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      CONTROL_CENTER_REDIS_LIVE_APPLY: ${CONTROL_CENTER_REDIS_LIVE_APPLY:-false}
+      CONTROL_CENTER_REDIS_HOST: ${CONTROL_CENTER_REDIS_HOST:-redis}
+      CONTROL_CENTER_REDIS_PORT: ${CONTROL_CENTER_REDIS_PORT:-6379}
+      CONTROL_CENTER_REDIS_USERNAME: ${CONTROL_CENTER_REDIS_USERNAME:-platform}
+      CONTROL_CENTER_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      CONTROL_CENTER_REDIS_DATABASE: ${REDIS_DB:-0}
+      CONTROL_CENTER_REDIS_CACHE_PREFIX: ${CONTROL_CENTER_REDIS_CACHE_PREFIX:-control-center:cache:v1}
+      CONTROL_CENTER_REDIS_CACHE_MAX_BYTES: ${CONTROL_CENTER_REDIS_CACHE_MAX_BYTES:-4194304}
+      CONTROL_CENTER_CONTEXT_CACHE_TTL_MS: ${CONTROL_CENTER_CONTEXT_CACHE_TTL_MS:-15000}
+      CONTROL_CENTER_HTML_CACHE_TTL_MS: ${CONTROL_CENTER_HTML_CACHE_TTL_MS:-15000}
+      CONTROL_CENTER_HOSTED_WORKLOAD_LOCK_FILE: /run/platform/hosted-workloads.lock.json
       CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
@@ -375,6 +383,9 @@ services:
       PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE: /var/www/project-state/database-destructive-operations.json
       CONTROL_CENTER_REPORTS_ROOT: /var/www/infra-docs/reports
       CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS: ${CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS:-86400}
+      CONTROL_CENTER_BACKUP_ROOT: /var/www/project-state/backups
+      CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: ${CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS:-false}
+      CONTROL_CENTER_BACKUP_SIGNING_KEYS_FILE: /run/secrets/backup_signing_keys
       PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_SENSITIVE_MATERIALS_FILE: /var/www/project-state/sensitive-materials.json
       PROJECT_VAULT_FILE: /var/www/project-state/secret-vault.json
@@ -416,16 +427,19 @@ services:
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
       - ./projects-portal/state:/var/www/project-state
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
     secrets:
       - projects_gateway_signing_keys
       - control_center_vault_keys
       - control_center_database_url
       - mariadb_root_password
       - postgres_superuser_password
+      - backup_signing_keys
+      - redis_password
     depends_on:
-      keycloak:
-        condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - enterprise_net
@@ -956,6 +970,8 @@ configs:
                 - url: http://keycloak:8080
 
 secrets:
+  backup_signing_keys:
+    file: ${BACKUP_SIGNING_KEYS_SECRET_FILE:-./secrets/backup_signing_keys.txt}
   control_center_database_url:
     file: ${CONTROL_CENTER_DATABASE_URL_SECRET_FILE:-./secrets/control_center_database_url.txt}
   control_center_vault_keys:

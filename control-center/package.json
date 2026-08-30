@@ -6,13 +6,15 @@
   "description": "Docker-first generic infrastructure dashboard and Admin Control Center.",
   "main": "./server.mjs",
   "dependencies": {
+    "@simplewebauthn/server": "13.3.3",
     "jose": "6.1.3",
-    "pg": "8.16.3"
+    "pg": "8.16.3",
+    "redis": "6.2.1"
   },
   "scripts": {
     "start": "node server.mjs",
     "state:migrate": "node state/migration.mjs",
-    "test": "node --test tests/*.test.mjs state/*.test.mjs status/*.test.mjs",
+    "test": "node --test tests/*.test.mjs state/*.test.mjs status/*.test.mjs redis/*.test.mjs",
     "test:postgres-auth": "node tests/postgres-auth-store.integration.mjs"
   }
 }
