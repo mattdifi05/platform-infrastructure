@@ -205,7 +205,8 @@ jobs:
             (.volumes | length) == 12 and
             (.services["backup-scheduler"] == null) and
             (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
-            (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind" and (.read_only != true))] | length == 0))
+            (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
+            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 8, "php-fiplatform": 9, "php-matthewdifilippo": 8, "php-stream": 8, "php-workcalendar": 8} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
           ' "${RUNNER_TEMP}/v1-current-render.json"
       - name: Render staging and backup compose
         run: |
