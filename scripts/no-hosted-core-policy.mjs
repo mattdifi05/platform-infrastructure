@@ -5607,6 +5607,7 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
   basePolicySha256: coreSemanticPolicySha256,
   composeOverlay: "compose.local-private.yaml",
   projectedAuthoritySha256: CORE_SEMANTIC_POLICY.currentAuthority.normalizedRenderSha256,
+  additionalServices: LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES,
   additionalSecrets: LOCAL_PRIVATE_ADDITIONAL_SECRET_NAMES,
   baseSecrets: LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
   externalAuthority: Object.freeze({
@@ -5623,6 +5624,10 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
     firstConfigurationMode: "required",
     minimumPasskeysDefault: "1",
     localCaTarget: "/run/platform/tls/control-center-local-ca.pem",
+  }),
+  adminServiceProfiles: Object.freeze({
+    phpmyadmin: Object.freeze(["admin"]),
+    phppgadmin: Object.freeze(["admin"]),
   }),
   backupScheduler: Object.freeze({
     executionMode: "BROKER_ONLY",
@@ -7616,6 +7621,7 @@ function localPrivateAdminServiceAuthority(root, certificatesDirectory, environm
     mem_reservation: "50331648",
     networks: { platform_db_admin: null, platform_routing: null },
     pids_limit: 256,
+    profiles: ["admin"],
     restart: "unless-stopped",
     security_opt: ["no-new-privileges:true"],
     ulimits: { nofile: { hard: 8192, soft: 8192 } },

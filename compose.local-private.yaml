@@ -50,7 +50,7 @@ services:
   project-router:
     environment:
       PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e
       PROJECT_HOST_SUFFIX: .platform-infrastructure.com
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
       NODE_PROJECT_HOSTS: ""
@@ -75,7 +75,8 @@ services:
       - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/mysql/ssl:ro
 
   phpmyadmin:
-    profiles: !reset []
+    profiles: !override
+      - admin
     pids_limit: 256
     restart: unless-stopped
     environment: !override
@@ -91,7 +92,8 @@ services:
       - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/phpmyadmin/certs:ro
 
   phppgadmin:
-    profiles: !reset []
+    profiles: !override
+      - admin
     pids_limit: 256
     restart: unless-stopped
 

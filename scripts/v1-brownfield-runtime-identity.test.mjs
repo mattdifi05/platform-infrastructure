@@ -587,7 +587,11 @@ test("RI14 current source files reproduce all three mismatch/STOP projections", 
   assert.doesNotMatch(scheduler, /from\s+["']node:child_process["']/);
   assert.doesNotMatch(serviceBlock(productionQueueOverlay, "control-center"), /backup_scheduler_jobs/);
   assert.doesNotMatch(serviceBlock(finalIsolationOverlay, "control-center"), /backup_scheduler_jobs/);
-  assert.deepEqual(noHosted.protectedResourceNames, PROTECTED_RESOURCE_MAP);
+  assert.deepEqual(noHosted.protectedResourceNames, {
+    ...PROTECTED_RESOURCE_MAP,
+    secrets: [...PROTECTED_RESOURCE_MAP.secrets, "backup_signing_keys"].sort(),
+    services: [...PROTECTED_RESOURCE_MAP.services, "local-dns"].sort(),
+  });
 
   const result = verifyV1BrownfieldRuntimeIdentity(JSON.parse(fs.readFileSync(TEMPLATE, "utf8")));
   assert.equal(result.currentContractStatus, "MISMATCH-STOP");

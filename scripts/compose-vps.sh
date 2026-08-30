@@ -977,8 +977,8 @@ if [[ -n "$workload_lock" ]]; then
 else
   if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
-    canonical_no_hosted_lock_sha256=064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab
-    canonical_no_hosted_policy_sha256=6ac80176818ddea36879a8a6b7202b1d5760b3e46bde1b308789c3b353050baa
+    canonical_no_hosted_lock_sha256=6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e
+    canonical_no_hosted_policy_sha256=c2b93ae50d9e02f44df5af2cf987b6c441cb798b44060c6fe7c746b49e6561b4
     canonical_no_hosted_secret_count=22
     canonical_no_hosted_service_count=23
   else
@@ -1170,6 +1170,10 @@ compose_environment=(
 if [[ -n "${HOME:-}" ]]; then
   compose_environment+=("HOME=$HOME")
 fi
+compose_profiles=(--profile backup)
+if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
+  compose_profiles+=(--profile admin)
+fi
 compose_render_status=0
 if (
   eval "exec ${compose_render_writer_fd}>&-"
@@ -1177,7 +1181,7 @@ if (
   for compose_render_child_fd in "${compose_render_reader_fds[@]}"; do
     eval "exec ${compose_render_child_fd}<&-"
   done
-  "${compose_environment[@]}" "${compose[@]}" --profile backup config --format json
+  "${compose_environment[@]}" "${compose[@]}" "${compose_profiles[@]}" config --format json
 ) | (
   for (( compose_render_child_fd=first_handoff_fd;
       compose_render_child_fd<next_handoff_fd;

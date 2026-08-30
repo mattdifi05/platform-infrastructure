@@ -23,8 +23,10 @@ test("every Compose declaration preserves the database-admin profile gate", () =
       if (block === null) continue;
       const directive = profileDirective(block);
       assert.notEqual(directive.operation, "reset", `${file} must not reset ${service} profiles`);
-      assert.notEqual(directive.operation, "override", `${file} must not override ${service} profiles`);
-      if (directive.operation === "merge") {
+      if (directive.operation === "override") {
+        assert.equal(file, "compose.local-private.yaml", `${file} must not override ${service} profiles`);
+        assert.deepEqual(directive.profiles, ["admin"], `${file} may only pin ${service}'s admin profile`);
+      } else if (directive.operation === "merge") {
         assert.deepEqual(directive.profiles, ["admin"], `${file} may only preserve ${service}'s admin profile`);
       }
     }

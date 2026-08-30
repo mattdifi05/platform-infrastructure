@@ -20,7 +20,7 @@ const NO_HOSTED_WORKLOAD_LOCKS = Object.freeze({
   }),
   LOCAL_PRIVATE: Object.freeze({
     path: "config/no-hosted-workloads.local-private.lock.json",
-    sha256: "064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab",
+    sha256: "6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e",
   }),
 });
 

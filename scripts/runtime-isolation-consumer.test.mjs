@@ -1551,6 +1551,7 @@ test("VPS wrapper derives a core-only envelope only in explicit canonical no-hos
     const renderedMarker = fs.existsSync(sandbox.dockerMarker);
     assert.equal(renderedMarker, true, "semantic envelope did not invoke the fake config renderer");
     assert.match(rendererArguments, /--profile backup config --format json$/);
+    assert.doesNotMatch(rendererArguments, /--profile admin/);
     assert.doesNotMatch(
       rendererArguments,
       /(?:^|\s)(?:build|create|down|exec|kill|pull|push|restart|rm|run|start|stop|up)(?:\s|$)/,
@@ -1588,7 +1589,7 @@ test("LOCAL_PRIVATE Compose variant is explicit, no-hosted-only and appended aft
     const localPrivateArguments = fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8").trim();
     assert.match(
       localPrivateArguments,
-      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json$/,
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup --profile admin config --format json$/,
     );
     const localPrivateRuntimeIdentity = runWrapper(sandbox, ["config", "--format", "json"], {
       PLATFORM_COMPOSE_VARIANT: "LOCAL_PRIVATE",
@@ -1602,7 +1603,7 @@ test("LOCAL_PRIVATE Compose variant is explicit, no-hosted-only and appended aft
     assert.equal(localPrivateRuntimeIdentity.status, 0, localPrivateRuntimeIdentity.stderr);
     assert.match(
       fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8").trim(),
-      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup config --format json$/,
+      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup --profile admin config --format json$/,
     );
 
     const localAppend = composeVpsSource.indexOf("compose+=(-f compose.local-private.yaml)");
@@ -1674,7 +1675,7 @@ test("V1 LOCAL_PRIVATE admits only its root-owned exact render environment and c
     assert.equal(fs.readFileSync(sandbox.dockerMarker, "utf8"), "", "authorized V1 render did not reach Docker");
     assert.match(
       fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
-      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json/,
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup --profile admin config --format json/,
     );
     assert.doesNotMatch(
       fs.readFileSync(sandbox.dockerProcessEnvironmentCapture, "utf8"),
@@ -1702,7 +1703,7 @@ test("V1 LOCAL_PRIVATE admits only its root-owned exact render environment and c
     assert.equal(runtimeRender.status, 0, runtimeRender.stderr);
     assert.match(
       fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
-      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup config --format json/,
+      /-f compose\.local-private\.yaml -f compose\.runtime-identity\.yaml --profile backup --profile admin config --format json/,
     );
     for (const [name, value] of Object.entries(runtimeIdentity)) {
       assert.match(fs.readFileSync(sandbox.dockerEnvironmentCapture, "utf8"), new RegExp(`^${name}=${value}$`, "m"));
@@ -3040,6 +3041,7 @@ function localPrivateAdminServiceFixtures(root, certificatesDirectory) {
     mem_reservation: "50331648",
     networks: { platform_db_admin: null, platform_routing: null },
     pids_limit: 256,
+    profiles: ["admin"],
     restart: "unless-stopped",
     security_opt: ["no-new-privileges:true"],
     ulimits: { nofile: { hard: 8192, soft: 8192 } },
@@ -3796,6 +3798,8 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
         ...files.flatMap((filename) => ["-f", filename]),
         "--profile",
         "backup",
+        "--profile",
+        "admin",
         "config",
         "--format",
         "json",
@@ -3932,6 +3936,14 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets outside the release", (
     assert.equal(lock.coreSemanticPolicy.sha256, localPrivateCoreSemanticPolicySha256);
     assert.equal(lock.protectedResourceNames.secrets.length, 22);
     const overlay = fs.readFileSync(path.join(repositoryRoot, "compose.local-private.yaml"), "utf8");
+    for (const serviceName of ["phpmyadmin", "phppgadmin"]) {
+      assert.match(
+        overlay,
+        new RegExp(`  ${serviceName}:\\n(?:    [^\\n]*\\n)*?    profiles: !override\\n      - admin`),
+        `${serviceName} must preserve the exact opt-in admin profile`,
+      );
+    }
+    assert.doesNotMatch(overlay, /profiles: !reset \[\]/);
     assert.match(
       overlay,
       /group_add: !override\n\s+- \$\{WAF_TLS_KEY_GID:\?set WAF_TLS_KEY_GID\}/,
@@ -3966,6 +3978,21 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets outside the release", (
       environment,
     );
     assert.deepEqual(violations, [], `LOCAL_PRIVATE authority rejected: ${violations.join(",")}`);
+
+    for (const [serviceName, profiles] of [
+      ["phpmyadmin", []],
+      ["phpmyadmin", ["backup"]],
+      ["phppgadmin", []],
+      ["phppgadmin", ["backup"]],
+    ]) {
+      const mutant = structuredClone(config);
+      mutant.services[serviceName].profiles = profiles;
+      assert.ok(
+        validateNoHostedCoreAuthority(lock, mutant, sandbox.root, environment)
+          .includes(`${serviceName}:local-private-exact-authority`),
+        `${serviceName} accepted non-admin profiles ${JSON.stringify(profiles)}`,
+      );
+    }
 
     const runtimeEnvironment = new Map(environment);
     const runtimeValues = {
@@ -4138,7 +4165,7 @@ test("LOCAL_PRIVATE wrapper renders once against its exact lock and semantic env
     assert.deepEqual(JSON.parse(result.stdout), config);
     assert.match(
       fs.readFileSync(sandbox.dockerArgumentsCapture, "utf8"),
-      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup config --format json/,
+      /-f compose\.runtime-isolation\.yaml -f compose\.local-private\.yaml --profile backup --profile admin config --format json/,
     );
   } finally {
     removeSandbox(sandbox);
