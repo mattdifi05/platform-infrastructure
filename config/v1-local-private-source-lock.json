@@ -95,6 +95,7 @@
       "compose.backup-scheduler.yaml",
       "compose.runtime.yaml",
       "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
       "compose.local-private.yaml",
       "compose.local-private-applications.yaml",
       "compose.greenfield.yaml"
