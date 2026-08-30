@@ -10861,7 +10861,7 @@ function repoCoverageCategory(filePath) {
     ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
     ["platform-config", /^(?:config\/.+\.json|config\/local-private-recovery-escrow-cert\.pem)$/],
     ["object-storage", /^minio\//],
-    ["documentation", /^[A-Z][A-Z0-9_-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
+    ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
     ["host-service", /^systemd\/[^/]+\.service$/],
     ["host-privilege-policy", /^sudoers\/[^/]+$/],
