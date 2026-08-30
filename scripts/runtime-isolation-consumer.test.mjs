@@ -70,6 +70,7 @@ const expectedCoreInventory = {
   ],
   secrets: [
     "alertmanager_webhook_token",
+    "backup_signing_keys",
     "control_center_database_url",
     "control_center_vault_keys",
     "docker_action_backup_catalog",
@@ -100,6 +101,7 @@ const expectedCoreInventory = {
     "docker-action-broker",
     "grafana",
     "keycloak",
+    "local-dns",
     "loki",
     "mariadb",
     "minio",
@@ -562,7 +564,6 @@ function coreRuntimeConfig(inventory, { hosted = false } = {}) {
       Object.assign(
         service.environment,
         structuredClone(coreSemanticPolicyDescriptor.controlCenterFixedSecurityEnvironment),
-        { CONTROL_CENTER_OIDC_ISSUER: "https://auth.fixture.invalid/realms/platform" },
       );
     }
     if (serviceName === "waf") {
@@ -1572,8 +1573,8 @@ test("LOCAL_PRIVATE Compose variant is explicit, no-hosted-only and appended aft
     assert.doesNotMatch(standardArguments, /compose\.local-private\.yaml/);
 
     const localPrivateConfig = structuredClone(config);
-    localPrivateConfig.secrets.control_center_first_configuration_bootstrap_token = {};
-    localPrivateConfig.secrets.control_center_first_configuration_keycloak_client_secret = {};
+    localPrivateConfig.services.phpmyadmin = {};
+    localPrivateConfig.services.phppgadmin = {};
     writeDockerOutput(sandbox, `${JSON.stringify(localPrivateConfig)}\n`);
     fs.writeFileSync(
       path.join(sandbox.scripts, "no-hosted-core-policy.mjs"),
@@ -1654,8 +1655,8 @@ test("V1 LOCAL_PRIVATE admits only its root-owned exact render environment and c
     fixtureRootDirectory = fixture.root;
     try {
       const config = coreAuthorityConfig();
-      config.secrets.control_center_first_configuration_bootstrap_token = {};
-      config.secrets.control_center_first_configuration_keycloak_client_secret = {};
+      config.services.phpmyadmin = {};
+      config.services.phppgadmin = {};
       writeDockerOutput(fixture, `${JSON.stringify(config)}\n`);
       fs.writeFileSync(path.join(fixture.scripts, "no-hosted-core-policy.mjs"), "process.exit(0);\n");
       return config;
@@ -2358,9 +2359,9 @@ test("QA7 no-hosted rejects security-sensitive core environment divergence", () 
       ["WAF anomaly threshold widened", (config) => {
         config.services.waf.environment.ANOMALY_INBOUND = "999999";
       }],
-      ["control-center issuer redirected", (config) => {
-        config.services["control-center"].environment.CONTROL_CENTER_OIDC_ISSUER =
-          "https://attacker.invalid/realms/platform";
+      ["control-center relying party redirected", (config) => {
+        config.services["control-center"].environment.CONTROL_CENTER_AUTH_RP_ID =
+          "attacker.invalid";
       }],
       ["backup retention apply mismatch", (config) => {
         config.services["backup-scheduler"].environment
@@ -2407,7 +2408,7 @@ test("QA7 no-hosted semantic projection follows the exact trusted env snapshot",
       "PLATFORM_NETWORK_PREFIX=parity_core",
       "MARIADB_DATA_VOLUME=enterprise_parity_mariadb",
       "PROMETHEUS_RETENTION_TIME=30d",
-      "CONTROL_CENTER_OIDC_ISSUER=https://issuer.parity.invalid/realms/platform",
+      "CONTROL_CENTER_AUTH_RP_NAME=Parity Control Center",
       "CONTROL_CENTER_DATABASE_URL_SECRET_FILE=secrets/parity-control-url.txt",
       ...requiredCoreEnvironmentLines,
       "",
@@ -2428,8 +2429,8 @@ test("QA7 no-hosted semantic projection follows the exact trusted env snapshot",
       ANOMALY_INBOUND: "8",
       ANOMALY_OUTBOUND: "7",
     });
-    config.services["control-center"].environment.CONTROL_CENTER_OIDC_ISSUER =
-      "https://issuer.parity.invalid/realms/platform";
+    config.services["control-center"].environment.CONTROL_CENTER_AUTH_RP_NAME =
+      "Parity Control Center";
     config.services.prometheus.command[2] = "--storage.tsdb.retention.time=30d";
     for (const networkName of expectedCoreInventory.networks) {
       if (networkName.startsWith("platform_") && networkName !== "platform_docker_control") {
@@ -2604,14 +2605,14 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v2",
-    sha256: "8c3c4e35da4df27d0c622372ad7f9ea6f2f39dfc6694ee829d48e4d9eb59bcf1",
+    sha256: "92c16ab50f62cd94c74272d38a1ceacfebb104be9ec2f74f122188b486ad6874",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
   assert.deepEqual(lock.protectedResourceNames, expectedCoreInventory);
   assert.deepEqual(
     Object.fromEntries(protectedKinds.map((kind) => [kind, lock.protectedResourceNames[kind].length])),
-    { configs: 1, networks: 9, secrets: 21, services: 20, volumes: 17 },
+    { configs: 1, networks: 9, secrets: 22, services: 21, volumes: 17 },
   );
   assert.equal(lock.protectedResourceNames.services.includes("php-apache"), false);
   for (const kind of protectedKinds) {
@@ -3024,10 +3025,103 @@ test("QA8 exact overlay golden preserves the four independently derived canonica
   }
 });
 
+function localPrivateAdminServiceFixtures(root, certificatesDirectory) {
+  const resources = {
+    blkio_config: { weight: 300 },
+    cpu_shares: 256,
+    cpus: 0.25,
+    expose: ["80"],
+    init: true,
+    logging: {
+      driver: "json-file",
+      options: { "max-file": "5", "max-size": "10m" },
+    },
+    mem_limit: "268435456",
+    mem_reservation: "50331648",
+    networks: { platform_db_admin: null, platform_routing: null },
+    pids_limit: 256,
+    restart: "unless-stopped",
+    security_opt: ["no-new-privileges:true"],
+    ulimits: { nofile: { hard: 8192, soft: 8192 } },
+  };
+  return {
+    phpmyadmin: {
+      ...structuredClone(resources),
+      command: null,
+      container_name: "phpmyadmin",
+      depends_on: { mariadb: { condition: "service_healthy", required: true } },
+      entrypoint: null,
+      environment: {
+        PMA_HOST: "platform.local",
+        PMA_PORT: "3306",
+        PMA_SSL_CA: "/etc/phpmyadmin/certs/ca.pem",
+        PMA_SSL_VERIFIES: "1",
+        UPLOAD_LIMIT: "256M",
+      },
+      healthcheck: {
+        interval: "20s",
+        retries: 10,
+        test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/ >/dev/null"],
+        timeout: "5s",
+      },
+      image: "phpmyadmin:5.2.3@sha256:b16dc88d6e62b186dc4864adac4996fe0238587aa9f5ed507dcfc3894903a3f6",
+      volumes: [
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phpmyadmin/apache-forwarded-proto.conf"),
+          target: "/etc/apache2/conf-enabled/forwarded-proto.conf",
+          type: "bind",
+        },
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phpmyadmin/config.user.inc.php"),
+          target: "/etc/phpmyadmin/config.user.inc.php",
+          type: "bind",
+        },
+        {
+          bind: {},
+          read_only: true,
+          source: certificatesDirectory,
+          target: "/etc/phpmyadmin/certs",
+          type: "bind",
+        },
+      ],
+    },
+    phppgadmin: {
+      ...structuredClone(resources),
+      command: null,
+      container_name: "phppgadmin",
+      depends_on: { postgres: { condition: "service_healthy", required: true } },
+      entrypoint: null,
+      environment: { PHPPGADMIN_HOST: "postgres", PHPPGADMIN_PORT: "5432" },
+      healthcheck: {
+        interval: "20s",
+        retries: 10,
+        test: [
+          "CMD-SHELL",
+          "php -r '$$h=@get_headers(\"http://127.0.0.1/phppgadmin/\"); exit(isset($$h[0]) && str_contains($$h[0], \" 200 \") ? 0 : 1);'",
+        ],
+        timeout: "5s",
+      },
+      image: "tozd/phppgadmin@sha256:2c146e25719c3712dd3190c2b59689f20448c2fa7b595f89be06214ddc89f1fd",
+      volumes: [
+        {
+          bind: {},
+          read_only: true,
+          source: path.join(root, "phppgadmin/config.inc.php"),
+          target: "/etc/phppgadmin/config.inc.php",
+          type: "bind",
+        },
+      ],
+    },
+  };
+}
+
 function localPrivateQa8Fixture(sandbox) {
   const environment = installQa8Environment(sandbox);
   const config = qa8IndependentGolden(sandbox);
-  materializeQa8CanonicalSources(sandbox, config);
   const dataRoot = path.join(sandbox.cleanupRoot, "local-private-data");
   const sourceDirectory = path.join(path.dirname(dataRoot), "src");
   const previousSourceDirectory = path.join(sandbox.cleanupRoot, "compose-source");
@@ -3041,18 +3135,19 @@ function localPrivateQa8Fixture(sandbox) {
   const certificate = path.join(certificatesDirectory, "local-cert.pem");
   const privateKey = path.join(certificatesDirectory, "local-key.pem");
   const localCa = path.join(certificatesDirectory, "local-ca.pem");
-  const bootstrapToken = path.join(secretsRoot, "first-configuration-bootstrap-token.txt");
-  const keycloakClientSecret = path.join(secretsRoot, "first-configuration-keycloak-secret.txt");
   for (const [filename, mode] of [
     [certificate, 0o644],
     [privateKey, 0o640],
     [localCa, 0o644],
-    [bootstrapToken, 0o600],
-    [keycloakClientSecret, 0o600],
   ]) {
     fs.writeFileSync(filename, `local-private-${path.basename(filename)}\n`, { mode });
     fs.chmodSync(filename, mode);
   }
+  Object.assign(
+    config.services,
+    localPrivateAdminServiceFixtures(sandbox.root, certificatesDirectory),
+  );
+  materializeQa8CanonicalSources(sandbox, config);
   for (const [secretName, authority] of Object.entries(
     LOCAL_PRIVATE_BASE_SECRET_AUTHORITY,
   )) {
@@ -3075,8 +3170,6 @@ function localPrivateQa8Fixture(sandbox) {
     WAF_TLS_KEY_GID: String(fs.statSync(privateKey).gid),
     PLATFORM_SECRETS_ROOT: secretsRoot,
     CONTROL_CENTER_LOCAL_CA_CERT_SOURCE: localCa,
-    CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_SECRET_FILE: bootstrapToken,
-    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: keycloakClientSecret,
     HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: localLock,
     PROJECT_SOURCE_DIR: sourceDirectory,
   })) environment.set(key, value);
@@ -3096,45 +3189,21 @@ function localPrivateQa8Fixture(sandbox) {
     environment.set(variable, path.join(sandbox.cleanupRoot, `ignored-${secretName}.txt`));
   }
 
-  const additionalSecrets = {
-    control_center_first_configuration_bootstrap_token: bootstrapToken,
-    control_center_first_configuration_keycloak_client_secret: keycloakClientSecret,
-  };
-  for (const [secretName, filename] of Object.entries(additionalSecrets)) {
-    config.secrets[secretName] = {
-      file: filename,
-      name: `platform_infra_vps_${secretName}`,
-    };
-    config.services["control-center"].secrets.push({
-      source: secretName,
-      target: `/run/secrets/${secretName}`,
-    });
-  }
-
   Object.assign(config.services["control-center"].environment, {
     CONTROL_CENTER_ENV: "local_private",
     CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "required",
-    CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE:
-      "/run/secrets/control_center_first_configuration_bootstrap_token",
-    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_ID: "platform-first-configuration",
-    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE:
-      "/run/secrets/control_center_first_configuration_keycloak_client_secret",
     CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME: "admin",
     CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL: "admin@example.com",
     CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:
-      "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128",
+      "192.168.1.0/24,127.0.0.0/8,::1/128",
     CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:
       "172.16.0.0/12,127.0.0.0/8,::1/128",
-    CONTROL_CENTER_FIRST_CONFIGURATION_ACCOUNT_URL:
-      "https://auth.fixture.invalid/realms/platform/account/",
-    CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_ENDPOINT:
-      "https://auth.fixture.invalid/realms/platform/protocol/openid-connect/token",
-    CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_BASE_URL:
-      "https://auth.fixture.invalid/admin/realms/platform",
-    CONTROL_CENTER_MIN_PASSKEYS: "2",
+    CONTROL_CENTER_MIN_PASSKEYS: "1",
+    CONTROL_CENTER_PASSKEY_TTL_SECONDS: "315360000",
+    CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: "true",
+    CONTROL_CENTER_REDIS_LIVE_APPLY: "true",
     NODE_EXTRA_CA_CERTS: "/run/platform/tls/control-center-local-ca.pem",
   });
-  config.services["control-center"].extra_hosts = ["auth.fixture.invalid=host-gateway"];
 
   const replaceMount = (serviceName, target, source) => {
     const mount = config.services[serviceName].volumes.find((entry) => entry.target === target);
@@ -3145,6 +3214,11 @@ function localPrivateQa8Fixture(sandbox) {
   replaceMount("waf", "/etc/nginx/conf/server.key", privateKey);
   config.services.waf.group_add = [environment.get("WAF_TLS_KEY_GID")];
   replaceMount("control-center", "/var/www/project-state", stateDirectory);
+  replaceMount(
+    "control-center",
+    "/run/platform/hosted-workloads.lock.json",
+    localLock,
+  );
   config.services["control-center"].volumes.push({
     type: "bind",
     source: localCa,
@@ -3814,8 +3888,8 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
       [...composeFiles, "compose.runtime-identity.yaml"],
     );
     const lock = JSON.parse(lockBytes);
-    assert.equal(Object.keys(source.config.services).length, 20);
-    assert.equal(Object.keys(final.config.services).length, 20);
+    assert.equal(Object.keys(source.config.services).length, 23);
+    assert.equal(Object.keys(final.config.services).length, 23);
     assert.deepEqual(
       projectArchiveRuntimeIdentity({
         reconciler: path.join(release, "scripts", "v1-local-private-reconcile.py"),
@@ -3881,12 +3955,12 @@ test("LOCAL_PRIVATE real git archive passes both SHA-pinned Compose renders and 
   }
 });
 
-test("LOCAL_PRIVATE exact overlay binds all base secrets plus two setup secrets outside the release", () => {
+test("LOCAL_PRIVATE exact overlay binds all base secrets outside the release", () => {
   const sandbox = createConsumerSandbox();
   try {
     const { config, environment, lock } = localPrivateQa8Fixture(sandbox);
     assert.equal(lock.coreSemanticPolicy.sha256, localPrivateCoreSemanticPolicySha256);
-    assert.equal(lock.protectedResourceNames.secrets.length, 23);
+    assert.equal(lock.protectedResourceNames.secrets.length, 22);
     const overlay = fs.readFileSync(path.join(repositoryRoot, "compose.local-private.yaml"), "utf8");
     assert.match(
       overlay,
@@ -4205,8 +4279,8 @@ test("LOCAL_PRIVATE authority rejects setup, path, lock and raw-scheduler wideni
   try {
     const baseline = localPrivateQa8Fixture(sandbox);
     const mutations = [
-      ["setup secret", (config) => {
-        delete config.secrets.control_center_first_configuration_bootstrap_token;
+      ["database admin service", (config) => {
+        delete config.services.phpmyadmin;
       }],
       ["first configuration mode", (config) => {
         config.services["control-center"].environment.CONTROL_CENTER_FIRST_CONFIGURATION_MODE = "optional";
@@ -4431,6 +4505,7 @@ test("QA8 v2 dynamic projections preserve one digest and reject hidden authority
     }
     releaseEnvironment.set("PROMETHEUS_RETENTION_TIME", "30d");
     releaseEnvironment.set("ALERTMANAGER_SECRET_GID", "2000");
+    releaseEnvironment.set("LOCAL_DNS_BIND", "127.0.0.53");
     const releaseLabels = {
       "com.platform.runtime.candidate-id": releaseValues.PLATFORM_RUNTIME_CANDIDATE_ID,
       "com.platform.runtime.commit": releaseValues.PLATFORM_RUNTIME_COMMIT,
@@ -4446,6 +4521,9 @@ test("QA8 v2 dynamic projections preserve one digest and reject hidden authority
     }
     releaseConfig.services.prometheus.command[2] = "--storage.tsdb.retention.time=30d";
     releaseConfig.services.alertmanager.group_add = ["2000"];
+    for (const port of releaseConfig.services["local-dns"].ports) {
+      port.host_ip = "127.0.0.53";
+    }
     const releaseResult = evaluateCurrentNoHostedExactAuthority(
       lock,
       releaseConfig,
@@ -4508,6 +4586,10 @@ test("QA8 v2 dynamic projections preserve one digest and reject hidden authority
         environment.set("WAF_HTTP_BIND", "attacker.invalid:80");
         config.services.waf.ports[0].host_ip = "attacker.invalid";
       }],
+      ["local DNS wildcard bind", (config, environment) => {
+        environment.set("LOCAL_DNS_BIND", "0.0.0.0");
+        for (const port of config.services["local-dns"].ports) port.host_ip = "0.0.0.0";
+      }],
       ["scheduler non-boolean enable", (config, environment) => {
         environment.set("BACKUP_SCHEDULER_ENABLE_OFFSITE", "yes");
         config.services["backup-scheduler"].environment.BACKUP_SCHEDULER_ENABLE_OFFSITE = "yes";
@@ -4548,8 +4630,8 @@ test("QA8 v2 dynamic projections preserve one digest and reject hidden authority
         `Host(\`${precedenceHost}\`)`,
       );
     precedenceConfig.services["control-center"].environment.CONTROL_CENTER_HOST = precedenceHost;
-    precedenceConfig.services["control-center"].environment.CONTROL_CENTER_OIDC_REDIRECT_URI =
-      `https://${precedenceHost}/auth/callback`;
+    precedenceConfig.services["control-center"].environment.CONTROL_CENTER_AUTH_RP_ID =
+      precedenceHost;
     precedenceConfig.services["control-center"].environment.CONTROL_CENTER_PUBLIC_ORIGIN =
       `https://${precedenceHost}`;
     precedenceConfig.services["project-router"].environment.CONTROL_CENTER_HOST = precedenceHost;
@@ -4587,10 +4669,10 @@ test("QA8 exact environment authority rejects same-name security and endpoint wi
       ["keycloak non-strict", "keycloak", "KC_HOSTNAME_STRICT", "false"],
       ["grafana anonymous", "grafana", "GF_AUTH_ANONYMOUS_ENABLED", "true"],
       [
-        "control-center token endpoint",
+        "control-center relying party",
         "control-center",
-        "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
-        "https://attacker.invalid/token",
+        "CONTROL_CENTER_AUTH_RP_ID",
+        "attacker.invalid",
       ],
       ["waf method widening", "waf", "ALLOWED_METHODS", "GET HEAD POST TRACE CONNECT"],
       [

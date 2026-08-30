@@ -977,14 +977,16 @@ if [[ -n "$workload_lock" ]]; then
 else
   if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
-    canonical_no_hosted_lock_sha256=1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f
-    canonical_no_hosted_policy_sha256=091b61c3cef05c55d4c6cf6f5adaf54a386299c5f9877bff8743b196ba8cffb8
-    canonical_no_hosted_secret_count=23
+    canonical_no_hosted_lock_sha256=064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab
+    canonical_no_hosted_policy_sha256=6ac80176818ddea36879a8a6b7202b1d5760b3e46bde1b308789c3b353050baa
+    canonical_no_hosted_secret_count=22
+    canonical_no_hosted_service_count=23
   else
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.lock.json
-    canonical_no_hosted_lock_sha256=657a3c17f18dcadb9097d6dd8363e0e2d4294bd6bd6bdf32436cc8edccaaf217
-    canonical_no_hosted_policy_sha256=8c3c4e35da4df27d0c622372ad7f9ea6f2f39dfc6694ee829d48e4d9eb59bcf1
-    canonical_no_hosted_secret_count=21
+    canonical_no_hosted_lock_sha256=70e476932a904d2f54d96cc9934d58111a411ad125c484a73966397d0935caf9
+    canonical_no_hosted_policy_sha256=92c16ab50f62cd94c74272d38a1ceacfebb104be9ec2f74f122188b486ad6874
+    canonical_no_hosted_secret_count=22
+    canonical_no_hosted_service_count=21
   fi
   runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$canonical_no_hosted_lock}")
   if [[ "$PREPARE_RESOLVED" = 1 ]]; then
@@ -1007,7 +1009,8 @@ else
     }
     jq -e \
       --arg coreSemanticPolicySha256 "$canonical_no_hosted_policy_sha256" \
-      --argjson secretCount "$canonical_no_hosted_secret_count" '
+      --argjson secretCount "$canonical_no_hosted_secret_count" \
+      --argjson serviceCount "$canonical_no_hosted_service_count" '
       type == "object"
       and ((keys | sort) == ["brokerPolicySha256", "coreSemanticPolicy", "projectName", "protectedResourceNames", "routes", "state", "validatorVersion", "version", "workloads"])
       and .version == 4
@@ -1028,7 +1031,7 @@ else
       and (.protectedResourceNames.configs | length) == 1
       and (.protectedResourceNames.networks | length) == 9
       and (.protectedResourceNames.secrets | length) == $secretCount
-      and (.protectedResourceNames.services | length) == 20
+      and (.protectedResourceNames.services | length) == $serviceCount
       and (.protectedResourceNames.volumes | length) == 17
       and all(.protectedResourceNames[]; . == (unique | sort) and all(.[]; type == "string" and length > 0))
       and (.protectedResourceNames.services | index("php-apache")) == null

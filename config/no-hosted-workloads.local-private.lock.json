@@ -7,7 +7,7 @@
   "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "coreSemanticPolicy": {
     "schema": "platform-no-hosted-core-capability-policy/v2",
-    "sha256": "091b61c3cef05c55d4c6cf6f5adaf54a386299c5f9877bff8743b196ba8cffb8"
+    "sha256": "6ac80176818ddea36879a8a6b7202b1d5760b3e46bde1b308789c3b353050baa"
   },
   "projectName": "platform_infra_vps",
   "protectedResourceNames": {
@@ -27,9 +27,8 @@
     ],
     "secrets": [
       "alertmanager_webhook_token",
+      "backup_signing_keys",
       "control_center_database_url",
-      "control_center_first_configuration_bootstrap_token",
-      "control_center_first_configuration_keycloak_client_secret",
       "control_center_vault_keys",
       "docker_action_backup_catalog",
       "docker_action_backup_job_execute",
@@ -59,10 +58,13 @@
       "docker-action-broker",
       "grafana",
       "keycloak",
+      "local-dns",
       "loki",
       "mariadb",
       "minio",
       "nats",
+      "phpmyadmin",
+      "phppgadmin",
       "platform-alert-dispatcher",
       "postgres",
       "project-router",

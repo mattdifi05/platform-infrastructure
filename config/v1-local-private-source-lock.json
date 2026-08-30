@@ -6,7 +6,7 @@
     "composeProject": "platform_infra_greenfield",
     "serviceCount": 32,
     "liveBaseRenderSha256": "03eae7431b600cbe192f3fc2ad84e76a4f2503cfba2c50107cc1e0911084a2bd",
-    "hostedWorkloadRuntimeLockSha256": "1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f",
+    "hostedWorkloadRuntimeLockSha256": "064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab",
     "sourceRootVariable": "PHP_PROJECTS_DIR",
     "sourceRootLiveValue": "/home/platform_infrastructure/v1-fresh-data/src",
     "environmentFileClass": "external-state"

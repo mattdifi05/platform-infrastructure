@@ -1,8 +1,9 @@
 # V1 LOCAL_PRIVATE filesystem/setup overlay. Load after every canonical
 # runtime overlay so immutable release sources stay read-only while mutable
-# state, TLS material and one-time bootstrap secrets remain deployment-owned.
-# Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR and the three
-# setup file sources below must be absolute paths outside the release tree.
+# state, TLS material and the runtime secret store remain deployment-owned.
+# Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR,
+# PLATFORM_SECRETS_ROOT and CONTROL_CENTER_LOCAL_CA_CERT_SOURCE must be
+# absolute paths outside the release tree.
 # The current immutable backup scheduler is broker-only. This overlay does not
 # grant it docker.sock; LOCAL_PRIVATE reconciliation keeps it READY_BUT_DISABLED
 # until the separately admitted broker/provider material is available.
@@ -49,7 +50,7 @@ services:
   project-router:
     environment:
       PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true"
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 1e94e2bbe27708e22409fffcba72c078c8e8572162cede09a7c38e323f9aed8f
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: 064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab
       PROJECT_HOST_SUFFIX: .platform-infrastructure.com
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80
       NODE_PROJECT_HOSTS: ""
