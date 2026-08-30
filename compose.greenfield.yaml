@@ -76,10 +76,9 @@ services:
       platform_egress: {}
   waf:
     container_name: gf-waf
-    networks: !override
+    networks:
       platform_edge:
         ipv4_address: 172.30.251.2
-      platform_ingress: {}
 
 networks:
   enterprise_net:

@@ -91,6 +91,13 @@ services:
       - source: fresh_application_routes
         target: /etc/traefik/dynamic/fresh-application-routes.yml
 
+  # Application ingress exists only with this workload overlay. Keep the
+  # core-only greenfield render self-contained while attaching WAF whenever
+  # the application topology is present.
+  waf:
+    networks:
+      platform_ingress: {}
+
   backend:
     image: ${BACKEND_BUILD_IMAGE:-platform/backend:local}
     container_name: enterprise-backend
