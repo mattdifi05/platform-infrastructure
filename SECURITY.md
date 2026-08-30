@@ -140,7 +140,7 @@ not platform go-live gates.
 - `sh ./scripts/offsite-backup-restic.sh` after the full local backup set in production.
 - `sh ./scripts/rollback-release.sh` as a dry-run before every approved rollback.
 - `sh ./scripts/sign-images.sh` for immutable production images.
-- `node scripts/t16-policy.mjs` after every release workflow or GitHub governance change.
+- `node scripts/privileged-workflow-policy.test.mjs` after every release workflow or GitHub governance change.
 - Release admission must invoke the checksum-pinned GitHub verifier directly;
   unsigned SLSA, normalized `verified=true` reports and commit-check bypasses are
   forbidden.

@@ -36,7 +36,7 @@
           "title": "VPS preflight and postdeploy runtime checks",
           "mode": "protected-runtime",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["command:vps-preflight", "command:vps-postdeploy", "command:vps-go-live", "file:scripts/vps-go-live.sh"]
+          "evidenceRefs": ["command:vps-preflight", "command:vps-postdeploy", "file:config/v1-local-private-source-lock.json"]
         }
       ]
     },
@@ -231,7 +231,7 @@
           "title": "New-host rebuild and restore drill",
           "mode": "protected-runtime",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["file:scripts/vps-bootstrap-ubuntu.sh", "file:scripts/vps-hardening-ubuntu.sh", "command:vps-go-live", "command:full-restore-drill"]
+          "evidenceRefs": ["file:scripts/vps-bootstrap-ubuntu.sh", "file:scripts/vps-hardening-ubuntu.sh", "command:full-restore-drill"]
         }
       ]
     },
@@ -296,10 +296,10 @@
         },
         {
           "id": "deploy-orchestration",
-          "title": "VPS deploy and go-live orchestration",
+          "title": "LOCAL_PRIVATE activation boundary",
           "mode": "protected-runtime",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["command:deploy-vps", "command:vps-go-live", "file:scripts/deploy-vps.sh", "file:scripts/vps-go-live.sh"]
+          "evidenceRefs": ["file:config/v1-local-private-source-lock.json", "file:compose.local-private.yaml", "file:compose.greenfield.yaml", "file:scripts/deploy-vps.sh"]
         }
       ]
     },

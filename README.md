@@ -97,17 +97,12 @@ I container usano prefisso `enterprise-`, network `enterprise_net` e volumi `ent
 Il core si renderizza e passa i gate con zero applicazioni. Per collegare un
 workload, la repository applicativa fornisce un manifest, un overlay Compose
 image-only, un environment non-secret ignorato da Git e le proprie migrazioni.
-La preparazione non e' un comando portabile da eseguire con `.env.vps`. Il
-protocollo Hosted legacy/greenfield installa sul target l'environment root-owned
-`0640`, prepara il lock target-local e successivamente emette runtime intent,
-admission e release context v3. Questa terminologia non definisce l'ordine V1
-brownfield. Per un host esistente la Phase A approvata e' esclusivamente una
-autorizzazione provider read-only precedente al preflight; installazione,
-preparazione del lock e receipt target-root appartengono alla Phase B e sono
-vietate finche' preflight e backup PRE-DEPLOY non risultano verificati. L'ordine
-completo e' fissato in `V1-BROWNFIELD-DEPLOYMENT.md`. Entrambe le fasi restano
-`EXTERNAL-PENDING`; questo checkout non costituisce un sostituto del provider e
-non offre un percorso production manuale equivalente.
+La preparazione non e' un comando portabile da eseguire con `.env.vps`. La V1
+LOCAL_PRIVATE corrente usa l'ordine Compose e i profili fissati in
+`config/v1-local-private-source-lock.json`; le applicazioni vengono costruite da
+checkout immutabili e il render finale deve rispettare lock, isolamento,
+network e secret dichiarati. I percorsi di release VPS restano separati e
+fail-closed: questo checkout non autorizza una mutazione production remota.
 
 La preparazione valida digest immutabili, nomi, route, secret dichiarati,
 network e budget, confronta render core e combinato e scrive un lock `0600` con
@@ -660,12 +655,9 @@ La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 `production` e raccoglie prove live non mutanti: uptime provider, load benchmark
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
 bundle completo.
-La workflow manuale `enterprise-vps-evidence` e' disabilitata per questa V1
-brownfield: **V1 brownfield: unconditional STOP 78** prima di installare la
-chiave SSH e quindi prima di qualsiasi SSH, Git fetch, bootstrap, hardening o
-produzione di receipt. Input `confirm`, variabili e report locali sono
-`NONAUTHORITATIVE` e non possono aggirare lo stop. Non esiste ancora un consumer
-di admission V1 autorevole che possa abilitarla; plan/read-only/local tests remain available.
+La V1 LOCAL_PRIVATE non usa un workflow GitHub per mutare l'host. Readiness e
+metriche host vengono raccolte direttamente nella finestra operatore; il
+percorso production remoto resta fail-closed e separato.
 Il codice di trasporto irraggiungibile conserva comunque il pin che contiene
 soltanto `algoritmo base64-host-key`; hostname e porta arrivano da variabili
 separate e vengono legati in un `known_hosts` a voce singola. Non e' ammesso
@@ -766,14 +758,12 @@ digest precedenti e collega `reports/rollback/rollback-plan-*.json`.
 
 ## Produzione
 
-> **Boundary brownfield V1:** i comandi di bootstrap/hardening qui sotto sono
-> destinati a un host nuovo o gia' coperto da un piano di recovery verificato.
-> Sul server esistente non eseguire `--apply`, hardening, teardown Compose,
-> prune, reinstallazione o ricostruzione finche' non sono soddisfatti il
-> [contratto brownfield V1](V1-BROWNFIELD-DEPLOYMENT.md), il backup PRE-DEPLOY
-> completo su storage separato e tutti e tre i gate provider autorevoli. Una
-> ricostruzione puo' sostituire identita' Docker solo dopo quella prova di
-> recovery; la baseline point-in-time da sola non e' autorizzazione.
+> **Boundary operativa:** i comandi di bootstrap/hardening qui sotto sono
+> destinati a un host nuovo o a una finestra di manutenzione esplicitamente
+> approvata. Sul server V1 esistente non eseguire teardown Compose, prune,
+> reinstallazione o ricostruzione senza backup completo verificato, rollback
+> disponibile e render esatto del protected `main`. La baseline point-in-time
+> da sola non autorizza una mutazione.
 
 ### VPS hardening e Cloudflare origin-lock
 
@@ -846,9 +836,8 @@ della porta SSH non viene approvata e testata.
 Per prove Linux locali dentro container usa `--diagnostic`: scrive in
 `reports/vps-host-diagnostics/` e non viene considerato dal go/no-go di
 produzione.
-La workflow manuale `enterprise-vps-evidence` non raccoglie questa evidenza in
-V1: termina incondizionatamente con exit 78 prima delle credenziali SSH. Le prove
-plan/read-only/local tests remain available, ma non sono evidenza VPS live.
+Questa evidenza viene raccolta direttamente sull'host approvato; i test locali
+non sostituiscono il report VPS live.
 
 Le regole edge Cloudflare versionate sono in `cloudflare/`. Il WAF Cloudflare blocca admin host, file sensibili e scanner path prima della VPS; il WAF interno OWASP CRS resta attivo come secondo livello. `cloudflare/access-admin.example.json` rende versionate anche le applicazioni Cloudflare Access per phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO, Traefik, Projects e Keycloak Admin.
 
@@ -978,19 +967,9 @@ I drill piu' pesanti restano opt-in: usa
 `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE=1` solo quando staging/VPS, Restic e GitHub
 sono pronti.
 
-Per ottenere soltanto un piano locale non autoritativo:
-
-```sh
-sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-```
-
-Il piano scritto in `reports/vps-go-live/` resta `NONAUTHORITATIVE`.
-**V1 brownfield: unconditional STOP 78**: `--confirmLive` termina prima di
-bootstrap, hardening, readiness, preflight, Docker restart o evidence bundle.
-Nessun flag o stato locale puo' abilitarlo finche' non esiste un consumer di
-admission V1 autorevole. I plan/read-only/local tests remain available. Su un
-host nuovo e dimostrabilmente vuoto si usano separatamente gli script standalone
-fresh-host; questa non e' un'autorizzazione per il server V1 esistente.
+La V1 LOCAL_PRIVATE viene gestita con la procedura operatore basata sul source
+lock corrente. Su un host nuovo e dimostrabilmente vuoto si usano separatamente
+gli script standalone fresh-host.
 
 Nel profilo VPS:
 

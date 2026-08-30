@@ -523,8 +523,8 @@ revalidate_v1_local_private_render_environment() {
   done
 }
 
-# This wrapper is deliberately read-only. Production mutation is admitted only
-# by deploy-vps-remote.sh after the release, host, origin and network gates.
+# This wrapper is deliberately read-only. Production mutation requires the
+# separately reviewed release, host, origin and network admission boundary.
 case "${1:-}" in
   config|events|images|logs|ls|port|ps|runtime-isolation-envelope|top|version) ;;
   *)

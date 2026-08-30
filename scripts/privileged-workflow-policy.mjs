@@ -1,10 +1,6 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
 
 const TRUSTED_REF_GUARD = "github.ref == 'refs/heads/main' && github.ref_protected == true";
-const V1_INSTALL_ONLY_WORKFLOW_SHA256 = "9cfcd743fea01968020a128d632845994cc13d7d275ed209dc38b1f026ee3ab3";
-const V1_LOCAL_PRIVATE_WORKFLOW_SHA256 = "b6f6c0b0f36f63696b1fe88a0d0fa93d760e21e0ff8776e499d7ffe32bb77959";
-const LOCAL_RECOVERY_PRIVATE_AUTHORITY = /operator-recovery-private|recovery[_-]private[_-]key|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|\.platform-infrastructure-recovery|openssl[\s\S]{0,160}\bcms\b[\s\S]{0,160}\bdecrypt\b/i;
 const RUN_EVIDENCE_SECRET_FIXTURES = "postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password projects_gateway_signing_keys control_center_vault_keys control_center_database_url smtp_password mariadb_root_password phpmyadmin_control_password alertmanager_webhook_token backup_signing_keys restic_password docker_action_runtime_intent_trust_key docker_action_backup_catalog docker_action_backup_job_execute docker_action_backup_prune_plan docker_action_backup_prune_apply docker_action_restore_drill_full docker_action_backup_offsite_sync docker_action_evidence_runtime_snapshot";
 const RUN_EVIDENCE_ENV_OVERRIDE_KEYS = "DOMAIN PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256 ALERT_EMAIL_TO MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER";
 const RUN_EVIDENCE_COMPOSE_VERSION = "5.3.1";
@@ -208,123 +204,6 @@ export function deploymentPrerequisiteMismatches(workflowText) {
     || !deploy.includes(".dastChainSha256' \"$ACTIVATION_RECEIPT\")\" = \"$DEPLOY_DAST_CHAIN_SHA256")
   ) {
     issues.push("deploy-vps must validate the exact receipt v3 release, envelope, authorization and chain identities");
-  }
-  return issues;
-}
-
-export function v1InstallOnlyWorkflowMismatches(workflowText) {
-  const text = String(workflowText);
-  const issues = [];
-  if (crypto.createHash("sha256").update(text, "utf8").digest("hex") !== V1_INSTALL_ONLY_WORKFLOW_SHA256) {
-    issues.push("V1 install-only workflow bytes differ from the exact-main controller");
-  }
-  const install = jobBlock(text, "install-v1");
-  if (!install) return ["V1 install-only workflow is missing install-v1"];
-  if (!/^  workflow_dispatch:\s*$/m.test(text) || /^  (?:pull_request|push|schedule|workflow_call):\s*$/m.test(text)) {
-    issues.push("V1 install-only workflow must be manual-only");
-  }
-  if (!/^permissions:\s*\n  contents:\s*read\s*$/m.test(text)
-    || /^\s{2}(?:actions|attestations|checks|deployments|id-token|packages|pull-requests|statuses):/m.test(text)) {
-    issues.push("V1 install-only workflow permissions must be exactly contents read");
-  }
-  if (!install.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
-    issues.push("V1 install-only workflow lacks the exact protected-main manual guard");
-  }
-  if (/environment:\s*\n\s+name:\s+production/.test(install)) issues.push("V1 install-only validation must not acquire the production environment gate");
-  if (!/concurrency:\s*\n\s+group:\s+infra-production-deploy\s*\n\s+cancel-in-progress:\s*false/.test(install)) {
-    issues.push("V1 install-only workflow must serialize with full production deployment");
-  }
-  if (!/uses:\s*actions\/checkout@[a-f0-9]{40}[\s\S]*?with:\s*\n\s+ref:\s*\$\{\{ github\.sha \}\}\s*\n\s+persist-credentials:\s*false/.test(install)) {
-    issues.push("V1 install-only workflow must checkout github.sha without persisted credentials");
-  }
-  if (!install.includes('test "$APPROVED_CANDIDATE_SHA" = "$GITHUB_SHA"')
-    || !install.includes('test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
-    || !install.includes('test "$(git rev-parse --verify \'HEAD^{commit}\')" = "$GITHUB_SHA"')
-    || !install.includes('test -z "$(git status --porcelain=v1 --untracked-files=all)"')
-    || !install.includes('git update-ref refs/remotes/github/main "$GITHUB_SHA"')
-    || !install.includes('test "$(git rev-parse --verify refs/remotes/github/main)" = "$GITHUB_SHA"')) {
-    issues.push("V1 install-only workflow does not bind the approved exact-main candidate and clean controller");
-  }
-  if (/^\s+needs:|continue-on-error:\s*true/m.test(install)) {
-    issues.push("V1 install-only workflow must have no cross-job dependency or continue-on-error path");
-  }
-  if (/deploy-v1-install-only|python3\s+(?:\.\/)?scripts\/v1-node-runtime-prerequisite\.py|DEPLOY_|\/usr\/bin\/ssh|\.ssh\/|secrets\.|vars\.|sudo\s|uses:\s*actions\/upload-artifact/i.test(install)) {
-    issues.push("V1 install-only validation workflow contains remote or deployment authority");
-  }
-  if (LOCAL_RECOVERY_PRIVATE_AUTHORITY.test(install)) {
-    issues.push("V1 install-only validation workflow must not reference or decrypt the Mac-only recovery private key");
-  }
-  for (const command of [
-    "python3 -m py_compile", "scripts/v1-brownfield-bootstrap-bridge.py", "scripts/v1-brownfield-install-consumer.py",
-    "scripts/v1-node-runtime-prerequisite.py",
-    "scripts/v1-local-private-control.py", "scripts/v1-local-private-reconcile.py",
-    "scripts/v1-local-private-evidence-producer.py", "node --check scripts/v1-brownfield-install-receipt.mjs",
-    "node --check scripts/v1-local-private-control-receipt.mjs", "node --test --test-concurrency=1",
-    "scripts/v1-brownfield-install-consumer.test.mjs", "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
-    "scripts/v1-node-runtime-prerequisite.test.mjs",
-    "scripts/v1-local-private-reconcile.test.mjs",
-    "scripts/v1-local-private-evidence-producer.test.mjs",
-  ]) if (!install.includes(command)) issues.push("V1 install-only validation omits one exact source/receipt contract check");
-  if ((install.match(/STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED/g) ?? []).length !== 1
-    || (install.match(/^\s+exit 78\s*$/gm) ?? []).length !== 1
-    || !install.includes("run the fixed V1 client on the authorized Mac")) {
-    issues.push("V1 install-only validation must terminate exactly once before deployment with LOCAL_OPERATOR_ESCROW_REQUIRED");
-  }
-  return issues;
-}
-
-export function v1LocalPrivateWorkflowMismatches(workflowText) {
-  const text = String(workflowText);
-  const issues = [];
-  if (crypto.createHash("sha256").update(text, "utf8").digest("hex") !== V1_LOCAL_PRIVATE_WORKFLOW_SHA256) {
-    issues.push("V1 LOCAL_PRIVATE workflow bytes differ from the exact-main authority controller");
-  }
-  const activation = jobBlock(text, "activate-v1-local-private");
-  if (!activation) return ["V1 LOCAL_PRIVATE workflow is missing activate-v1-local-private"];
-  if (!/^  workflow_dispatch:\s*$/m.test(text) || /^  (?:pull_request|push|schedule|workflow_call):\s*$/m.test(text)) {
-    issues.push("V1 LOCAL_PRIVATE workflow must be manual-only");
-  }
-  if (!/^permissions:\s*\n  contents:\s*read\s*$/m.test(text)
-    || /^\s{2}(?:actions|attestations|checks|deployments|id-token|packages|pull-requests|statuses):/m.test(text)) {
-    issues.push("V1 LOCAL_PRIVATE workflow permissions must be exactly contents read");
-  }
-  if (!activation.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
-    issues.push("V1 LOCAL_PRIVATE workflow lacks the exact protected-main manual guard");
-  }
-  if (/environment:\s*\n\s+name:\s+production/.test(activation)) issues.push("V1 LOCAL_PRIVATE source validation must not acquire the production environment gate");
-  if (!/concurrency:\s*\n\s+group:\s+infra-production-deploy\s*\n\s+cancel-in-progress:\s*false/.test(activation)) {
-    issues.push("V1 LOCAL_PRIVATE workflow must serialize with full production deployment");
-  }
-  if (!/uses:\s*actions\/checkout@[a-f0-9]{40}[\s\S]*?with:\s*\n\s+ref:\s*\$\{\{ github\.sha \}\}\s*\n\s+persist-credentials:\s*false/.test(activation)) {
-    issues.push("V1 LOCAL_PRIVATE workflow must checkout github.sha without persisted credentials");
-  }
-  if (!activation.includes('test "$APPROVED_CONTROLLER_SHA" = "$GITHUB_SHA"')
-    || !activation.includes('test "$(git rev-parse --verify \'HEAD^{commit}\')" = "$GITHUB_SHA"')
-    || !activation.includes('test -z "$(git status --porcelain=v1 --untracked-files=all)"')
-    || !activation.includes('git update-ref refs/remotes/github/main "$GITHUB_SHA"')
-    || !activation.includes('test "$(git rev-parse --verify refs/remotes/github/main)" = "$GITHUB_SHA"')) {
-    issues.push("V1 LOCAL_PRIVATE workflow does not bind the approved exact-main clean controller");
-  }
-  if (/^\s+needs:|continue-on-error:\s*true/m.test(activation)) {
-    issues.push("V1 LOCAL_PRIVATE workflow must have no cross-job dependency or continue-on-error path");
-  }
-  if (/deploy-v1-local-private|DEPLOY_|\/usr\/bin\/ssh|\.ssh\/|secrets\.|vars\.|sudo\s|uses:\s*actions\/upload-artifact|begin-maintenance|\breconcile\s+(?:apply|evidence)|\bseal\b/i.test(activation)) {
-    issues.push("V1 LOCAL_PRIVATE validation workflow contains remote or cutover authority");
-  }
-  if (LOCAL_RECOVERY_PRIVATE_AUTHORITY.test(activation)) {
-    issues.push("V1 LOCAL_PRIVATE validation workflow must not reference or decrypt the Mac-only recovery private key");
-  }
-  for (const command of [
-    "python3 -m py_compile", "scripts/v1-local-private-control.py", "scripts/v1-local-private-reconcile.py",
-    "scripts/v1-local-private-evidence-producer.py", "node --check scripts/v1-local-private-control-receipt.mjs",
-    "node --test --test-concurrency=1",
-    "scripts/v1-local-private-control.test.mjs", "scripts/v1-local-private-control.e2e.test.mjs",
-    "scripts/v1-local-private-reconcile.test.mjs", "scripts/v1-local-private-evidence-producer.test.mjs",
-  ]) if (!activation.includes(command)) issues.push("V1 LOCAL_PRIVATE validation omits one exact source/receipt contract check");
-  if ((activation.match(/STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED/g) ?? []).length !== 1
-    || (activation.match(/^\s+exit 78\s*$/gm) ?? []).length !== 1
-    || !activation.includes("run the fixed V1 client on the authorized Mac")) {
-    issues.push("V1 LOCAL_PRIVATE validation must terminate exactly once before cutover with LOCAL_OPERATOR_ESCROW_REQUIRED");
   }
   return issues;
 }

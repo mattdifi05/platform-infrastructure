@@ -143,7 +143,7 @@ LAN-only Ubuntu server.
 - `vps-preflight.sh` validates the full VPS+WAF Compose render used by deploy, then `vps-postdeploy.sh` runs WAF smoke and `infra-health` after the VPS compose start, with opt-in pre go-live evidence, final `production-go-no-go` and live readiness flags.
 - `evidence-bundle-verify.sh` rereads the final evidence bundle manifest, validates entry SHA256/size and can require every live evidence family before handoff.
 - `vps-postdeploy.sh` parses only the required `.env` keys and does not source/execute the env file.
-- `vps-go-live.sh` provides a plan-first VPS orchestration path for readiness, preflight, optional compose start, postdeploy, go/no-go and evidence bundle reports.
+- LOCAL_PRIVATE activation is bound to the exact protected-main source lock; host readiness and postdeploy checks run directly in the approved maintenance window.
 - `deploy-vps.sh` passes remote deploy values through SSH positional arguments and a literal remote script, avoiding shell-string interpolation for branch, path, env file and deploy flags.
 - `evidence-bundle.sh` creates a non-secret `.tmp/evidence-bundles/infra-evidence-bundle-*.tar.gz` with report/document manifests and SHA256 checksums.
 

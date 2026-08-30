@@ -429,7 +429,6 @@ Workflow files:
 .github/workflows/enterprise-infra.yml
 .github/workflows/enterprise-infra-run-evidence.yml
 .github/workflows/enterprise-live-evidence.yml
-.github/workflows/enterprise-vps-evidence.yml
 .github/workflows/release-attestation.yml
 ```
 

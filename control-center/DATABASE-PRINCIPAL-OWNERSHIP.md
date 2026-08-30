@@ -44,17 +44,11 @@ The MariaDB and PostgreSQL provisioning paths contain no `ALTER USER`, `ALTER RO
 
 Rotation is a separate path. It requires an active exact binding, an existing database owned by that principal, and a catalog principal without superuser, role-creation, database-creation, replication, bypass-RLS, global-admin or grant-option capabilities. A missing, foreign, reserved or privileged binding is rejected before credential mutation.
 
-## Legacy resources
+## Existing resources
 
-Existing principals are never auto-adopted. `scripts/database-principal-migration-plan.mjs` reads metadata only and creates a dual-credential plan:
-
-1. create the generated principal with a new credential;
-2. grant only the target database;
-3. deploy the application with the new credential;
-4. verify application and backup/restore behavior;
-5. revoke the legacy principal only after separate approval.
-
-The planner has no apply mode. T04 does not execute this sequence against live databases.
+Existing principals are never auto-adopted or rewritten by the platform. Any
+manual ownership change requires its own reviewed maintenance procedure,
+current backup/restore evidence and application-specific verification.
 
 ## Verification
 

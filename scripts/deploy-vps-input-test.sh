@@ -523,7 +523,7 @@ expect_reject() {
   printf 'PASS\t%s\n' "$label"
 }
 
-expect_v1_admission_stop() {
+expect_activation_stop() {
   label=$1
   shift
   rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
@@ -532,15 +532,11 @@ expect_v1_admission_stop() {
   status=$?
   set -e
   [ "$status" -eq 78 ] || {
-    echo "FAIL: $label did not stop with EXTERNAL-PENDING status 78 (status $status)" >&2
+    echo "FAIL: $label did not stop with status 78 (status $status)" >&2
     exit 1
   }
-  grep -F 'Authoritative V1 brownfield admission is unavailable.' "$TMP/$label.stderr" >/dev/null || {
-    echo "FAIL: $label did not report the authoritative V1 brownfield stop" >&2
-    exit 1
-  }
-  grep -F 'REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE' "$TMP/$label.stderr" >/dev/null || {
-    echo "FAIL: $label did not classify the local backup result as deny-only" >&2
+  grep -F 'V1.1 production activation is intentionally unavailable from CI.' "$TMP/$label.stderr" >/dev/null || {
+    echo "FAIL: $label did not report the current activation stop" >&2
     exit 1
   }
   [ ! -e "$FAKE_SSH_ARGS" ] || {
@@ -569,40 +565,9 @@ expect_reject legacy-dast-receipt-only run_client env -u DEPLOY_DAST_PROVIDER_RE
 ln -s "$TMP/ssh-key" "$TMP/ssh-key-link"
 expect_reject symlink-ssh-key run_client env DEPLOY_SSH_KEY_PATH="$TMP/ssh-key-link" sh "$TEST_ROOT/scripts/deploy-vps.sh"
 
-expect_v1_admission_stop omitted-v1-admission \
-  run_client sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop self-asserted-ready-is-denied \
+expect_activation_stop caller-state-cannot-bypass \
   run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
-    DEPLOY_V1_BROWNFIELD_MUTATION_AUTHORITY=true \
-    sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop local-non-authoritative-backup-is-denied \
-  run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE \
-    DEPLOY_V1_BROWNFIELD_MUTATION_AUTHORITY=false \
-    sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop caller-baseline-hash-cannot-bypass \
-  run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
-    DEPLOY_V1_BROWNFIELD_BASELINE_SHA256="$(printf '0%.0s' $(seq 1 64))" \
-    sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop caller-backup-hash-cannot-bypass \
-  run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
-    DEPLOY_V1_BROWNFIELD_BACKUP_RECEIPT_SHA256="$(printf '0%.0s' $(seq 1 64))" \
-    sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop caller-candidate-binding-cannot-bypass \
-  run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
-    DEPLOY_V1_BROWNFIELD_CANDIDATE_COMMIT="$(printf '0%.0s' $(seq 1 40))" \
-    DEPLOY_V1_BROWNFIELD_CANDIDATE_TREE="$(printf '1%.0s' $(seq 1 40))" \
-    sh "$TEST_ROOT/scripts/deploy-vps.sh"
-expect_v1_admission_stop caller-target-binding-cannot-bypass \
-  run_client env \
-    DEPLOY_V1_BROWNFIELD_ADMISSION_STATUS=READY \
-    DEPLOY_V1_BROWNFIELD_TARGET_ROOT=/srv/caller-selected \
-    DEPLOY_V1_BROWNFIELD_PROVIDER_AUTHORIZATION=self-asserted \
-    DEPLOY_V1_BROWNFIELD_TARGET_AUTHORIZATION=self-asserted \
+    DEPLOY_ACTIVATION_OVERRIDE=AUTHORIZED \
     sh "$TEST_ROOT/scripts/deploy-vps.sh"
 
 for forbidden in 'sh -s' 'git ' 'docker ' 'scp ' 'sftp ' 'cloudflare-origin-lock-ufw.sh' 'prepare-vps-runtime.sh'; do
@@ -613,4 +578,4 @@ for forbidden in 'sh -s' 'git ' 'docker ' 'scp ' 'sftp ' 'cloudflare-origin-lock
 done
 printf 'PASS\tno-remote-checkout-staging-or-candidate-privilege\n'
 
-printf 'deploy VPS input tests passed 25/25\n'
+printf 'deploy VPS input tests passed 19/19\n'

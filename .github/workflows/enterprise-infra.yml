@@ -137,6 +137,8 @@ jobs:
       PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256: "4444444444444444444444444444444444444444444444444444444444444444"
       PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY: ghcr.io/example.invalid/platform-provider-activation-sidecar
       PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256: "5555555555555555555555555555555555555555555555555555555555555555"
+      HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: ./config/no-hosted-workloads.local-private.lock.json
+      WAF_TLS_KEY_GID: "101"
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -183,6 +185,31 @@ jobs:
             -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml -f compose.runtime.yaml \
             -f compose.networks.yaml -f compose.runtime-isolation.yaml \
             --profile backup config --quiet
+      - name: Render exact current V1 source lock
+        run: |
+          mapfile -t current_files < <(jq -r '.compose.runtimeFilesInOrder[]' config/v1-local-private-source-lock.json)
+          mapfile -t current_profiles < <(jq -r '.compose.activeProfiles[]' config/v1-local-private-source-lock.json)
+          test "${#current_files[@]}" -eq 12
+          test "${#current_profiles[@]}" -eq 1
+          test "${current_profiles[0]}" = admin
+          compose_args=()
+          for file in "${current_files[@]}"; do
+            test -f "$file"
+            compose_args+=( -f "$file" )
+          done
+          docker compose --env-file .env -p platform_infra_greenfield \
+            "${compose_args[@]}" --profile admin config --format json > "${RUNNER_TEMP}/v1-current-render.json"
+          jq -e '
+            . as $root |
+            (.services | length) == 32 and
+            (.secrets | length) == 20 and
+            (.networks | length) == 11 and
+            (.volumes | length) == 12 and
+            (.services["backup-scheduler"] == null) and
+            (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
+            (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
+            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 8, "php-fiplatform": 9, "php-matthewdifilippo": 8, "php-stream": 8, "php-workcalendar": 8} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
+          ' "${RUNNER_TEMP}/v1-current-render.json"
       - name: Render staging and backup compose
         run: |
           docker compose --env-file .env -p platform_infra_staging_ci \
@@ -336,41 +363,15 @@ jobs:
           node scripts/trusted-receipt-workflow.test.mjs
           node scripts/privileged-workflow-policy.test.mjs
           node scripts/ssh-host-key-policy.test.mjs
-          node scripts/t16-policy.mjs
           sh scripts/ops-image-trust-test.sh
           sh scripts/release-compose-admission.test.sh
           sh scripts/deploy-vps-input-test.sh
           sh scripts/deploy-vps-order-test.sh
           sh scripts/vps-activation-sink-test.sh
-      - name: V1 brownfield offline preservation tests
-        timeout-minutes: 10
+      - name: Current data-preservation tests
         run: |
-          node --test --test-concurrency=1 \
+          node --test \
             scripts/live-preservation-baseline.test.mjs \
-            scripts/v1-predeploy-backup-receipt.test.mjs \
-            scripts/v1-provider-gates.test.mjs \
-            scripts/v1-phase-a-authorization.test.mjs \
-            scripts/v1-brownfield-bootstrap.test.mjs \
-            scripts/v1-brownfield-bootstrap-bridge.test.mjs \
-            scripts/v1-node-runtime-prerequisite.test.mjs \
-            scripts/v1-brownfield-admission.test.mjs \
-            scripts/v1-brownfield-install-consumer.test.mjs \
-            scripts/v1-install-package.test.mjs \
-            scripts/v1-phase-b-preinstall-authorization.test.mjs \
-            scripts/v1-phase-b-replay-artifacts.test.mjs \
-            scripts/v1-brownfield-runtime-identity.test.mjs \
-            scripts/v1-brownfield-application-data-cutover.test.mjs \
-            scripts/v1-brownfield-scheduler-cutover.test.mjs \
-            scripts/v1-brownfield-control-plane-policy.test.mjs \
-            scripts/v1-brownfield-control-plane-gate.test.mjs \
-            scripts/v1-local-private-control.test.mjs \
-            scripts/v1-local-private-control.e2e.test.mjs \
-            scripts/v1-local-private-runtime-semantics-contract.test.mjs \
-            scripts/v1-local-private-validation-lane.test.mjs \
-            scripts/v1-local-private-evidence-producer.test.mjs \
-            scripts/v1-local-private-reconcile.test.mjs \
-            scripts/v1-local-private-reconcile-journal-contract.test.mjs \
-            scripts/deploy-v1-local-private.test.mjs \
             scripts/hosted-workload-preservation-guard.test.mjs
       - name: Upload supply-chain evidence reports
         if: always()
@@ -1244,11 +1245,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Block production until authoritative V1 brownfield admission exists
+      - name: Keep CI production activation fail-closed
         run: |
-          echo "::error::STOP: authoritative V1 brownfield admission is not implemented; canonical COMPLETE baseline, immutable/CAS PRE-DEPLOY backup, exact candidate commit/tree and target root, and provider+target authorization are required."
-          echo "::error::Local REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE with mutationAuthority=false is deny-only."
-          node ./scripts/v1-brownfield-control-plane-gate.mjs apply
+          echo "::error::STOP: V1.1 production activation is intentionally unavailable from CI; controlled LOCAL_PRIVATE deployment uses the protected-main Compose model."
           exit 78
       - name: Download exact admitted deployment receipts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

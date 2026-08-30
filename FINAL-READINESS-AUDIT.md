@@ -135,7 +135,6 @@ scripts/full-restore-drill.sh
 scripts/github-actions-config.sh
 scripts/github-branch-protection.sh
 scripts/github-environments.sh
-scripts/vps-go-live.sh
 scripts/vps-postdeploy.sh
 scripts/vps-preflight.sh
 scripts/infra-health.sh
@@ -205,7 +204,6 @@ generic hosting capability.
 - External uptime dry-run reports with `mode=dry-run` and `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying live provider gates.
 - Alert evidence command with synthetic Alertmanager delivery test, exact receiver receipt and optional email/forward delivery requirements.
 - VPS post-deploy command with WAF smoke, `infra-health`, optional pre go-live evidence and optional final go/no-go enforcement.
-- VPS go-live orchestrator with plan-only default and JSON/Markdown reports under `reports/vps-go-live/`.
 - Non-secret evidence bundle command with manifest, SHA256 checksums and `.tar.gz` output under `.tmp/evidence-bundles/`.
 - Final readiness report and VPS pre-deploy checklist.
 
@@ -256,7 +254,6 @@ scripts/infra-ops.sh static-security-check through docker:29-cli
 scripts/infra-ops.sh infra-health through docker:29-cli
 scripts/infra-ops.sh enterprise-10-check through docker:29-cli
 docker run --rm -v D:/docker/platform-infrastructure:/work:ro alpine:3.22 sh -ec 'sh -n /work/scripts/deploy-vps.sh && sh -n /work/scripts/vps-postdeploy.sh && sh -n /work/scripts/evidence-bundle.sh'
-docker run --rm -v D:/docker/platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
 full-restore-drill.sh
 failure-tests.sh --confirmServiceStop --targets redis
 load-benchmark.sh --quick --profiles 50,100,500 --requests 20 --maxConcurrency 8 --maxP95Ms 2000
@@ -283,7 +280,6 @@ All commands listed above passed in the local evidence gathered during this hard
 - Alerting uses the platform dispatcher with SMTP and one provider-neutral forward webhook, both with delivery metrics.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.
 - VPS deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.
-- VPS live execution previously required manually sequencing many commands; `vps-go-live.sh` now creates a plan-first orchestration report and can run the ordered live sequence with `--confirmLive`.
 - VPS bootstrap was previously a manual VPS task; `vps-bootstrap-ubuntu.sh` now plans/applies Git, Docker Engine, Buildx and Compose plugin installation with evidence reports.
 - VPS hardening previously printed dry-run/apply output only; it now writes plan/apply JSON and Markdown evidence reports.
 - VPS preflight previously rendered only the base VPS overlay; it now renders the full VPS+WAF Compose stack used by deploy and scans that render for mutable `:latest` images.

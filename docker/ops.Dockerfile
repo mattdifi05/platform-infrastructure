@@ -46,7 +46,6 @@ RUN chmod -R a-w /opt/platform-infrastructure \
     && chmod 0555 \
       /opt/platform-infrastructure/scripts/ops-image-entrypoint.sh \
       /opt/platform-infrastructure/scripts/deploy-vps.sh \
-      /opt/platform-infrastructure/scripts/deploy-vps-remote.sh \
       /opt/platform-infrastructure/scripts/activation-bundle.mjs \
       /opt/platform-infrastructure/scripts/activation-request.mjs \
       /opt/platform-infrastructure/scripts/activation-receipt-policy.mjs \
