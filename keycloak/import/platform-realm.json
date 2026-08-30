@@ -18,7 +18,9 @@
   "failureFactor": 5,
   "eventsEnabled": true,
   "eventsExpiration": 604800,
-  "eventsListeners": ["jboss-logging"],
+  "eventsListeners": [
+    "jboss-logging"
+  ],
   "webAuthnPolicyRpEntityName": "Platform",
   "webAuthnPolicyRpId": "auth.localhost.com",
   "webAuthnPolicyExtraOrigins": [
@@ -41,65 +43,6 @@
     "acr.loa.map": "{\"urn:platform:loa:passkey\":1}"
   },
   "browserFlow": "browser",
-  "authenticationFlows": [
-    {
-      "alias": "platform-passkey-browser",
-      "description": "Platform administrator passkey-only browser flow.",
-      "providerId": "basic-flow",
-      "topLevel": true,
-      "builtIn": false,
-      "authenticationExecutions": [
-        {
-          "authenticatorFlow": true,
-          "requirement": "CONDITIONAL",
-          "priority": 10,
-          "flowAlias": "platform-passkey-loa",
-          "userSetupAllowed": false
-        }
-      ]
-    },
-    {
-      "alias": "platform-passkey-loa",
-      "description": "Reach passkey LoA 1 with a verified passwordless WebAuthn assertion.",
-      "providerId": "basic-flow",
-      "topLevel": false,
-      "builtIn": false,
-      "authenticationExecutions": [
-        {
-          "authenticatorConfig": "platform-passkey-loa-1",
-          "authenticator": "conditional-level-of-authentication",
-          "authenticatorFlow": false,
-          "requirement": "REQUIRED",
-          "priority": 10,
-          "userSetupAllowed": false
-        },
-        {
-          "authenticatorConfig": "platform-passkey-amr-webauthn",
-          "authenticator": "webauthn-authenticator-passwordless",
-          "authenticatorFlow": false,
-          "requirement": "REQUIRED",
-          "priority": 20,
-          "userSetupAllowed": false
-        }
-      ]
-    }
-  ],
-  "authenticatorConfig": [
-    {
-      "alias": "platform-passkey-loa-1",
-      "config": {
-        "loa-condition-level": "1",
-        "loa-max-age": "0"
-      }
-    },
-    {
-      "alias": "platform-passkey-amr-webauthn",
-      "config": {
-        "default.reference.value": "webauthn",
-        "default.reference.maxAge": "300"
-      }
-    }
-  ],
   "clients": [
     {
       "clientId": "platform-web",
@@ -117,75 +60,30 @@
         "https://auth.localhost.com",
         "https://portal.localhost.com"
       ]
-    },
-    {
-      "clientId": "platform-control-center",
-      "name": "Platform Control Center",
-      "enabled": true,
-      "protocol": "openid-connect",
-      "publicClient": true,
-      "bearerOnly": false,
-      "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": false,
-      "implicitFlowEnabled": false,
-      "serviceAccountsEnabled": false,
-      "fullScopeAllowed": true,
-      "authenticationFlowBindingOverrides": {},
-      "defaultClientScopes": [
-        "web-origins",
-        "acr",
-        "profile",
-        "roles",
-        "basic",
-        "email"
-      ],
-      "redirectUris": [
-        "https://portal.localhost.com/auth/callback"
-      ],
-      "webOrigins": [
-        "https://portal.localhost.com"
-      ],
-      "attributes": {
-        "pkce.code.challenge.method": "S256",
-        "backchannel.logout.url": "https://portal.localhost.com/auth/backchannel-logout",
-        "backchannel.logout.session.required": "true",
-        "backchannel.logout.revoke.offline.tokens": "true"
-      },
-      "protocolMappers": [
-        {
-          "name": "amr",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-amr-mapper",
-          "consentRequired": false,
-          "config": {
-            "id.token.claim": "true",
-            "access.token.claim": "true"
-          }
-        },
-        {
-          "name": "platform-realm-roles",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
-          "consentRequired": false,
-          "config": {
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "realm_access.roles",
-            "jsonType.label": "String",
-            "multivalued": "true",
-            "user.attribute": "foo"
-          }
-        }
-      ]
     }
   ],
   "roles": {
     "realm": [
-      { "name": "owner", "description": "Full Platform owner access" },
-      { "name": "admin", "description": "Administrative access" },
-      { "name": "developer", "description": "Developer access" },
-      { "name": "billing", "description": "Billing access" },
-      { "name": "viewer", "description": "Read-only access" }
+      {
+        "name": "owner",
+        "description": "Full Platform owner access"
+      },
+      {
+        "name": "admin",
+        "description": "Administrative access"
+      },
+      {
+        "name": "developer",
+        "description": "Developer access"
+      },
+      {
+        "name": "billing",
+        "description": "Billing access"
+      },
+      {
+        "name": "viewer",
+        "description": "Read-only access"
+      }
     ]
   }
 }

@@ -3420,8 +3420,6 @@ function infraTestingHygiene() {
     "scripts/evidence-bundle-phase.test.mjs",
     "scripts/pinned-ssh-host-key.mjs",
     "scripts/pinned-ssh-host-key.test.mjs",
-    "scripts/keycloak-passkey-reconcile.mjs",
-    "scripts/keycloak-passkey-reconcile.test.mjs",
     "scripts/runtime-isolation-consumer.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
@@ -3461,7 +3459,6 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-isolation-consumer.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/keycloak-passkey-reconcile.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
@@ -3871,8 +3868,6 @@ function infraMaintainabilityHygiene() {
     "hosted-workload-lock.sh",
     "hosted-workload-network-ownership.sh",
     "install-host-reliability-collector.sh",
-    "keycloak-backchannel-configure.sh",
-    "keycloak-passkey-readiness.sh",
     "minio-service-identity.sh",
     "network-segmentation-sandbox-test.sh",
     "php-project-runtime.sh",

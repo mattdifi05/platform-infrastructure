@@ -27,11 +27,14 @@ database dumps or live exploitation output in public reports.
 
 ## Admin Control Plane
 
-- Control Center access is fail-closed through Keycloak OIDC Authorization Code
-  with PKCE and passkey-attested `acr`/`amr` claims. There is no production
-  local-password path.
+- Control Center access is fail-closed through application-owned SimpleWebAuthn.
+  Passkey public credentials, one-use challenges and revocable sessions are in
+  the dedicated PostgreSQL schema. There is no OIDC or local-password path.
+- First enrollment is an explicit trust-on-first-use boundary restricted by
+  the exact portal origin and management CIDR. Use the narrowest practical
+  enrollment CIDR; the store serializes registration and admits one credential.
 - Browser cookies contain opaque session identifiers with `HttpOnly`, `Secure`
-  and `SameSite=Lax`; transactions and revocable sessions are server-side.
+  and `SameSite=Lax`; revocable sessions are server-side.
 - Mutating Control Center API calls reject untrusted `Origin` headers and hostile
   Fetch Metadata.
 - Privileged backup producers must pass the exact frozen route-capability
@@ -77,8 +80,9 @@ not platform go-live gates.
 
 - `portal.localhost.com` is the local Infrastructure Portal host, not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
 - Its persistent cookie is opaque, `HttpOnly`, `Secure` and `SameSite=Lax`.
-- Revoke sessions through the Control Center session store and Keycloak policy;
-  do not add a local password or static cookie-verifier fallback.
+- Revoke Control Center sessions through its PostgreSQL session store. Keycloak
+  policies apply only to hosted application identities; do not add a local
+  password or static cookie-verifier fallback.
 
 ## Alert delivery
 

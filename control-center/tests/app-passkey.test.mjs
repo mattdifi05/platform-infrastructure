@@ -7,7 +7,7 @@ import {
   AuthRequestError,
   createControlCenterAuth,
   readAuthConfig,
-} from "../auth/oidc.mjs";
+} from "../auth/app-passkey.mjs";
 import { createFirstConfiguration, FIRST_CONFIGURATION_STATES } from "../first-configuration/index.mjs";
 import { DATABASE_ADMIN_AUTHORIZATION_PATH } from "../auth/database-admin-gate.mjs";
 
@@ -54,13 +54,11 @@ test("app-passkey config is standalone with an exact origin, durable credential 
   assert.equal(config.challengeTtlSeconds, 300);
 });
 
-test("app-passkey config does not require OIDC or Keycloak material", () => {
-  assert.doesNotThrow(() => readAuthConfig(env({
-    CONTROL_CENTER_OIDC_ISSUER: undefined,
-    CONTROL_CENTER_OIDC_CLIENT_ID: undefined,
-    CONTROL_CENTER_FIRST_CONFIGURATION_BOOTSTRAP_TOKEN_FILE: undefined,
-    CONTROL_CENTER_FIRST_CONFIGURATION_KEYCLOAK_CLIENT_SECRET_FILE: undefined,
-  })));
+test("app-passkey config has no external identity-provider material", () => {
+  const config = readAuthConfig(env());
+  for (const key of ["issuer", "clientId", "authorizationEndpoint", "tokenEndpoint"]) {
+    assert.equal(Object.hasOwn(config, key), false, key);
+  }
   assert.throws(
     () => readAuthConfig(env({ CONTROL_CENTER_PUBLIC_ORIGIN: "http://portal.platform-infrastructure.com" })),
     AuthConfigurationError,
@@ -172,7 +170,7 @@ test("registration and login options are generated for the exact portal origin",
 test("one passkey completes direct first configuration and duplicate credentials never overwrite", async () => {
   const auth = await createControlCenterAuth({ env: env() });
   try {
-    const setup = await createFirstConfiguration({ env: env(), oidc: auth });
+    const setup = await createFirstConfiguration({ env: env(), auth });
     assert.equal(setup.direct, true);
     assert.equal((await setup.status()).state, FIRST_CONFIGURATION_STATES.REQUIRED);
 
@@ -190,6 +188,7 @@ test("one passkey completes direct first configuration and duplicate credentials
     };
     assert.equal(await auth.store.createPasskey(credential), true);
     assert.equal(await auth.store.createPasskey({ ...credential, publicKey: new Uint8Array([9, 9, 9]) }), false);
+    assert.equal(await auth.store.createPasskey({ ...credential, id: "credential-two" }), false);
     assert.deepEqual([...auth.store.passkeys.get(credential.id).publicKey], [1, 2, 3]);
     const state = await setup.status();
     assert.equal(state.state, FIRST_CONFIGURATION_STATES.COMPLETE);

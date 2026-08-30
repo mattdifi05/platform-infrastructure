@@ -281,17 +281,12 @@ assert.match(
   /return \["tests", "state", "status"\]\.flatMap\(\(directory\) =>/,
   "Control Center hygiene must include package-owned tests, state, and status suites",
 );
-for (const firstConfigurationTest of [
-  "control-center/tests/first-configuration.test.mjs",
-  "control-center/tests/first-configuration-keycloak.test.mjs",
-]) {
-  assert.equal(fs.existsSync(firstConfigurationTest), true, `${firstConfigurationTest} must remain in the enumerated Control Center suite`);
-}
-assert.match(
-  infraOps,
-  /run\(process\.execPath, \["--test", "scripts\/keycloak-passkey-reconcile\.test\.mjs"\]/,
-  "the retained Keycloak readiness contract must stay wired into testing-hygiene",
+assert.equal(
+  fs.existsSync("control-center/tests/app-passkey.test.mjs"),
+  true,
+  "the application-owned passkey suite must remain enumerated",
 );
+assert.doesNotMatch(infraOps, /keycloak-(?:passkey|backchannel)/);
 assert.doesNotMatch(infraOps, /v1-(?:brownfield|local-private-(?:control|reconcile|evidence-producer))/);
 
 process.stdout.write("privileged workflow policy tests passed\n");

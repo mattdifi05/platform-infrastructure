@@ -20,7 +20,8 @@ every item must map to a file, command, policy or recurring drill.
   encrypted audited store.
 - Multi-node/high-compliance deployments may swap the materialization backend
   to a provider KMS while preserving the same `*_FILE` contract.
-- Raw Control Center, OIDC, provider and backup signing secrets must not be
+- Raw Control Center application-auth, application identity-provider, provider
+  and backup signing secrets must not be
   required in `.env` for production.
 - Rotation uses active plus previous key rings, then removes previous keys after the
   observation window.
@@ -51,8 +52,8 @@ Declared targets:
 
 ## 5. Security test matrix
 
-- Cover Control Center CSRF/origin policy, OIDC/PKCE/passkey claim enforcement,
-  session revocation, WAF, secret boundaries and privilege blocks. Application
+- Cover Control Center CSRF/origin policy, WebAuthn verification, session
+  revocation, WAF, secret boundaries and privilege blocks. Application
   auth flows remain workload-owned.
 - Gate: `sh scripts/infra-ops.sh security-matrix`.
 

@@ -7,7 +7,7 @@
     "serviceCount": 32,
     "liveBaseRenderSha256": "03eae7431b600cbe192f3fc2ad84e76a4f2503cfba2c50107cc1e0911084a2bd",
     "liveObservedHostedWorkloadRuntimeLockSha256": "064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab",
-    "hostedWorkloadRuntimeLockSha256": "6320478fbeac47ffe45a1470d171894094d0e4a21cd8a7a324d4d262f602e15e",
+    "hostedWorkloadRuntimeLockSha256": "612fe4c801584753b285c9e7fccbb1602419fab1a636e8b0919b235b17f38963",
     "sourceRootVariable": "PHP_PROJECTS_DIR",
     "sourceRootLiveValue": "/home/platform_infrastructure/v1-fresh-data/src",
     "environmentFileClass": "external-state"

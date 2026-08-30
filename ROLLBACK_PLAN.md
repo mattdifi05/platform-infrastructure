@@ -18,11 +18,10 @@ No database or volume rollback is permitted from an unverified artifact. Select 
 
 Use dual credentials. Keep the old principal active through functional smoke, retain encrypted historical Vault keys by key ID and revoke only after the new credential and rollback path are verified.
 
-OIDC rollback must never republish the current fail-open Control Center. If the
-passkey cutover fails, first remove the portal route or restrict it to the
-management LAN, then restore the recorded image, Keycloak configuration and
-control-plane database. Do not delete enrolled passkeys or the last break-glass
-credential as part of rollback.
+Control Center auth rollback must never republish a fail-open portal. If a
+passkey rollout fails, first remove the portal route or restrict it to the
+management LAN, then restore the recorded image and control-plane database.
+Do not delete the enrolled passkey as part of rollback.
 
 ## Network rollback
 
