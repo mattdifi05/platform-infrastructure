@@ -23,7 +23,7 @@ export const controlCenterScriptEntrypoints = [
 // Keep the default version in sync with the current UI contract so browsers
 // revalidate the stylesheet/script after a Control Center image update. Hosts
 // may still override it explicitly through CONTROL_CENTER_ASSET_VERSION.
-const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260830-sidebar-logout-2";
+const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260830-preload-coordinator-1";
 
 function versionedAssetHref(href) {
   return `${href}${href.includes("?") ? "&" : "?"}v=${encodeURIComponent(controlCenterAssetVersion)}`;

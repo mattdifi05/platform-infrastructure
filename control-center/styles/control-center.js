@@ -6,6 +6,7 @@
   var cacheTtlMs = 300000;
   var prefetchTimeoutMs = 15000;
   var preloadWorkerCount = 4;
+  var backgroundPreloadWorkerCount = 1;
   var sidebarStateKey = "platform-control-center-sidebar";
   var htmlCache = new Map();
   var activeRequest = null;
@@ -13,6 +14,12 @@
   var bootId = "cc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   var fileManagerRefreshInFlight = false;
   var prefetchInFlight = new Set();
+  var prefetchControllers = new Map();
+  var backgroundPreloadHandle = null;
+  var backgroundPreloadUsesIdleCallback = false;
+  var backgroundPreloadRunning = false;
+  var backgroundPreloadPending = false;
+  var backgroundPreloadGeneration = 0;
   var formSubmissions = new WeakSet();
   var navigationSequence = 0;
   var opsNavLastPillRect = null;
@@ -95,6 +102,26 @@
 
   function clearCache() {
     htmlCache.clear();
+  }
+
+  function cancelBackgroundPreload() {
+    backgroundPreloadGeneration += 1;
+    backgroundPreloadPending = false;
+    if (backgroundPreloadHandle !== null) {
+      if (backgroundPreloadUsesIdleCallback && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(backgroundPreloadHandle);
+      } else {
+        window.clearTimeout(backgroundPreloadHandle);
+      }
+      backgroundPreloadHandle = null;
+    }
+    prefetchControllers.forEach(function (controller) {
+      controller.abort();
+    });
+  }
+
+  function isCurrentBackgroundPreload(generation) {
+    return generation === undefined || generation === backgroundPreloadGeneration;
   }
 
   function cachedPage(url, allowStale) {
@@ -258,6 +285,7 @@
   }
 
   async function requestHtml(url, options) {
+    cancelBackgroundPreload();
     var method = (options && options.method ? options.method : "GET").toUpperCase();
     var useCache = method === "GET";
     var cacheKey = url.href;
@@ -315,7 +343,10 @@
       }
       return { html: html, url: finalUrl, fromCache: false };
     } finally {
-      if (activeRequest === controller) activeRequest = null;
+      if (activeRequest === controller) {
+        activeRequest = null;
+        scheduleControlCenterPreload();
+      }
     }
   }
 
@@ -324,8 +355,9 @@
     var cached = cachedPage(url.href, false);
     if (cached) return { html: cached.html, url: url.href, fromCache: true };
     prefetchInFlight.add(url.href);
+    var controller = new AbortController();
+    prefetchControllers.set(url.href, controller);
     try {
-      var controller = new AbortController();
       var timeout = window.setTimeout(function () {
         controller.abort();
       }, prefetchTimeoutMs);
@@ -360,6 +392,9 @@
       // Preload is opportunistic; normal navigation still fetches on demand.
       return null;
     } finally {
+      if (prefetchControllers.get(url.href) === controller) {
+        prefetchControllers.delete(url.href);
+      }
       prefetchInFlight.delete(url.href);
     }
   }
@@ -1317,14 +1352,18 @@
     }).filter(Boolean);
   }
 
-  async function preloadControlCenterPages(urls, onProgress) {
+  async function preloadControlCenterPages(urls, onProgress, options) {
     var queue = Array.isArray(urls) ? urls.slice() : portalPageUrlsForPreload();
+    var workerCount = options && Number.isInteger(options.workerCount) && options.workerCount > 0
+      ? options.workerCount
+      : preloadWorkerCount;
+    var generation = options ? options.generation : undefined;
     var total = queue.length;
     var completed = 0;
     var failed = [];
     if (!total) return { total: 0, completed: 0, failed: [] };
-    var workers = Array.from({ length: Math.min(preloadWorkerCount, queue.length) }, async function () {
-      while (queue.length) {
+    var workers = Array.from({ length: Math.min(workerCount, queue.length) }, async function () {
+      while (queue.length && isCurrentBackgroundPreload(generation)) {
         var url = queue.shift();
         if (!url) continue;
         var result = await prefetchHtml(url);
@@ -1338,7 +1377,31 @@
   }
 
   function scheduleControlCenterPreload() {
-    Promise.resolve().then(preloadControlCenterPages);
+    if (document.body.dataset.ccPreloading === "true") return;
+    backgroundPreloadPending = true;
+    if (backgroundPreloadHandle !== null || backgroundPreloadRunning) return;
+    var generation = backgroundPreloadGeneration;
+    var run = function () {
+      backgroundPreloadHandle = null;
+      if (!backgroundPreloadPending || !isCurrentBackgroundPreload(generation)) return;
+      backgroundPreloadPending = false;
+      backgroundPreloadRunning = true;
+      var finish = function () {
+        backgroundPreloadRunning = false;
+        if (backgroundPreloadPending) scheduleControlCenterPreload();
+      };
+      preloadControlCenterPages(undefined, null, {
+        generation: generation,
+        workerCount: backgroundPreloadWorkerCount,
+      }).then(finish, finish);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      backgroundPreloadUsesIdleCallback = true;
+      backgroundPreloadHandle = window.requestIdleCallback(run, { timeout: 1000 });
+    } else {
+      backgroundPreloadUsesIdleCallback = false;
+      backgroundPreloadHandle = window.setTimeout(run, 200);
+    }
   }
 
   function updateInitialPreloadProgress(completed, total, message) {
