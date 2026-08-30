@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -11,20 +11,16 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
-
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 // Keep the child clock on an exact second so 300 seconds is a true inclusive
 // boundary, while staying close to the real clock used by Date construction.
 const fixedNow = Math.floor(Date.now() / 1000) * 1000;
-const issuer = "https://identity.example.test/realms/platform";
-const clientId = "platform-control-center";
-const requiredAcr = "urn:platform:loa:passkey";
+let publicOrigin = "";
+let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
   ["GET", "/control/overview"],
@@ -61,53 +57,19 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   writeFileSync(path.join(stateDir, "secret-vault.json"), '{"version":2,"items":{}}\n', { mode: 0o600 });
   writeFileSync(path.join(backupsDir, "postgres", "fg043-canary.dump"), "non-secret backup canary\n", { mode: 0o600 });
   writeFileSync(clockModule, `Date.now = () => ${fixedNow};\n`, { mode: 0o600 });
-
-  const keys = await generateKeyPair("RS256", { extractable: true });
-  const publicJwk = { ...(await exportJWK(keys.publicKey)), alg: "RS256", use: "sig", kid: "capability-test-key" };
-  const loginClaims = new Map();
-  const idpPort = await freePort();
-  const idp = createHttpServer(async (req, res) => {
-    if (req.url === "/jwks") {
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify({ keys: [publicJwk] }));
-      return;
-    }
-    if (req.url === "/token" && req.method === "POST") {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const code = new URLSearchParams(Buffer.concat(chunks).toString("utf8")).get("code") || "";
-      const claims = loginClaims.get(code);
-      if (!claims) {
-        res.writeHead(400).end();
-        return;
-      }
-      const idToken = await new SignJWT({
-        nonce: claims.nonce,
-        acr: requiredAcr,
-        amr: ["webauthn"],
-        auth_time: Math.floor(fixedNow / 1000) - claims.ageSeconds,
-        sid: `sid-${code}`,
-        realm_access: { roles: [claims.role] },
-      })
-        .setProtectedHeader({ alg: "RS256", kid: "capability-test-key" })
-        .setIssuer(issuer)
-        .setAudience(clientId)
-        .setSubject(`subject-${code}`)
-        // jose validates iat against the process's real wall clock, while the
-        // Control Center child has a fixed Date.now() for exact freshness
-        // boundaries. Keep iat real and auth_time fixed for those two duties.
-        .setIssuedAt()
-        .setExpirationTime(Math.floor(fixedNow / 1000) + 600)
-        .sign(keys.privateKey);
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify({ id_token: idToken, token_type: "Bearer", expires_in: 600 }));
-      return;
-    }
-    res.writeHead(404).end();
-  });
-  await new Promise((resolve) => idp.listen(idpPort, "127.0.0.1", resolve));
+  const sessionFixtures = [
+    fixture("viewer", "viewer", 0),
+    fixture("admin", "admin", 0),
+    fixture("owner", "owner", 0),
+    fixture("owner-299", "owner", 299),
+    fixture("owner-300", "owner", 300),
+    fixture("owner-301", "owner", 301),
+    fixture("owner-future", "owner", -1),
+  ];
 
   const port = await freePort();
+  publicOrigin = `https://127.0.0.1:${port}`;
+  publicHost = `127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["--import", clockModule, path.join(infraRoot, "control-center", "server.mjs")], {
     cwd: infraRoot,
     env: {
@@ -116,17 +78,14 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_BIND_HOST: "127.0.0.1",
-      CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+      CONTROL_CENTER_AUTH_MODE: "app-passkey",
       CONTROL_CENTER_AUTH_STORE: "memory",
-      CONTROL_CENTER_OIDC_ISSUER: issuer,
-      CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: `${issuer}/protocol/openid-connect/auth`,
-      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: `http://127.0.0.1:${idpPort}/token`,
-      CONTROL_CENTER_OIDC_JWKS_URI: `http://127.0.0.1:${idpPort}/jwks`,
-      CONTROL_CENTER_OIDC_REDIRECT_URI: "https://portal.example.test/auth/callback",
-      CONTROL_CENTER_PUBLIC_ORIGIN: "https://portal.example.test",
-      CONTROL_CENTER_OIDC_CLIENT_ID: clientId,
-      CONTROL_CENTER_OIDC_REQUIRED_ACR: requiredAcr,
-      CONTROL_CENTER_OIDC_REQUIRED_AMR: "webauthn",
+      CONTROL_CENTER_PUBLIC_ORIGIN: publicOrigin,
+      CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1",
+      CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled",
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8",
+      CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: "172.16.0.0/12",
+      CONTROL_CENTER_TEST_SESSION_FIXTURES: JSON.stringify(sessionFixtures),
       CONTROL_CENTER_LOGIN_MAX_ATTEMPTS: "50",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
@@ -142,20 +101,32 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   t.after(async () => {
     await stopChild(child);
-    await new Promise((resolve) => idp.close(resolve));
     rmSync(root, { recursive: true, force: true });
   });
 
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForHealth(`${baseUrl}/__health`, child);
+  const disabledRegistration = await fetch(`${baseUrl}/auth/passkey/register/options`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      host: publicHost,
+      origin: publicOrigin,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: "{}",
+    redirect: "manual",
+  });
+  assert.equal(disabledRegistration.status, 404, "disabled first configuration must not expose passkey enrollment");
   const identities = {
-    viewer: await login(baseUrl, "viewer", "viewer", 0, loginClaims),
-    admin: await login(baseUrl, "admin", "admin", 0, loginClaims),
-    owner: await login(baseUrl, "owner", "owner", 0, loginClaims),
-    owner299: await login(baseUrl, "owner-299", "owner", 299, loginClaims),
-    owner300: await login(baseUrl, "owner-300", "owner", 300, loginClaims),
-    owner301: await login(baseUrl, "owner-301", "owner", 301, loginClaims),
-    ownerFuture: await login(baseUrl, "owner-future", "owner", -1, loginClaims),
+    viewer: identity(sessionFixtures[0]),
+    admin: identity(sessionFixtures[1]),
+    owner: identity(sessionFixtures[2]),
+    owner299: identity(sessionFixtures[3]),
+    owner300: identity(sessionFixtures[4]),
+    owner301: identity(sessionFixtures[5]),
+    ownerFuture: identity(sessionFixtures[6]),
   };
 
   const restoreStateAfterDenied = installContextTripwire(path.join(stateDir, "projects.json"));
@@ -203,7 +174,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     assert.equal((await stale.json()).error, "admin_reauthentication_required");
   }
   const staleBrowserPage = await fetch(`${baseUrl}/?section=secrets`, {
-    headers: { accept: "text/html", cookie: identities.owner301.cookie },
+    headers: { accept: "text/html", host: publicHost, cookie: identities.owner301.cookie },
     redirect: "manual",
   });
   assert.equal(staleBrowserPage.status, 303);
@@ -212,8 +183,9 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     method: "POST",
     headers: {
       accept: "text/html",
+      host: publicHost,
       cookie: identities.owner301.cookie,
-      origin: "https://portal.example.test",
+      origin: publicOrigin,
       "sec-fetch-site": "same-origin",
       "content-type": "application/x-www-form-urlencoded",
       "x-csrf-token": identities.owner301.csrf,
@@ -245,7 +217,8 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   for (const [method, pathname] of sensitiveTargets) {
     for (const alias of [pathname, versioned(pathname)]) {
       const response = await request(baseUrl, method, alias, identities.owner, { validCsrf: method === "POST" });
-      assert.ok(![401, 403, 404, 428, 500].includes(response.status), `fresh owner reaches handler: ${method} ${alias} -> ${response.status}`);
+      const body = await response.clone().text();
+      assert.ok(![401, 403, 404, 428, 500].includes(response.status), `fresh owner reaches handler: ${method} ${alias} -> ${response.status}: ${body}`);
     }
   }
   for (const pathname of ["/control/overview", "/control/v1/advanced/backup-restore"]) {
@@ -304,28 +277,30 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   assert.equal(stderr, "");
 });
 
-async function login(baseUrl, code, role, ageSeconds, loginClaims) {
-  const begin = await fetch(`${baseUrl}/auth/login`, { redirect: "manual" });
-  assert.equal(begin.status, 303);
-  const location = new URL(begin.headers.get("location"));
-  loginClaims.set(code, { role, ageSeconds, nonce: location.searchParams.get("nonce") || "" });
-  const callback = await fetch(`${baseUrl}/auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(location.searchParams.get("state") || "")}`, { redirect: "manual" });
-  assert.equal(callback.status, 303, `login ${code}`);
-  const cookies = callback.headers.getSetCookie();
+function fixture(label, role, ageSeconds) {
   return {
-    cookie: cookies.map((value) => value.split(";", 1)[0]).join("; "),
-    csrf: cookieValue(cookies, "__Host-platform_cc_csrf"),
+    token: `test-session-token-${label}`,
+    csrf: `test-session-csrf-${label}`,
+    role,
+    ageSeconds,
+  };
+}
+
+function identity(item) {
+  return {
+    cookie: `__Host-platform_cc_session=${item.token}; __Host-platform_cc_csrf=${item.csrf}`,
+    csrf: item.csrf,
   };
 }
 
 function request(baseUrl, method, pathname, identity = null, options = {}) {
-  const headers = { accept: "application/json" };
+  const headers = { accept: "application/json", host: publicHost };
   if (identity) headers.cookie = identity.cookie;
   let body;
   if (method === "POST") {
     headers["content-type"] = "application/x-www-form-urlencoded";
     if (options.validCsrf || options.invalidCsrf) {
-      headers.origin = options.origin || "https://portal.example.test";
+      headers.origin = options.origin || publicOrigin;
       if (!options.omitFetchSite) headers["sec-fetch-site"] = options.fetchSite || "same-origin";
       headers["x-csrf-token"] = options.invalidCsrf ? "invalid-csrf-token" : identity.csrf;
     }
@@ -393,11 +368,6 @@ function installContextTripwire(filename) {
     if (previous) writeFileSync(filename, previous, { mode: 0o600 });
     else rmSync(filename, { force: true });
   };
-}
-
-function cookieValue(cookies, name) {
-  const prefix = `${name}=`;
-  return cookies.map((value) => value.split(";", 1)[0]).find((value) => value.startsWith(prefix))?.slice(prefix.length) || "";
 }
 
 function versioned(pathname) {

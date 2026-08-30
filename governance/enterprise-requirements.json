@@ -142,11 +142,11 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": "control-center/server.mjs" },
-        { "type": "file", "path": "control-center/auth/oidc.mjs" },
+        { "type": "file", "path": "control-center/auth/app-passkey.mjs" },
         { "type": "file", "path": "cloudflare/access-admin.example.json" },
         { "type": "command", "name": "platform-admin-audit" },
-        { "type": "pattern", "path": "control-center/auth/oidc.mjs", "pattern": "authorize\\(req, url, session\\)" },
-        { "type": "pattern", "path": "control-center/auth/oidc.mjs", "pattern": "ownerRole[\\s\\S]*adminRole[\\s\\S]*viewerRole" }
+        { "type": "pattern", "path": "control-center/auth/app-passkey.mjs", "pattern": "authorize\\(req, url, session\\)" },
+        { "type": "pattern", "path": "control-center/auth/app-passkey.mjs", "pattern": "owner:fresh" }
       ],
       "liveProof": "Archive platform-admin-audit and Cloudflare Access evidence for Control Center, provider and deploy admin access.",
       "liveProofChecks": ["platform-admin-audit-evidence", "cloudflare-access-admin-verified"]

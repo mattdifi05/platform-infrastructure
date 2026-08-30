@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createControlCenterAuth } from "../auth/oidc.mjs";
+import { createControlCenterAuth } from "../auth/app-passkey.mjs";
 import {
   listControlRouteDefinitions,
   normalizeControlApiParts,
@@ -115,7 +115,7 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
 });
 
 test("FG-004 and FG-043 routes require a fresh owner for canonical and v1 aliases", async (t) => {
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
 
   const principals = [
@@ -146,7 +146,7 @@ test("FG-004 and FG-043 routes require a fresh owner for canonical and v1 aliase
 test("fresh-owner authorization accepts 299 and 300 seconds but rejects 301 seconds", async (t) => {
   const now = new Date("2030-01-01T00:00:00.000Z");
   t.mock.timers.enable({ apis: ["Date"], now });
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
   for (const pathname of ["/control/vault"]) {
     const target = url(pathname);
@@ -163,7 +163,7 @@ test("fresh-owner authorization accepts 299 and 300 seconds but rejects 301 seco
 });
 
 test("fresh-owner authorization fails closed for missing, malformed, and future auth_time", async (t) => {
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
   const target = url("/control/vault");
   const request = {
@@ -183,7 +183,7 @@ test("fresh-owner authorization fails closed for missing, malformed, and future 
 });
 
 test("unknown Control routes and non-GET HTML shell methods fail closed", async (t) => {
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
   const cases = [
     ["GET", "/control/not-cataloged"],
@@ -219,7 +219,7 @@ test("unknown Control routes and non-GET HTML shell methods fail closed", async 
 });
 
 test("ordinary cataloged reads and mutations preserve documented role behavior", async (t) => {
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
 
   assert.equal(authorize(auth, "GET", "/control/projects", session("viewer")).status, 200);
@@ -229,7 +229,7 @@ test("ordinary cataloged reads and mutations preserve documented role behavior",
 });
 
 test("the HTML shell lasts for the session while legacy sensitive actions require a fresh owner", async (t) => {
-  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
 
   for (const pathname of ["/", "/index.html"]) {
@@ -317,19 +317,15 @@ function url(pathname) {
   return new URL(`https://portal.example.test${pathname}`);
 }
 
-function completeOidcEnv() {
+function appPasskeyEnv() {
   return {
     NODE_ENV: "test",
     CONTROL_CENTER_ENV: "test",
     CONTROL_CENTER_BIND_HOST: "127.0.0.1",
-    CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+    CONTROL_CENTER_AUTH_MODE: "app-passkey",
     CONTROL_CENTER_AUTH_STORE: "memory",
-    CONTROL_CENTER_OIDC_ISSUER: "https://identity.example.test/realms/platform",
-    CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: "https://identity.example.test/realms/platform/protocol/openid-connect/auth",
-    CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: "http://127.0.0.1/token",
-    CONTROL_CENTER_OIDC_JWKS_URI: "http://127.0.0.1/jwks",
-    CONTROL_CENTER_OIDC_REDIRECT_URI: "https://portal.example.test/auth/callback",
-    CONTROL_CENTER_OIDC_CLIENT_ID: "platform-control-center",
-    CONTROL_CENTER_OIDC_REQUIRED_ACR: "urn:platform:loa:passkey",
+    CONTROL_CENTER_PUBLIC_ORIGIN: "https://portal.example.test",
+    CONTROL_CENTER_AUTH_RP_ID: "portal.example.test",
+    CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8",
   };
 }

@@ -1,6 +1,6 @@
 # Control Center Core
 
-Status: candidate T19, verified in an isolated container, not deployed live.
+Status: V1 live architecture, protected-main source of truth.
 
 ## Boundaries
 
@@ -9,7 +9,7 @@ state and execution behavior is owned by modules:
 
 | Area | Module | Contract |
 | --- | --- | --- |
-| Admin authentication | `auth/` | Application-owned SimpleWebAuthn passkey, PostgreSQL credential/session store, fail closed; OIDC is explicit compatibility mode |
+| Admin authentication | `auth/app-passkey.mjs` | Application-owned SimpleWebAuthn passkey with PostgreSQL credential/session store and fail-closed route capabilities |
 | Backup jobs | `backup/contracts.mjs` | typed resources, signed manifests, exact ownership |
 | Database operations | `database/` | principal ownership and destructive state machine |
 | Vault crypto | `vault/keyring.mjs` | versioned key IDs and authenticated encryption |
@@ -61,7 +61,7 @@ generic migration catalog and retain their own backup and migration gates.
 
 ## Activation Gate
 
-No state migration or Control Center recreate was performed for T19. A future
-rollout requires T01/T02 passkey activation, a fresh state backup, T08 recovery
-evidence, a maintenance approval and the procedure in
-`STATE-STORE-MIGRATION.md`.
+The application-owned passkey schema is installed by
+`migrations/001_app_passkey.sql`. State migration remains a separate operation
+and follows `STATE-STORE-MIGRATION.md`; a Control Center image rollout must not
+implicitly migrate metadata or remove PostgreSQL tables.

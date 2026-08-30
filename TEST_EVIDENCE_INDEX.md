@@ -1,5 +1,11 @@
 # Test Evidence Index
 
+> Historical evidence through 2026-07-11 is retained as an audit record and
+> describes the candidate that existed on the recorded date. It is not a
+> current operating contract. In V1.1 the Control Center uses direct
+> SimpleWebAuthn with PostgreSQL, one enrolled passkey and no OIDC/Keycloak
+> handoff; current verification is recorded in `V1.1-BASELINE.md`.
+
 | Evidence ID | Task | Boundary | Command or artifact | Result | Freshness |
 | --- | --- | --- | --- | --- | --- |
 | EV-T00-001 | T00 | Git/runtime baseline | `/home/platform_infrastructure/remediation-work/20260710T034801Z-t00-baseline` | PASS: 22 dirty paths accounted for | 2026-07-10 |
@@ -9,14 +15,14 @@
 | EV-T00-005 | T00 | Functional edge | local-CA HTTPS probes for registered application hosts | PASS for seven registered apps; public FAIL 404 | 2026-07-10 |
 | EV-T01-NEG-001 | T01 | Admin authorization | anonymous GET `/control/applications` | FAIL expected security invariant: HTTP 200 proves fail-open | 2026-07-10 |
 | EV-T01-001 | T01 | Auth behavior | `npm test` in pinned Node container | PASS 9/9: anonymous denial, no password path, PKCE/nonce, passkey ACR/AMR, RBAC, one-time state and logout revocation | 2026-07-10 |
-| EV-T01-002 | T01 | PostgreSQL session store | PostgreSQL 18 tmpfs sandbox plus `001_auth_sessions.sql` and `postgres-auth-store.integration.mjs` | PASS: migration, atomic transaction consumption, session lookup and post-revocation replay denial | 2026-07-10 |
+| EV-T01-002 | T01 | Historical PostgreSQL session store | PostgreSQL 18 tmpfs sandbox against the then-current auth migration and `postgres-auth-store.integration.mjs` | HISTORICAL PASS: transaction consumption, session lookup and post-revocation replay denial; superseded by the V1.1 app-passkey store | 2026-07-10 |
 | EV-T01-003 | T01 | Immutable image | build `docker/control-center.Dockerfile`, run with network disabled and loopback health probe | PASS; test image removed after smoke | 2026-07-10 |
-| EV-T01-004 | T01 | Production render | canonical VPS Compose JSON invariant extraction | PASS: `oidc-passkey`, PostgreSQL store, database secret present, password verifier absent, source bind absent | 2026-07-10 |
+| EV-T01-004 | T01 | Historical production render | canonical VPS Compose JSON invariant extraction | HISTORICAL PASS: the then-current identity candidate rendered as designed; superseded by direct app-passkey authentication | 2026-07-10 |
 | EV-T01-005 | T01 | Global static gate | `static-security-check --infra-only` | BLOCKED by pre-existing T20 CSS border assertion; no T01 auth assertion failure observed before stop | 2026-07-10 |
-| EV-T02-001 | T02 | Browser mutation boundary | cryptographic OIDC integration test | PASS: missing/sibling Origin rejected, same-origin CSRF accepted, oversized body 413, stale passkey auth 428 | 2026-07-10 |
-| EV-T02-002 | T02 | Shared session security | both auth migrations plus PostgreSQL 18 tmpfs integration | PASS: throttle lock/reset, CSRF/session columns, transaction replay and logout revocation | 2026-07-10 |
-| EV-T02-003 | T02 | Keycloak policy | pinned Keycloak 26.6.3 first-boot import in tmpfs | PASS: brute force, no password recovery, required UV, discoverable passkey, passwordless-only flow, PKCE and AMR mapper | 2026-07-10 |
-| EV-T02-004 | T02 | Runtime readiness negative | `scripts/keycloak-passkey-readiness.sh` against live realm | EXPECTED FAIL: brute-force protection is disabled; live cutover correctly blocked | 2026-07-10 |
+| EV-T02-001 | T02 | Historical browser mutation boundary | cryptographic identity integration test from the recorded candidate | HISTORICAL PASS: Origin/CSRF/body-size/fresh-auth boundaries; current equivalents are covered by the V1.1 app-passkey suite | 2026-07-10 |
+| EV-T02-002 | T02 | Historical shared session security | then-current auth migrations plus PostgreSQL 18 tmpfs integration | HISTORICAL PASS: throttle, CSRF, replay and logout boundaries; superseded by `001_app_passkey.sql` | 2026-07-10 |
+| EV-T02-003 | T02 | Historical identity-provider policy | pinned Keycloak 26.6.3 first-boot import in tmpfs | HISTORICAL PASS for the old Control Center handoff; Keycloak now serves application identities only | 2026-07-10 |
+| EV-T02-004 | T02 | Historical runtime readiness negative | then-current Control Center identity-provider readiness probe | HISTORICAL EXPECTED FAIL; the retired Control Center handoff is no longer a live readiness gate | 2026-07-10 |
 | EV-T02-005 | T02 | Alert rules | pinned Prometheus `promtool check rules` | PASS: 21 rules including Keycloak login-failure and admin-lockout alerts | 2026-07-10 |
 | EV-T02-006 | T02 | Effective VPS config | canonical Compose JSON invariant extraction | PASS: exact portal origin, 300-second fresh auth, shared throttle, Keycloak event metrics and identity upstream | 2026-07-10 |
 | EV-T03-001 | T03 | Versioned Vault keyring | official Control Center runner and `control-center/tests/vault-keyring.test.mjs` | PASS 12/12 overall: stable key ID, reorder, rotation, missing key, tamper and legacy migration | 2026-07-10 |
@@ -69,7 +75,7 @@
 | EV-T09-007 | T09 | Config and deploy guard | pinned `amtool check-config`, canonical Compose render and VPS preflight source | PASS: immediate probe route, runtime group, functional health and preflight permission check are present | 2026-07-10 |
 | EV-T09-008 | T09 | Regression and live preservation | Control Center, project-router, shell syntax and before/after live container IDs | PASS: 24/24, 1/1, all shell syntax; live Alertmanager/receiver unchanged and no restart executed | 2026-07-10 |
 | EV-T09-009 | T09 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T141511Z-t09-alert-delivery/evidence-sha256.txt` | PASS: 15 private evidence files verified; directory 0700 and files 0600 | 2026-07-10 |
-| EV-T09-010 | T09/T22 | Infrastructure test runner | `testing-hygiene` through current ops wrapper | KNOWN BLOCKER: anonymous dependency mount hides `jose`; equivalent suites pass with the correct staged layout; remediation remains T22 | 2026-07-10 |
+| EV-T09-010 | T09/T22 | Historical infrastructure test runner | `testing-hygiene` through the then-current ops wrapper | HISTORICAL BLOCKER: dependency mount layout; the retired Control Center OIDC dependency is absent in V1.1 | 2026-07-10 |
 | EV-T09-011 | T09 | Global static gate | `static-security-check --infraOnly` | BLOCKED only after T09 assertions by the pre-existing T20 CSS border assertion | 2026-07-10 |
 | EV-MAP-DB-001 | T00/T04 | DB catalog | PostgreSQL and MariaDB read-only catalog queries | PASS inventory; drift recorded | 2026-07-10 |
 | EV-MAP-BKP-001 | T00/T07 | Backup catalog | filesystem baseline plus typed candidate coverage | PARTIAL: candidate catalog covers all declared resources; live complete off-site restore and full-host portability remain unproven | 2026-07-10 |
@@ -130,7 +136,7 @@
 | EV-T20-006 | T20 | Backup/restore semantics | application detail UI and typed job behavior tests | PASS: backup is labelled as a real queued backup; restore is explicitly labelled restore drill and targets disposable restore behavior, never a masked live restore | 2026-07-11 |
 | EV-T20-007 | T20 | Repository policy gates | `static-security-check --infraOnly` and `governance-check` | PASS: former T20 CSS blocker is closed and governance remains green | 2026-07-11 |
 | EV-T20-008 | T20 | Canonical Compose render | `compose.yaml + compose.secrets.yaml` with non-secret synthetic required mail values | PASS: render validates without changing runtime, secrets or state | 2026-07-11 |
-| EV-T20-009 | T20/T22 | Residual global harness gates | `maintainability-hygiene` and `testing-hygiene` | KNOWN BLOCKERS outside T20: alert permission wrapper delegation and ops mount hiding `jose`/`pg`; dedicated candidate suite is green | 2026-07-11 |
+| EV-T20-009 | T20/T22 | Historical residual harness gates | `maintainability-hygiene` and `testing-hygiene` | HISTORICAL BLOCKERS outside T20: wrapper delegation and dependency mounts; current V1.1 results are recorded separately | 2026-07-11 |
 | EV-T20-010 | T20 | Safety and private evidence | candidate isolation, cleanup, before/after live inventory and checksums | PASS: read-only candidate with synthetic tmpfs data only; candidate/tunnel/images removed; no live service or data mutation | 2026-07-11 |
 
 | EV-T21-001 | T21 | Read-only host baseline | OS, route, failed units, mounts, Docker inventory, packages, storage, logs and power inventory | PASS: Ubuntu 26.04, NVMe-backed home/Docker paths, 34 running containers; identified wait-online failure, missing drive tools, 32 pending updates and no UPS | 2026-07-11 |

@@ -7,8 +7,8 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readd
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
-import { createFirstConfiguration, FIRST_CONFIGURATION_STATES, FirstConfigurationError } from "./first-configuration/index.mjs";
+import { AuthRequestError, createControlCenterAuth } from "./auth/app-passkey.mjs";
+import { createFirstConfiguration } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
@@ -193,7 +193,7 @@ const statusEventBroker = createStatusEventBroker({
 });
 const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
-const firstConfiguration = await createFirstConfiguration({ oidc: controlAuth });
+const firstConfiguration = await createFirstConfiguration({ auth: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
 
 const docs = {
@@ -247,15 +247,18 @@ const server = createServer(async (req, res) => {
     }
 
     if (firstConfiguration.enabled && url.pathname.startsWith("/first-configuration")) {
-      if (firstConfiguration.direct) await handleDirectFirstConfiguration(req, res, url);
-      else await handleFirstConfiguration(req, res, url);
+      await handleDirectFirstConfiguration(req, res, url);
       return;
     }
 
     if (controlAuth.mode === "app-passkey") {
       if (url.pathname === "/auth/passkey/register/options" && req.method === "POST") {
+        if (!firstConfiguration.enabled) {
+          notFound(res);
+          return;
+        }
         const setup = await firstConfiguration.status();
-        if (firstConfiguration.enabled && setup.complete) {
+        if (setup.complete) {
           throw new AuthRequestError("A Control Center passkey is already registered.", 409);
         }
         const options = await controlAuth.beginPasskeyRegistration(req);
@@ -263,6 +266,14 @@ const server = createServer(async (req, res) => {
         return;
       }
       if (url.pathname === "/auth/passkey/register/verify" && req.method === "POST") {
+        if (!firstConfiguration.enabled) {
+          notFound(res);
+          return;
+        }
+        const setup = await firstConfiguration.status();
+        if (setup.complete) {
+          throw new AuthRequestError("A Control Center passkey is already registered.", 409);
+        }
         const payload = await readPayload(req);
         const login = await controlAuth.completePasskeyRegistration(req, payload);
         appendAudit({
@@ -321,173 +332,12 @@ const server = createServer(async (req, res) => {
         html(res, renderAppPasskeyLogin());
         return;
       }
-      if (firstConfiguration.enabled) {
-        const setup = await firstConfiguration.status();
-        if (![FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED, FIRST_CONFIGURATION_STATES.LOGOUT_VERIFICATION_REQUIRED, FIRST_CONFIGURATION_STATES.RELOGIN_REQUIRED, FIRST_CONFIGURATION_STATES.FINALIZING, FIRST_CONFIGURATION_STATES.COMPLETE].includes(setup.state)) {
-          redirect(res, "/first-configuration");
-          return;
-        }
-      }
-      const location = await controlAuth.beginLogin(req);
-      redirect(res, location);
+      redirect(res, "/");
       return;
     }
 
-    if (url.pathname === "/auth/callback" && req.method === "GET") {
-      if (controlAuth.mode === "app-passkey") {
-        notFound(res);
-        return;
-      }
-      let login;
-      try {
-        const setupBefore = await firstConfiguration.status();
-        if (firstConfiguration.enabled && ![
-          FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED,
-          FIRST_CONFIGURATION_STATES.LOGOUT_VERIFICATION_REQUIRED,
-          FIRST_CONFIGURATION_STATES.RELOGIN_REQUIRED,
-          FIRST_CONFIGURATION_STATES.FINALIZING,
-          FIRST_CONFIGURATION_STATES.COMPLETE,
-        ].includes(setupBefore.state)) {
-          throw new FirstConfigurationError("Passkey login is not available in the current setup state.", 409, "first_configuration_login_not_ready");
-        }
-        login = await controlAuth.completeLogin(url);
-        const setup = await firstConfiguration.notePasskeyLogin(login.subject);
-        appendAudit({
-          action: "admin.oidc.login.success",
-          actor: login.subject,
-          target: login.subject,
-          environment,
-          risk: "low",
-          result: "success",
-          dryRun: false,
-          summary: `Passkey-backed OIDC session created with ${login.role} authorization.`,
-        });
-        res.setHeader("set-cookie", login.cookies);
-        redirect(res, firstConfiguration.enabled && setup.state && !setup.state.complete ? "/first-configuration" : "/");
-      } catch (error) {
-        res.removeHeader("set-cookie");
-        if (login) {
-          try { await controlAuth.discardLogin(login); } catch { /* The browser never received the opaque cookie. */ }
-        }
-        appendAudit({
-          action: "admin.oidc.login.failed",
-          target: "control-center",
-          environment,
-          risk: "medium",
-          result: "failed",
-          dryRun: false,
-          summary: "OIDC login rejected without creating an administrative session.",
-        });
-        const status = error instanceof AuthRequestError || error instanceof FirstConfigurationError ? error.status : 401;
-        html(res, renderLogin("Autenticazione passkey non riuscita."), status);
-      }
-      return;
-    }
-
-    if (url.pathname === "/auth/provider-security-event" && req.method === "POST") {
-      let result;
-      try {
-        result = await controlAuth.providerSecurityEvent(req);
-      } catch (error) {
-        const invalidToken = error instanceof AuthRequestError;
-        try {
-          appendAudit({
-            action: invalidToken
-              ? "admin.oidc.provider-security-event.rejected"
-              : "admin.oidc.provider-security-event.failed",
-            target: "control-center-sessions",
-            environment,
-            risk: "medium",
-            result: "failed",
-            dryRun: false,
-            summary: invalidToken
-              ? "Signed provider account or authorization event was rejected before session mutation."
-              : "Provider security event processing failed or had an indeterminate commit outcome; an idempotent retry is required.",
-          });
-        } catch {
-          // Preserve the protocol status even when the local audit sink is unavailable.
-        }
-        json(res, {
-          error: invalidToken ? "oidc_provider_security_event_rejected" : "oidc_provider_security_event_unavailable",
-          message: invalidToken
-            ? "Provider security event was rejected."
-            : "Provider security event processing is temporarily unavailable; retry safely.",
-        }, invalidToken ? error.status : 503);
-        return;
-      }
-
-      try {
-        appendAudit({
-          action: "admin.oidc.provider-security-event.accepted",
-          target: "control-center-sessions",
-          environment,
-          risk: "medium",
-          result: "success",
-          dryRun: false,
-          summary: `Validated provider security event processed; type=${result.eventType} revoked=${Number(result.revoked || 0)} replayed=${result.replayed === true}.`,
-        });
-      } catch {
-        json(res, {
-          error: "oidc_provider_security_event_audit_unavailable",
-          message: "Provider security event was processed, but completion evidence is temporarily unavailable; retry safely.",
-        }, 503);
-        return;
-      }
-      json(res, { ok: true, replayed: result.replayed === true, revoked: Number(result.revoked || 0) });
-      return;
-    }
-
-    if (url.pathname === "/auth/backchannel-logout" && req.method === "POST") {
-      let result;
-      try {
-        result = await controlAuth.backchannelLogout(req);
-      } catch (error) {
-        const invalidToken = error instanceof AuthRequestError;
-        try {
-          appendAudit({
-            action: invalidToken
-              ? "admin.oidc.backchannel-logout.rejected"
-              : "admin.oidc.backchannel-logout.failed",
-            target: "control-center-sessions",
-            environment,
-            risk: "medium",
-            result: "failed",
-            dryRun: false,
-            summary: invalidToken
-              ? "OIDC back-channel logout signal was rejected before session mutation."
-              : "OIDC back-channel logout processing failed or had an indeterminate commit outcome; an idempotent retry is required.",
-          });
-        } catch {
-          // Preserve the protocol status even when the local audit sink is unavailable.
-        }
-        const status = invalidToken ? error.status : 503;
-        json(res, {
-          error: invalidToken ? "oidc_backchannel_logout_rejected" : "oidc_backchannel_logout_unavailable",
-          message: invalidToken
-            ? "OIDC back-channel logout was rejected."
-            : "OIDC back-channel logout is temporarily unavailable; retry safely.",
-        }, status);
-        return;
-      }
-
-      try {
-        appendAudit({
-          action: "admin.oidc.backchannel-logout.accepted",
-          target: "control-center-sessions",
-          environment,
-          risk: "medium",
-          result: "success",
-          dryRun: false,
-          summary: `Validated OIDC logout signal processed; revoked=${Number(result.revoked || 0)} replayed=${result.replayed === true}.`,
-        });
-      } catch {
-        json(res, {
-          error: "oidc_backchannel_logout_audit_unavailable",
-          message: "OIDC back-channel logout was processed, but completion evidence is temporarily unavailable; retry safely.",
-        }, 503);
-        return;
-      }
-      json(res, { ok: true, replayed: result.replayed === true, revoked: Number(result.revoked || 0) });
+    if (url.pathname.startsWith("/auth/")) {
+      notFound(res);
       return;
     }
 
@@ -754,8 +604,8 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     if (writeBackupQueueError(res, error)) return;
     const message = error instanceof Error ? error.message : String(error);
-    const status = error instanceof AuthRequestError || error instanceof FirstConfigurationError ? error.status : 500;
-    const code = error instanceof FirstConfigurationError ? error.code : status === 413 ? "payload_too_large" : "control_center_error";
+    const status = error instanceof AuthRequestError ? error.status : 500;
+    const code = status === 413 ? "payload_too_large" : "control_center_error";
     json(res, { error: code, message: sanitizeMessage(message) }, status);
   }
 });
@@ -763,166 +613,6 @@ const server = createServer(async (req, res) => {
 server.listen(port, bindHost, () => {
   console.log(`control-center listening on ${bindHost}:${port} with ${controlAuth.mode} authentication`);
 });
-
-async function handleFirstConfiguration(req, res, url) {
-  const method = String(req.method || "GET").toUpperCase();
-  firstConfigurationHeaders(res);
-
-  if (method === "GET" && ["/first-configuration", "/first-configuration/"].includes(url.pathname)) {
-    const identity = await firstConfiguration.authenticate(req);
-    if (!identity.ok) {
-      if (identity.code === "first_configuration_closed") {
-        redirect(res, "/");
-        return;
-      }
-      html(res, renderFirstConfigurationEntry(identity.code === "first_configuration_auth_required" ? "" : identity.message), identity.status === 401 ? 200 : identity.status);
-      return;
-    }
-    const oidcSession = await controlAuth.authenticate(req);
-    html(res, renderFirstConfiguration(identity.state, identity.csrfToken, oidcSession));
-    return;
-  }
-
-  if (method === "POST" && url.pathname === "/first-configuration/bootstrap") {
-    const payload = await readPayload(req);
-    const result = await firstConfiguration.consumeBootstrap(req, payload.bootstrapCode);
-    res.setHeader("set-cookie", result.cookies);
-    redirect(res, "/first-configuration");
-    return;
-  }
-
-  if (method !== "POST") {
-    notFound(res);
-    return;
-  }
-
-  const identity = await firstConfiguration.authenticate(req);
-  if (!identity.ok) {
-    html(res, renderFirstConfigurationEntry(identity.message), identity.status);
-    return;
-  }
-  const payload = await readPayload(req);
-  const mutation = await firstConfiguration.validateMutation(req, identity, payload._first_csrf);
-  if (!mutation.ok) {
-    html(res, renderFirstConfiguration(identity.state, identity.csrfToken, { ok: false }, mutation.message), mutation.status);
-    return;
-  }
-
-  try {
-    if (url.pathname === "/first-configuration/confirm-administrator") {
-      const result = await firstConfiguration.confirmAdministrator(identity, payload);
-      appendAudit({
-        action: "admin.first-configuration.identity.confirmed",
-        actor: result.state.adminUsername,
-        target: result.state.adminUsername,
-        environment,
-        risk: "medium",
-        result: "success",
-        dryRun: false,
-        summary: "LOCAL_PRIVATE first-configuration owner identity prepared for personal passkey enrollment.",
-      });
-      html(res, renderFirstConfiguration(result.state, identity.csrfToken, { ok: false }, "", { temporaryPassword: result.temporaryPassword }));
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/rotate-bootstrap-password") {
-      const result = await firstConfiguration.rotateBootstrapPassword(identity);
-      html(res, renderFirstConfiguration(result.state, identity.csrfToken, { ok: false }, "", { temporaryPassword: result.temporaryPassword }));
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/refresh-passkeys") {
-      const result = await firstConfiguration.refreshPasskeys(identity);
-      html(res, renderFirstConfiguration(result.state, identity.csrfToken, await controlAuth.authenticate(req), "Inventario passkey aggiornato.", { passkeys: result.passkeys }));
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/confirm-passkeys") {
-      const state = await firstConfiguration.confirmPasskeyIndependence(identity, {
-        firstTested: payload.firstTested === "on",
-        secondTested: payload.secondTested === "on",
-        independent: payload.independent === "on",
-      });
-      html(res, renderFirstConfiguration(state, identity.csrfToken, await controlAuth.authenticate(req), "Conferma delle due passkey registrata."));
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/apply-cutover") {
-      const state = await firstConfiguration.applyPasskeyCutover(identity);
-      appendAudit({
-        action: "admin.first-configuration.passkey-cutover.applied",
-        actor: state.adminUsername,
-        target: "platform-passkey-browser",
-        environment,
-        risk: "high",
-        result: "success",
-        dryRun: false,
-        summary: "Passkey-only browser flow activated after two credentials and human independence confirmation.",
-      });
-      redirect(res, "/auth/login");
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/verify-logout") {
-      const oidcSession = await controlAuth.authenticate(req);
-      if (!oidcSession.ok) throw new FirstConfigurationError("A verified owner passkey session is required.", 401, "first_configuration_passkey_login_required");
-      const previousOperation = req.controlCenterOperation;
-      req.controlCenterOperation = { capability: "owner:fresh" };
-      const authorization = controlAuth.authorize(req, url, oidcSession);
-      req.controlCenterOperation = previousOperation;
-      if (!authorization.ok) throw new FirstConfigurationError(authorization.message, authorization.status, authorization.error || "first_configuration_owner_required");
-      const oidcMutation = await controlAuth.validateMutation(req, url, authorization);
-      if (!oidcMutation.ok) throw new FirstConfigurationError(oidcMutation.message, oidcMutation.status, oidcMutation.error || "first_configuration_oidc_csrf_rejected");
-      const logoutCookies = await controlAuth.logout(req);
-      await firstConfiguration.recordLogoutVerification(identity, oidcSession.identity.subject);
-      try {
-        appendAudit({
-          action: "admin.first-configuration.logout.verified",
-          actor: oidcSession.identity.subject,
-          target: oidcSession.identity.subject,
-          environment,
-          risk: "medium",
-          result: "success",
-          dryRun: false,
-          summary: "Passkey session revoked; a second real passkey login is required to close first configuration.",
-        });
-      } catch { /* Session revocation and persistent setup state are authoritative. */ }
-      res.setHeader("set-cookie", logoutCookies);
-      redirect(res, "/auth/login");
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/retry-finalization") {
-      const result = await firstConfiguration.retryFinalization(identity);
-      try {
-        appendAudit({
-          action: "admin.first-configuration.finalization.retried",
-          actor: result.state.adminUsername,
-          target: "platform-first-configuration",
-          environment,
-          risk: "medium",
-          result: "success",
-          dryRun: false,
-          summary: "Idempotent First Configuration finalization completed after a bounded retry.",
-        });
-      } catch { /* Bootstrap disable and persistent completion are authoritative. */ }
-      redirect(res, "/");
-      return;
-    }
-
-    if (url.pathname === "/first-configuration/logout") {
-      res.setHeader("set-cookie", await firstConfiguration.logoutBootstrap(req));
-      redirect(res, "/first-configuration");
-      return;
-    }
-
-    notFound(res);
-  } catch (error) {
-    if (!(error instanceof FirstConfigurationError)) throw error;
-    const current = await firstConfiguration.status();
-    html(res, renderFirstConfiguration(current, identity.csrfToken, await controlAuth.authenticate(req), error.message), error.status);
-  }
-}
 
 async function handleDirectFirstConfiguration(req, res, url) {
   firstConfigurationHeaders(res);
@@ -2135,11 +1825,11 @@ async function buildContext({ projects, state }) {
     wafMode: "configured",
     rateLimitTier: "configured",
     adminProtection: controlAuth.enabled
-      ? (controlAuth.mode === "app-passkey" ? "app-passkey-required" : "oidc-passkey-required")
+      ? "app-passkey-required"
       : "test-only-disabled",
     securityHeaders: "configured",
     cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
-    passkeyAdminAuth: controlAuth.mode === "app-passkey" ? "application-owned-webauthn" : "external-idp-or-passkey-app",
+    passkeyAdminAuth: "application-owned-webauthn",
     status: "discovered",
     source: "control-center-default",
   });
@@ -2851,7 +2541,7 @@ function advancedSectionData(section, context) {
     case "identity":
       return {
         adminAuthRequired: controlAuth.enabled,
-        adminVerifierConfigured: ["oidc-passkey", "app-passkey"].includes(controlAuth.mode),
+        adminVerifierConfigured: controlAuth.mode === "app-passkey",
         sessionPolicy: "PostgreSQL-backed; revocable; HttpOnly; Secure; SameSite=Lax",
         passkeyAdminAuth: context.security.passkeyAdminAuth,
         adminUsers: context.identityAccess.adminUsers,
@@ -9819,240 +9509,8 @@ ${controlCenterStylesheetLinks()}
 </html>`;
 }
 
-function renderFirstConfigurationEntry(message = "") {
-  return `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow,noarchive">
-<link rel="icon" href="data:,">
-<title>Prima configurazione / Control Center</title>
-${controlCenterStylesheetLinks()}
-</head>
-<body data-cc-theme="light">
-<main class="first-configuration-shell">
-  <section class="first-configuration-panel ui-panel-stack" aria-labelledby="first-configuration-title">
-    <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
-    <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
-    <h1 id="first-configuration-title">Configura l’accesso amministrativo</h1>
-    <p class="first-configuration-lead">Questa procedura guidata prepara due passkey indipendenti e attiva l’accesso passkey-only senza esporre un login temporaneo permanente.</p>
-    ${message ? `<p class="first-configuration-alert error" role="alert">${escapeHtml(message)}</p>` : ""}
-    <form class="first-configuration-form" action="/first-configuration/bootstrap" method="post" autocomplete="off">
-      <label for="bootstrap-code">Codice temporaneo di configurazione</label>
-      <input id="bootstrap-code" name="bootstrapCode" type="password" minlength="43" maxlength="4096" required autocomplete="one-time-code" spellcheck="false">
-      <button class="button open" type="submit">Avvia la configurazione</button>
-    </form>
-    <p class="first-configuration-note">Il codice resta valido solo durante la Prima Configurazione, esclusivamente dalla rete di gestione locale. Ogni nuovo accesso revoca la precedente sessione e il codice non viene salvato in chiaro.</p>
-  </section>
-</main>
-</body>
-</html>`;
-}
-
-function renderFirstConfiguration(state, csrfToken, oidcSession = { ok: false }, message = "", details = {}) {
-  const current = state?.state || FIRST_CONFIGURATION_STATES.REQUIRED;
-  const step = firstConfigurationStep(current);
-  const regularCsrf = oidcSession?.ok ? String(oidcSession.identity?.csrfToken || "") : "";
-  const passwordCard = details.temporaryPassword ? `
-    <section class="first-configuration-secret" aria-labelledby="temporary-password-title">
-      <div>
-        <p class="eyebrow">VISUALIZZAZIONE UNICA</p>
-        <h2 id="temporary-password-title">Password temporanea Keycloak</h2>
-        <p>Copiala ora. Serve solo per il primo accesso alla Account Console e verrà rimossa prima del cutover.</p>
-      </div>
-      <code>${escapeHtml(details.temporaryPassword)}</code>
-    </section>` : "";
-
-  return `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow,noarchive">
-<link rel="icon" href="data:,">
-<title>Prima configurazione / Control Center</title>
-${controlCenterStylesheetLinks()}
-</head>
-<body data-cc-theme="light">
-<main class="first-configuration-shell wide">
-  <section class="first-configuration-panel ui-panel-stack">
-    <header class="first-configuration-head">
-      <div>
-        <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
-        <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
-        <h1>Accesso amministrativo con passkey</h1>
-        <p class="first-configuration-lead">Completa i passaggi nell’ordine indicato. Il flow passkey-only resta disattivato finché due passkey non sono presenti e confermate.</p>
-      </div>
-      <span class="first-configuration-state">${escapeHtml(firstConfigurationStateLabel(current))}</span>
-    </header>
-    <ol class="first-configuration-progress" aria-label="Avanzamento prima configurazione">
-      ${["Amministratore", "Due passkey", "Readiness", "Login", "Logout e revoca"].map((label, index) => {
-        const number = index + 1;
-        const status = number < step ? "done" : number === step ? "current" : "pending";
-        return `<li class="${status}"${status === "current" ? ' aria-current="step"' : ""}><span>${number < step ? "✓" : number}</span><strong>${escapeHtml(label)}</strong></li>`;
-      }).join("")}
-    </ol>
-    ${message ? `<p class="first-configuration-alert ${/errore|rifiut|richiest|non |manc/i.test(message) ? "error" : "success"}" role="status">${escapeHtml(message)}</p>` : ""}
-    ${passwordCard}
-    ${renderFirstConfigurationAction(current, state, csrfToken, regularCsrf, oidcSession, details)}
-    <footer class="first-configuration-footer">
-      <span>Stato persistente: <strong>${escapeHtml(current)}</strong></span>
-      <form action="/first-configuration/logout" method="post">
-        <input type="hidden" name="_first_csrf" value="${escapeHtml(csrfToken)}">
-        <button class="first-configuration-link" type="submit">Chiudi sessione di configurazione</button>
-      </form>
-    </footer>
-  </section>
-</main>
-</body>
-</html>`;
-}
-
-function renderFirstConfigurationAction(current, state, csrfToken, regularCsrf, oidcSession, details) {
-  const firstCsrf = `<input type="hidden" name="_first_csrf" value="${escapeHtml(csrfToken)}">`;
-  if (current === FIRST_CONFIGURATION_STATES.REQUIRED) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">PASSAGGIO 1</p>
-      <h2>Conferma l’amministratore</h2>
-      <p>La coppia utente/email deve coincidere con l’identità owner predisposta sul server.</p>
-      <form class="first-configuration-form two-column" action="/first-configuration/confirm-administrator" method="post">
-        ${firstCsrf}
-        <label>Nome utente<input name="username" value="${escapeHtml(state.adminUsername || "")}" required autocomplete="username"></label>
-        <label>Email<input name="email" type="email" value="${escapeHtml(state.adminEmail || "")}" required autocomplete="email"></label>
-        <button class="button open" type="submit">Conferma e prepara l’account</button>
-      </form>
-    </section>`;
-  }
-
-  if ([FIRST_CONFIGURATION_STATES.ADMIN_CONFIRMED, FIRST_CONFIGURATION_STATES.ENROLLMENT_REQUIRED].includes(current)) {
-    const canConfirm = Number(state.passkeyCount || 0) >= Number(state.minimumPasskeys || 2);
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">PASSAGGIO 2</p>
-      <h2>Registra due passkey indipendenti</h2>
-      <p>Accedi alla Account Console con <strong>${escapeHtml(state.adminUsername)}</strong>, registra la prima passkey richiesta e aggiungi la seconda dalla sezione Sicurezza dell’account.</p>
-      <div class="first-configuration-actions">
-        <a class="button open" href="${escapeHtml(state.accountUrl)}#/security/signingin" target="_blank" rel="noopener noreferrer">Apri registrazione passkey</a>
-        <form action="/first-configuration/refresh-passkeys" method="post">${firstCsrf}<button class="button" type="submit">Verifica le passkey</button></form>
-        <form action="/first-configuration/rotate-bootstrap-password" method="post">${firstCsrf}<button class="button" type="submit">Rigenera password temporanea</button></form>
-      </div>
-      <div class="first-configuration-count"><strong>${Number(state.passkeyCount || 0)}</strong><span>passkey rilevate / minimo ${Number(state.minimumPasskeys || 2)}</span></div>
-      ${Array.isArray(details.passkeys) && details.passkeys.length ? `<ul class="first-configuration-credentials">${details.passkeys.map((item, index) => `<li><strong>Passkey ${index + 1}</strong><span>${escapeHtml(item.label || "Credenziale WebAuthn passwordless")}</span></li>`).join("")}</ul>` : ""}
-      ${canConfirm ? `<form class="first-configuration-confirmation" action="/first-configuration/confirm-passkeys" method="post">
-        ${firstCsrf}
-        <label><input type="checkbox" name="firstTested" required> Ho testato la prima passkey.</label>
-        <label><input type="checkbox" name="secondTested" required> Ho testato la seconda passkey.</label>
-        <label><input type="checkbox" name="independent" required> Confermo che appartengono a due domini di controllo indipendenti.</label>
-        <button class="button open" type="submit">Conferma le due passkey</button>
-      </form>` : `<p class="first-configuration-note">Il cutover resta bloccato finché Keycloak non restituisce almeno due credenziali passwordless.</p>`}
-    </section>`;
-  }
-
-  if (current === FIRST_CONFIGURATION_STATES.PASSKEYS_READY) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">PASSAGGIO 3</p>
-      <h2>Readiness completata</h2>
-      <p>Sono presenti ${Number(state.passkeyCount || 0)} passkey e la loro indipendenza è stata confermata. Il prossimo comando verifica il contratto esatto e collega il flow passkey-only; la password temporanea verrà rimossa solo dopo il primo login passkey reale.</p>
-      <form action="/first-configuration/apply-cutover" method="post">
-        ${firstCsrf}
-        <button class="button open" type="submit">Attiva accesso passkey-only</button>
-      </form>
-    </section>`;
-  }
-
-  if (current === FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">PASSAGGIO 4</p>
-      <h2>Verifica il login reale</h2>
-      <p>Il flow passkey-only è attivo. Accedi ora al Control Center con una delle passkey registrate.</p>
-      <a class="button open" href="/auth/login">Accedi con passkey</a>
-    </section>`;
-  }
-
-  if (current === FIRST_CONFIGURATION_STATES.LOGOUT_VERIFICATION_REQUIRED) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">PASSAGGIO 5</p>
-      <h2>Verifica logout e revoca</h2>
-      <p>Il login passkey è riuscito. Revoca questa sessione; il portale richiederà un secondo login reale prima di chiudere il bootstrap.</p>
-      ${oidcSession?.ok && regularCsrf ? `<form action="/first-configuration/verify-logout" method="post">
-        ${firstCsrf}
-        <input type="hidden" name="_csrf" value="${escapeHtml(regularCsrf)}">
-        <button class="button open" type="submit">Revoca sessione e verifica nuovo login</button>
-      </form>` : '<a class="button open" href="/auth/login">Ripeti login con passkey</a>'}
-    </section>`;
-  }
-
-  if (current === FIRST_CONFIGURATION_STATES.RELOGIN_REQUIRED) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">VERIFICA FINALE</p>
-      <h2>La sessione precedente è stata revocata</h2>
-      <p>Esegui un nuovo login passkey. Al successo il client di bootstrap verrà disabilitato e la Prima Configurazione sarà chiusa automaticamente.</p>
-      <a class="button open" href="/auth/login">Verifica il nuovo login</a>
-    </section>`;
-  }
-
-  if (current === FIRST_CONFIGURATION_STATES.FINALIZING) {
-    return `<section class="first-configuration-card">
-      <p class="eyebrow">FINALIZZAZIONE</p>
-      <h2>Chiusura del bootstrap da completare</h2>
-      <p>L’accesso passkey è attivo. Completa in modo idempotente la disattivazione della credenziale tecnica temporanea; un errore transitorio non verrà mai registrato come successo.</p>
-      <div class="first-configuration-actions">
-        <form action="/first-configuration/retry-finalization" method="post">${firstCsrf}<button class="button open" type="submit">Riprova la finalizzazione</button></form>
-        <a class="button" href="/auth/login">Ripeti il login passkey</a>
-      </div>
-    </section>`;
-  }
-
-  return `<section class="first-configuration-card"><p class="eyebrow">COMPLETATA</p><h2>Prima Configurazione conclusa</h2><p>Il bootstrap è chiuso e l’accesso amministrativo richiede una passkey.</p><a class="button open" href="/auth/login">Apri il Control Center</a></section>`;
-}
-
-function firstConfigurationStep(state) {
-  if (state === FIRST_CONFIGURATION_STATES.REQUIRED) return 1;
-  if ([FIRST_CONFIGURATION_STATES.ADMIN_CONFIRMED, FIRST_CONFIGURATION_STATES.ENROLLMENT_REQUIRED].includes(state)) return 2;
-  if (state === FIRST_CONFIGURATION_STATES.PASSKEYS_READY) return 3;
-  if (state === FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED) return 4;
-  return 5;
-}
-
-function firstConfigurationStateLabel(state) {
-  const labels = {
-    [FIRST_CONFIGURATION_STATES.REQUIRED]: "Configurazione richiesta",
-    [FIRST_CONFIGURATION_STATES.ADMIN_CONFIRMED]: "Amministratore confermato",
-    [FIRST_CONFIGURATION_STATES.ENROLLMENT_REQUIRED]: "Registrazione passkey richiesta",
-    [FIRST_CONFIGURATION_STATES.PASSKEYS_READY]: "Passkey pronte",
-    [FIRST_CONFIGURATION_STATES.LOGIN_REQUIRED]: "Verifica login richiesta",
-    [FIRST_CONFIGURATION_STATES.LOGOUT_VERIFICATION_REQUIRED]: "Verifica logout richiesta",
-    [FIRST_CONFIGURATION_STATES.RELOGIN_REQUIRED]: "Nuovo login richiesto",
-    [FIRST_CONFIGURATION_STATES.FINALIZING]: "Chiusura bootstrap",
-    [FIRST_CONFIGURATION_STATES.COMPLETE]: "Completata",
-  };
-  return labels[state] || state;
-}
-
 function renderLogin(message) {
-  if (controlAuth.mode === "app-passkey") return renderAppPasskeyLogin(message);
-  return `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Accesso Control Center</title>
-${controlCenterStylesheetLinks()}
-${controlCenterScriptTags()}
-</head>
-<body data-cc-theme="light">
-<main class="login-shell">
-  <section class="login-panel ui-panel-stack">
-    <span class="brand-mark">P</span>
-    <p class="eyebrow">${escapeHtml(environment.toUpperCase())}</p>
-    <h1>Accesso amministrativo</h1>
-    <p class="login-copy">${escapeHtml(message || "Autenticazione passkey richiesta.")}</p>
-    <a class="button open" href="/auth/login">Accedi con passkey</a>
-  </section>
-</main>
-</body>
-</html>`;
+  return renderAppPasskeyLogin(message);
 }
 
 function renderDocsPortal(selectedDocPath = "") {
@@ -14845,7 +14303,7 @@ function defaultMaterialStores(notificationChannels = []) {
   return [
     { id: "docker-compose-files", name: "Docker secrets", status: "configured by compose files", materialConfigured: true, valueExposed: false, productionEvidence: false },
     { id: "control-center-session", name: "Control Center session store", status: controlAuth.enabled ? "PostgreSQL-backed" : "test-only disabled", materialConfigured: controlAuth.enabled, valueExposed: false, productionEvidence: false },
-    { id: "admin-identity", name: "Admin identity provider", status: controlAuth.mode === "app-passkey" ? "Application passkey in Control Center PostgreSQL" : controlAuth.mode === "oidc-passkey" ? "OIDC passkey-only" : "test-only disabled", materialConfigured: ["oidc-passkey", "app-passkey"].includes(controlAuth.mode), valueExposed: false, productionEvidence: false },
+    { id: "admin-identity", name: "Admin identity provider", status: controlAuth.mode === "app-passkey" ? "Application passkey in Control Center PostgreSQL" : "test-only disabled", materialConfigured: controlAuth.mode === "app-passkey", valueExposed: false, productionEvidence: false },
     { id: "alert-delivery", name: "Alert delivery material", status: alertDeliveryConfigured ? "partially configured" : "metadata only", materialConfigured: alertDeliveryConfigured, valueExposed: false, productionEvidence: false },
     { id: "provider-private-material", name: "Provider private material", status: "tracked by provider connections", materialConfigured: false, valueExposed: false, productionEvidence: false },
     { id: "kms-metadata", name: "Platform Local KMS metadata", status: "evidence through infra-ops", materialConfigured: false, valueExposed: false, productionEvidence: false },

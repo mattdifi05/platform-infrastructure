@@ -1,17 +1,114 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
+import pg from "pg";
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
-import { resolveAuthorizationCapability, } from "./route-capabilities.mjs";
+import { resolveAuthorizationCapability } from "./route-capabilities.mjs";
 import { DATABASE_ADMIN_AUTHORIZATION_PATH } from "./database-admin-gate.mjs";
-import { cidrListContains, resolveClientAddress } from "../first-configuration/config.mjs";
-import { AuthRequestError, MemoryAuthStore, PostgresAuthStore } from "./oidc.mjs";
+
+const { Pool } = pg;
 
 const SESSION_COOKIE = "__Host-platform_cc_session";
 const CSRF_COOKIE = "__Host-platform_cc_csrf";
+
+export class AuthConfigurationError extends Error {}
+
+export class AuthRequestError extends Error {
+  constructor(message, status = 401) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export async function createControlCenterAuth({ env = process.env } = {}) {
+  const config = readAuthConfig(env);
+  if (config.mode === "test-disabled") return new TestDisabledAuth(config);
+  const store = config.store === "memory"
+    ? new MemoryAppPasskeyStore()
+    : new PostgresAppPasskeyStore(config.databaseUrl);
+  await store.ready();
+  await seedTestSessions(store, config, env);
+  return new AppPasskeyAuth(config, store);
+}
+
+export function readAuthConfig(env = process.env) {
+  const environment = String(env.CONTROL_CENTER_ENV || "local").trim().toLowerCase();
+  const nodeEnvironment = String(env.NODE_ENV || "production").trim().toLowerCase();
+  const bindHost = String(env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
+  const mode = String(env.CONTROL_CENTER_AUTH_MODE || "").trim().toLowerCase();
+  if (mode === "test-disabled") {
+    if (nodeEnvironment !== "test" || !isLoopback(bindHost)) {
+      throw new AuthConfigurationError("test-disabled authentication requires NODE_ENV=test and a loopback bind address.");
+    }
+    return { mode, environment, bindHost };
+  }
+  if (mode !== "app-passkey") {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_MODE must be app-passkey.");
+  }
+  if (String(env.NODE_TLS_REJECT_UNAUTHORIZED || "").trim() === "0") {
+    throw new AuthConfigurationError("TLS certificate verification must remain enabled.");
+  }
+
+  const store = String(env.CONTROL_CENTER_AUTH_STORE || "postgres").trim().toLowerCase();
+  if (!['postgres', 'memory'].includes(store)) {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_STORE must be postgres or memory.");
+  }
+  if (store === "memory" && nodeEnvironment !== "test") {
+    throw new AuthConfigurationError("The in-memory app-passkey store is restricted to NODE_ENV=test.");
+  }
+
+  const publicOrigin = exactHttpsOrigin(env.CONTROL_CENTER_PUBLIC_ORIGIN, "CONTROL_CENTER_PUBLIC_ORIGIN");
+  const publicUrl = new URL(publicOrigin);
+  const publicHost = publicUrl.host.toLowerCase();
+  const rpId = String(env.CONTROL_CENTER_AUTH_RP_ID || publicUrl.hostname).trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/.test(rpId) ||
+      (publicUrl.hostname.toLowerCase() !== rpId && !publicUrl.hostname.toLowerCase().endsWith(`.${rpId}`))) {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_RP_ID must be the exact Control Center hostname or a parent suffix.");
+  }
+
+  const adminUsername = requiredText(
+    env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME || "admin",
+    "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_USERNAME",
+  );
+  const adminEmail = requiredText(
+    env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL || "admin@example.com",
+    "CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_EMAIL",
+  );
+  const adminSubject = `app-admin:${sha256(`${publicOrigin}\0${adminUsername}`).slice(0, 48)}`;
+  return {
+    mode,
+    environment,
+    nodeEnvironment,
+    bindHost,
+    publicOrigin,
+    publicHost,
+    rpId,
+    rpName: requiredText(env.CONTROL_CENTER_AUTH_RP_NAME || "Platform Control Center", "CONTROL_CENTER_AUTH_RP_NAME"),
+    adminUsername,
+    adminEmail,
+    adminDisplayName: String(env.CONTROL_CENTER_FIRST_CONFIGURATION_ADMIN_DISPLAY_NAME || adminUsername).trim() || adminUsername,
+    adminSubject,
+    webauthnUserId: sha256(`webauthn-user\0${adminSubject}`),
+    sessionMaxAgeSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS, 86400, 3600, 7 * 86400),
+    sessionIdleSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_IDLE_SECONDS, 86400, 300, 7 * 86400),
+    passkeyTtlSeconds: boundedInteger(env.CONTROL_CENTER_PASSKEY_TTL_SECONDS, 10 * 365 * 86400, 86400, 20 * 365 * 86400),
+    challengeTtlSeconds: boundedInteger(env.CONTROL_CENTER_PASSKEY_CHALLENGE_TTL_SECONDS, 300, 60, 86400),
+    freshAuthSeconds: boundedInteger(env.CONTROL_CENTER_FRESH_AUTH_SECONDS, 300, 60, 900),
+    loginMaxAttempts: boundedInteger(env.CONTROL_CENTER_LOGIN_MAX_ATTEMPTS, 20, 2, 100),
+    loginWindowSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_WINDOW_SECONDS, 60, 10, 600),
+    loginLockSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_LOCK_SECONDS, 60, 10, 3600),
+    sessionPolicyVersion: requiredText(env.CONTROL_CENTER_SESSION_POLICY_VERSION || "1", "CONTROL_CENTER_SESSION_POLICY_VERSION"),
+    allowedCidrs: parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS || "192.168.1.0/24,127.0.0.0/8,::1/128"),
+    trustedProxyCidrs: parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS || "172.16.0.0/12,127.0.0.0/8,::1/128"),
+    store,
+    databaseUrl: store === "postgres" ? readDatabaseUrl(env.CONTROL_CENTER_AUTH_DATABASE_URL_FILE) : "",
+  };
+}
 
 /**
  * Control Center authentication owned by the application itself.
@@ -301,7 +398,12 @@ export class AppPasskeyAuth {
     try {
       this.assertRequest(req, { mutation: true });
     } catch (error) {
-      return denied(error.status || 403, error.message || "Request rejected.", { error: "admin_request_rejected" });
+      const code = error?.message === "Exact request origin is required."
+        ? "csrf_origin_rejected"
+        : error?.message === "Same-origin Fetch Metadata is required."
+          ? "csrf_fetch_site_rejected"
+          : "admin_request_rejected";
+      return denied(error.status || 403, error.message || "Request rejected.", { error: code });
     }
     if (String(req?.headers?.origin || "") !== this.config.publicOrigin) return denied(403, "Exact request origin is required.", { error: "csrf_origin_rejected" });
     if (String(req?.headers?.["sec-fetch-site"] || "").toLowerCase() !== "same-origin") return denied(403, "Same-origin Fetch Metadata is required.", { error: "csrf_fetch_site_rejected" });
@@ -318,19 +420,506 @@ export class AppPasskeyAuth {
     return clearSessionCookies();
   }
 
-  async providerSecurityEvent() { throw new AuthRequestError("Provider security events are unavailable for app-passkey authentication.", 404); }
-  async backchannelLogout() { throw new AuthRequestError("OIDC back-channel logout is unavailable for app-passkey authentication.", 404); }
-  async discardLogin(login) {
-    const tokenHash = String(login?.sessionTokenHash || "");
-    if (/^[0-9a-f]{64}$/.test(tokenHash)) await this.store.revokeSession(tokenHash);
-  }
   async close() { await this.store.close(); }
 }
 
 export async function createAppPasskeyAuth(config) {
-  const store = config.store === "memory" ? new MemoryAuthStore() : new PostgresAuthStore(config.databaseUrl);
-  await store.ready({ requirePasskeys: true });
+  const store = config.store === "memory"
+    ? new MemoryAppPasskeyStore()
+    : new PostgresAppPasskeyStore(config.databaseUrl);
+  await store.ready();
   return new AppPasskeyAuth(config, store);
+}
+
+class TestDisabledAuth {
+  constructor(config) {
+    this.config = config;
+    this.enabled = false;
+    this.mode = config.mode;
+  }
+  async authenticate() {
+    return { ok: true, status: 200, message: "", role: "owner", identity: { subject: "test-owner", role: "owner" } };
+  }
+  authorize(_req, _url, session) { return session; }
+  async validateMutation(_req, _url, session) { return session; }
+  async close() {}
+}
+
+export class PostgresAppPasskeyStore {
+  constructor(connectionString) {
+    this.pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
+  }
+
+  async ready() {
+    const result = await this.pool.query(
+      `select to_regclass('control_auth.sessions') as sessions,
+              to_regclass('control_auth.login_throttle') as throttle,
+              to_regclass('control_auth.passkeys') as passkeys,
+              to_regclass('control_auth.webauthn_challenges') as webauthn_challenges,
+              exists(select 1 from information_schema.columns
+                     where table_schema='control_auth' and table_name='sessions' and column_name='csrf_hash') as csrf_ready,
+              exists(select 1 from information_schema.columns
+                     where table_schema='control_auth' and table_name='sessions' and column_name='policy_version') as policy_ready`,
+    );
+    const row = result.rows[0] || {};
+    if (!row.sessions || !row.throttle || !row.passkeys || !row.webauthn_challenges || !row.csrf_ready || !row.policy_ready) {
+      throw new AuthConfigurationError("Control Center app-passkey migration is not applied.");
+    }
+  }
+
+  async createSession(item) {
+    await this.pool.query(
+      `insert into control_auth.sessions
+       (token_hash,csrf_hash,policy_version,subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,signing_key_id,expires_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [
+        item.tokenHash,
+        item.csrfHash,
+        item.policyVersion,
+        item.subject,
+        item.email,
+        item.displayName,
+        item.role,
+        item.roles,
+        item.acr,
+        item.amr,
+        item.authTime,
+        item.issuer,
+        item.sessionId || "",
+        item.keyId || "",
+        item.expiresAt,
+      ],
+    );
+  }
+
+  async getSession(tokenHash, idleSeconds) {
+    const result = await this.pool.query(
+      `update control_auth.sessions
+       set last_seen_at=now()
+       where token_hash=$1 and revoked_at is null and expires_at > now()
+         and last_seen_at > now() - ($2::text || ' seconds')::interval
+       returning subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,csrf_hash,policy_version,created_at,last_seen_at,expires_at`,
+      [tokenHash, idleSeconds],
+    );
+    return normalizeSessionRow(result.rows[0]);
+  }
+
+  async revokeSession(tokenHash) {
+    await this.pool.query("update control_auth.sessions set revoked_at=now() where token_hash=$1 and revoked_at is null", [tokenHash]);
+  }
+
+  async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const current = (await client.query(
+        "select * from control_auth.login_throttle where key_hash=$1 for update",
+        [keyHash],
+      )).rows[0];
+      const now = Date.now();
+      const lockedUntil = current?.locked_until ? new Date(current.locked_until).getTime() : 0;
+      if (lockedUntil > now) {
+        await client.query("commit");
+        return { allowed: false, retryAfterSeconds: Math.ceil((lockedUntil - now) / 1000) };
+      }
+      const windowStarted = current?.window_started_at ? new Date(current.window_started_at).getTime() : 0;
+      const reset = !windowStarted || windowStarted <= now - windowSeconds * 1000;
+      const attempts = reset ? 1 : Number(current.attempts || 0) + 1;
+      const nextLockedUntil = attempts > maxAttempts ? new Date(now + lockSeconds * 1000) : null;
+      await client.query(
+        `insert into control_auth.login_throttle (key_hash,window_started_at,attempts,locked_until,updated_at)
+         values ($1,$2,$3,$4,now())
+         on conflict (key_hash) do update
+         set window_started_at=excluded.window_started_at,attempts=excluded.attempts,
+             locked_until=excluded.locked_until,updated_at=now()`,
+        [keyHash, new Date(reset ? now : windowStarted), attempts, nextLockedUntil],
+      );
+      await client.query("commit");
+      return { allowed: attempts <= maxAttempts, retryAfterSeconds: nextLockedUntil ? lockSeconds : 0 };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async clearLoginThrottle(keyHash) {
+    await this.pool.query("delete from control_auth.login_throttle where key_hash=$1", [keyHash]);
+  }
+
+  async createWebAuthnChallenge(item) {
+    await this.pool.query("delete from control_auth.webauthn_challenges where expires_at <= now()");
+    await this.pool.query(
+      `insert into control_auth.webauthn_challenges
+       (challenge_hash,challenge,flow,user_id,peer_hash,expires_at)
+       values ($1,$2,$3,$4,$5,$6)
+       on conflict (challenge_hash) do update
+       set challenge=excluded.challenge,flow=excluded.flow,user_id=excluded.user_id,
+           peer_hash=excluded.peer_hash,created_at=now(),expires_at=excluded.expires_at`,
+      [item.challengeHash, item.challenge, item.flow, item.userId, item.peerHash, item.expiresAt],
+    );
+  }
+
+  async consumeWebAuthnChallenge({ challengeHash, challenge, flow, userId, peerHash }) {
+    const result = await this.pool.query(
+      `delete from control_auth.webauthn_challenges
+       where challenge_hash=$1 and challenge=$2 and flow=$3 and user_id=$4 and peer_hash=$5 and expires_at > now()
+       returning challenge,flow,user_id,peer_hash,expires_at`,
+      [challengeHash, challenge, flow, userId, peerHash],
+    );
+    const row = result.rows[0];
+    return row ? {
+      challenge: row.challenge,
+      flow: row.flow,
+      userId: row.user_id,
+      peerHash: row.peer_hash,
+      expiresAt: row.expires_at,
+    } : null;
+  }
+
+  async listPasskeys(userId) {
+    await this.pool.query("delete from control_auth.passkeys where expires_at <= now()");
+    const result = await this.pool.query(
+      `select credential_id,user_id,webauthn_user_id,public_key,counter,transports,device_type,backed_up,
+              created_at,expires_at,last_used_at,updated_at
+       from control_auth.passkeys where user_id=$1 and expires_at > now() order by created_at asc`,
+      [userId],
+    );
+    return result.rows.map(normalizePasskeyRow);
+  }
+
+  async createPasskey(item) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [item.userId]);
+      await client.query("delete from control_auth.passkeys where user_id=$1 and expires_at <= now()", [item.userId]);
+      const result = await client.query(
+        `insert into control_auth.passkeys
+         (credential_id,user_id,webauthn_user_id,public_key,counter,transports,device_type,backed_up,expires_at)
+         select $1,$2,$3,$4,$5,$6,$7,$8,$9
+         where not exists (select 1 from control_auth.passkeys where user_id=$2 and expires_at > now())
+         on conflict (credential_id) do nothing`,
+        [item.id, item.userId, item.webauthnUserId, item.publicKey, item.counter, item.transports || [], item.deviceType, item.backedUp, item.expiresAt],
+      );
+      await client.query("commit");
+      return result.rowCount === 1;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updatePasskeyCounter({ credentialId, userId, counter, deviceType, backedUp }) {
+    const result = await this.pool.query(
+      `update control_auth.passkeys
+       set counter=$1,device_type=coalesce($2,device_type),backed_up=coalesce($3,backed_up),last_used_at=now(),updated_at=now()
+       where credential_id=$4 and user_id=$5 and expires_at > now() and counter <= $1
+       returning credential_id`,
+      [counter, deviceType || null, backedUp === undefined ? null : Boolean(backedUp), credentialId, userId],
+    );
+    return result.rowCount === 1;
+  }
+
+  async close() { await this.pool.end(); }
+}
+
+export class MemoryAppPasskeyStore {
+  constructor() {
+    this.sessions = new Map();
+    this.loginThrottle = new Map();
+    this.passkeys = new Map();
+    this.webauthnChallenges = new Map();
+  }
+  async ready() {}
+  async createSession(item) {
+    this.sessions.set(item.tokenHash, {
+      ...structuredClone(item),
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+      revokedAt: null,
+    });
+  }
+  async getSession(tokenHash, idleSeconds) {
+    const item = this.sessions.get(tokenHash);
+    const now = Date.now();
+    if (!item || item.revokedAt || item.expiresAt.getTime() <= now || item.lastSeenAt.getTime() <= now - idleSeconds * 1000) return null;
+    item.lastSeenAt = new Date();
+    return structuredClone(item);
+  }
+  async revokeSession(tokenHash) {
+    const item = this.sessions.get(tokenHash);
+    if (item) item.revokedAt = new Date();
+  }
+  async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
+    const now = Date.now();
+    const current = this.loginThrottle.get(keyHash);
+    if (current?.lockedUntil > now) {
+      return { allowed: false, retryAfterSeconds: Math.ceil((current.lockedUntil - now) / 1000) };
+    }
+    const reset = !current || current.windowStarted <= now - windowSeconds * 1000;
+    const attempts = reset ? 1 : current.attempts + 1;
+    const lockedUntil = attempts > maxAttempts ? now + lockSeconds * 1000 : 0;
+    this.loginThrottle.set(keyHash, { windowStarted: reset ? now : current.windowStarted, attempts, lockedUntil });
+    return { allowed: attempts <= maxAttempts, retryAfterSeconds: lockedUntil ? lockSeconds : 0 };
+  }
+  async clearLoginThrottle(keyHash) { this.loginThrottle.delete(keyHash); }
+  async createWebAuthnChallenge(item) {
+    const now = Date.now();
+    for (const [key, value] of this.webauthnChallenges) {
+      if (value.expiresAt.getTime() <= now) this.webauthnChallenges.delete(key);
+    }
+    this.webauthnChallenges.set(item.challengeHash, {
+      ...structuredClone(item),
+      expiresAt: new Date(item.expiresAt),
+    });
+  }
+  async consumeWebAuthnChallenge({ challengeHash, challenge, flow, userId, peerHash }) {
+    const item = this.webauthnChallenges.get(challengeHash);
+    this.webauthnChallenges.delete(challengeHash);
+    if (!item || item.challenge !== challenge || item.flow !== flow || item.userId !== userId ||
+        item.peerHash !== peerHash || item.expiresAt.getTime() <= Date.now()) return null;
+    return structuredClone(item);
+  }
+  async listPasskeys(userId) {
+    const now = Date.now();
+    for (const [key, value] of this.passkeys) {
+      if (value.expiresAt.getTime() <= now) this.passkeys.delete(key);
+    }
+    return [...this.passkeys.values()]
+      .filter((item) => item.userId === userId && item.expiresAt.getTime() > now)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .map((item) => structuredClone(item));
+  }
+  async createPasskey(item) {
+    const now = Date.now();
+    for (const [key, value] of this.passkeys) {
+      if (value.expiresAt.getTime() <= now) this.passkeys.delete(key);
+      else if (value.userId === item.userId) return false;
+    }
+    if (this.passkeys.has(item.id)) return false;
+    this.passkeys.set(item.id, {
+      ...structuredClone(item),
+      publicKey: new Uint8Array(item.publicKey),
+      createdAt: new Date(item.createdAt || Date.now()),
+      expiresAt: new Date(item.expiresAt),
+    });
+    return true;
+  }
+  async updatePasskeyCounter({ credentialId, userId, counter, deviceType, backedUp }) {
+    const item = this.passkeys.get(credentialId);
+    if (!item || item.userId !== userId || item.expiresAt.getTime() <= Date.now() || item.counter > counter) return false;
+    item.counter = counter;
+    if (deviceType) item.deviceType = deviceType;
+    if (backedUp !== undefined) item.backedUp = Boolean(backedUp);
+    item.lastUsedAt = new Date();
+    item.updatedAt = new Date();
+    return true;
+  }
+  async close() {}
+}
+
+async function seedTestSessions(store, config, env) {
+  const raw = String(env.CONTROL_CENTER_TEST_SESSION_FIXTURES || "").trim();
+  if (!raw) return;
+  if (config.nodeEnvironment !== "test" || config.store !== "memory" || !isLoopback(config.bindHost)) {
+    throw new AuthConfigurationError("CONTROL_CENTER_TEST_SESSION_FIXTURES is restricted to loopback memory tests.");
+  }
+  let fixtures;
+  try {
+    fixtures = JSON.parse(raw);
+  } catch {
+    throw new AuthConfigurationError("CONTROL_CENTER_TEST_SESSION_FIXTURES must be valid JSON.");
+  }
+  if (!Array.isArray(fixtures) || fixtures.length > 32) {
+    throw new AuthConfigurationError("CONTROL_CENTER_TEST_SESSION_FIXTURES must contain at most 32 sessions.");
+  }
+  for (const fixture of fixtures) {
+    const token = requiredFixtureToken(fixture?.token, "token");
+    const csrf = requiredFixtureToken(fixture?.csrf, "csrf");
+    const role = String(fixture?.role || "");
+    if (!["viewer", "admin", "owner"].includes(role)) {
+      throw new AuthConfigurationError("Test session roles must be viewer, admin, or owner.");
+    }
+    const ageSeconds = Number(fixture?.ageSeconds || 0);
+    if (!Number.isFinite(ageSeconds) || Math.abs(ageSeconds) > 86400) {
+      throw new AuthConfigurationError("Test session ageSeconds is invalid.");
+    }
+    const authTime = new Date(Date.now() - ageSeconds * 1000);
+    await store.createSession({
+      tokenHash: sha256(token),
+      csrfHash: sha256(csrf),
+      policyVersion: config.sessionPolicyVersion,
+      subject: config.adminSubject,
+      email: config.adminEmail,
+      displayName: config.adminDisplayName,
+      role,
+      roles: [role],
+      acr: "app-passkey",
+      amr: ["webauthn"],
+      authTime,
+      issuer: config.publicOrigin,
+      sessionId: "",
+      keyId: "",
+      expiresAt: new Date(Date.now() + config.sessionMaxAgeSeconds * 1000),
+    });
+  }
+}
+
+function requiredFixtureToken(value, label) {
+  const token = String(value || "");
+  if (!/^[A-Za-z0-9_-]{16,256}$/.test(token)) {
+    throw new AuthConfigurationError(`Test session ${label} is invalid.`);
+  }
+  return token;
+}
+
+function normalizeSessionRow(row) {
+  if (!row) return null;
+  return {
+    subject: row.subject,
+    email: row.email,
+    displayName: row.display_name,
+    role: row.role,
+    roles: row.roles || [],
+    acr: row.acr,
+    amr: row.amr || [],
+    authTime: row.auth_time,
+    issuer: row.issuer,
+    sessionId: row.oidc_session_id,
+    csrfHash: row.csrf_hash,
+    policyVersion: row.policy_version,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+function normalizePasskeyRow(row) {
+  return {
+    id: row.credential_id,
+    userId: row.user_id,
+    webauthnUserId: row.webauthn_user_id,
+    publicKey: row.public_key,
+    counter: Number(row.counter || 0),
+    transports: Array.isArray(row.transports) ? row.transports : [],
+    deviceType: row.device_type || "singleDevice",
+    backedUp: row.backed_up === true,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    lastUsedAt: row.last_used_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function readDatabaseUrl(filename) {
+  const target = String(filename || "").trim();
+  if (!target || !existsSync(target)) {
+    throw new AuthConfigurationError("CONTROL_CENTER_AUTH_DATABASE_URL_FILE is required and must exist.");
+  }
+  const value = readFileSync(target, "utf8").trim();
+  if (!/^postgres(?:ql)?:\/\//i.test(value)) {
+    throw new AuthConfigurationError("Control Center auth database URL must use PostgreSQL.");
+  }
+  return value;
+}
+
+function exactHttpsOrigin(value, name) {
+  const text = requiredText(value, name);
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new AuthConfigurationError(`${name} must be an absolute HTTPS origin.`);
+  }
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
+    throw new AuthConfigurationError(`${name} must be an exact HTTPS origin without path, query, fragment, or credentials.`);
+  }
+  return url.origin;
+}
+
+function requiredText(value, name) {
+  const text = String(value || "").trim();
+  if (!text) throw new AuthConfigurationError(`${name} is required.`);
+  return text;
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number.parseInt(String(value || fallback), 10);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new AuthConfigurationError(`Authentication timeout must be between ${minimum} and ${maximum} seconds.`);
+  }
+  return parsed;
+}
+
+function isLoopback(host) {
+  return ["127.0.0.1", "::1", "localhost"].includes(String(host).toLowerCase());
+}
+
+function parseCidrs(value) {
+  const cidrs = String(value || "").split(",").map((item) => item.trim()).filter(Boolean).map(parseCidr);
+  if (cidrs.length === 0 || cidrs.length > 32) {
+    throw new AuthConfigurationError("Control Center CIDR lists cannot be empty or exceed 32 entries.");
+  }
+  return cidrs;
+}
+
+function parseCidr(value) {
+  const [rawAddress, rawPrefix, ...extra] = String(value).split("/");
+  const address = normalizeIp(rawAddress);
+  const family = isIP(address);
+  if (extra.length || !family) throw new AuthConfigurationError(`Invalid CIDR: ${value}`);
+  const maximum = family === 4 ? 32 : 128;
+  const prefix = rawPrefix === undefined ? maximum : Number(rawPrefix);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > maximum) {
+    throw new AuthConfigurationError(`Invalid CIDR: ${value}`);
+  }
+  if (family === 6 && !(address === "::1" && prefix === 128)) {
+    throw new AuthConfigurationError("Only the ::1/128 IPv6 management CIDR is supported.");
+  }
+  return { address, family, prefix };
+}
+
+function resolveClientAddress(config, req) {
+  let current = normalizeIp(req?.socket?.remoteAddress || "");
+  if (!current) return "";
+  if (!cidrListContains(config.trustedProxyCidrs, current)) return current;
+  const forwarded = String(req?.headers?.["x-forwarded-for"] || "")
+    .split(",")
+    .map((value) => normalizeIp(value.trim()))
+    .filter(Boolean);
+  if (forwarded.length === 0 || forwarded.length > 8) return "";
+  for (let index = forwarded.length - 1; index >= 0; index -= 1) {
+    if (!cidrListContains(config.trustedProxyCidrs, current)) break;
+    current = forwarded[index];
+  }
+  return current;
+}
+
+function cidrListContains(cidrs, address) {
+  return cidrs.some((cidr) => cidrContains(cidr, address));
+}
+
+function cidrContains(cidr, rawAddress) {
+  const address = normalizeIp(rawAddress);
+  if (cidr.family !== isIP(address)) return false;
+  if (cidr.family === 6) return address === cidr.address;
+  const mask = cidr.prefix === 0 ? 0 : (0xffffffff << (32 - cidr.prefix)) >>> 0;
+  return (ipv4Number(address) & mask) === (ipv4Number(cidr.address) & mask);
+}
+
+function ipv4Number(value) {
+  return value.split(".").reduce((total, part) => ((total << 8) | Number(part)) >>> 0, 0);
+}
+
+function normalizeIp(value) {
+  let address = String(value || "").trim().toLowerCase();
+  if (address.startsWith("[")) address = address.replace(/^\[|\]$/g, "");
+  if (address.startsWith("::ffff:")) address = address.slice(7);
+  return isIP(address) ? address : "";
 }
 
 function normalizeCredential(value, flow) {

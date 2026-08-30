@@ -271,7 +271,7 @@ const CORE_SEMANTIC_POLICY = {
             "literal": "/run/secrets/control_center_database_url"
           },
           "CONTROL_CENTER_AUTH_MODE": {
-            "literal": "oidc-passkey"
+            "literal": "app-passkey"
           },
           "CONTROL_CENTER_AUTH_STORE": {
             "literal": "postgres"
@@ -339,53 +339,6 @@ const CORE_SEMANTIC_POLICY = {
           "CONTROL_CENTER_MARIADB_ROOT_USER": {
             "variable": "CONTROL_CENTER_MARIADB_ROOT_USER",
             "fallback": "root"
-          },
-          "CONTROL_CENTER_OIDC_ADMIN_ROLE": {
-            "variable": "CONTROL_CENTER_OIDC_ADMIN_ROLE",
-            "fallback": "admin"
-          },
-          "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT": {
-            "variable": "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT",
-            "fallback": "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth",
-            "template": "${CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth}"
-          },
-          "CONTROL_CENTER_OIDC_CLIENT_ID": {
-            "variable": "CONTROL_CENTER_OIDC_CLIENT_ID",
-            "fallback": "platform-control-center"
-          },
-          "CONTROL_CENTER_OIDC_ISSUER": {
-            "variable": "CONTROL_CENTER_OIDC_ISSUER",
-            "fallback": "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform",
-            "template": "${CONTROL_CENTER_OIDC_ISSUER:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform}"
-          },
-          "CONTROL_CENTER_OIDC_JWKS_URI": {
-            "variable": "CONTROL_CENTER_OIDC_JWKS_URI",
-            "fallback": "http://keycloak:8080/realms/platform/protocol/openid-connect/certs"
-          },
-          "CONTROL_CENTER_OIDC_OWNER_ROLE": {
-            "variable": "CONTROL_CENTER_OIDC_OWNER_ROLE",
-            "fallback": "owner"
-          },
-          "CONTROL_CENTER_OIDC_REDIRECT_URI": {
-            "variable": "CONTROL_CENTER_OIDC_REDIRECT_URI",
-            "fallback": "https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback",
-            "template": "${CONTROL_CENTER_OIDC_REDIRECT_URI:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback}"
-          },
-          "CONTROL_CENTER_OIDC_REQUIRED_ACR": {
-            "variable": "CONTROL_CENTER_OIDC_REQUIRED_ACR",
-            "fallback": "urn:platform:loa:passkey"
-          },
-          "CONTROL_CENTER_OIDC_REQUIRED_AMR": {
-            "variable": "CONTROL_CENTER_OIDC_REQUIRED_AMR",
-            "fallback": "webauthn"
-          },
-          "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT": {
-            "variable": "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
-            "fallback": "http://keycloak:8080/realms/platform/protocol/openid-connect/token"
-          },
-          "CONTROL_CENTER_OIDC_VIEWER_ROLE": {
-            "variable": "CONTROL_CENTER_OIDC_VIEWER_ROLE",
-            "fallback": "viewer"
           },
           "CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL": {
             "variable": "CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL",
@@ -3269,19 +3222,6 @@ currentEnvironmentAuthority.nats = { present: false, entries: {} };
 currentEnvironmentAuthority.redis.entries.REDIS_USERNAME = { literal: "platform" };
 
 const controlCenterEnvironment = currentEnvironmentAuthority["control-center"].entries;
-for (const removed of [
-  "CONTROL_CENTER_OIDC_ADMIN_ROLE",
-  "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT",
-  "CONTROL_CENTER_OIDC_CLIENT_ID",
-  "CONTROL_CENTER_OIDC_ISSUER",
-  "CONTROL_CENTER_OIDC_JWKS_URI",
-  "CONTROL_CENTER_OIDC_OWNER_ROLE",
-  "CONTROL_CENTER_OIDC_REDIRECT_URI",
-  "CONTROL_CENTER_OIDC_REQUIRED_ACR",
-  "CONTROL_CENTER_OIDC_REQUIRED_AMR",
-  "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
-  "CONTROL_CENTER_OIDC_VIEWER_ROLE",
-]) delete controlCenterEnvironment[removed];
 Object.assign(controlCenterEnvironment, {
   CONTROL_CENTER_AUTH_MODE: { literal: "app-passkey" },
   CONTROL_CENTER_AUTH_RP_ID: {
@@ -5622,7 +5562,6 @@ export const localPrivateCoreSemanticPolicyDescriptor = Object.freeze({
   controlCenter: Object.freeze({
     environment: "local_private",
     firstConfigurationMode: "required",
-    minimumPasskeysDefault: "1",
     localCaTarget: "/run/platform/tls/control-center-local-ca.pem",
   }),
   adminServiceProfiles: Object.freeze({
@@ -5819,16 +5758,6 @@ function validateServiceEnvironmentAuthority(
       || (expected.present && !sameFlatObject(service.environment, expected.value))) {
     violations.push(`${serviceName}:environment-authority`);
   }
-}
-
-function expectedControlCenterOidcIssuer(environment) {
-  const domain = envOr(environment, "DOMAIN", "localhost.com");
-  const authHost = envOr(environment, "AUTH_HOST", `auth.${domain}`);
-  return envOr(
-    environment,
-    "CONTROL_CENTER_OIDC_ISSUER",
-    `https://${authHost}/realms/platform`,
-  );
 }
 
 function projectedSecurityValue(environment, projection) {
@@ -7592,7 +7521,6 @@ function localPrivateExpectedEnvironment(environment) {
         "CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS",
         "172.16.0.0/12,127.0.0.0/8,::1/128",
       ),
-      CONTROL_CENTER_MIN_PASSKEYS: envOr(environment, "CONTROL_CENTER_MIN_PASSKEYS", "1"),
       CONTROL_CENTER_PASSKEY_TTL_SECONDS: envOr(
         environment,
         "CONTROL_CENTER_PASSKEY_TTL_SECONDS",
@@ -8024,7 +7952,6 @@ export function projectLocalPrivateNoHostedAuthority(
         || !validCidrList(
           expectedEnvironment.values.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS,
         )
-        || expectedEnvironment.values.CONTROL_CENTER_MIN_PASSKEYS !== "1"
         || !/^[1-9][0-9]{0,9}$/.test(
           expectedEnvironment.values.CONTROL_CENTER_PASSKEY_TTL_SECONDS,
         )

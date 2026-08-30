@@ -1,328 +1,111 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
-import { PostgresAuthStore, providerScopeAdvisoryLockKey } from "../auth/oidc.mjs";
-import { PostgresFirstConfigurationStore } from "../first-configuration/store.mjs";
+import { PostgresAppPasskeyStore } from "../auth/app-passkey.mjs";
 
 const { Pool } = pg;
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const issuer = "https://identity.example.test/realms/platform";
-const otherIssuer = "https://other-identity.example.test/realms/platform";
-const subject = "test-owner";
-const adminPool = databaseUrl
-  ? new Pool({ connectionString: withApplicationName(databaseUrl, "oidc-backchannel-admin") })
-  : null;
-const stores = [];
-let runtimeDatabaseUrl = "";
-let hashCounter = 0;
 
 if (!databaseUrl) {
-  process.stdout.write("POSTGRES_AUTH_STORE_PROVIDER_REVOCATION_NOT_RUN: TEST_DATABASE_URL is not set\n");
+  process.stdout.write("POSTGRES_APP_PASSKEY_STORE_NOT_RUN: TEST_DATABASE_URL is not set\n");
 } else if (process.env.TEST_DATABASE_DISPOSABLE !== "1") {
   throw new Error("TEST_DATABASE_DISPOSABLE=1 is required because this test recreates control_auth.");
-} else try {
-  await adminPool.query("drop schema if exists control_auth cascade");
-  await adminPool.query("drop role if exists control_center_runtime");
-  await adminPool.query("create role control_center_runtime login password 'first-configuration-integration-runtime'");
-  runtimeDatabaseUrl = withCredentials(
-    databaseUrl,
-    "control_center_runtime",
-    "first-configuration-integration-runtime",
-  );
-  for (const migration of [
-    "../migrations/001_auth_sessions.sql",
-    "../migrations/002_session_security.sql",
-    "../migrations/003_oidc_provider_revocation.sql",
-    "../migrations/004_first_configuration.sql",
-    "../migrations/006_app_passkeys.sql",
-  ]) {
-    await adminPool.query(readFileSync(new URL(migration, import.meta.url), "utf8"));
-  }
-
-  const store = authStore("oidc-backchannel-base");
-  await store.ready();
-  const transaction = {
-    stateHash: nextHash(),
-    nonceHash: nextHash(),
-    codeVerifier: "c".repeat(64),
-    throttleKeyHash: nextHash(),
-    expiresAt: new Date(Date.now() + 60_000),
-  };
-  await store.createTransaction(transaction);
-  assert.equal((await store.consumeTransaction(transaction.stateHash)).nonceHash, transaction.nonceHash);
-  assert.equal(await store.consumeTransaction(transaction.stateHash), null);
-
-  const authenticationTime = new Date(Date.now() - 60_000);
-  const sidA = session({ issuer, subject, sessionId: "sid-a", authTime: authenticationTime });
-  const sidB = session({ issuer, subject, sessionId: "sid-b", authTime: authenticationTime });
-  const otherIssuerSession = session({ issuer: otherIssuer, subject, sessionId: "sid-a", authTime: authenticationTime });
-  await store.createSession(sidA);
-  await store.createSession(sidB);
-  await store.createSession(otherIssuerSession);
-
-  const sidEventAt = new Date();
-  const sidReceiptExpiry = new Date(Date.now() + 20 * 60_000);
-  assert.deepEqual(await store.consumeProviderRevocation({
-    issuer,
-    eventType: "http://schemas.openid.net/event/backchannel-logout",
-    jtiHash: nextHash(),
-    issuedAt: sidEventAt,
-    expiresAt: sidReceiptExpiry,
-    sid: "sid-a",
-    subject,
-  }), { replayed: false, revoked: 1 });
-  assert.equal(await store.getSession(sidA.tokenHash, 600), null);
-  assert.equal((await store.getSession(sidB.tokenHash, 600)).sessionId, "sid-b");
-  assert.equal((await store.getSession(otherIssuerSession.tokenHash, 600)).issuer, otherIssuer);
-
-  const replayJti = nextHash();
-  assert.deepEqual(await store.consumeProviderRevocation({
-    issuer,
-    eventType: "http://schemas.openid.net/event/backchannel-logout",
-    jtiHash: replayJti,
-    issuedAt: sidEventAt,
-    expiresAt: sidReceiptExpiry,
-    sid: "sid-missing",
-    subject,
-  }), { replayed: false, revoked: 0 });
-  assert.deepEqual(await store.consumeProviderRevocation({
-    issuer,
-    eventType: "http://schemas.openid.net/event/backchannel-logout",
-    jtiHash: replayJti,
-    issuedAt: sidEventAt,
-    expiresAt: sidReceiptExpiry,
-    sid: "sid-b",
-    subject,
-  }), { replayed: true, revoked: 0 });
-  assert.notEqual(await store.getSession(sidB.tokenHash, 600), null);
-
-  const subjectEventAt = new Date(Date.now() - 2_000);
-  assert.deepEqual(await store.consumeProviderRevocation({
-    issuer,
-    eventType: "urn:platform-infrastructure:event:authorization-changed",
-    jtiHash: nextHash(),
-    issuedAt: subjectEventAt,
-    expiresAt: sidReceiptExpiry,
-    sid: "",
-    subject,
-  }), { replayed: false, revoked: 1 });
-  assert.equal(await store.getSession(sidB.tokenHash, 600), null);
-  assert.notEqual(await store.getSession(otherIssuerSession.tokenHash, 600), null);
-
-  const staleAfterSubjectLogout = session({
-    issuer,
-    subject,
-    sessionId: "sid-stale-after-subject-logout",
-    authTime: new Date(subjectEventAt.getTime() - 1_000),
-  });
-  await assert.rejects(store.createSession(staleAfterSubjectLogout), /was revoked/);
-  const freshAfterSubjectLogout = session({
-    issuer,
-    subject,
-    sessionId: "sid-fresh-after-subject-logout",
-    authTime: new Date(subjectEventAt.getTime() + 1_000),
-  });
-  await store.createSession(freshAfterSubjectLogout);
-  assert.notEqual(await store.getSession(freshAfterSubjectLogout.tokenHash, 600), null);
-
-  for (const scopeType of ["sid", "subject"]) {
-    await exerciseConcurrentCreateBeforeRevocation(store, scopeType);
-    await exerciseConcurrentRevocationBeforeCreate(store, scopeType);
-  }
-
-  const throttleHash = nextHash();
-  assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, true);
-  assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, true);
-  assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, false);
-  await store.clearLoginThrottle(throttleHash);
-  assert.equal((await store.registerLoginAttempt(throttleHash, 2, 60, 60)).allowed, true);
-
-  const webauthnChallenge = {
-    challengeHash: nextHash(),
-    challenge: "c".repeat(43),
-    flow: "registration",
-    userId: subject,
-    peerHash: nextHash(),
-    expiresAt: new Date(Date.now() + 60_000),
-  };
-  await store.createWebAuthnChallenge(webauthnChallenge);
-  assert.deepEqual(
-    (await store.consumeWebAuthnChallenge(webauthnChallenge)).challenge,
-    webauthnChallenge.challenge,
-  );
-  assert.equal(await store.consumeWebAuthnChallenge(webauthnChallenge), null);
-  const passkey = {
-    id: `credential-${nextHash()}`,
-    userId: subject,
-    webauthnUserId: nextHash(),
-    publicKey: Buffer.from([1, 2, 3]),
-    counter: 0,
-    transports: ["internal"],
-    deviceType: "singleDevice",
-    backedUp: false,
-    expiresAt: new Date(Date.now() + 60_000),
-  };
-  assert.equal(await store.createPasskey(passkey), true);
-  assert.equal(await store.createPasskey({ ...passkey, publicKey: Buffer.from([9]) }), false);
-  assert.deepEqual([...((await store.listPasskeys(subject))[0].publicKey)], [1, 2, 3]);
-  assert.equal(await store.updatePasskeyCounter({ credentialId: passkey.id, userId: subject, counter: 1 }), true);
-  assert.equal(await store.updatePasskeyCounter({ credentialId: passkey.id, userId: subject, counter: 0 }), false);
-
-  const firstConfigurationStore = new PostgresFirstConfigurationStore(
-    withApplicationName(runtimeDatabaseUrl, "first-configuration-runtime"),
-  );
-  stores.push(firstConfigurationStore);
-  const bootstrapTokenHash = nextHash();
-  await firstConfigurationStore.ready({
-    bootstrapTokenHash,
-    bootstrapTokenExpiresAt: new Date(Date.now() + 60_000),
-  });
-  const setupSessionHash = nextHash();
-  const setupPeerHash = nextHash();
-  const setupState = await firstConfigurationStore.consumeBootstrapToken({
-    bootstrapTokenHash,
-    sessionTokenHash: setupSessionHash,
-    csrfHash: nextHash(),
-    peerHash: setupPeerHash,
-    expiresAt: new Date(Date.now() + 60_000),
-  });
-  assert.equal(setupState.state, "FIRST_CONFIGURATION_REQUIRED");
-  assert.notEqual(await firstConfigurationStore.getSession(setupSessionHash, setupPeerHash, 60), null);
-  const prepared = await firstConfigurationStore.recordAdministrator({
-    subject: "first-configuration-owner",
-    username: "matthew",
-    email: "matthew@example.test",
-  });
-  assert.equal(prepared.state, "PASSKEY_ENROLLMENT_REQUIRED");
-  await firstConfigurationStore.recordPasskeyCount({ subject: prepared.adminSubject, count: 2 });
-  const passkeysReady = await firstConfigurationStore.confirmPasskeyIndependence({ subject: prepared.adminSubject });
-  assert.equal(passkeysReady.state, "PASSKEYS_READY");
-  await firstConfigurationStore.recordCutover({ subject: prepared.adminSubject, count: 2 });
-  await firstConfigurationStore.recordPasskeyLogin({ subject: prepared.adminSubject });
-  await firstConfigurationStore.recordLogoutVerification({ subject: prepared.adminSubject });
-  await firstConfigurationStore.recordFinalizing({ subject: prepared.adminSubject });
-  const completedSetup = await firstConfigurationStore.recordComplete({ subject: prepared.adminSubject });
-  assert.equal(completedSetup.state, "FIRST_CONFIGURATION_COMPLETE");
-  assert.equal(
-    (await firstConfigurationStore.recordComplete({ subject: prepared.adminSubject })).completedAt.getTime(),
-    completedSetup.completedAt.getTime(),
-  );
-  process.stdout.write("POSTGRES_AUTH_STORE_PROVIDER_REVOCATION_OK\n");
-} finally {
-  await Promise.allSettled(stores.map((store) => store.close()));
+} else {
+  const admin = new Pool({ connectionString: databaseUrl });
+  let store;
   try {
-    await adminPool.query("drop schema if exists control_auth cascade");
-  } finally {
-    try {
-      await adminPool.query("drop role if exists control_center_runtime");
-    } finally {
-      await adminPool.end();
-    }
-  }
-}
+    await admin.query("drop schema if exists control_auth cascade");
+    await admin.query("drop role if exists control_center_runtime");
+    await admin.query("create role control_center_runtime login password 'app-passkey-integration-runtime'");
+    const migration = readFileSync(new URL("../migrations/001_app_passkey.sql", import.meta.url), "utf8");
+    await admin.query(migration);
+    await admin.query(migration);
 
-async function exerciseConcurrentCreateBeforeRevocation(readStore, scopeType) {
-  const raceSubject = `race-create-first-${scopeType}`;
-  const raceSid = `sid-race-create-first-${scopeType}`;
-  const raceSession = session({
-    issuer,
-    subject: raceSubject,
-    sessionId: raceSid,
-    authTime: new Date(Date.now() - 60_000),
-  });
-  const createStore = authStore(`oidc-race-create-first-${scopeType}`);
-  const revocationStore = authStore(`oidc-race-revoke-second-${scopeType}`);
-  const scopeValue = scopeType === "sid" ? raceSid : raceSubject;
-  const scopeKey = providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue);
-  const blocker = await adminPool.connect();
-  let createPromise;
-  let revocationPromise;
-  try {
-    await blocker.query("select pg_advisory_lock(hashtextextended($1, 0))", [scopeKey]);
-    createPromise = createStore.createSession(raceSession);
-    await waitForLock(`oidc-race-create-first-${scopeType}`);
-    revocationPromise = revocationStore.consumeProviderRevocation({
-      issuer,
-      eventType: scopeType === "sid"
-        ? "http://schemas.openid.net/event/backchannel-logout"
-        : "urn:platform-infrastructure:event:authorization-changed",
-      jtiHash: nextHash(),
-      issuedAt: new Date(),
-      expiresAt: new Date(Date.now() + 20 * 60_000),
-      sid: scopeType === "sid" ? raceSid : "",
-      subject: raceSubject,
-    });
-    await waitForLock(`oidc-race-revoke-second-${scopeType}`);
-  } finally {
-    await blocker.query("select pg_advisory_unlock(hashtextextended($1, 0))", [scopeKey]);
-    blocker.release();
-  }
-  assert.equal((await Promise.allSettled([createPromise, revocationPromise])).every((item) => item.status === "fulfilled"), true);
-  assert.equal(await readStore.getSession(raceSession.tokenHash, 600), null);
-}
-
-async function exerciseConcurrentRevocationBeforeCreate(readStore, scopeType) {
-  const raceSubject = `race-revoke-first-${scopeType}`;
-  const raceSid = `sid-race-revoke-first-${scopeType}`;
-  const raceSession = session({
-    issuer,
-    subject: raceSubject,
-    sessionId: raceSid,
-    authTime: new Date(Date.now() - 60_000),
-  });
-  const createStore = authStore(`oidc-race-create-second-${scopeType}`);
-  const revocationStore = authStore(`oidc-race-revoke-first-${scopeType}`);
-  const scopeValue = scopeType === "sid" ? raceSid : raceSubject;
-  const scopeKey = providerScopeAdvisoryLockKey(issuer, scopeType, scopeValue);
-  const blocker = await adminPool.connect();
-  let createPromise;
-  let revocationPromise;
-  try {
-    await blocker.query("select pg_advisory_lock(hashtextextended($1, 0))", [scopeKey]);
-    revocationPromise = revocationStore.consumeProviderRevocation({
-      issuer,
-      eventType: scopeType === "sid"
-        ? "http://schemas.openid.net/event/backchannel-logout"
-        : "urn:platform-infrastructure:event:account-disabled",
-      jtiHash: nextHash(),
-      issuedAt: new Date(),
-      expiresAt: new Date(Date.now() + 20 * 60_000),
-      sid: scopeType === "sid" ? raceSid : "",
-      subject: raceSubject,
-    });
-    await waitForLock(`oidc-race-revoke-first-${scopeType}`);
-    createPromise = createStore.createSession(raceSession);
-    await waitForLock(`oidc-race-create-second-${scopeType}`);
-  } finally {
-    await blocker.query("select pg_advisory_unlock(hashtextextended($1, 0))", [scopeKey]);
-    blocker.release();
-  }
-  const [revocationResult, createResult] = await Promise.allSettled([revocationPromise, createPromise]);
-  assert.equal(revocationResult.status, "fulfilled");
-  assert.equal(createResult.status, "rejected");
-  assert.match(String(createResult.reason?.message || createResult.reason), /was revoked/);
-  assert.equal(await readStore.getSession(raceSession.tokenHash, 600), null);
-}
-
-async function waitForLock(applicationName) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await adminPool.query(
-      `select 1 from pg_stat_activity
-       where datname=current_database() and application_name=$1 and wait_event_type='Lock'
-       limit 1`,
-      [applicationName],
+    const legacy = await admin.query(
+      `select to_regclass('control_auth.oidc_transactions') as transactions,
+              to_regclass('control_auth.provider_event_tokens') as events,
+              to_regclass('control_auth.first_configuration') as first_configuration`,
     );
-    if (result.rowCount === 1) return;
-    await delay(25);
-  }
-  throw new Error(`Timed out waiting for PostgreSQL advisory lock: ${applicationName}`);
-}
+    assert.deepEqual(legacy.rows[0], {
+      transactions: null,
+      events: null,
+      first_configuration: null,
+    });
 
-function authStore(applicationName) {
-  const store = new PostgresAuthStore(withApplicationName(runtimeDatabaseUrl || databaseUrl, applicationName));
-  stores.push(store);
-  return store;
+    store = new PostgresAppPasskeyStore(withCredentials(
+      databaseUrl,
+      "control_center_runtime",
+      "app-passkey-integration-runtime",
+    ));
+    await store.ready();
+
+    const session = sessionRecord("1");
+    await store.createSession(session);
+    const loaded = await store.getSession(session.tokenHash, 3600);
+    assert.equal(loaded.subject, session.subject);
+    assert.equal(loaded.role, "owner");
+    assert.equal(loaded.policyVersion, session.policyVersion);
+    assert.equal(loaded.issuer, session.issuer);
+    assert.equal(loaded.sessionId, "");
+    await store.revokeSession(session.tokenHash);
+    assert.equal(await store.getSession(session.tokenHash, 3600), null);
+
+    const throttleKey = hex(2);
+    assert.equal((await store.registerLoginAttempt(throttleKey, 2, 60, 60)).allowed, true);
+    assert.equal((await store.registerLoginAttempt(throttleKey, 2, 60, 60)).allowed, true);
+    assert.equal((await store.registerLoginAttempt(throttleKey, 2, 60, 60)).allowed, false);
+    await store.clearLoginThrottle(throttleKey);
+    assert.equal((await store.registerLoginAttempt(throttleKey, 2, 60, 60)).allowed, true);
+
+    const challenge = {
+      challengeHash: hex(3),
+      challenge: "challenge_value_1234567890",
+      flow: "authentication",
+      userId: "app-admin:integration",
+      peerHash: hex(4),
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    await store.createWebAuthnChallenge(challenge);
+    assert.equal((await store.consumeWebAuthnChallenge(challenge)).challenge, challenge.challenge);
+    assert.equal(await store.consumeWebAuthnChallenge(challenge), null);
+
+    const passkey = {
+      id: "integration_credential_1",
+      userId: "app-admin:integration",
+      webauthnUserId: hex(5),
+      publicKey: Buffer.from([1, 2, 3, 4]),
+      counter: 0,
+      transports: ["internal"],
+      deviceType: "singleDevice",
+      backedUp: false,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    };
+    assert.equal(await store.createPasskey(passkey), true);
+    assert.equal(await store.createPasskey(passkey), false);
+    assert.equal(await store.createPasskey({ ...passkey, id: "integration_credential_2" }), false);
+    assert.equal((await store.listPasskeys(passkey.userId))[0].id, passkey.id);
+    assert.equal(await store.updatePasskeyCounter({
+      credentialId: passkey.id,
+      userId: passkey.userId,
+      counter: 2,
+      deviceType: "multiDevice",
+      backedUp: true,
+    }), true);
+    assert.equal(await store.updatePasskeyCounter({
+      credentialId: passkey.id,
+      userId: passkey.userId,
+      counter: 1,
+    }), false);
+    const updated = (await store.listPasskeys(passkey.userId))[0];
+    assert.equal(updated.counter, 2);
+    assert.equal(updated.deviceType, "multiDevice");
+    assert.equal(updated.backedUp, true);
+
+    process.stdout.write("POSTGRES_APP_PASSKEY_STORE_OK\n");
+  } finally {
+    await store?.close();
+    await admin.end();
+  }
 }
 
 function withCredentials(connectionString, username, password) {
@@ -332,33 +115,26 @@ function withCredentials(connectionString, username, password) {
   return url.toString();
 }
 
-function withApplicationName(connectionString, applicationName) {
-  const url = new URL(connectionString);
-  url.searchParams.set("application_name", applicationName);
-  return url.toString();
+function hex(value) {
+  return Number(value).toString(16).padStart(64, "0");
 }
 
-function nextHash() {
-  hashCounter += 1;
-  return hashCounter.toString(16).padStart(64, "0");
-}
-
-function session({ issuer: sessionIssuer, subject: sessionSubject, sessionId, authTime }) {
+function sessionRecord(seed) {
   return {
-    tokenHash: nextHash(),
-    csrfHash: nextHash(),
+    tokenHash: hex(seed),
+    csrfHash: hex(Number(seed) + 20),
     policyVersion: "test-policy-v1",
-    subject: sessionSubject,
-    email: `${sessionSubject}@example.test`,
-    displayName: sessionSubject,
+    subject: "app-admin:integration",
+    email: "admin@example.test",
+    displayName: "Integration Admin",
     role: "owner",
     roles: ["owner"],
-    acr: "urn:platform:loa:passkey",
+    acr: "app-passkey",
     amr: ["webauthn"],
-    authTime,
-    issuer: sessionIssuer,
-    sessionId,
-    keyId: "test-key",
-    expiresAt: new Date(Date.now() + 10 * 60_000),
+    authTime: new Date(),
+    issuer: "https://portal.example.test",
+    sessionId: "",
+    keyId: "",
+    expiresAt: new Date(Date.now() + 86_400_000),
   };
 }
