@@ -7,6 +7,7 @@
   var prefetchTimeoutMs = 15000;
   var preloadWorkerCount = 4;
   var backgroundPreloadWorkerCount = 1;
+  var backgroundPreloadQuietMs = 200;
   var sidebarStateKey = "platform-control-center-sidebar";
   var htmlCache = new Map();
   var activeRequest = null;
@@ -16,7 +17,6 @@
   var prefetchInFlight = new Set();
   var prefetchControllers = new Map();
   var backgroundPreloadHandle = null;
-  var backgroundPreloadUsesIdleCallback = false;
   var backgroundPreloadRunning = false;
   var backgroundPreloadPending = false;
   var backgroundPreloadGeneration = 0;
@@ -108,11 +108,7 @@
     backgroundPreloadGeneration += 1;
     backgroundPreloadPending = false;
     if (backgroundPreloadHandle !== null) {
-      if (backgroundPreloadUsesIdleCallback && typeof window.cancelIdleCallback === "function") {
-        window.cancelIdleCallback(backgroundPreloadHandle);
-      } else {
-        window.clearTimeout(backgroundPreloadHandle);
-      }
+      window.clearTimeout(backgroundPreloadHandle);
       backgroundPreloadHandle = null;
     }
     prefetchControllers.forEach(function (controller) {
@@ -1395,13 +1391,7 @@
         workerCount: backgroundPreloadWorkerCount,
       }).then(finish, finish);
     };
-    if (typeof window.requestIdleCallback === "function") {
-      backgroundPreloadUsesIdleCallback = true;
-      backgroundPreloadHandle = window.requestIdleCallback(run, { timeout: 1000 });
-    } else {
-      backgroundPreloadUsesIdleCallback = false;
-      backgroundPreloadHandle = window.setTimeout(run, 200);
-    }
+    backgroundPreloadHandle = window.setTimeout(run, backgroundPreloadQuietMs);
   }
 
   function updateInitialPreloadProgress(completed, total, message) {
