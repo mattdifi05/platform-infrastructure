@@ -55,17 +55,15 @@ test("known_hosts verification rejects wrong endpoints and extra trust entries",
 });
 
 test("SSH workflows require pinned trust and contain no trust-on-first-use path", () => {
-  const evidenceWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "enterprise-vps-evidence.yml"), "utf8");
   const deployWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "enterprise-infra.yml"), "utf8");
   const deployScript = fs.readFileSync(path.join(repositoryRoot, "scripts", "deploy-vps.sh"), "utf8");
-  const combined = [evidenceWorkflow, deployWorkflow, deployScript].join("\n");
+  const combined = [deployWorkflow, deployScript].join("\n");
   const forbiddenTrustOnFirstUse = new RegExp([
     ["accept", "new"].join("-"),
     ["StrictHostKeyChecking", "no"].join("="),
     ["ssh", "keyscan"].join("-"),
   ].join("|"), "i");
   assert.doesNotMatch(combined, forbiddenTrustOnFirstUse);
-  assert.match(evidenceWorkflow, /DEPLOY_SSH_HOST_KEY: \$\{\{ secrets\.DEPLOY_SSH_HOST_KEY \}\}/);
   assert.match(deployWorkflow, /DEPLOY_SSH_HOST_KEY: \$\{\{ secrets\.DEPLOY_SSH_HOST_KEY \}\}/);
   assert.match(combined, /StrictHostKeyChecking=yes/);
   assert.match(combined, /UserKnownHostsFile=/);
@@ -95,7 +93,7 @@ test("a fake endpoint cannot emit an archive or receipt through any pre-trust ga
     assert.equal(fs.existsSync(invoked), false);
     assert.match(
       result.stderr,
-      /provider-attested ops image entrypoint|authoritative V1 brownfield admission|pinned SSH host trust/i,
+      /provider-attested ops image entrypoint|production activation is intentionally unavailable|pinned SSH host trust/i,
     );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

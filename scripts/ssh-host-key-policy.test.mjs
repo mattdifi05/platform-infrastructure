@@ -8,10 +8,7 @@ import { spawnSync } from "node:child_process";
 
 const paths = [
   "scripts/deploy-vps.sh",
-  "scripts/deploy-v1-local-private.sh",
   ".github/workflows/enterprise-infra.yml",
-  ".github/workflows/enterprise-vps-evidence.yml",
-  ".github/workflows/v1-local-private.yml",
 ];
 const sources = Object.fromEntries(paths.map((pathname) => [pathname, fs.readFileSync(pathname, "utf8")]));
 const combined = Object.values(sources).join("\n");
@@ -23,24 +20,10 @@ assert.match(combined, /UpdateHostKeys=no/);
 assert.match(combined, /BatchMode=yes/);
 assert.match(combined, /IdentitiesOnly=yes/);
 assert.match(sources["scripts/deploy-vps.sh"], /pinned-ssh-host-key\.mjs" verify/);
-assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /DEPLOY_SSH_HOST_KEY[\s\S]*pinned-ssh-host-key\.mjs verify/);
 assert.match(sources["scripts/deploy-vps.sh"], /pinned-ssh-host-key\.mjs" verify[\s\S]*ssh "\$@" -- "\$REMOTE" '\/usr\/bin\/sudo -n -- \/usr\/local\/libexec\/platform-activation-broker activate'/);
-assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /known_hosts_snapshot[\s\S]*pinned-ssh-host-key\.mjs verify[\s\S]*ssh -F \/dev\/null -i "\$ssh_key_snapshot"/);
 assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH private key" "\$SSH_KEY_SOURCE"/);
 assert.match(sources["scripts/deploy-vps.sh"], /require_input_file "SSH known-hosts input" "\$KNOWN_HOSTS_SOURCE"/);
 assert.match(sources["scripts/deploy-vps.sh"], /key_before=.*[\s\S]*cp "\$SSH_KEY_SOURCE" "\$ssh_key"[\s\S]*hash_file "\$SSH_KEY_SOURCE"/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /pinned-ssh-host-key\.mjs" verify/);
-assert.doesNotMatch(
-  sources[".github/workflows/v1-local-private.yml"],
-  /DEPLOY_SSH_HOST_KEY|pinned-ssh-host-key|\/usr\/bin\/ssh|deploy-v1-local-private\.sh/,
-  "the hosted LOCAL_PRIVATE workflow must stop before every SSH/deploy boundary",
-);
-assert.match(sources[".github/workflows/v1-local-private.yml"], /STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /pinned-ssh-host-key\.mjs" verify[\s\S]*exec "\$SSH" "\$@" -- "\$REMOTE" "\$REMOTE_COMMAND" < \/dev\/null/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /REMOTE_COMMAND='\/usr\/bin\/sudo -n -- \/usr\/local\/libexec\/platform-v1-local-private-control activate'/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /require_input_file "SSH private key" "\$SSH_KEY_SOURCE"/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /require_input_file "SSH known-hosts input" "\$KNOWN_HOSTS_SOURCE"/);
-assert.match(sources["scripts/deploy-v1-local-private.sh"], /key_before=.*[\s\S]*cp "\$SSH_KEY_SOURCE" "\$ssh_key"[\s\S]*hash_file "\$SSH_KEY_SOURCE"/);
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-host-key-policy-"));
 process.on("exit", () => fs.rmSync(temporary, { recursive: true, force: true }));
@@ -65,4 +48,4 @@ assert.notEqual(verify(`${endpoint},[alias.internal]:2222 ${key1}\n`).status, 0,
 assert.notEqual(verify(`${endpoint} ssh-ed25519 definitely-not-a-key\n`).status, 0, "malformed key base64 must fail before SSH");
 assert.notEqual(verify(`${endpoint} ssh-unknown ${key1.split(" ")[1]}\n`).status, 0, "an unsupported key type must fail before SSH");
 
-process.stdout.write("SSH host key policy tests passed 30/30\n");
+process.stdout.write("SSH host key policy tests passed 28/28\n");

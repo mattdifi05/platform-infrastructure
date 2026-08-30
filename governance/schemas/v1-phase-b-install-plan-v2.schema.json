@@ -1,7 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://platform.example.invalid/schemas/v1-phase-b-install-plan-v2.schema.json",
-  "title": "V1 Phase-B exact non-destructive control-plane install plan",
-  "description": "The Phase-B plan is not an adjacent representation: it is exactly the canonical brownfield preinstallTuple.installPlan definition.",
-  "$ref": "urn:platform-infrastructure:schema:v1-brownfield-common-tuple:v1#/$defs/installPlan"
-}

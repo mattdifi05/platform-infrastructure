@@ -58,7 +58,7 @@ jq -e '.volumes.enterprise_local_registry_data.external == true' "$OUTPUT" >/dev
 
 if rg -n '\.tmp/(vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml' \
   README.md RUNBOOK.md scripts/compose-vps.sh scripts/deploy-vps.sh \
-  scripts/vps-preflight.sh scripts/vps-go-live.sh compose*.yaml >/dev/null; then
+  scripts/vps-preflight.sh compose*.yaml >/dev/null; then
   echo "Tracked runtime still references an ignored .tmp overlay." >&2
   exit 1
 fi

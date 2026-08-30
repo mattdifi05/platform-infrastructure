@@ -1,21 +1,10 @@
 # Platform VPS Pre-Deploy Checklist
 
-This document has two disjoint host modes. Never apply the fresh-host commands
-to an existing/brownfield host merely because a local flag or report says that
-the operation is confirmed.
-
-## Existing/brownfield V1: terminal STOP
-
-- [ ] Treat `vps-go-live.sh --confirmLive` and the `enterprise-vps-evidence`
-      workflow/remote collector as terminal STOP with exit 78.
-- [ ] Do not run bootstrap, hardening, Docker daemon replacement/restart, Git
-      fetch, evidence collection or any other live mutation through those paths.
-- [ ] A caller flag, environment value, local `NONAUTHORITATIVE` report or
-      self-asserted `SATISFIED`/`AUTHORIZED` state cannot lift this stop.
-- [ ] Resume only through the controlled V1 sequence after a canonical complete
-      live baseline, a separate verified and restorable PRE-DEPLOY backup for
-      every application/database/storage mapping, and all three authenticated
-      provider gates. Until then those gates remain `EXTERNAL-PENDING`.
+Never apply the fresh-host commands to the existing V1 host. LOCAL_PRIVATE
+maintenance uses the exact order and profiles in
+`config/v1-local-private-source-lock.json`, protected `main`, a verified backup
+and an explicit rollback point. Do not teardown, prune, reinstall or rebuild the
+current runtime outside that bounded operator procedure.
 
 ## Fresh-host bootstrap only
 
@@ -31,9 +20,6 @@ They are not recovery or admission instructions for the existing V1 server.
 - [ ] Password SSH login disabled.
 - [ ] `sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd` executed after key access and the target SSH port were verified, including Docker daemon hardening, and the JSON/Markdown report under `reports/vps-hardening/` was archived outside Git. If an existing `/etc/docker/daemon.json` blocks the run, review the generated template and rerun with `--replace-docker-daemon-config`.
 - [ ] `sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce` passed and the JSON/Markdown report under `reports/vps-host/`, including the expected SSH port, UFW allow rule and remediation guidance for every check, was archived outside Git.
-- [ ] Do not use `enterprise-vps-evidence` for V1: it is deliberately hard-stopped
-      before SSH. Run the reviewed standalone fresh-host scripts directly only
-      when the host is independently proven empty/new.
 - [ ] `sudo ufw status verbose` reviewed.
 - [ ] fail2ban active.
 - [ ] `sh ./scripts/container-metrics-sandbox-test.sh` passed without touching the live Docker runtime.
@@ -56,6 +42,8 @@ They are not recovery or admission instructions for the existing V1 server.
       application sources. The external `src` path is not part of this
       repository.
 - [ ] `.env` created from `.env.example` and `.env.vps.example`.
+- [ ] `config/v1-local-private-source-lock.json` reviewed and its ordered Compose
+      render reproduced from protected `main` before touching the current V1.
 - [ ] No `localhost`, `example.com`, `change_me` or placeholder production values remain.
 - [ ] `sh ./scripts/infra-secret-manager.sh init` executed.
 - [ ] `sh ./scripts/infra-secret-manager.sh verify` passed.
@@ -70,7 +58,6 @@ They are not recovery or admission instructions for the existing V1 server.
 - [ ] The gated deploy used one canonical verified hosted-workload lock and exact project name for the ordered sequence: bounded Compose `create`; unprivileged `hosted-workload-network-ownership.sh --lock <absolute-lock> --project-name <project>`; noninteractive root `workload-egress-firewall.sh --apply --confirm APPLY-WORKLOAD-EGRESS-FIREWALL` and `--verify`, both with the same lock/project; fresh ownership/firewall verification; bounded Compose `start`. The deployment identity has the narrow reviewed `sudo -n` prerequisite for that firewall gate. No prefix discovery, caller subnet, or direct wrapper mutation was used.
 - [ ] `sh ./scripts/linux-portability-check.sh` passed and the JSON/Markdown report under `reports/linux-portability/` was archived outside Git.
 - [ ] No mutable `:latest` image exists in the rendered VPS+WAF stack.
-- [ ] `sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated only a reviewed `NONAUTHORITATIVE` JSON/Markdown plan under `reports/vps-go-live/`. Never turn that plan into existing-host authority with `--confirmLive`; it remains terminal STOP.
 - [ ] `sh ./scripts/vps-postdeploy.sh .env` passed after the first VPS compose start, including WAF smoke and `infra-health` against public URLs from `.env`.
 - [ ] Remote deploy variables reviewed: `DEPLOY_RUN_PRE_GO_LIVE`, `DEPLOY_RUN_GO_NO_GO`, `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL`, `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN` and `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE` are enabled only for the final evidence window.
 
@@ -85,7 +72,9 @@ They are not recovery or admission instructions for the existing V1 server.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --apply` completed for admin hosts, or equivalent Cloudflare Access config is proven.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote` passed.
 - [ ] Rendered candidate saved with `COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json`; origin lock then applied with `sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port <current-ssh-port>` and verified from its saved CIDR/receipt state.
-- [ ] Production activation is routed only through the trusted `deploy-vps.sh` workflow; `vps-go-live.sh --start-stack` and direct VPS `compose up` are disabled as admission bypasses.
+- [ ] LOCAL_PRIVATE activation uses only the reviewed source-lock render and
+      targeted Docker/Compose operator sequence; the remote production workflow
+      remains fail-closed and is not an alternate path.
 - [ ] TLS mode and origin certificate strategy confirmed.
 
 ## Data Protection

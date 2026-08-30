@@ -73,11 +73,10 @@ after the approved provider change and archive the non-secret result.
 
 ## Remote workflow input
 
-`enterprise-vps-evidence.yml` and `scripts/deploy-vps.sh` use a fixed remote
-command (`bash -s` or `sh -s`). Every configurable field is validated before
-SSH, Base64-encoded into a generated script prelude, decoded and validated again
-remotely, then passed through quoted arguments or Bash arrays. No workflow input
-is appended to the SSH remote command string.
+`scripts/deploy-vps.sh` uses a fixed remote broker command. Every configurable
+field is validated before SSH and no workflow input is appended to the remote
+command string. The LOCAL_PRIVATE V1 path is separate and consumes the exact
+protected-main source lock.
 
 Production deploy admission is currently deny-all. The repository can verify
 artifact attestations, but it has no authenticated external producer for
@@ -139,10 +138,8 @@ node scripts/release-trust.test.mjs
 node --test scripts/dast-runtime-receipt-policy.test.mjs
 node scripts/privileged-workflow-policy.test.mjs
 node scripts/github-governance-policy.test.mjs
-node scripts/vps-evidence-request.test.mjs
 sh scripts/deploy-vps-input-test.sh
 sh scripts/deploy-vps-order-test.sh
-node scripts/t16-policy.mjs
 ```
 
 Provider verification for this repository still requires an approved

@@ -717,14 +717,11 @@ from configuration alone.
 ## VPS hardening and Cloudflare
 
 > **Existing-host stop gate:** the commands in this section are for a new host
-> or for a host already covered by a verified recovery plan. On the current
-> brownfield server, do not run any `--apply`, Docker daemon replacement,
-> Compose teardown, prune, reinstall, or rebuild until
-> [V1-BROWNFIELD-DEPLOYMENT.md](V1-BROWNFIELD-DEPLOYMENT.md) is satisfied, a new
-> complete PRE-DEPLOY backup exists on separate storage and all three provider
-> gates are authenticated. An intentional rebuild may replace Docker
-> identities only after that recovery evidence exists; the read-only baseline
-> is deny-only and cannot authorize mutation.
+> or for an explicitly approved maintenance window. On the current V1 server,
+> do not run `--apply`, Docker daemon replacement, Compose teardown, prune,
+> reinstall, or rebuild without a verified complete backup, a usable rollback
+> path and an exact render from protected `main`. The read-only baseline alone
+> cannot authorize mutation.
 
 Run on a new VPS Ubuntu LTS VPS before public traffic:
 
@@ -1013,12 +1010,9 @@ Run the manual `enterprise-live-evidence` workflow from the production
 environment after DNS, Cloudflare, provider monitors and VPS evidence are ready;
 it gathers external uptime, public Cloudflare load, Cloudflare Access, live
 go/no-go and complete evidence bundle reports without deploying.
-Do not run `enterprise-vps-evidence` for the existing V1 host. **V1 brownfield:
-unconditional STOP 78** occurs before SSH credential installation, SSH, Git
-fetch, bootstrap, hardening and receipt/archive generation. Workflow inputs,
-`confirm_mutating_vps` and local `NONAUTHORITATIVE` state cannot bypass it.
-There is no authoritative V1 admission consumer for this path yet;
-plan/read-only/local tests remain available, but they are not live evidence.
+Collect host readiness directly during the approved LOCAL_PRIVATE maintenance
+window. Local tests are not a substitute for live host evidence, and the remote
+production workflow is not an alternate LOCAL_PRIVATE activation path.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 
@@ -1137,15 +1131,10 @@ candidate core was not deployed over the 34-service historical runtime. That
 SHA is historical evidence, not a current deployment instruction. Do not copy a
 passing flag into the report and do not deploy it.
 
-For V1 brownfield remediation, `30fb7d6ebbaf1734e4f7eabfb95a6444417b0ed0`
-is only the base under remediation described in
-[V1-BROWNFIELD-DEPLOYMENT.md](V1-BROWNFIELD-DEPLOYMENT.md); it is not deployable.
-There is no current deployable SHA. A new clean candidate SHA can be selected
-only after the non-destructive implementation is complete, the canonical live
-baseline is complete, the immutable/CAS PRE-DEPLOY backup is authoritative and
-all provider, target and activation gates bind the exact candidate commit/tree
-and target root. Until then the production workflow and `deploy-vps.sh` stop
-before SSH or the ops-image activation path.
+The historical SHA `30fb7d6ebbaf1734e4f7eabfb95a6444417b0ed0` is not a
+deployment instruction. LOCAL_PRIVATE operations must use the current protected
+`main`, the exact source lock and current recovery evidence. Remote production
+workflow activation remains fail-closed before SSH or the ops-image path.
 
 The same verdict retains stale bootstrap/hardening evidence, UPS, complete
 pre-go-live, rotation, off-site DR and real alert delivery as local/maintenance
@@ -1369,19 +1358,9 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE=1` during the staging/VPS validation
    window once Restic, GitHub and provider credentials are ready.
 
-   The same-host V1 helper is plan-only:
-
-   ```sh
-   sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-   ```
-
-   The JSON/Markdown plan under `reports/vps-go-live/` is `NONAUTHORITATIVE`.
-   **V1 brownfield: unconditional STOP 78** makes `--confirmLive` terminate
-   before bootstrap, hardening, Docker restart, readiness or evidence creation.
-   No caller flag or local state can enable it while an authoritative V1
-   admission consumer does not exist. The plan/read-only/local tests remain available.
-   For a proven empty/new host, use the standalone fresh-host scripts separately;
-   do not reinterpret them as authority over the existing V1 server.
+   The existing LOCAL_PRIVATE V1 uses the exact protected-main source lock and
+   its bounded operator procedure. For a proven empty/new host, use the
+   standalone fresh-host scripts separately.
 
 7. Keep database/admin surfaces private. Do not publish phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO console or Traefik dashboard to public DNS.
 

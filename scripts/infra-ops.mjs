@@ -3360,7 +3360,6 @@ function infraTestingHygiene() {
     "scripts/infra-ops.mjs",
     "scripts/alert-delivery-sandbox-test.mjs",
     "scripts/control-center-vault-reencrypt.mjs",
-    "scripts/database-principal-migration-plan.mjs",
     "scripts/hosted-workload-contract.mjs",
     "control-center/server.mjs",
     "control-center/database/destructive-workflow.mjs",
@@ -3419,45 +3418,13 @@ function infraTestingHygiene() {
     "scripts/evidence-bundle-anchor.test.mjs",
     "scripts/evidence-bundle-phase.mjs",
     "scripts/evidence-bundle-phase.test.mjs",
-    "scripts/vps-evidence-request.mjs",
-    "scripts/vps-evidence-request.test.mjs",
     "scripts/pinned-ssh-host-key.mjs",
     "scripts/pinned-ssh-host-key.test.mjs",
-    "scripts/v1-brownfield-install-receipt.mjs",
-    "scripts/v1-brownfield-install-receipt.test.mjs",
-    "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
-    "scripts/v1-node-runtime-prerequisite.test.mjs",
-    "scripts/deploy-v1-install-only.test.mjs",
     "scripts/keycloak-passkey-reconcile.mjs",
     "scripts/keycloak-passkey-reconcile.test.mjs",
     "scripts/runtime-isolation-consumer.test.mjs",
-    "scripts/v1-local-private-control-receipt.mjs",
-    "scripts/v1-local-private-control.test.mjs",
-    "scripts/v1-local-private-control.e2e.test.mjs",
-    "scripts/v1-local-private-evidence-producer.test.mjs",
-    "scripts/v1-local-private-reconcile.test.mjs",
-    "scripts/deploy-v1-local-private.test.mjs",
-    "scripts/platform-activation-transport.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
-    "scripts/greenfield-namespace.mjs",
-    "scripts/greenfield-namespace.test.mjs",
-    "scripts/greenfield-core-policy.mjs",
-    "scripts/greenfield-core-policy.test.mjs",
-    "scripts/greenfield-state-projection.mjs",
-    "scripts/greenfield-state-projection.test.mjs",
-    "scripts/greenfield-secret-projection.mjs",
-    "scripts/greenfield-secret-projection.test.mjs",
-    "scripts/greenfield-backup-restore-executor.mjs",
-    "scripts/greenfield-backup-restore-executor.test.mjs",
-    "scripts/greenfield-final-sync-plan.mjs",
-    "scripts/greenfield-final-sync-plan.test.mjs",
-    "scripts/greenfield-auth-bootstrap.mjs",
-    "scripts/greenfield-auth-bootstrap.test.mjs",
-    "scripts/greenfield-control-plane-separation.mjs",
-    "scripts/greenfield-control-plane-separation.test.mjs",
-    "scripts/greenfield-offline-matrix.test.mjs",
-    "scripts/v1-greenfield-transaction.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -3495,41 +3462,13 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-isolation-consumer.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/keycloak-passkey-reconcile.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/v1-local-private-evidence-producer.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/v1-local-private-reconcile.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-phase.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/pinned-ssh-host-key.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, [
-    "--test",
-    "scripts/v1-brownfield-bootstrap-bridge.test.mjs",
-    "scripts/v1-node-runtime-prerequisite.test.mjs",
-    "scripts/v1-brownfield-install-receipt.test.mjs",
-    "scripts/deploy-v1-install-only.test.mjs",
-    "scripts/v1-local-private-control.test.mjs",
-    "scripts/v1-local-private-control.e2e.test.mjs",
-    "scripts/deploy-v1-local-private.test.mjs",
-  ], { cwd: infraRoot });
-  run(process.execPath, ["scripts/platform-activation-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-namespace.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-core-policy.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-state-projection.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-secret-projection.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-backup-restore-executor.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-final-sync-plan.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-auth-bootstrap.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/greenfield-control-plane-separation.test.mjs"], { cwd: infraRoot });
-  run(process.execPath, ["--test", "scripts/v1-greenfield-transaction.test.mjs"], { cwd: infraRoot });
-  run("sh", ["scripts/greenfield-workload-builder.test.sh"], { cwd: infraRoot });
-  run(process.execPath, [
-    "--test",
-    "scripts/greenfield-offline-matrix.test.mjs",
-  ], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
     const shell = readText(path.join(infraRoot, "scripts", file)).startsWith("#!/usr/bin/env bash") ? "bash" : "sh";
@@ -3920,16 +3859,12 @@ function infraMaintainabilityHygiene() {
     "collect-host-reliability.sh",
     "compose-runtime-check.sh",
     "compose-vps.sh",
-    "compose-greenfield.sh",
     "configure-host-wait-online.sh",
     "container-metrics-sandbox-test.sh",
     "core-image-supply-chain-test.sh",
     "core-stack-activation-gate.sh",
     "database-ownership-sandbox-test.sh",
     "deploy-vps-input-test.sh",
-    "deploy-v1-install-only.sh",
-    "deploy-v1-local-private.sh",
-    "deploy-vps-remote.sh",
     "helper-image-supply-chain-test.sh",
     "host-reliability-sandbox-test.sh",
     "hosted-workload-activation-gate.sh",
@@ -3948,9 +3883,7 @@ function infraMaintainabilityHygiene() {
     "runtime-isolation-sandbox-test.sh",
     "ssh-known-host-endpoint.sh",
     "verify-locked-images.sh",
-    "vps-evidence-remote.sh",
     "workload-egress-firewall.sh",
-    "greenfield-workload-builder.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
     "infra-ops.sh",
@@ -3960,9 +3893,7 @@ function infraMaintainabilityHygiene() {
     "node-project-runtime.sh",
     "ops-image-entrypoint.sh",
     "ops-image-trust.sh",
-    "v1-brownfield-bootstrap.sh",
     "vps-bootstrap-ubuntu.sh",
-    "vps-go-live.sh",
     "vps-hardening-ubuntu.sh",
     "vps-host-readiness.sh",
     "vps-postdeploy.sh",
@@ -9338,7 +9269,6 @@ const evidenceBundleReportSpecs = [
   { directory: "linux-portability", prefix: "linux-portability-", label: "linux-portability", required: true },
   { directory: "vps-bootstrap", prefix: "vps-bootstrap-apply-", label: "vps-bootstrap-apply", required: true },
   { directory: "vps-hardening", prefix: "vps-hardening-apply-", label: "vps-hardening-apply", required: true },
-  { directory: "vps-go-live", prefix: "vps-go-live-", label: "vps-go-live", required: false },
   { directory: "backups", prefix: "", label: "backup-execution-reports", required: false },
   { directory: "restore-drills", prefix: "full-restore-drill-", label: "full-restore-drill", required: false },
   { directory: "failure-tests", prefix: "failure-tests-", label: "failure-tests", required: false },
@@ -10859,7 +10789,7 @@ function repoCoverageCategory(filePath) {
   const rules = [
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
     ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
-    ["platform-config", /^(?:config\/.+\.json|config\/local-private-recovery-escrow-cert\.pem)$/],
+    ["platform-config", /^config\/.+\.json$/],
     ["object-storage", /^minio\//],
     ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
@@ -10958,8 +10888,7 @@ async function repoCoverageCheck() {
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
     ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*evidence_not_before:[\s\S]*External uptime provider evidence[\s\S]*--providerEvidenceAttestation online[\s\S]*--providerEvidenceSourceDigest[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle --phase production-live --strict[\s\S]*evidence-bundle-verify --phase production-live[\s\S]*--requireComplete/],
-    ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*Upload VPS evidence reports/],
-    ["pinned-ssh-host-trust", /DEPLOY_SSH_HOST_KEY[\s\S]*pinned-ssh-host-key\.mjs render[\s\S]*StrictHostKeyChecking=yes[\s\S]*UserKnownHostsFile=/],
+    ["pinned-ssh-host-trust", /DEPLOY_SSH_HOST_KEY[\s\S]*pinned-ssh-host-key\.mjs render[\s\S]*pinned-ssh-host-key\.mjs verify/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],

@@ -79,14 +79,14 @@ require_input_file() {
     || fail "$label must be one readable, non-empty regular file and not a symlink."
 }
 
-enforce_v1_brownfield_admission_stop() {
-  fail "Authoritative V1 brownfield admission is unavailable. A canonical COMPLETE baseline, immutable/CAS PRE-DEPLOY backup receipt, exact candidate commit/tree and target root, plus provider and target authorization are required. REBUILD_BACKUP_VERIFIED_NON_AUTHORITATIVE and mutationAuthority=false are deny-only; caller-supplied claims cannot authorize production mutation." 78
+enforce_ci_activation_stop() {
+  fail "V1.1 production activation is intentionally unavailable from CI. Use the protected-main LOCAL_PRIVATE Compose model through the controlled operator procedure." 78
 }
 
 [ "${PLATFORM_TRUSTED_OPS_RUNNER:-}" = 1 ] || fail \
   "Deployment must execute through the exact provider-attested ops image entrypoint." 78
 [ "$#" -eq 0 ] || fail "deploy-vps.sh accepts no positional arguments."
-enforce_v1_brownfield_admission_stop
+enforce_ci_activation_stop
 
 case "$REMOTE" in *@*) ;; *) fail "DEPLOY_REMOTE must be one canonical user@host endpoint." ;; esac
 REMOTE_USER=${REMOTE%@*}

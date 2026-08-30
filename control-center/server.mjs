@@ -3397,7 +3397,6 @@ const documentedStatusTitles = {
   "testing-hygiene": "Igiene test",
   "validate-local-secrets": "Validazione secrets locali",
   "vps-bootstrap-ubuntu": "Bootstrap Ubuntu VPS",
-  "vps-go-live": "Orchestrazione VPS go-live",
   "vps-hardening-ubuntu": "Hardening Ubuntu VPS",
   "vps-host-readiness": "Readiness host VPS",
   "vps-postdeploy": "Post-deploy VPS",
@@ -3508,7 +3507,6 @@ const documentedStatusEvidenceSpecs = {
   "validate-local-secrets": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
   "vulnerability-disclosure": { directory: "security", prefix: "vulnerability-disclosure-", maxAgeHours: 168, pass: "vulnerability-disclosure" },
   "sign-existing-postgres-backups": { directory: "postgres-backup-signatures", prefix: "postgres-backup-signatures-", maxAgeHours: 168, pass: "postgres-backup-signatures" },
-  "vps-go-live": { directory: "vps-go-live", prefix: "vps-go-live-", excludePrefixes: ["vps-go-live-plan-"], maxAgeHours: 168, pass: "vps-go-live-live" },
   "vps-postdeploy": { directory: "local-checks", prefix: "vps-postdeploy-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-postdeploy" },
   "vps-preflight": { directory: "local-checks", prefix: "vps-preflight-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-preflight" },
   "waf-smoke": { directory: "local-checks", prefix: "waf-smoke-", maxAgeHours: 168, pass: "local-check-passed", command: "waf-smoke" },
@@ -3635,7 +3633,6 @@ const documentedStatusGroups = [
       "restore-test-secret-manager-metadata",
       "rollback-release",
       "sign-existing-postgres-backups",
-      "vps-go-live",
     ],
   },
   {
@@ -3988,8 +3985,6 @@ function documentedEvidencePassed(payload, spec) {
       return status === "success";
     case "summary-failed-zero":
       return status === "passed" && Number(payload.summary?.failed || payload.summary?.failedChecks || 0) === 0;
-    case "vps-go-live-live":
-      return status === "passed" && payload.mode === "live";
     default:
       return false;
   }
@@ -8170,7 +8165,6 @@ function statusDedupeKey(row) {
   const id = sanitizeIdentifier(row?.technicalId || row?.id || "");
   if (["go-no-go-verdict", "production-go-no-go", "production-readiness-live"].includes(id)) return "go-live-decision";
   if (id === "deploy-vps") return "vps-deploy-protected";
-  if (id === "vps-go-live") return "vps-go-live-orchestration";
   if (["go-no-go-report-readable", "readiness-matrix-readable"].includes(id)) return id;
   if (id.includes("pre-go-live")) return "pre-go-live-evidence";
   if (id.includes("github-actions-config") || id.includes("automatic-ci-cd-deploy") || id.includes("remote-ci-cd")) return "github-actions-runtime";
@@ -8199,7 +8193,6 @@ function statusDedupeMeta(key) {
   const titles = {
     "go-live-decision": ["Decisione go live", "go-live-decision"],
     "vps-deploy-protected": ["Deploy VPS protetto", "deploy-vps"],
-    "vps-go-live-orchestration": ["Orchestrazione VPS go-live", "vps-go-live"],
     "pre-go-live-evidence": ["Pacchetto pre go-live", "pre-go-live-evidence"],
     "github-actions-runtime": ["GitHub Actions runtime", "github-actions-runtime"],
     "github-governance": ["GitHub governance", "github-governance"],
@@ -8470,7 +8463,6 @@ function statusCategoryForCanonicalKey(key, primary = {}) {
   const categories = {
     "go-live-decision": "go-live",
     "vps-deploy-protected": "runtime-vps",
-    "vps-go-live-orchestration": "runtime-vps",
     "pre-go-live-evidence": "go-live",
     "github-actions-runtime": "github-release",
     "github-governance": "github-release",
@@ -8760,7 +8752,6 @@ function protectedEvidenceText(text) {
     "restore test",
     "rotate",
     "secret",
-    "vps-go-live",
   ].some((needle) => clean.includes(needle));
 }
 
@@ -14764,7 +14755,7 @@ function defaultProviderConnections(notificationChannels = []) {
       provider: "generic-vps",
       name: "Generic VPS",
       status: "metadata-only",
-      scope: "vps-go-live",
+      scope: "vps-host-readiness",
       source: "control-center-default",
     }),
     providerConnectionRecord({
