@@ -29,8 +29,8 @@
       "url": "https://github.com/mattdifi05/Stexor-account.git",
       "visibility": "private",
       "ref": "main",
-      "commit": "60be3769302500777ff557e06284db0300136659",
-      "tree": "0d65cbb9b61cc45788c869a4da19612543205e43",
+      "commit": "b8fe5413f34081ea282d41513e4093f9f7e3a7a3",
+      "tree": "336559d06ef0d3517d59f2f10a38c2b210b1fd9d",
       "checkoutDirectory": "stexor",
       "applications": ["stexor", "stexor-account", "stexor-ui"],
       "runtimeServices": [
