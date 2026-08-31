@@ -17,8 +17,10 @@ const resticImage = `sha256:${sha("b")}`;
 const roots = {
   backupHost: "/srv/platform/local-private-backup/data/backups",
   brokerStateHost: "/srv/platform/local-private-backup/broker-state",
+  dataContainer: "/var/lib/platform-backup-data",
   dataHost: "/srv/platform/local-private-backup/data",
   secretsHost: "/srv/platform/critical",
+  stagingContainer: "/var/lib/platform-backup-data/.tmp/broker-artifact-staging",
   stagingHost: "/srv/platform/local-private-backup/data/.tmp/broker-artifact-staging",
 };
 
@@ -49,15 +51,15 @@ test("LOCAL_PRIVATE catalog and job Docker policy admits only exact backup captu
   const allowed = [
     ["exec", "gf-postgres", "pg_dump", "-U", "postgres", "-d", "stexor", "--format=custom", "--no-owner", "--no-acl", `--file=${postgresFile}`],
     ["exec", "gf-postgres", "rm", "-f", postgresFile],
-    ["cp", `gf-postgres:${postgresFile}`, `${roots.stagingHost}/.stexor-20260831-141500.dump.staging-${pid}-${random}`],
+    ["cp", `gf-postgres:${postgresFile}`, `${roots.stagingContainer}/.stexor-20260831-141500.dump.staging-${pid}-${random}`],
     ["exec", "gf-mariadb", "sh", "-ec", mariadbBackupProgram(mariadbFile, "stexor")],
     ["exec", "gf-mariadb", "rm", "-f", mariadbFile],
-    ["cp", `gf-mariadb:${mariadbFile}`, `${roots.stagingHost}/.mariadb-stexor-20260831-141501.sql.gz.staging-${pid}-${random}`],
-    ["cp", "gf-minio:/data", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data`],
+    ["cp", `gf-mariadb:${mariadbFile}`, `${roots.stagingContainer}/.mariadb-stexor-20260831-141501.sql.gz.staging-${pid}-${random}`],
+    ["cp", "gf-minio:/data", `${roots.dataContainer}/.tmp/ops/platform-minio-data-Abc123/minio-data`],
     ["exec", "gf-keycloak", "sh", "-ec", keycloakBackupProgram()],
     ["exec", "gf-keycloak", "sh", "-ec", keycloakBackupCleanupProgram()],
     ["exec", "gf-keycloak", "sh", "-ec", keycloakBackupResidueAssertionProgram()],
-    ["cp", "gf-keycloak:/tmp/platform-keycloak-config-backup", `${roots.dataHost}/.tmp/ops/platform-keycloak-config-Abc123/keycloak-config`],
+    ["cp", "gf-keycloak:/tmp/platform-keycloak-config-backup", `${roots.dataContainer}/.tmp/ops/platform-keycloak-config-Abc123/keycloak-config`],
     [
       "run", "--rm", "--network", "none",
       "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
@@ -90,6 +92,13 @@ test("LOCAL_PRIVATE Docker policy rejects arbitrary containers, mounts, flags, r
     ["exec", "gf-control-center", "id"],
     ["exec", "gf-postgres", "rm", "-rf", "/"],
     ["cp", "gf-minio:/data", "/tmp/escaped"],
+    ["cp", "gf-postgres:/tmp/stexor-20260831-141500.dump", `${roots.stagingHost}/.stexor-20260831-141500.dump.staging-${pid}-${random}`],
+    [
+      "run", "--rm", "--network", "none",
+      "-v", `${roots.dataContainer}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
     ["run", "--rm", "--privileged", nodeImage, "sh"],
     ["run", "--rm", "--network", "none", "-v", "/var/run/docker.sock:/var/run/docker.sock", nodeImage],
     ["rm", "-f", "gf-postgres"],

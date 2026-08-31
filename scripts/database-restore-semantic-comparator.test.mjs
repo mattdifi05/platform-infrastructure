@@ -16,6 +16,13 @@ function body(start, end, input = source) {
   return input.slice(startIndex, endIndex);
 }
 
+test("Docker copy destinations stay in the CLI client namespace while daemon bind mounts are translated", () => {
+  assert.doesNotMatch(source, /run\("docker", \["cp",[^\n]*hostPathForContainerMount/);
+  assert.match(source, /run\("docker", \["cp", `\$\{container\}:\$\{containerPath\}`, stagingPath\]\)/);
+  assert.match(source, /`\$\{hostPathForContainerMount\(hostWorkDir\)\}:\/work:ro`/);
+  assert.match(source, /`\$\{hostPathForContainerMount\(path\.dirname\(stagingPath\)\)\}:\/backup`/);
+});
+
 test("PostgreSQL restore test binds two full deterministic independent restores of one artifact", () => {
   const fingerprint = body("function postgresSemanticFingerprint", "function semanticComparatorReceipt");
   assert.match(fingerprint, /postgresCanonicalSchemaDigest/);
@@ -353,7 +360,7 @@ test("Keycloak exports with kcadm, copies into the private transaction, packages
   assert.doesNotMatch(program, /\btar\b|\bgzip\b|archive=/);
   assert.match(residue, /test ! -e[\s\S]*\.keycloak\/kcadm\.config/);
   assert.match(backup, /dockerExec\(container, \["sh", "-ec", backupScript\]\)/);
-  assert.match(backup, /run\("docker", \["cp", `\$\{container\}:\$\{containerWorkDir\}`, hostPathForContainerMount\(hostWorkDir\)\]\)/);
+  assert.match(backup, /run\("docker", \["cp", `\$\{container\}:\$\{containerWorkDir\}`, hostWorkDir\]\)/);
   assert.match(backup, /assertBackupExecutionPrivateDirectory\(hostWorkDir/);
   assert.match(backup, /keycloakBackupResidueAssertionProgram\(\)/);
   assert.match(backup, /keycloakBackupCleanupProgram\(\)/);
