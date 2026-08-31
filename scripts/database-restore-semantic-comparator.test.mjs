@@ -6,13 +6,14 @@ import path from "node:path";
 import test from "node:test";
 
 const source = fs.readFileSync(path.resolve(import.meta.dirname, "infra-ops.mjs"), "utf8");
+const localPrivatePolicySource = fs.readFileSync(path.resolve(import.meta.dirname, "local-private-backup-docker-policy.mjs"), "utf8");
 
-function body(start, end) {
-  const startIndex = source.indexOf(start);
-  const endIndex = source.indexOf(end, startIndex + start.length);
+function body(start, end, input = source) {
+  const startIndex = input.indexOf(start);
+  const endIndex = input.indexOf(end, startIndex + start.length);
   assert.notEqual(startIndex, -1, `missing ${start}`);
   assert.notEqual(endIndex, -1, `missing ${end}`);
-  return source.slice(startIndex, endIndex);
+  return input.slice(startIndex, endIndex);
 }
 
 test("PostgreSQL restore test binds two full deterministic independent restores of one artifact", () => {
@@ -341,8 +342,8 @@ test("closed backup Docker admission binds each private work path, output family
 
 test("Keycloak exports with kcadm, copies into the private transaction, packages with pinned Node, and removes residue", () => {
   const backup = body("async function backupKeycloakConfig", "const keycloakConfigComparatorVersion");
-  const program = body("function keycloakBackupProgram", "function keycloakBackupResidueAssertionProgram");
-  const residue = body("function keycloakBackupResidueAssertionProgram", "function keycloakBackupCleanupProgram");
+  const program = body("function keycloakBackupProgram", "function keycloakBackupResidueAssertionProgram", localPrivatePolicySource);
+  const residue = body("function keycloakBackupResidueAssertionProgram", "function keycloakBackupCleanupProgram", localPrivatePolicySource);
   assert.equal((program.match(/\/opt\/keycloak\/bin\/kcadm\.sh/g) ?? []).length, (program.match(/--config "\$kcadm_config"/g) ?? []).length);
   assert.doesNotMatch(program, /kcadm\.sh[^\n]*\|\| true/);
   assert.match(program, /trap cleanup EXIT/);
@@ -352,8 +353,8 @@ test("Keycloak exports with kcadm, copies into the private transaction, packages
   assert.doesNotMatch(program, /\btar\b|\bgzip\b|archive=/);
   assert.match(residue, /test ! -e[\s\S]*\.keycloak\/kcadm\.config/);
   assert.match(backup, /dockerExec\(container, \["sh", "-ec", backupScript\]\)/);
-  assert.match(backup, /run\("docker", \["cp", `\$\{container\}:\$\{containerWorkDir\}`, hostWorkDir\]\)/);
-  assert.match(backup, /assertRootOwnedPrivateDirectory\(hostWorkDir/);
+  assert.match(backup, /run\("docker", \["cp", `\$\{container\}:\$\{containerWorkDir\}`, hostPathForContainerMount\(hostWorkDir\)\]\)/);
+  assert.match(backup, /assertBackupExecutionPrivateDirectory\(hostWorkDir/);
   assert.match(backup, /keycloakBackupResidueAssertionProgram\(\)/);
   assert.match(backup, /keycloakBackupCleanupProgram\(\)/);
   assert.match(backup, /dockerRun\(\[[\s\S]*"--network", "none"[\s\S]*configuredNodeImage\(\)[\s\S]*tar -czf/);

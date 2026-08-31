@@ -101,6 +101,33 @@ test("a published-path swap cannot be promoted to a success report", () => {
   }
 });
 
+test("an explicitly admitted private staging directory publishes by immutable cross-directory links", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "backup-publication-private-"));
+  const stagingDirectory = path.join(root, "broker-only-staging");
+  const publishedDirectory = path.join(root, "shared-backups");
+  fs.mkdirSync(stagingDirectory, { mode: 0o700 });
+  fs.mkdirSync(publishedDirectory, { mode: 0o700 });
+  const stagingPath = path.join(stagingDirectory, ".database.dump.staging-synthetic");
+  const publishedPath = path.join(publishedDirectory, "database.dump");
+  fs.writeFileSync(stagingPath, artifactA, { mode: 0o600 });
+  let publication;
+  try {
+    assert.throws(() => publishBackupArtifact({ stagingPath, publishedPath, createSignature: signatureFactory }), /explicitly admitted/i);
+    publication = publishBackupArtifact({
+      stagingPath,
+      publishedPath,
+      allowSeparateStagingDirectory: true,
+      createSignature: signatureFactory,
+    });
+    publication.assertCurrent();
+    assert.deepEqual(fs.readFileSync(publishedPath), artifactA);
+    assert.equal(fs.readdirSync(stagingDirectory).length, 0);
+  } finally {
+    publication?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("all first-party backup producers stage before publishing and retain leases through reports", () => {
   const source = fs.readFileSync(path.resolve(import.meta.dirname, "infra-ops.mjs"), "utf8");
   const ranges = [

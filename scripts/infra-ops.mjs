@@ -72,6 +72,15 @@ import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { dastReceiptWiringMismatches, deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotFileArtifact, snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import { validateExactSourceArchive } from "./source-archive-policy.mjs";
+import {
+  assertLocalPrivateBackupDockerInvocation,
+  initializeLocalPrivateBackupInvocation,
+  keycloakBackupCleanupProgram,
+  keycloakBackupProgram,
+  keycloakBackupResidueAssertionProgram,
+  mariadbBackupProgram,
+  mariadbBackupProgramFromScript,
+} from "./local-private-backup-docker-policy.mjs";
 import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
 import { validateRegistryResolutionReceipt } from "./release-registry-resolution.mjs";
 import { assertCoreProjectGenericSources } from "./local-private-compatibility-source-boundary.mjs";
@@ -389,6 +398,10 @@ function initializeTypedEvidenceInvocation() {
 }
 
 const typedEvidenceInvocation = initializeTypedEvidenceInvocation();
+const localPrivateBackupInvocation = initializeLocalPrivateBackupInvocation();
+if (typedEvidenceInvocation && localPrivateBackupInvocation) {
+  fail("Typed V1 evidence and LOCAL_PRIVATE backup authorities are mutually exclusive.");
+}
 
 
 
@@ -676,7 +689,11 @@ function run(bin, args = [], options = {}) {
   const childEnvironment = { ...process.env };
   for (const key of options.unsetEnv ?? []) delete childEnvironment[key];
   if (path.basename(String(bin)) === "docker") {
-    assertTypedEvidenceDockerInvocation(args, options);
+    if (localPrivateBackupInvocation) {
+      assertLocalPrivateBackupDockerInvocation(localPrivateBackupInvocation, args, options);
+    } else {
+      assertTypedEvidenceDockerInvocation(args, options);
+    }
     bin = "/usr/bin/docker";
   }
   return runCommandSync(bin, args, {
@@ -1515,16 +1532,28 @@ function writeBackupExecutionReport({
 }
 
 function backupArtifactStagingPath(hostPath) {
+  let stagingDirectory = path.dirname(hostPath);
+  if (localPrivateBackupInvocation) {
+    stagingDirectory = path.join(dataRoot, ".tmp", "broker-artifact-staging");
+    fs.mkdirSync(stagingDirectory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(stagingDirectory, 0o700);
+    assertBackupExecutionPrivateDirectory(stagingDirectory, "LOCAL_PRIVATE broker artifact staging directory");
+  }
   return path.join(
-    path.dirname(hostPath),
+    stagingDirectory,
     `.${path.basename(hostPath)}.staging-${process.pid}-${crypto.randomBytes(12).toString("hex")}`,
   );
+}
+
+function backupArtifactPublicationOptions() {
+  return localPrivateBackupInvocation ? { allowSeparateStagingDirectory: true } : {};
 }
 
 function publishBackupArtifactWithEvidence({ stagingPath, hostPath, engine, sourceContainer, startedAt, metadata, recordSuccess }) {
   const publication = publishBackupArtifact({
     stagingPath,
     publishedPath: hostPath,
+    ...backupArtifactPublicationOptions(),
     createSignature: createBackupArtifactSignature,
     onPublished({ hash, sizeBytes, signature }) {
       recordSuccess?.({ hash, signature });
@@ -2136,12 +2165,13 @@ async function backupPostgres(options = {}) {
   try {
     log(`Creating PostgreSQL backup for database '${database}'...`);
     dockerExec(container, ["pg_dump", "-U", user, "-d", database, "--format=custom", "--no-owner", "--no-acl", `--file=${containerPath}`]);
-    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
+    run("docker", ["cp", `${container}:${containerPath}`, hostPathForContainerMount(stagingPath)]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const publication = publishBackupArtifact({
       stagingPath,
       publishedPath: hostPath,
+      ...backupArtifactPublicationOptions(),
       createSignature: createBackupArtifactSignature,
       onPublished({ hash, sizeBytes, signature }) {
         recordBackupRestoreRun({ container, database, user, operation: "backup", status: "success", artifactPath: hostPath, artifactSha256: hash, startedAt });
@@ -2290,6 +2320,7 @@ async function backupApplications(options = {}) {
       const publication = publishBackupArtifact({
         stagingPath,
         publishedPath: hostPath,
+        ...backupArtifactPublicationOptions(),
         createSignature: createBackupArtifactSignature,
       });
       publications.push(publication);
@@ -3378,6 +3409,7 @@ function infraTestingHygiene() {
     "scripts/docker-action-v2-fixtures.test.mjs",
     "scripts/docker-action-activation.test.mjs",
     "scripts/local-private-backup-admission.test.mjs",
+    "scripts/local-private-backup-docker-policy.test.mjs",
     "scripts/local-private-docker-action-broker.test.mjs",
     "scripts/documented-scheduler-entrypoint.test.mjs",
   ];
@@ -3410,6 +3442,8 @@ function infraTestingHygiene() {
     "scripts/docker-action-activation.test.mjs",
     "scripts/local-private-backup-admission.mjs",
     "scripts/local-private-backup-admission.test.mjs",
+    "scripts/local-private-backup-docker-policy.mjs",
+    "scripts/local-private-backup-docker-policy.test.mjs",
     "scripts/local-private-docker-action-broker.mjs",
     "scripts/local-private-docker-action-broker.test.mjs",
     "scripts/local-private-docker-action-readiness.mjs",
@@ -5130,6 +5164,12 @@ function resticRuntimeEnvironmentArgs() {
   return ["-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp/.cache"];
 }
 
+function resticDockerNetworkArgs() {
+  return localPrivateBackupInvocation
+    ? ["--network", localPrivateBackupInvocation.egressNetwork]
+    : [];
+}
+
 function resticRetentionConfig(options = {}) {
   const keepLast = positiveInteger(options.keepLast ?? argv.keepLast ?? process.env.RESTIC_KEEP_LAST ?? 42, "--keepLast", 1);
   const noPrune = Boolean(options.noPrune) || booleanFlag(argv.noPrune) || booleanFlag(process.env.RESTIC_NO_PRUNE);
@@ -5155,6 +5195,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const args = [
     "run",
     "--rm",
+    ...resticDockerNetworkArgs(),
     ...resticDockerUserArgs(),
     ...resticRuntimeEnvironmentArgs(),
     ...secretTransport.dockerArgs,
@@ -5200,6 +5241,7 @@ function resticRepositorySizeBytes(repository) {
   const result = run("docker", [
     "run",
     "--rm",
+    ...resticDockerNetworkArgs(),
     ...resticDockerUserArgs(),
     ...resticRuntimeEnvironmentArgs(),
     "--entrypoint",
@@ -11568,6 +11610,22 @@ function assertRootOwnedPrivateDirectory(directory, label) {
   if (fs.realpathSync(directory) !== directory) fail(`${label} must not traverse symbolic links.`);
 }
 
+function assertBackupExecutionPrivateDirectory(directory, label) {
+  if (!localPrivateBackupInvocation) {
+    assertRootOwnedPrivateDirectory(directory, label);
+    return;
+  }
+  const metadata = fs.lstatSync(directory, { throwIfNoEntry: false });
+  const expectedUid = process.getuid();
+  const expectedGid = process.getgid();
+  if (!metadata?.isDirectory() || metadata.isSymbolicLink()
+    || metadata.uid !== expectedUid || metadata.gid !== expectedGid
+    || (metadata.mode & 0o7777) !== 0o700) {
+    fail(`${label} must be one service-owned, non-symlink 0700 directory.`);
+  }
+  if (fs.realpathSync(directory) !== directory) fail(`${label} must not traverse symbolic links.`);
+}
+
 function assertV1TypedEvidenceCapability(expectedOperation) {
   if (!v1EvidenceReceiptEnabled()
       || !typedEvidenceInvocation
@@ -12114,25 +12172,6 @@ async function backupRestoreDrill() {
   log(`Backup/restore drill recorded restore_test success for ${path.basename(backup.hostPath)}.`);
 }
 
-function mariadbBackupProgram(containerPath, database = "") {
-  const databaseSelection = database
-    ? `DATABASES=${shellQuote(database)}`
-    : 'DATABASES="$(mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "select schema_name from information_schema.schemata where schema_name not in (\'information_schema\',\'mysql\',\'performance_schema\',\'sys\') order by schema_name")"';
-  return [
-    "test -s /run/secrets/mariadb_root_password",
-    'MARIADB_ROOT_PASSWORD="$(cat /run/secrets/mariadb_root_password)"',
-    databaseSelection,
-    'test -n "$DATABASES"',
-    `mariadb-dump --single-transaction --routines --events --triggers --databases $DATABASES -uroot -p"$MARIADB_ROOT_PASSWORD" | gzip -9 > ${shellQuote(containerPath)}`,
-  ].join(" && ");
-}
-
-function mariadbBackupProgramFromScript(script) {
-  const match = String(script ?? "").match(/ > '(\/tmp\/mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz)'$/);
-  if (!match) return null;
-  return script === mariadbBackupProgram(match[1]) ? match[1] : null;
-}
-
 async function backupMariadb(options = {}) {
   const container = options.container ?? argv.container ?? "mariadb";
   const requestedDatabase = options.database ?? argv.database ?? "";
@@ -12152,12 +12191,13 @@ async function backupMariadb(options = {}) {
       "-ec",
       mariadbBackupProgram(containerPath, database),
     ]);
-    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
+    run("docker", ["cp", `${container}:${containerPath}`, hostPathForContainerMount(stagingPath)]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const publication = publishBackupArtifact({
       stagingPath,
       publishedPath: hostPath,
+      ...backupArtifactPublicationOptions(),
       createSignature: createBackupArtifactSignature,
       onPublished({ hash, sizeBytes, signature }) {
         recordDatabaseBackupEvidence({
@@ -12527,13 +12567,13 @@ async function backupMinio(options = {}) {
 
   try {
     log("Creating MinIO data backup...");
-    run("docker", ["cp", `${container}:/data`, hostWorkDir]);
+    run("docker", ["cp", `${container}:/data`, hostPathForContainerMount(hostWorkDir)]);
     dockerRun([
       "--network", "none",
       "-v",
       `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
       "-v",
-      `${hostPathForContainerMount(outputDir)}:/backup`,
+      `${hostPathForContainerMount(path.dirname(stagingPath))}:/backup`,
       configuredNodeImage(),
       "sh",
       "-lc",
@@ -12894,53 +12934,6 @@ async function backupRestoreDrillMinio() {
   log(`MinIO backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
 }
 
-function keycloakBackupProgram() {
-  return `
-set -eu
-umask 077
-work="/tmp/platform-keycloak-config-backup"
-kcadm_config="/tmp/platform-kcadm-backup.config"
-kcadm_log="/tmp/platform-kcadm-backup.log"
-default_kcadm_config="$HOME/.keycloak/kcadm.config"
-cleanup() {
-  status=$?
-  trap - EXIT HUP INT TERM
-  rm -f "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
-  if [ "$status" -ne 0 ]; then rm -rf "$work"; fi
-  exit "$status"
-}
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-rm -rf "$work"
-rm -f "$kcadm_config" "$kcadm_log" "$default_kcadm_config"
-mkdir -p "$work/realms" "$work/import" "$work/runtime"
-KC_BOOTSTRAP_ADMIN_PASSWORD="$(cat /run/secrets/keycloak_admin_password)"
-export KC_BOOTSTRAP_ADMIN_PASSWORD
-/opt/keycloak/bin/kcadm.sh config credentials --config "$kcadm_config" --server http://127.0.0.1:8080 --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" >"$kcadm_log" 2>&1
-/opt/keycloak/bin/kcadm.sh get realms --config "$kcadm_config" --fields realm,enabled > "$work/realms.json"
-for realm in $(grep -o '"realm"[[:space:]]*:[[:space:]]*"[^"]*"' "$work/realms.json" | sed 's/.*"realm"[[:space:]]*:[[:space:]]*"//; s/".*//'); do
-  safe="$(printf '%s' "$realm" | tr -c 'A-Za-z0-9_.-' '_')"
-  /opt/keycloak/bin/kcadm.sh get "realms/$realm" --config "$kcadm_config" > "$work/realms/\${safe}-realm.json"
-  /opt/keycloak/bin/kcadm.sh get clients --config "$kcadm_config" -r "$realm" > "$work/realms/\${safe}-clients.json"
-  /opt/keycloak/bin/kcadm.sh get roles --config "$kcadm_config" -r "$realm" > "$work/realms/\${safe}-roles.json"
-done
-if [ -d /opt/keycloak/data/import ]; then
-  cp -R /opt/keycloak/data/import/. "$work/import/" 2>/dev/null || true
-fi
-env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime/kc-env-sanitized.txt" || true
-`;
-}
-
-function keycloakBackupResidueAssertionProgram() {
-  return "test ! -e '/tmp/platform-keycloak-config-backup' && test ! -e '/tmp/platform-kcadm-backup.config' && test ! -e '/tmp/platform-kcadm-backup.log' && test ! -e '/tmp/platform-keycloak-config-backup.tar.gz' && test ! -e \"$HOME/.keycloak/kcadm.config\"";
-}
-
-function keycloakBackupCleanupProgram() {
-  return "rm -rf '/tmp/platform-keycloak-config-backup' '/tmp/platform-keycloak-config-backup.tar.gz' '/tmp/platform-kcadm-backup.config' '/tmp/platform-kcadm-backup.log' \"$HOME/.keycloak/kcadm.config\"";
-}
-
 async function backupKeycloakConfig(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-keycloak";
   const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "keycloak")));
@@ -12960,8 +12953,8 @@ async function backupKeycloakConfig(options = {}) {
     // backup program inside the authority-bound exact release and pass it as
     // one fixed shell argument instead of opening a generic stdin channel.
     dockerExec(container, ["sh", "-ec", backupScript]);
-    run("docker", ["cp", `${container}:${containerWorkDir}`, hostWorkDir]);
-    assertRootOwnedPrivateDirectory(hostWorkDir, "Keycloak configuration backup staging directory");
+    run("docker", ["cp", `${container}:${containerWorkDir}`, hostPathForContainerMount(hostWorkDir)]);
+    assertBackupExecutionPrivateDirectory(hostWorkDir, "Keycloak configuration backup staging directory");
     dockerExec(container, ["sh", "-ec", keycloakBackupCleanupProgram()]);
     dockerExec(container, ["sh", "-ec", keycloakBackupResidueAssertionProgram()]);
     dockerRun([
@@ -12969,7 +12962,7 @@ async function backupKeycloakConfig(options = {}) {
       "-v",
       `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
       "-v",
-      `${hostPathForContainerMount(outputDir)}:/backup`,
+      `${hostPathForContainerMount(path.dirname(stagingPath))}:/backup`,
       configuredNodeImage(),
       "sh",
       "-lc",
@@ -13275,7 +13268,7 @@ async function backupSecretManagerMetadata(options = {}) {
       "-v",
       `${hostPathForContainerMount(workDir)}:/work:ro`,
       "-v",
-      `${hostPathForContainerMount(outputDir)}:/backup`,
+      `${hostPathForContainerMount(path.dirname(stagingPath))}:/backup`,
       configuredNodeImage(),
       "sh",
       "-lc",
