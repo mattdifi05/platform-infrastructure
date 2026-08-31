@@ -50,3 +50,6 @@ projects-portal/state/**
 *.log
 *.tmp
 **/.DS_Store
+!vendor/
+!vendor/json-schema/
+!vendor/json-schema/**
