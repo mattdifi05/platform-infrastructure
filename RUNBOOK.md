@@ -43,9 +43,11 @@ checkout before executing only the admitted local image ID with
 Scheduled backup/restore jobs remain socketless and submit only fixed semantic
 actions to the root-owned broker. No loopback or ephemeral raw Docker API is
 created.
-`backup-scheduler` is activated or updated only by the trusted
-`deploy-vps.sh` workflow. `compose-vps.sh` is limited to render and inspection; it is
-not a supported scheduler mutation entrypoint.
+In provider/VPS, `backup-scheduler` is activated or updated only by the trusted
+`deploy-vps.sh` workflow. `compose-vps.sh` is limited to render and inspection;
+it is not a supported scheduler mutation entrypoint. The Dell LOCAL_PRIVATE
+runtime is governed separately by the exact source-lock and the signed
+three-action backup admission documented below.
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is
@@ -227,12 +229,11 @@ AlertDeliveryFailed
 HostDiskUsageHigh
 HostDiskUsageCritical
 HostDiskWillFillSoon
-HostReliabilityCollectorMissing
-HostNetworkNotReady
-HostUpdatesPending
-HostRebootRequired
-HostDriveTelemetryMissing
-HostDriveUnhealthy
+HostMemoryUsageHigh
+HostCpuUsageHigh
+ContainerCpuUsageHigh
+ContainerMemoryUsageHigh
+ContainerDisappeared
 HostDriveMediaErrors
 HostIoPressureHigh
 HostJournalUsageHigh
@@ -273,9 +274,9 @@ webhook URLs in `.env` or Git.
 ## Workload metrics and capacity
 
 Per-container CPU, memory and effective cgroup limits come from the hardened
-host collector documented in `WORKLOAD-METRICS.md`. cAdvisor remains a
-compatibility scrape, but its `/healthz` alone is not accepted as workload
-coverage evidence.
+host collector documented in `WORKLOAD-METRICS.md`. The Dell V1.1 render does
+not start or scrape cAdvisor; its workload metrics come only from the
+`platform_container_*` textfile series.
 
 Before an approved rollout, validate without touching the live collector:
 
@@ -654,6 +655,50 @@ Off-site restore drill:
 `offsite-restore-drill-restic.sh --planOnly` writes the expected execution plan without remote credentials. `--dryRun` proves reachability only and is recorded as `EXTERNAL-PENDING`. The full command restores into `.tmp/ops`, verifies the embedded signed manifest against its snapshot tags, rejects any missing/extra/duplicate/substituted path, stages the exact set under `backups/offsite-restore-drills/`, executes every typed resource restore, then runs `infra-health`. Use `--snapshot <id>` for a specific snapshot. Selective `--families` and `--allowPartial` are fail-closed and cannot be used for evidence.
 
 Production go/no-go requires a real remote Restic restore. The accepted report must show `coverage.complete=true`, cryptographic manifest verification, exact-set verification, every manifest resource restored and tested, and `infra-health` passed. Repository-only tests never satisfy this external gate.
+
+### Dell V1.1 LOCAL_PRIVATE
+
+Sul Dell la configurazione canonica e' `compose.local-private-backup.yaml`,
+caricata nell'ordine fissato da `config/v1-local-private-source-lock.json` con
+il solo profilo `admin`. Non attivare il vecchio profilo provider `backup`.
+Prima dell'avvio verificare che:
+
+- il trust directory esterno contenga admission canonica e le sole capability
+  catalog, backup-only typed-job e offsite, tutte `0600` e possedute
+  dall'utente deploy `1000:1000`; la directory deve essere `0700`;
+- la chiave privata Ed25519 sia presente soltanto nell'escrow Mac;
+- `LOCAL_PRIVATE_CRITICAL_ROOT` contenga la password Restic originale e
+  `rclone/rclone.conf`, senza stamparne il contenuto;
+- `LOCAL_PRIVATE_BACKUP_RENDER_FILE` sia il render esatto del release corrente;
+- broker state, OAuth staging, receipt e UDS siano sotto le directory dedicate
+  `LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR` e
+  `LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR`, esterne al checkout e al parent
+  state condiviso;
+- broker, scheduler e helper Restic corrispondano agli image ID firmati;
+- il broker sia l'unico servizio con `docker.sock` e lo scheduler non lo monti.
+
+Il boundary queue LOCAL_PRIVATE ammette solo job `backup`: qualunque
+`restore-drill` viene rifiutato nel broker prima di avviare `infra-ops`. I
+restore di prova si eseguono invece in target usa-e-getta tramite la procedura
+operatore isolata. Il file rclone canonico e' scrivibile soltanto dal broker;
+il helper off-site usa una copia nello state directory e il broker copia
+indietro soltanto un refresh del campo OAuth `token` validato. Il mount password
+del helper deve essere il singolo `restic_password.txt`, mai la directory
+`critical`. Ogni operazione deve lasciare una receipt terminale canonica sotto
+la directory broker dedicata, in `terminal/`, prima del rilascio del lock; in caso di
+esito client `UNKNOWN_AFTER_ADMISSION`, riconciliare quella receipt e non
+ritentare automaticamente.
+
+Il file schedule deve contenere una riga `platform-catalog-backup` e, con
+`BACKUP_SCHEDULER_ENABLE_OFFSITE=true`, una riga `restic-offsite`. Sul Dell
+LOCAL_PRIVATE non viene avviato `crond`: l'entrypoint UID/GID `1000:1000`
+valida i due schedule nella forma ristretta `MINUTE */HOUR * * *` e li esegue
+con il timer non privilegiato indicato dal marker
+`local-private-timer.ready`. Verificare il primo ciclo attraverso lo scheduler
+e poi eseguire un restore off-site reale in path/volumi usa-e-getta. Un errore
+rclone `invalid_grant` e' un gate interattivo:
+non rigenerare il token automaticamente e usare il reconnect manuale soltanto
+dopo autorizzazione dell'operatore.
 
 For Cloudflare R2, use the S3-compatible Restic repository endpoint and keep
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the VPS secret environment or

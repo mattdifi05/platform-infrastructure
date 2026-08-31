@@ -1556,13 +1556,14 @@ function hostPathForContainerMount(filePath) {
     return resolved;
   }
   const mappings = [
+    [process.env.LOCAL_PRIVATE_BACKUP_BROKER_STATE_CONTAINER_ROOT, process.env.LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT],
     [process.env.PLATFORM_RELEASE_CONTAINER_ROOT || process.env.PLATFORM_INFRA_CONTAINER_ROOT || infraRoot, process.env.PLATFORM_RELEASE_HOST_ROOT || process.env.PLATFORM_INFRA_HOST_ROOT],
     [process.env.PLATFORM_DATA_CONTAINER_ROOT || dataRoot, process.env.PLATFORM_DATA_HOST_ROOT],
     [process.env.PLATFORM_STATE_CONTAINER_ROOT || projectStateRoot, process.env.PLATFORM_STATE_HOST_ROOT],
     [process.env.PLATFORM_SECRETS_CONTAINER_ROOT || secretsRoot, process.env.PLATFORM_SECRETS_HOST_ROOT],
     [sourceRoot, process.env.PROJECT_SOURCE_HOST_ROOT],
   ]
-    .filter(([, hostRoot]) => Boolean(hostRoot))
+    .filter(([containerRoot, hostRoot]) => Boolean(containerRoot) && Boolean(hostRoot))
     .map(([containerRoot, hostRoot]) => [
       path.resolve(containerRoot).replaceAll("\\", "/").replace(/\/$/, ""),
       path.resolve(String(hostRoot)).replaceAll("\\", "/").replace(/\/$/, ""),
@@ -2518,10 +2519,14 @@ async function executeTypedBackupResource(resource) {
     }));
   }
   if (resource.kind === "platform-state" && resource.externalId === "minio-data") {
-    return typedArtifactRecord(resource, await backupMinio());
+    return typedArtifactRecord(resource, await backupMinio({
+      container: process.env.BACKUP_MINIO_CONTAINER || "enterprise-minio",
+    }));
   }
   if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
-    return typedArtifactRecord(resource, await backupKeycloakConfig());
+    return typedArtifactRecord(resource, await backupKeycloakConfig({
+      container: process.env.BACKUP_KEYCLOAK_CONTAINER || "enterprise-keycloak",
+    }));
   }
   if (resource.kind === "platform-state" && resource.externalId === "control-center-state") {
     return typedArtifactRecord(resource, await backupControlCenterState());
@@ -2638,7 +2643,10 @@ async function executeTypedRestoreResource(resource, artifact, options = {}) {
     };
   }
   if (resource.kind === "platform-state" && resource.externalId === "minio-data") {
-    const result = await restoreTestMinio({ backupFile });
+    const result = await restoreTestMinio({
+      backupFile,
+      container: process.env.BACKUP_MINIO_CONTAINER || "enterprise-minio",
+    });
     return {
       resourceId: resource.id,
       status: "passed",
@@ -2650,7 +2658,10 @@ async function executeTypedRestoreResource(resource, artifact, options = {}) {
     };
   }
   if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
-    const result = await restoreTestKeycloakConfig({ backupFile });
+    const result = await restoreTestKeycloakConfig({
+      backupFile,
+      container: process.env.BACKUP_KEYCLOAK_CONTAINER || "enterprise-keycloak",
+    });
     return {
       resourceId: resource.id,
       status: "passed",
@@ -3355,6 +3366,9 @@ function infraTestingHygiene() {
     "scripts/docker-action-helper-plan.test.mjs",
     "scripts/docker-action-v2-fixtures.test.mjs",
     "scripts/docker-action-activation.test.mjs",
+    "scripts/local-private-backup-admission.test.mjs",
+    "scripts/local-private-docker-action-broker.test.mjs",
+    "scripts/documented-scheduler-entrypoint.test.mjs",
   ];
   const checkFiles = [
     "scripts/infra-ops.mjs",
@@ -3383,6 +3397,11 @@ function infraTestingHygiene() {
     "scripts/dast-activation-authorization.test.mjs",
     "scripts/docker-action-activation.mjs",
     "scripts/docker-action-activation.test.mjs",
+    "scripts/local-private-backup-admission.mjs",
+    "scripts/local-private-backup-admission.test.mjs",
+    "scripts/local-private-docker-action-broker.mjs",
+    "scripts/local-private-docker-action-broker.test.mjs",
+    "scripts/local-private-docker-action-readiness.mjs",
     "scripts/platform-release-context.mjs",
     "scripts/platform-release-context.test.mjs",
     "scripts/provider-evidence-auth.mjs",
@@ -5081,10 +5100,22 @@ function resticRcloneConfig(repository) {
   }
   const configDir = path.dirname(rcloneConfig);
   const configName = path.basename(rcloneConfig);
+  const mountMode = booleanFlag(process.env.RCLONE_CONFIG_WRITABLE) ? "rw" : "ro";
   return {
     env: ["-e", `RCLONE_CONFIG=/rclone-config/${configName}`],
-    mounts: ["-v", `${hostPathForContainerMount(configDir)}:/rclone-config:ro`],
+    mounts: ["-v", `${hostPathForContainerMount(configDir)}:/rclone-config:${mountMode}`],
   };
+}
+
+function resticDockerUserArgs() {
+  const user = String(process.env.RESTIC_DOCKER_USER ?? "").trim();
+  if (!user) return [];
+  if (!/^\d{1,10}:\d{1,10}$/.test(user)) fail("RESTIC_DOCKER_USER must be a numeric uid:gid pair.");
+  return ["--user", user];
+}
+
+function resticRuntimeEnvironmentArgs() {
+  return ["-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp/.cache"];
 }
 
 function resticRetentionConfig(options = {}) {
@@ -5101,7 +5132,6 @@ function immutableResticImage(image) {
 }
 
 function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
-  const resticPasswordDir = path.dirname(passwordFile);
   const resticPasswordName = path.basename(passwordFile);
   const repositoryClass = classifyResticRepository(repository);
   const rcloneConfig = resticRcloneConfig(repository);
@@ -5113,6 +5143,8 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const args = [
     "run",
     "--rm",
+    ...resticDockerUserArgs(),
+    ...resticRuntimeEnvironmentArgs(),
     ...secretTransport.dockerArgs,
     ...rcloneConfig.env,
   ];
@@ -5125,7 +5157,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
     ...mounts,
     ...rcloneConfig.mounts,
     "-v",
-    `${hostPathForContainerMount(resticPasswordDir)}:/restic-password:ro`,
+    `${hostPathForContainerMount(passwordFile)}:/restic-password/${resticPasswordName}:ro`,
     image,
   );
   return { args, secretTransport };
@@ -5156,6 +5188,8 @@ function resticRepositorySizeBytes(repository) {
   const result = run("docker", [
     "run",
     "--rm",
+    ...resticDockerUserArgs(),
+    ...resticRuntimeEnvironmentArgs(),
     "--entrypoint",
     "rclone",
     ...rcloneConfig.env,
@@ -10795,7 +10829,7 @@ function repoCoverageCategory(filePath) {
     ["messaging", /^(?:nats\/|scripts\/(?:render-workload-broker-config|workload-broker-policy)\.mjs$)/],
     ["security-regression", /^(?:scripts\/postfix_evidence\/|tests\/pre-fix\/)/],
     ["operations-script", /^scripts\/.+\.(?:awk|sh|mjs|py|rb)$/],
-    ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/docker-action-activation-policy\.json)$/],
+    ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/.+\.(?:json|pem))$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
     ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
     ["identity", /^keycloak\//],

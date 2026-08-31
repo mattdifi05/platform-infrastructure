@@ -257,6 +257,74 @@ test("FG-005 execute-backup-job accepts only a claimed queue basename", () => {
   }
 });
 
+test("LOCAL_PRIVATE scheduler admits catalog, typed jobs and offsite only", () => {
+  for (const command of ["backup-platform-catalog", "offsite-backup-restic"]) {
+    const accepted = runSchedulerWithFakeClient(["--run", command], {
+      BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true",
+    });
+    assert.equal(accepted.result.status, 0, `${accepted.result.stdout}\n${accepted.result.stderr}`);
+    assert.equal(accepted.clientArguments.at(-1), command);
+  }
+  for (const command of ["prune-manifest-backups-plan", "prune-manifest-backups-apply", "full-restore-drill"]) {
+    const rejected = runSchedulerWithFakeClient(["--run", command], {
+      BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true",
+    });
+    assert.notEqual(rejected.result.status, 0, command);
+    assert.deepEqual(rejected.clientArguments, []);
+  }
+});
+
+test("LOCAL_PRIVATE scheduler cron contains only catalog and the explicitly enabled offsite sync", () => {
+  const enabled = renderLocalPrivateSchedulerCron(true);
+  assert.match(enabled, /platform-catalog-backup/);
+  assert.match(enabled, /backup-platform-catalog/);
+  assert.match(enabled, /restic-offsite/);
+  assert.match(enabled, /offsite-backup-restic/);
+  assert.doesNotMatch(enabled, /prune-manifest|full-restore-drill/);
+  assert.equal(enabled.trim().split("\n").length, 2);
+
+  const disabled = renderLocalPrivateSchedulerCron(false);
+  assert.match(disabled, /platform-catalog-backup/);
+  assert.doesNotMatch(disabled, /restic-offsite|offsite-backup-restic|prune-manifest|full-restore-drill/);
+  assert.equal(disabled.trim().split("\n").length, 1);
+});
+
+test("LOCAL_PRIVATE non-root scheduler owns its cron spool and uses its real account name", () => {
+  const overlay = serviceBlock(
+    fs.readFileSync(path.join(root, "compose.local-private-backup.yaml"), "utf8"),
+    "backup-scheduler",
+  );
+  assert.equal(scalarProperty(overlay, "user"), "1000:1000");
+  assert.match(
+    overlay,
+    /^\s{6}BACKUP_SCHEDULER_CRON_FILE: \/run\/platform\/backup-scheduler\/crontabs\/node$/m,
+  );
+  assert.match(
+    overlay,
+    /^\s{6}- \/run\/platform\/backup-scheduler:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700$/m,
+  );
+  assert.match(
+    overlay,
+    /test -s \/run\/platform\/backup-scheduler\/crontabs\/node/,
+  );
+  assert.match(
+    overlay,
+    /test -s \/run\/platform\/backup-scheduler\/local-private-timer\.ready/,
+  );
+});
+
+test("LOCAL_PRIVATE scheduler executes a due backup through its unprivileged timer without crond", () => {
+  const observed = runLocalPrivateTimerTick();
+  assert.equal(observed.result.status, 99, `${observed.result.stdout}\n${observed.result.stderr}`);
+  assert.deepEqual(
+    observed.clientArguments,
+    [path.join(root, "scripts", "docker-action-client.mjs"), "backup-platform-catalog"],
+    `${observed.result.stdout}\n${observed.result.stderr}\n${observed.timerLog}`,
+  );
+  assert.equal(observed.timerReady, "platform.local-private-backup-timer/v1");
+  assert.equal(observed.crondInvoked, false);
+});
+
 test("FG-005 the real queue consumer forwards only its atomically claimed filename", () => {
   const observed = runClaimedQueueWithFakeClient();
   assert.equal(observed.result.status, 0, `${observed.result.stdout}\n${observed.result.stderr}`);
@@ -433,7 +501,7 @@ function parseTmpfsEntry(entry) {
   };
 }
 
-function runSchedulerWithFakeClient(arguments_) {
+function runSchedulerWithFakeClient(arguments_, environment = {}) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-client-contract-"));
   const bin = path.join(temporary, "bin");
   const capture = path.join(temporary, "client-arguments.json");
@@ -452,6 +520,7 @@ function runSchedulerWithFakeClient(arguments_) {
       PATH: bin,
       PLATFORM_INFRA_ROOT: root,
       SCHEDULER_CLIENT_CAPTURE: capture,
+      ...environment,
     },
     timeout: 10_000,
   });
@@ -460,6 +529,34 @@ function runSchedulerWithFakeClient(arguments_) {
     : [];
   fs.rmSync(temporary, { recursive: true, force: true });
   return { result, clientArguments };
+}
+
+function renderLocalPrivateSchedulerCron(enableOffsite) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-local-private-cron-"));
+  const cronFile = path.join(temporary, "runtime", "crontabs", "node");
+  const result = spawnSync("/bin/sh", [path.join(root, "scripts", "backup-scheduler.sh")], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      BACKUP_SCHEDULER_CRON_FILE: cronFile,
+      BACKUP_SCHEDULER_DRY_RUN: "true",
+      BACKUP_SCHEDULER_ENABLE_OFFSITE: enableOffsite ? "true" : "false",
+      BACKUP_SCHEDULER_ENV_FILE: path.join(temporary, "runtime", "backup-scheduler.env"),
+      BACKUP_SCHEDULER_JOBS_DIR: path.join(temporary, "jobs"),
+      BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true",
+      BACKUP_SCHEDULER_LOG_DIR: path.join(temporary, "logs"),
+      HOME: temporary,
+      PATH: process.env.PATH,
+      PLATFORM_INFRA_ROOT: root,
+    },
+    timeout: 10_000,
+  });
+  try {
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    return fs.readFileSync(cronFile, "utf8");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 function runClaimedQueueWithFakeClient({
@@ -589,6 +686,84 @@ exit 70
     result,
     runningExists: fs.existsSync(running),
     terminalJob,
+  };
+  fs.rmSync(temporary, { recursive: true, force: true });
+  return observed;
+}
+
+function runLocalPrivateTimerTick() {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-local-private-timer-"));
+  const bin = path.join(temporary, "bin");
+  const runtime = path.join(temporary, "runtime");
+  const capture = path.join(temporary, "client-arguments.txt");
+  const crondCapture = path.join(temporary, "crond-invoked");
+  fs.mkdirSync(bin);
+  for (const command of ["cat", "chmod", "dirname", "mkdir", "sed", "sh"]) {
+    fs.symlinkSync(findSystemExecutable(command), path.join(bin, command));
+  }
+  fs.writeFileSync(
+    path.join(bin, "date"),
+    `#!/bin/sh
+last=""
+for argument in "$@"; do last="$argument"; done
+case "$last" in
+  +%Y%m%d%H%M) printf '202608311205\\n' ;;
+  +%M) printf '05\\n' ;;
+  +%H) printf '12\\n' ;;
+  *) printf '2026-08-31T12:05:00Z\\n' ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  fs.writeFileSync(
+    path.join(bin, "node"),
+    `#!/bin/sh
+if [ "\${1:-}" = "$SCHEDULER_EXPECTED_QUEUE_CONTROL" ]; then
+  exit 0
+fi
+printf '%s\\n' "$@" > "$SCHEDULER_CLIENT_CAPTURE"
+`,
+    { mode: 0o700 },
+  );
+  fs.writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+  fs.writeFileSync(
+    path.join(bin, "crond"),
+    "#!/bin/sh\n: > \"$SCHEDULER_CROND_CAPTURE\"\nexit 70\n",
+    { mode: 0o700 },
+  );
+
+  const timerReadyFile = path.join(runtime, "local-private-timer.ready");
+  const result = spawnSync("/bin/sh", [path.join(root, "scripts", "backup-scheduler.sh")], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      BACKUP_SCHEDULER_CATALOG_CRON: "5 * * * *",
+      BACKUP_SCHEDULER_CRON_FILE: path.join(runtime, "crontabs", "node"),
+      BACKUP_SCHEDULER_ENABLE_OFFSITE: "false",
+      BACKUP_SCHEDULER_ENV_FILE: path.join(runtime, "backup-scheduler.env"),
+      BACKUP_SCHEDULER_JOBS_DIR: path.join(temporary, "jobs"),
+      BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true",
+      BACKUP_SCHEDULER_LOG_DIR: path.join(temporary, "logs"),
+      BACKUP_SCHEDULER_TIMER_READY_FILE: timerReadyFile,
+      HOME: temporary,
+      PATH: bin,
+      PLATFORM_INFRA_ROOT: root,
+      SCHEDULER_CLIENT_CAPTURE: capture,
+      SCHEDULER_CROND_CAPTURE: crondCapture,
+      SCHEDULER_EXPECTED_QUEUE_CONTROL: path.join(root, "scripts", "backup-queue-control.mjs"),
+    },
+    timeout: 10_000,
+  });
+  const observed = {
+    clientArguments: fs.existsSync(capture)
+      ? fs.readFileSync(capture, "utf8").trimEnd().split("\n").filter(Boolean)
+      : [],
+    crondInvoked: fs.existsSync(crondCapture),
+    result,
+    timerLog: fs.existsSync(path.join(temporary, "logs", "platform-catalog-backup.log"))
+      ? fs.readFileSync(path.join(temporary, "logs", "platform-catalog-backup.log"), "utf8")
+      : "",
+    timerReady: fs.existsSync(timerReadyFile) ? fs.readFileSync(timerReadyFile, "utf8").trim() : "",
   };
   fs.rmSync(temporary, { recursive: true, force: true });
   return observed;

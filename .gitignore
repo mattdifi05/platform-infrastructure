@@ -29,6 +29,7 @@ projects-portal/state/*
 *.local
 *.pem
 !config/local-private-recovery-escrow-cert.pem
+!policy/local-private-backup-admission.pub.pem
 *.key
 *.p12
 *.pfx

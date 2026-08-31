@@ -5088,6 +5088,27 @@ function platformBackupResources(context, requestedScope) {
         engine: database.engine,
       });
     }
+    if (requestedScope === "all" || requestedScope === "postgres") {
+      resources.push({
+        id: backupResourceId("database", "platform-postgres-keycloak"),
+        externalId: "platform-postgres-keycloak",
+        kind: "database",
+        projectId: "platform",
+        name: "keycloak",
+        engine: "postgres",
+      });
+    }
+  }
+  if (requestedScope === "all") {
+    for (const externalId of ["minio-data", "keycloak-config", "control-center-state", "secret-manager-metadata"]) {
+      resources.push({
+        id: backupResourceId("platform-state", externalId),
+        externalId,
+        kind: "platform-state",
+        projectId: "platform",
+        name: externalId,
+      });
+    }
   }
   return uniqueBackupResources(resources);
 }
@@ -9029,10 +9050,6 @@ async function readPrometheusResourceSnapshot() {
     platformContainerMemoryLimit: "platform_container_memory_limit_bytes",
     platformContainerMemoryReservation: "platform_container_memory_reservation_bytes",
     platformContainerPidsLimit: "platform_container_pids_limit",
-    cadvisorContainerCpuByName: 'sum by (name) (rate(container_cpu_usage_seconds_total{name!="",id!="/"}[2m]))',
-    cadvisorContainerMemoryByName: 'max by (name) (container_memory_working_set_bytes{name!="",id!="/"})',
-    cadvisorContainerCpuByContainer: 'sum by (container) (rate(container_cpu_usage_seconds_total{container!="",id!="/"}[2m]))',
-    cadvisorContainerMemoryByContainer: 'max by (container) (container_memory_working_set_bytes{container!="",id!="/"})',
   };
   const entries = await Promise.all(Object.entries(queries).map(async ([key, query]) => {
     try {
@@ -9061,12 +9078,7 @@ async function readPrometheusResourceSnapshot() {
   attachPrometheusContainerLimit(platformContainers, results.platformContainerMemoryLimit, "memoryLimitBytes");
   attachPrometheusContainerLimit(platformContainers, results.platformContainerMemoryReservation, "memoryReservationBytes");
   attachPrometheusContainerLimit(platformContainers, results.platformContainerPidsLimit, "pidsLimit");
-  const cadvisorContainers = mergePrometheusContainerMetrics(
-    [...results.cadvisorContainerCpuByName, ...results.cadvisorContainerCpuByContainer],
-    [...results.cadvisorContainerMemoryByName, ...results.cadvisorContainerMemoryByContainer],
-    "prometheus-cadvisor-compatibility",
-  );
-  const containers = platformContainers.length ? platformContainers : cadvisorContainers;
+  const containers = platformContainers;
   const snapshot = sanitizeEvent({
     available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
     cpu: {
@@ -9084,7 +9096,7 @@ async function readPrometheusResourceSnapshot() {
       message: Number.isFinite(memoryTotal) ? "" : "Metriche RAM non disponibili da Prometheus.",
     },
     disk: buildPrometheusDiskSnapshot(results.diskSize, results.diskAvailable),
-    containerSource: platformContainers.length ? "prometheus-node-exporter-textfile" : cadvisorContainers.length ? "prometheus-cadvisor-compatibility" : "",
+    containerSource: platformContainers.length ? "prometheus-node-exporter-textfile" : "",
     containers,
   });
   if (!snapshot.available) {

@@ -189,7 +189,7 @@ jobs:
         run: |
           mapfile -t current_files < <(jq -r '.compose.runtimeFilesInOrder[]' config/v1-local-private-source-lock.json)
           mapfile -t current_profiles < <(jq -r '.compose.activeProfiles[]' config/v1-local-private-source-lock.json)
-          test "${#current_files[@]}" -eq 12
+          test "${#current_files[@]}" -eq 13
           test "${#current_profiles[@]}" -eq 1
           test "${current_profiles[0]}" = admin
           compose_args=()
@@ -200,12 +200,46 @@ jobs:
           docker compose --env-file .env -p platform_infra_greenfield \
             "${compose_args[@]}" --profile admin config --format json > "${RUNNER_TEMP}/v1-current-render.json"
           jq -e '
+            def path_contains($parent; $child):
+              ($parent == $child) or ($child | startswith($parent + "/"));
             . as $root |
-            (.services | length) == 32 and
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/docker-action-broker")][0].source) as $brokerRuntimeSource |
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-docker-action-broker")][0].source) as $brokerStateSource |
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/docker-action-broker/client")][0].source) as $brokerTrustSource |
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/local-private-input/combined-render.yaml")][0].source) as $brokerRenderSource |
+            (.services | length) == 35 and
             (.secrets | length) == 20 and
             (.networks | length) == 11 and
             (.volumes | length) == 12 and
-            (.services["backup-scheduler"] == null) and
+            (.services["backup-scheduler"].network_mode == "none") and
+            (.services["docker-action-broker"].user == "1000:1000") and
+            (.services["backup-scheduler"].user == "1000:1000") and
+            ((.services["docker-action-broker"].profiles // []) == []) and
+            ((.services["backup-scheduler"].profiles // []) == []) and
+            (.services["docker-action-broker"].entrypoint == ["node", "/opt/platform-infrastructure/scripts/local-private-docker-action-broker.mjs"]) and
+            (.services["backup-scheduler"].environment.BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS == "true") and
+            (.services["backup-scheduler"].environment.BACKUP_SCHEDULER_ENABLE_OFFSITE == "true") and
+            (.services["backup-scheduler"].environment.BACKUP_SCHEDULER_CRON_FILE == "/run/platform/backup-scheduler/crontabs/node") and
+            (.services["backup-scheduler"].tmpfs | any(. == "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700")) and
+            ((.services["docker-action-broker"].secrets // []) == []) and
+            ((.services["backup-scheduler"].secrets // []) == []) and
+            ([.services | to_entries[] | select(any(.value.volumes[]?; .source == "/var/run/docker.sock" and .target == "/var/run/docker.sock")) | .key] == ["docker-action-broker"]) and
+            (.services["docker-action-broker"].volumes | any(.target == "/run/platform/docker-action-broker/client" and .read_only == true)) and
+            (.services["docker-action-broker"].volumes | any(.target == "/run/platform/critical" and .read_only == true)) and
+            (.services["docker-action-broker"].volumes | any(.target == "/run/platform/critical/rclone" and ((.read_only // false) == false))) and
+            (.services["backup-scheduler"].volumes | any(.target == "/run/platform/docker-action-broker/client" and .read_only == true)) and
+            (.services["backup-scheduler"].volumes | all(.source != "/var/run/docker.sock")) and
+            (.services["docker-action-broker"].environment.DOCKER_ACTION_BROKER_STATE_DIR == "/var/lib/platform-docker-action-broker") and
+            (.services["docker-action-broker"].environment.LOCAL_PRIVATE_BACKUP_BROKER_STATE_CONTAINER_ROOT == "/var/lib/platform-docker-action-broker") and
+            (.services["docker-action-broker"].environment.LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT == $brokerStateSource) and
+            ([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerStateSource)) | .key] == ["docker-action-broker"]) and
+            ([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerRenderSource)) | .key] == ["docker-action-broker"]) and
+            (([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerRuntimeSource)) | .key] | sort) == ["backup-scheduler", "docker-action-broker"]) and
+            (([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerTrustSource)) | .key] | sort) == ["backup-scheduler", "docker-action-broker"]) and
+            ([.services | to_entries[] | select(.key != "backup-scheduler" and .key != "docker-action-broker") | .value.volumes[]? | select(.type == "bind") | .source as $source | select(path_contains($source; $brokerStateSource) or path_contains($source; $brokerRuntimeSource) or path_contains($source; $brokerTrustSource) or path_contains($source; $brokerRenderSource))] | length == 0) and
+            (.services["node-exporter"] != null) and
+            (.services["cadvisor"] == null) and
+            (.services["docker-action-activation-sidecar"] == null) and
             (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
             (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
             ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 8, "php-fiplatform": 9, "php-matthewdifilippo": 8, "php-stream": 8, "php-workcalendar": 8} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))

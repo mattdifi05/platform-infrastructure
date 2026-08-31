@@ -39,6 +39,7 @@ env = {
   "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE" =>
     root.join("config/no-hosted-workloads.lock.json").to_s,
   "ALERT_EMAIL_TO" => "qa@fixture.invalid",
+  "LOCAL_DNS_BIND" => "127.0.0.1",
   "MAILER_FROM" => "qa@fixture.invalid",
   "MAILER_REPLY_TO" => "qa@fixture.invalid",
   "SMTP_HOST" => "smtp.fixture.invalid",

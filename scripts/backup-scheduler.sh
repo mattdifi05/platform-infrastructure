@@ -13,6 +13,11 @@ CLIENT_PATH="$SCRIPT_DIR/docker-action-client.mjs"
 LOG_DIR="${BACKUP_SCHEDULER_LOG_DIR:-/var/log/platform}"
 CRON_FILE="${BACKUP_SCHEDULER_CRON_FILE:-/run/platform/backup-scheduler/crontabs/root}"
 ENV_FILE="${BACKUP_SCHEDULER_ENV_FILE:-/run/platform/backup-scheduler/backup-scheduler.env}"
+case "$ENV_FILE" in
+  */*) TIMER_READY_PARENT="${ENV_FILE%/*}" ;;
+  *) TIMER_READY_PARENT=. ;;
+esac
+TIMER_READY_FILE="${BACKUP_SCHEDULER_TIMER_READY_FILE:-$TIMER_READY_PARENT/local-private-timer.ready}"
 JOBS_DIR="${BACKUP_SCHEDULER_JOBS_DIR:-/var/www/project-state/backup-jobs}"
 QUEUE_POLL_SECONDS="${BACKUP_SCHEDULER_QUEUE_POLL_SECONDS:-5}"
 RESTORE_DRILL_WEEKDAY="${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}"
@@ -26,6 +31,7 @@ ENABLE_OFFSITE="${BACKUP_SCHEDULER_ENABLE_OFFSITE:-false}"
 ENABLE_RETENTION_APPLY="${BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY:-false}"
 RUN_ON_START="${BACKUP_SCHEDULER_RUN_ON_START:-false}"
 DRY_RUN="${BACKUP_SCHEDULER_DRY_RUN:-false}"
+LOCAL_PRIVATE_FIXED_ACTIONS="${BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS:-false}"
 
 usage() {
   cat <<'EOF'
@@ -108,6 +114,9 @@ prepare_runtime_env() {
   write_env_var DOCKER_ACTION_RUNTIME_INTENT_ID "${DOCKER_ACTION_RUNTIME_INTENT_ID:-}"
   write_env_var DOCKER_ACTION_ACTIVE_RECEIPT_SHA256 "${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:-}"
   write_env_var DOCKER_ACTION_COMBINED_RENDER_SHA256 "${DOCKER_ACTION_COMBINED_RENDER_SHA256:-}"
+  write_env_var DOCKER_ACTION_LOCAL_ADMISSION_FILE "${DOCKER_ACTION_LOCAL_ADMISSION_FILE:-}"
+  write_env_var DOCKER_ACTION_LOCAL_CAPABILITY_DIR "${DOCKER_ACTION_LOCAL_CAPABILITY_DIR:-}"
+  write_env_var DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE "${DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE:-}"
   write_env_var BACKUP_QUEUE_MAX_OUTSTANDING "${BACKUP_QUEUE_MAX_OUTSTANDING:-32}"
   write_env_var BACKUP_QUEUE_MAX_PER_PRINCIPAL "${BACKUP_QUEUE_MAX_PER_PRINCIPAL:-4}"
   write_env_var BACKUP_QUEUE_RATE_WINDOW_SECONDS "${BACKUP_QUEUE_RATE_WINDOW_SECONDS:-900}"
@@ -179,6 +188,93 @@ node_ops() {
   printf '%s --run %s' "$(quote_shell_value "$SCHEDULER_PATH")" "$1"
 }
 
+local_private_schedule_fields() {
+  expression="$1"
+  name="$2"
+  validate_cron_expression "$expression" "$name"
+  set -f
+  set -- $expression
+  set +f
+  minute="$1"
+  hour="$2"
+  if [ "$3" != "*" ] || [ "$4" != "*" ] || [ "$5" != "*" ]; then
+    echo "LOCAL_PRIVATE $name must use '*' for day-of-month, month and weekday." >&2
+    return 1
+  fi
+  case "$minute" in
+    ""|*[!0-9]*) echo "LOCAL_PRIVATE $name minute must be one integer." >&2; return 1 ;;
+  esac
+  minute="$(printf '%s' "$minute" | sed 's/^0*//')"
+  [ -n "$minute" ] || minute=0
+  if [ "$minute" -gt 59 ]; then
+    echo "LOCAL_PRIVATE $name minute is outside 0..59." >&2
+    return 1
+  fi
+  case "$hour" in
+    "*") hour_step=1 ;;
+    "*/"*) hour_step="${hour#*/}" ;;
+    *) echo "LOCAL_PRIVATE $name hour must be '*' or '*/N'." >&2; return 1 ;;
+  esac
+  case "$hour_step" in
+    ""|*[!0-9]*) echo "LOCAL_PRIVATE $name hour step must be one integer." >&2; return 1 ;;
+  esac
+  hour_step="$(printf '%s' "$hour_step" | sed 's/^0*//')"
+  [ -n "$hour_step" ] || hour_step=0
+  if [ "$hour_step" -lt 1 ] || [ "$hour_step" -gt 24 ]; then
+    echo "LOCAL_PRIVATE $name hour step is outside 1..24." >&2
+    return 1
+  fi
+  printf '%s %s\n' "$minute" "$hour_step"
+}
+
+run_local_private_scheduled_action() {
+  operation="$1"
+  log_name="$2"
+  log_file="$LOG_DIR/$log_name.log"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] unprivileged timer starting $operation" >> "$log_file"
+  if "$SCHEDULER_PATH" --run "$operation" >> "$log_file" 2>&1; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] unprivileged timer completed $operation" >> "$log_file"
+  else
+    exit_code=$?
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] unprivileged timer $operation returned exit $exit_code" >> "$log_file"
+  fi
+}
+
+run_local_private_timer() {
+  catalog_fields="$(local_private_schedule_fields "$CATALOG_BACKUP_CRON" "platform-catalog-backup")"
+  catalog_minute="${catalog_fields% *}"
+  catalog_hour_step="${catalog_fields#* }"
+  offsite_minute=""
+  offsite_hour_step=""
+  if [ "$ENABLE_OFFSITE" = "true" ] || [ "$ENABLE_OFFSITE" = "1" ]; then
+    offsite_fields="$(local_private_schedule_fields "$OFFSITE_BACKUP_CRON" "restic-offsite")"
+    offsite_minute="${offsite_fields% *}"
+    offsite_hour_step="${offsite_fields#* }"
+  fi
+  printf 'platform.local-private-backup-timer/v1\n' > "$TIMER_READY_FILE"
+  chmod 600 "$TIMER_READY_FILE"
+  last_tick=""
+  while true; do
+    tick="$(date -u +%Y%m%d%H%M)"
+    if [ "$tick" != "$last_tick" ]; then
+      last_tick="$tick"
+      current_minute="$(date -u +%M)"
+      current_hour="$(date -u +%H)"
+      current_minute="${current_minute#0}"
+      current_hour="${current_hour#0}"
+      [ -n "$current_minute" ] || current_minute=0
+      [ -n "$current_hour" ] || current_hour=0
+      if [ "$current_minute" -eq "$catalog_minute" ] && [ $((current_hour % catalog_hour_step)) -eq 0 ]; then
+        run_local_private_scheduled_action backup-platform-catalog platform-catalog-backup
+      fi
+      if [ -n "$offsite_minute" ] && [ "$current_minute" -eq "$offsite_minute" ] && [ $((current_hour % offsite_hour_step)) -eq 0 ]; then
+        run_local_private_scheduled_action offsite-backup-restic restic-offsite
+      fi
+    fi
+    sleep 5
+  done
+}
+
 process_backup_job() {
   running_file="$1"
   name="$(basename "$running_file")"
@@ -230,6 +326,13 @@ if [ "${1:-}" = "--run" ]; then
   fi
   operation="$1"
   shift
+  if { [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "true" ] || [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "1" ]; } \
+    && [ "$operation" != "backup-platform-catalog" ] \
+    && [ "$operation" != "execute-backup-job" ] \
+    && [ "$operation" != "offsite-backup-restic" ]; then
+    echo "LOCAL_PRIVATE scheduler rejects capability outside catalog/job/offsite." >&2
+    exit 64
+  fi
   case "$operation" in
     execute-backup-job)
       if [ "$#" -ne 2 ] || [ "$1" != "--jobFileName" ] || ! valid_claimed_job_file_name "$2"; then
@@ -257,13 +360,14 @@ prepare_runtime_env
 : > "$CRON_FILE"
 
 append_cron_expression "$CATALOG_BACKUP_CRON" "platform-catalog-backup" "$(node_ops backup-platform-catalog)"
-if [ "$ENABLE_RETENTION_APPLY" = "true" ] || [ "$ENABLE_RETENTION_APPLY" = "1" ]; then
-  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention" "$(node_ops prune-manifest-backups-apply)"
-else
-  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention-plan" "$(node_ops prune-manifest-backups-plan)"
+if [ "$LOCAL_PRIVATE_FIXED_ACTIONS" != "true" ] && [ "$LOCAL_PRIVATE_FIXED_ACTIONS" != "1" ]; then
+  if [ "$ENABLE_RETENTION_APPLY" = "true" ] || [ "$ENABLE_RETENTION_APPLY" = "1" ]; then
+    append_cron_expression "$RETENTION_CRON" "platform-manifest-retention" "$(node_ops prune-manifest-backups-apply)"
+  else
+    append_cron_expression "$RETENTION_CRON" "platform-manifest-retention-plan" "$(node_ops prune-manifest-backups-plan)"
+  fi
+  append_weekly "$FULL_RESTORE_DRILL_AT" "full-restore-drill" "$(node_ops full-restore-drill)"
 fi
-append_weekly "$FULL_RESTORE_DRILL_AT" "full-restore-drill" "$(node_ops full-restore-drill)"
-
 if [ "$ENABLE_OFFSITE" = "true" ] || [ "$ENABLE_OFFSITE" = "1" ]; then
   append_cron_expression "$OFFSITE_BACKUP_CRON" "restic-offsite" "$(node_ops offsite-backup-restic)"
 fi
@@ -281,5 +385,9 @@ if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
 fi
 
 process_backup_job_queue &
+
+if [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "true" ] || [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "1" ]; then
+  run_local_private_timer
+fi
 
 exec crond -f -l 8 -L "$LOG_DIR/backup-scheduler.log" -c "$(dirname "$CRON_FILE")"

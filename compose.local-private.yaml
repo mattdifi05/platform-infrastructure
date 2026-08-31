@@ -4,9 +4,9 @@
 # Deployment values for PLATFORM_STATE_DIR, PLATFORM_CERTS_DIR,
 # PLATFORM_SECRETS_ROOT and CONTROL_CENTER_LOCAL_CA_CERT_SOURCE must be
 # absolute paths outside the release tree.
-# The current immutable backup scheduler is broker-only. This overlay does not
-# grant it docker.sock; LOCAL_PRIVATE reconciliation keeps it READY_BUT_DISABLED
-# until the separately admitted broker/provider material is available.
+# LOCAL_PRIVATE keeps Docker authority in a fixed-action broker. The scheduler
+# remains free of docker.sock and can request only signed catalog, typed-job and
+# off-site sync actions through the broker UDS.
 services:
   waf:
     group_add: !override
@@ -38,6 +38,9 @@ services:
       CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12,127.0.0.0/8,::1/128}
       CONTROL_CENTER_PASSKEY_TTL_SECONDS: ${CONTROL_CENTER_PASSKEY_TTL_SECONDS:-315360000}
       CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS: ${CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS:-true}
+      CONTROL_CENTER_BACKUP_ROOT: /var/www/project-state/backups
+      CONTROL_CENTER_REPORTS_ROOT: /var/www/project-state/reports
+      CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS: "30"
       CONTROL_CENTER_REDIS_LIVE_APPLY: "true"
       NODE_EXTRA_CA_CERTS: /run/platform/tls/control-center-local-ca.pem
     volumes: !override
@@ -97,6 +100,7 @@ services:
     restart: unless-stopped
 
   node-exporter:
+    profiles: !reset []
     volumes: !override
       - /:/host:ro
       - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/node-exporter-textfile:/var/lib/node-exporter/textfile:ro

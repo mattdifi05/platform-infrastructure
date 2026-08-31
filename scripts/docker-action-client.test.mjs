@@ -2366,6 +2366,19 @@ testWhenClientExports(
       },
       "an empty environment must retain the production queue default",
     );
+    assert.deepEqual(
+      client.defaultClaimedJobPolicy({
+        BACKUP_SCHEDULER_JOBS_DIR: jobsDirectory,
+        DOCKER_ACTION_LOCAL_ADMISSION_FILE: "/run/platform/docker-action-broker/client/admission.json",
+      }),
+      {
+        expectedGid: process.getgid(),
+        expectedUid: process.getuid(),
+        maximumBytes: MAX_CLAIMED_JOB_BYTES,
+        trustedRoot: path.join(jobsDirectory, "running"),
+      },
+      "LOCAL_PRIVATE queue files must be owned by the non-root scheduler and broker identity",
+    );
   },
 );
 

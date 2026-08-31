@@ -140,7 +140,9 @@ function wiringIssues(source) {
   requireText("name: activation-receipt-${{ github.run_id }}", "activation receipt evidence artifact is not run-bound");
   requireText("path: ${{ runner.temp }}/activation-receipt.json", "activation receipt evidence path is not exact");
   forbidText("run: sh ./scripts/deploy-vps.sh", "candidate checkout remains a production mutation sink");
-  forbidText("docker.sock", "trusted ops runner receives the Docker control socket");
+  if (deploy.includes("docker.sock")) {
+    issues.push("trusted ops runner receives the Docker control socket");
+  }
   if ((source.match(/^\s+"\$OPS_IMAGE_ID" deploy-vps > "\$ACTIVATION_RECEIPT"\s*$/gm) ?? []).length !== 1) {
     issues.push("trusted ops image entrypoint sink cardinality is not exact");
   }
@@ -225,7 +227,12 @@ assert.notDeepEqual(wiringIssues(workflow.replaceAll("DEPLOY_DAST_ACTIVATION_AUT
 assert.notDeepEqual(wiringIssues(workflow.replaceAll("ACTIVATION_PROMOTION_READ_TOKEN", "CALLER_TOKEN")), []);
 assert.notDeepEqual(wiringIssues(workflow.replaceAll("Install checksum-pinned GitHub attestation verifier", "Removed verifier install")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace('"$OPS_IMAGE_ID" deploy-vps', '"$OPS_IMAGE_ID" attacker-selected')), []);
-assert.notDeepEqual(wiringIssues(workflow.replace("docker run --rm --read-only", "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --read-only")), []);
+const trustedOpsRunAnchor = "docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges";
+assert.equal(workflow.split(trustedOpsRunAnchor).length - 1, 1);
+assert.notDeepEqual(wiringIssues(workflow.replace(
+  trustedOpsRunAnchor,
+  "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --read-only --cap-drop ALL --security-opt no-new-privileges",
+)), []);
 assert.notDeepEqual(wiringIssues(workflow.replace(
   "export DEPLOY_ENVIRONMENT_SHA256 DEPLOY_DAST_PROVIDER_RECEIPT_SHA256",
   "export DEPLOY_DAST_PROVIDER_RECEIPT_SHA256",

@@ -7,14 +7,15 @@ and effective cgroup limits without mounting the Docker socket in an additional
 container. The host service has Docker group read access and can write only the
 non-secret metrics paths under `projects-portal/state`.
 
-This collector complements node-exporter host metrics. cAdvisor remains a
-compatibility scrape target, but its process health is not accepted as proof
-that workload series exist on the supported Docker/overlayfs runtime.
+This collector complements node-exporter host metrics. The Dell V1.1 render
+does not start or scrape cAdvisor; workload evidence comes only from the
+collector's `platform_container_*` series.
 
 ## Data flow
 
-1. `platform-container-metrics.service` runs the installed copy of
-   `scripts/write-docker-stats-json.sh` every five seconds.
+1. The system service, or the Dell `--user-cron` runner, executes the installed
+   copy of `scripts/write-docker-stats-json.sh`. The Dell runner samples at
+   seconds 0, 20 and 40 of each minute.
 2. The collector reconciles `docker ps`, `docker stats --no-stream` and
    `docker inspect`. A sample is unhealthy when any running container is not
    represented by stats.
@@ -32,9 +33,10 @@ contents are collected.
 ## Truthfulness rules
 
 - A real CPU sample of `0.000%` is a measured zero, not missing data.
-- JSON snapshots older than 15 seconds are unavailable to Control Center.
+- JSON snapshots older than the configured freshness ceiling are unavailable
+  to Control Center; Dell V1.1 sets that ceiling to 30 seconds.
 - Prometheus workload rows are accepted only while the collector health series
-  is `1` and its latest attempt is no more than 15 seconds old.
+  is `1` and its latest attempt is no more than the same freshness ceiling old.
 - Missing Docker stats for any running container makes the collector unhealthy.
 - `cpuLimitCores`, `memoryLimitBytes`, `memoryReservationBytes` and `pidsLimit`
   are read from effective Docker `HostConfig`. `null` means no effective limit;
