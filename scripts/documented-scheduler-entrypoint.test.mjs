@@ -114,6 +114,11 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
     /^RUN chmod 0555 \/opt\/platform-backup-scheduler\/policy \\\n    && chmod 0444 \/opt\/platform-backup-scheduler\/policy\/local-private-backup-admission\.pub\.pem$/m,
     "the non-root scheduler must be able to traverse the public-key directory",
   );
+  assert.match(
+    candidates[0].source,
+    /^RUN chmod 0555 \\\n      \/opt\/platform-backup-scheduler\/scripts \\\n      \/opt\/platform-backup-scheduler\/control-center \\\n      \/opt\/platform-backup-scheduler\/control-center\/backup$/m,
+    "the non-root scheduler must be able to traverse every copied module directory",
+  );
   const executableSurface = instructions
     .filter(({ opcode }) => ["FROM", "RUN", "ENTRYPOINT", "CMD"].includes(opcode))
     .map(({ value }) => value)

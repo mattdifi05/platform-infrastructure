@@ -12,5 +12,9 @@ RUN chmod 0555 /opt/platform-backup-scheduler/policy \
     && chmod 0444 /opt/platform-backup-scheduler/policy/local-private-backup-admission.pub.pem
 COPY --chmod=0444 scripts/backup-queue-control.mjs /opt/platform-backup-scheduler/scripts/backup-queue-control.mjs
 COPY --chmod=0444 control-center/backup/contracts.mjs control-center/backup/queue-admission.mjs control-center/backup/queue-operation-adapter.mjs /opt/platform-backup-scheduler/control-center/backup/
+RUN chmod 0555 \
+      /opt/platform-backup-scheduler/scripts \
+      /opt/platform-backup-scheduler/control-center \
+      /opt/platform-backup-scheduler/control-center/backup
 
 ENTRYPOINT ["/opt/platform-backup-scheduler/backup-scheduler.sh"]
