@@ -111,6 +111,7 @@ function removeIfPresent(filePath) {
 export function publishBackupArtifact({
   stagingPath,
   publishedPath,
+  allowSeparateStagingDirectory = false,
   createSignature,
   onChecksumStaged,
   onPublished,
@@ -118,8 +119,20 @@ export function publishBackupArtifact({
 } = {}) {
   const staging = path.resolve(String(stagingPath ?? ""));
   const published = path.resolve(String(publishedPath ?? ""));
-  if (!stagingPath || !publishedPath || staging === published || path.dirname(staging) !== path.dirname(published)) {
-    invalid("Backup staging and publication paths must be distinct siblings.");
+  const stagingDirectory = path.dirname(staging);
+  const publishedDirectory = path.dirname(published);
+  const separateStagingDirectory = stagingDirectory !== publishedDirectory;
+  if (!stagingPath || !publishedPath || staging === published
+    || (separateStagingDirectory && allowSeparateStagingDirectory !== true)) {
+    invalid("Backup staging and publication paths must be distinct siblings unless a separate staging directory is explicitly admitted.");
+  }
+  if (separateStagingDirectory) {
+    const stagingDirectoryStat = fs.statSync(stagingDirectory);
+    const publishedDirectoryStat = fs.statSync(publishedDirectory);
+    if (!stagingDirectoryStat.isDirectory() || !publishedDirectoryStat.isDirectory()
+      || stagingDirectoryStat.dev !== publishedDirectoryStat.dev) {
+      invalid("Separate backup staging and publication directories must be directories on one filesystem.");
+    }
   }
   if (typeof createSignature !== "function") invalid("Backup signature factory is required.");
   if (onChecksumStaged !== undefined && typeof onChecksumStaged !== "function") invalid("onChecksumStaged must be a function.");
@@ -129,8 +142,8 @@ export function publishBackupArtifact({
   const signaturePath = `${published}.sig.json`;
   for (const filePath of [published, checksumPath, signaturePath]) ensureAbsent(filePath);
 
-  const checksumTemp = randomSibling(checksumPath, "staging");
-  const signatureTemp = randomSibling(signaturePath, "staging");
+  const checksumTemp = randomSibling(path.join(stagingDirectory, path.basename(checksumPath)), "staging");
+  const signatureTemp = randomSibling(path.join(stagingDirectory, path.basename(signaturePath)), "staging");
   let artifactLease;
   let checksumLease;
   let signatureLease;

@@ -275,6 +275,7 @@ assert.deepEqual(
     "scripts/docker-action-v2-fixtures.test.mjs",
     "scripts/docker-action-activation.test.mjs",
     "scripts/local-private-backup-admission.test.mjs",
+    "scripts/local-private-backup-docker-policy.test.mjs",
     "scripts/local-private-docker-action-broker.test.mjs",
     "scripts/documented-scheduler-entrypoint.test.mjs",
   ],

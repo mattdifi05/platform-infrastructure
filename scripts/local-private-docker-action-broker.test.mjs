@@ -43,6 +43,25 @@ function rcloneConfig(value, type = "onedrive") {
   return `[platform-onedrive]\ntype = ${type}\ntoken = ${JSON.stringify(value)}\ndrive_id = fixed-drive-id\ndrive_type = business\n`;
 }
 
+function executionTrust(overrides = {}) {
+  return {
+    receiptDigest: "1".repeat(64),
+    renderBinding: { egressNetwork: "platform_infra_greenfield_platform_egress" },
+    receipt: {
+      generation: 4,
+      releaseCommitSha1: "2".repeat(40),
+      treeSha256: "3".repeat(64),
+      resources: {
+        offsite: {
+          repository: "rclone:platform-onedrive:platform-infrastructure/restic",
+          resticImageId: `sha256:${"4".repeat(64)}`,
+        },
+      },
+    },
+    ...overrides,
+  };
+}
+
 test("LOCAL_PRIVATE rclone refresh permits only the platform-onedrive OAuth token value", () => {
   const before = Buffer.from(rcloneConfig(token("a".repeat(32), "b".repeat(32))));
   const after = Buffer.from(rcloneConfig(token(
@@ -179,7 +198,7 @@ test("LOCAL_PRIVATE broker dispatches backup jobs but rejects a valid restore jo
   const capture = path.join(root, "spawned.txt");
   const infraOps = path.join(root, "fake-infra-ops.mjs");
   const now = "2026-08-31T12:00:00.000Z";
-  writePrivate(infraOps, `import fs from "node:fs";\nfs.appendFileSync(${JSON.stringify(capture)}, process.argv.slice(2).join(" ") + "\\n");\n`);
+  writePrivate(infraOps, `import fs from "node:fs";\nfs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ args: process.argv.slice(2), action: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_ACTION, authority: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_AUTHORITY_SHA256, command: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_COMMAND, jobSha256: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_JOB_SHA256, schema: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_INVOCATION_SCHEMA }) + "\\n");\n`);
   try {
     for (const [id, operation] of [
       ["backup-job-0123456789abcdef", "backup"],
@@ -220,12 +239,19 @@ test("LOCAL_PRIVATE broker dispatches backup jobs but rejects a valid restore jo
     const backupResult = await runFixedOperation("backup.job.execute", backupParameters, {
       infraOps,
       jobsRoot,
+      requestSha256: "5".repeat(64),
       signal: new AbortController().signal,
       stateDir: root,
-      trusted: {},
+      trusted: executionTrust(),
     });
     assert.equal(backupResult.status, "completed");
-    assert.match(fs.readFileSync(capture, "utf8"), /^execute-backup-job --jobFile /);
+    const spawned = JSON.parse(fs.readFileSync(capture, "utf8"));
+    assert.equal(spawned.args[0], "execute-backup-job");
+    assert.equal(spawned.action, "backup.job.execute");
+    assert.equal(spawned.authority, "1".repeat(64));
+    assert.equal(spawned.command, "execute-backup-job");
+    assert.equal(spawned.jobSha256, backupParameters.jobSha256);
+    assert.equal(spawned.schema, "platform.local-private-backup-invocation/v1");
 
     fs.rmSync(capture, { force: true });
     const restoreParameters = await readClaimedBackupJob("restore-job-0123456789abcdef.json", policy);
@@ -233,9 +259,10 @@ test("LOCAL_PRIVATE broker dispatches backup jobs but rejects a valid restore jo
       runFixedOperation("backup.job.execute", restoreParameters, {
         infraOps,
         jobsRoot,
+        requestSha256: "6".repeat(64),
         signal: new AbortController().signal,
         stateDir: root,
-        trusted: {},
+        trusted: executionTrust(),
       }),
       (error) => error?.errorCode === "RESTORE_JOB_NOT_ALLOWED",
     );
@@ -260,14 +287,21 @@ test("LOCAL_PRIVATE offsite dispatch uses copy-on-write and atomically persists 
 import fs from "node:fs";
 fs.writeFileSync(process.env.RCLONE_CONFIG, ${JSON.stringify(refreshed)}, { mode: 0o600 });
 fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
+  action: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_ACTION,
+  authority: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_AUTHORITY_SHA256,
+  egress: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_EGRESS_NETWORK,
   operation: process.argv[2],
   repository: process.env.RESTIC_REPOSITORY,
+  schema: process.env.PLATFORM_LOCAL_PRIVATE_BACKUP_INVOCATION_SCHEMA,
   writable: process.env.RCLONE_CONFIG_WRITABLE,
 }));
 `);
-  const trusted = {
+  const trusted = executionTrust({
     offsiteFiles: { rcloneConfig: configFile, resticPassword: passwordFile },
     receipt: {
+      generation: 4,
+      releaseCommitSha1: "2".repeat(40),
+      treeSha256: "3".repeat(64),
       resources: {
         offsite: {
           repository: "rclone:platform-onedrive:platform-infrastructure/restic",
@@ -275,11 +309,12 @@ fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
         },
       },
     },
-  };
+  });
   try {
     const result = await runFixedOperation("backup.offsite.sync", {}, {
       infraOps,
       jobsRoot: path.join(root, "jobs"),
+      requestSha256: "7".repeat(64),
       signal: new AbortController().signal,
       stateDir,
       trusted,
@@ -288,8 +323,12 @@ fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
     assert.equal(fs.readFileSync(configFile, "utf8"), refreshed);
     const observed = JSON.parse(fs.readFileSync(capture, "utf8"));
     assert.deepEqual(observed, {
+      action: "backup.offsite.sync",
+      authority: "1".repeat(64),
+      egress: "platform_infra_greenfield_platform_egress",
       operation: "offsite-backup-restic",
       repository: "rclone:platform-onedrive:platform-infrastructure/restic",
+      schema: "platform.local-private-backup-invocation/v1",
       writable: "1",
     });
     assert.notEqual(path.resolve(configFile), path.resolve(path.join(stateDir, "rclone-refresh", "rclone.conf")));

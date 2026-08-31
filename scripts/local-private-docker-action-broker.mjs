@@ -22,6 +22,10 @@ import {
   readCanonicalAdmission,
   verifyAdmissionDocument,
 } from "./local-private-backup-admission.mjs";
+import {
+  localPrivateBackupChildBindings,
+  readLocalPrivateRenderBinding,
+} from "./local-private-backup-docker-policy.mjs";
 
 const DEFAULT_SOCKET = "/run/platform/docker-action-broker/broker.sock";
 const DEFAULT_STATE_DIR = "/var/lib/platform/docker-action-broker";
@@ -265,6 +269,13 @@ export function loadLocalPrivateTrust(environment = process.env, now = Date.now(
     publicKeyPem: fs.readFileSync(environment.DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE || DEFAULT_PUBLIC_KEY),
     renderFile,
   });
+  if (Object.keys(environment).some((key) => key.startsWith("PLATFORM_LOCAL_PRIVATE_BACKUP_"))) {
+    throw new Error("broker runtime must not inherit child-only LOCAL_PRIVATE authority markers");
+  }
+  const renderBinding = readLocalPrivateRenderBinding(renderFile);
+  for (const [key, value] of Object.entries(renderBinding.brokerEnvironment)) {
+    if (environment[key] !== value) throw new Error(`broker runtime differs from canonical render: ${key}`);
+  }
   const offsiteFiles = Object.freeze({
     rcloneConfig: verified.payload.resources.offsite.rcloneConfigPath,
     resticPassword: verified.payload.resources.offsite.resticPasswordPath,
@@ -288,6 +299,7 @@ export function loadLocalPrivateTrust(environment = process.env, now = Date.now(
       targetId: verified.payload.targetId,
     }),
     offsiteFiles,
+    renderBinding,
     receipt: verified.payload,
     receiptDigest: verified.receiptDigest,
   });
@@ -348,6 +360,21 @@ export function verifyRuntimeImages(trusted, { requireRestic = false, requireSch
     && inspectedImageId(trusted.receipt.resources.offsite.resticImageId)
       !== trusted.receipt.resources.offsite.resticImageId) {
     throw brokerError(403, "RESTIC_IMAGE_SUBSTITUTION_REJECTED", "Restic helper image differs from signed admission");
+  }
+}
+
+export function verifyRuntimeEgressNetwork(trusted) {
+  const expected = trusted.renderBinding.egressNetwork;
+  const values = JSON.parse(execFileSync("docker", ["network", "inspect", expected], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024,
+    timeout: 10_000,
+  }));
+  const network = Array.isArray(values) && values.length === 1 ? values[0] : null;
+  if (!network || network.Name !== expected || network.Driver !== "bridge"
+    || network.Internal !== false || network.EnableIPv6 !== false
+    || network.Labels?.["com.platform.trust-zone"] !== "trusted-platform-egress") {
+    throw brokerError(403, "EGRESS_NETWORK_SUBSTITUTION_REJECTED", "off-site egress network differs from signed render");
   }
 }
 
@@ -433,7 +460,7 @@ export function acquireOperation(stateDir, request) {
 }
 
 export async function runFixedOperation(action, parameters, {
-  jobsRoot, infraOps, signal, stateDir, trusted,
+  jobsRoot, infraOps, requestSha256, signal, stateDir, trusted,
 } = {}) {
   const args = [infraOps];
   let outputSchema;
@@ -468,6 +495,9 @@ export async function runFixedOperation(action, parameters, {
   let stagedRclone = null;
   delete childEnvironment.NODE_OPTIONS;
   delete childEnvironment.NODE_PATH;
+  for (const key of Object.keys(childEnvironment)) {
+    if (key.startsWith("PLATFORM_LOCAL_PRIVATE_BACKUP_")) delete childEnvironment[key];
+  }
   if (action === "backup.offsite.sync") {
     stagedRclone = stageRcloneRefresh(trusted.offsiteFiles.rcloneConfig, stateDir);
     childEnvironment.HOME = "/tmp";
@@ -482,6 +512,14 @@ export async function runFixedOperation(action, parameters, {
     childEnvironment.RESTIC_REPOSITORY = trusted.receipt.resources.offsite.repository;
     childEnvironment.RESTIC_REQUIRE_IMMUTABLE_IMAGE = "true";
   }
+  Object.assign(childEnvironment, localPrivateBackupChildBindings({
+    action,
+    command: args[1],
+    egressNetwork: trusted.renderBinding.egressNetwork,
+    jobSha256: action === "backup.job.execute" ? parameters.jobSha256 : "-",
+    requestSha256,
+    trusted,
+  }));
   let execution;
   try {
     execution = await new Promise((resolve, reject) => {
@@ -564,6 +602,7 @@ async function handleRequest(frame, environment, now = Date.now()) {
     requireRestic: request.action === "backup.offsite.sync",
     requireScheduler: true,
   });
+  if (request.action === "backup.offsite.sync") verifyRuntimeEgressNetwork(trusted);
   admitGeneration(stateDir, trusted);
   const capabilityKey = readProtectedBytes(trusted.capabilityFiles[request.action]);
   normalizeActionRequest(request, trusted, capabilityKey, { now });
@@ -575,6 +614,7 @@ async function handleRequest(frame, environment, now = Date.now()) {
     const result = await runFixedOperation(request.action, request.parameters, {
       infraOps: environment.LOCAL_PRIVATE_INFRA_OPS_FILE || DEFAULT_INFRA_OPS,
       jobsRoot: environment.BACKUP_SCHEDULER_JOBS_DIR || DEFAULT_JOBS_ROOT,
+      requestSha256: sha256(canonicalJson(request)),
       signal: controller.signal,
       stateDir,
       trusted,

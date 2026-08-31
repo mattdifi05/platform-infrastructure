@@ -254,7 +254,11 @@ jobs:
             (.services["docker-action-broker"].volumes | any(.target == "/run/platform/critical/rclone" and ((.read_only // false) == false))) and
             (.services["docker-action-broker"].volumes | any(.target == "/run/platform/control-center-state" and .read_only == true)) and
             (.services["docker-action-broker"].volumes | any(.target == "/var/lib/platform-backup-data" and ((.read_only // false) == false))) and
-            (.services["control-center"].volumes | any(.source == $backupDataSource and .target == "/var/lib/platform-backup-data" and ((.read_only // false) == false))) and
+            (([.services["control-center"].volumes[] | select(.target | startswith("/var/lib/platform-backup-data")) | {source, target, readOnly: (.read_only // false)}] | sort_by(.target)) == [
+              {source: ($backupDataSource + "/backup-jobs"), target: "/var/lib/platform-backup-data/backup-jobs", readOnly: false},
+              {source: ($backupDataSource + "/backups"), target: "/var/lib/platform-backup-data/backups", readOnly: false},
+              {source: ($backupDataSource + "/reports"), target: "/var/lib/platform-backup-data/reports", readOnly: false}
+            ]) and
             (.services["backup-scheduler"].volumes | any(.target == "/var/lib/platform-backup-data/backup-jobs" and ((.read_only // false) == false))) and
             (.services["backup-scheduler"].volumes | any(.target == "/run/platform/docker-action-broker/client" and .read_only == true)) and
             (.services["backup-scheduler"].volumes | all(.source != "/var/run/docker.sock")) and
