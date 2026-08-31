@@ -4,6 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 MODE=plan
 REPO_ROOT="${PLATFORM_REPO_ROOT:-$ROOT_DIR}"
+STATE_DIR_OVERRIDE="${PLATFORM_HOST_RELIABILITY_STATE_DIR:-}"
 UNIT_NAME=platform-host-reliability.service
 TIMER_NAME=platform-host-reliability.timer
 UNIT_FILE="/etc/systemd/system/$UNIT_NAME"
@@ -16,7 +17,7 @@ SOURCE_FILE="$ROOT_DIR/scripts/collect-host-reliability.sh"
 
 usage() {
   cat <<'EOF'
-Usage: install-host-reliability-collector.sh [--plan|--apply|--verify] [--repo-root PATH]
+Usage: install-host-reliability-collector.sh [--plan|--apply|--verify] [--repo-root PATH] [--state-dir PATH]
 
 Plan is the default. Apply installs smartmontools and nvme-cli, a hardened
 oneshot service and a one-minute timer. It does not configure networking,
@@ -30,6 +31,7 @@ while [ "$#" -gt 0 ]; do
     --apply) MODE=apply ;;
     --verify) MODE=verify ;;
     --repo-root) shift; REPO_ROOT="${1:?Missing value for --repo-root}" ;;
+    --state-dir) shift; STATE_DIR_OVERRIDE="${1:?Missing value for --state-dir}" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -37,7 +39,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$REPO_ROOT" in /*) ;; *) echo "--repo-root must be absolute" >&2; exit 2 ;; esac
-STATE_DIR="$REPO_ROOT/projects-portal/state/node-exporter-textfile"
+if [ -n "$STATE_DIR_OVERRIDE" ]; then
+  case "$STATE_DIR_OVERRIDE" in /*) ;; *) echo "--state-dir must be absolute" >&2; exit 2 ;; esac
+fi
+STATE_DIR="${STATE_DIR_OVERRIDE:-$REPO_ROOT/projects-portal/state/node-exporter-textfile}"
 PROM_FILE="$STATE_DIR/platform-host-reliability.prom"
 
 verify_installation() {

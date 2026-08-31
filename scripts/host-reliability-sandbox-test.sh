@@ -94,4 +94,18 @@ if PATH="$WORK_DIR/bin-no-route:$WORK_DIR/bin:$PATH" PLATFORM_SYS_BLOCK_ROOT="$W
   exit 1
 fi
 
+installer_plan=$(sh "$ROOT_DIR/scripts/install-host-reliability-collector.sh" \
+  --plan \
+  --repo-root "$ROOT_DIR" \
+  --state-dir "$WORK_DIR/runtime-state/node-exporter-textfile")
+printf '%s\n' "$installer_plan" | grep -Fq \
+  "$WORK_DIR/runtime-state/node-exporter-textfile/platform-host-reliability.prom"
+if sh "$ROOT_DIR/scripts/install-host-reliability-collector.sh" \
+  --plan \
+  --repo-root "$ROOT_DIR" \
+  --state-dir relative/path >/dev/null 2>&1; then
+  echo "Installer unexpectedly accepted a relative state directory" >&2
+  exit 1
+fi
+
 echo "Host reliability sandbox passed: network, patch, drive, I/O and UPS metrics are truthful."
