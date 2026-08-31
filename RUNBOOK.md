@@ -732,7 +732,8 @@ Validate before host mutation:
 sh ./scripts/host-reliability-sandbox-test.sh
 sudo sh ./scripts/install-host-reliability-collector.sh \
   --plan \
-  --repo-root /home/platform_infrastructure/platform-infrastructure
+  --repo-root /home/platform_infrastructure/platform-infrastructure \
+  --state-dir /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
 sudo sh ./scripts/configure-host-wait-online.sh --plan --interface wlp3s0
 ```
 
@@ -742,10 +743,12 @@ DHCP, routes or SSH:
 ```sh
 sudo sh ./scripts/install-host-reliability-collector.sh \
   --apply \
-  --repo-root /home/platform_infrastructure/platform-infrastructure
+  --repo-root /home/platform_infrastructure/platform-infrastructure \
+  --state-dir /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
 sudo sh ./scripts/install-host-reliability-collector.sh \
   --verify \
-  --repo-root /home/platform_infrastructure/platform-infrastructure
+  --repo-root /home/platform_infrastructure/platform-infrastructure \
+  --state-dir /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
 sudo sh ./scripts/configure-host-wait-online.sh --apply --interface wlp3s0
 sudo sh ./scripts/configure-host-wait-online.sh --verify --interface wlp3s0
 ```
