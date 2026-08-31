@@ -674,16 +674,23 @@ Prima dell'avvio verificare che:
   `LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR` e
   `LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR`, esterne al checkout e al parent
   state condiviso;
+- `LOCAL_PRIVATE_BACKUP_DATA_DIR` sia un root esterno `0700`, separato dallo
+  stato Control Center e contenente esclusivamente output backup, report,
+  runtime evidence, log scheduler e queue;
 - broker, scheduler e helper Restic corrispondano agli image ID firmati;
 - il broker sia l'unico servizio con `docker.sock` e lo scheduler non lo monti.
 
-Control Center e scheduler devono condividere esclusivamente l'ownership della
-coda `backup-jobs` come `1000:1000`: directory `0700` e file `0600`. Il Control
-Center root effettua l'handoff sui file temporanei prima di `fsync` e rename;
-lo scheduler rifiuta una configurazione UID/GID parziale o diversa. Dopo un
-restore di stato legacy, adottare una sola volta soltanto l'albero
-`backup-jobs` gia' validato e con consumer fermi; non cambiare ownership al
-resto di `PLATFORM_STATE_DIR`.
+Control Center, broker e scheduler usano UID/GID `1000:1000`. Prima di Compose,
+con i consumer fermi, eseguire
+`sh scripts/local-private-backup-filesystem-preflight.sh`: il controllo richiede
+lo stato Control Center interamente posseduto da `1000:1000`, crea e prova le
+sole leaf scrivibili sotto `LOCAL_PRIVATE_BACKUP_DATA_DIR`, e rifiuta symlink,
+path ampi o ownership divergente. Se uno stato storico e' root-owned, catturare
+prima snapshot e hash byte-exact, adottarne una sola volta l'ownership senza
+modificare i byte, quindi rieseguire il preflight. Il broker monta lo stato
+Control Center soltanto read-only; queue, artifact, report e runtime evidence
+restano nel data root separato. Project router e workload PHP non montano lo
+stato Control Center.
 
 Il boundary queue LOCAL_PRIVATE ammette solo job `backup`: qualunque
 `restore-drill` viene rifiutato nel broker prima di avviare `infra-ops`. I

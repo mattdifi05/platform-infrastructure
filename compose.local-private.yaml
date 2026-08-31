@@ -23,7 +23,6 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available
       - ${PLATFORM_CERTS_DIR:?set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
@@ -62,7 +61,6 @@ services:
       PHP_PROJECT_UPSTREAMS: anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80
     volumes: !override
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state:ro
       - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:?set exact LOCAL_PRIVATE runtime lock}:/run/platform/hosted-workloads.lock.json:ro
 
   mariadb:
@@ -103,7 +101,7 @@ services:
     profiles: !reset []
     volumes: !override
       - /:/host:ro
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}/runtime-state/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
 
 secrets:
   phpmyadmin_control_password: !reset null

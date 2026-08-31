@@ -92,6 +92,7 @@ const codeRoot = path.resolve(scriptDir, "..");
 const infraRoot = path.resolve(process.env.PLATFORM_INFRA_ROOT || codeRoot);
 const dataRoot = path.resolve(process.env.PLATFORM_DATA_ROOT || infraRoot);
 const projectStateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || path.join(dataRoot, "projects-portal", "state"));
+const backupRuntimeStateRoot = path.resolve(process.env.BACKUP_RUNTIME_STATE_ROOT || projectStateRoot);
 const secretsRoot = path.resolve(process.env.PLATFORM_SECRETS_ROOT || path.join(infraRoot, "secrets"));
 const reportsRoot = path.join(dataRoot, "reports");
 const backupsRoot = path.join(dataRoot, "backups");
@@ -752,7 +753,7 @@ function postgresOut(container, database, user, sql, options = {}) {
 }
 
 function backupRestoreRunLogPath() {
-  const stateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || projectStateRoot);
+  const stateRoot = backupRuntimeStateRoot;
   fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   return path.join(stateRoot, "backup-restore-runs.jsonl");
 }
@@ -764,7 +765,7 @@ function backupRestoreRunRecords() {
 }
 
 function writeBackupFreshnessMetrics(records = backupRestoreRunRecords()) {
-  const outputDir = path.join(projectStateRoot, "node-exporter-textfile");
+  const outputDir = path.resolve(process.env.BACKUP_NODE_EXPORTER_TEXTFILE_DIR || path.join(backupRuntimeStateRoot, "node-exporter-textfile"));
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o755 });
   const now = Date.now();
   const lines = [
@@ -2358,6 +2359,14 @@ async function backupApplications(options = {}) {
 }
 
 function controlCenterStateRoot() {
+  const explicitStateRoot = String(process.env.CONTROL_CENTER_STATE_ROOT || "").trim();
+  if (explicitStateRoot) {
+    const stateRoot = path.resolve(explicitStateRoot);
+    if (!fs.existsSync(stateRoot) || !fs.statSync(stateRoot).isDirectory()) {
+      fail("Explicit Control Center state root is not available for backup.");
+    }
+    return stateRoot;
+  }
   const candidates = [
     process.env.PROJECT_STATE_ROOT,
     "/var/www/project-state",
@@ -2369,7 +2378,7 @@ function controlCenterStateRoot() {
 }
 
 function validateControlCenterStateRoot(stateRoot) {
-  const required = ["projects.json", "databases.json", "secret-vault.json", "operations.jsonl", "audit.jsonl"];
+  const required = ["databases.json", "secret-vault.json", "operations.jsonl", "audit.jsonl"];
   const missing = required.filter((name) => !fs.existsSync(path.join(stateRoot, name)));
   if (missing.length) fail(`Control Center state backup is missing required files: ${missing.join(", ")}.`);
   return required;
@@ -2386,6 +2395,8 @@ async function backupControlCenterState(options = {}) {
   run("tar", [
     "-czf", stagingPath,
     "--exclude=backup-jobs",
+    "--exclude=backups",
+    "--exclude=reports",
     "--exclude=*.tmp",
     "--exclude=*.tmp-*",
     "--exclude=*.codex-*",
@@ -3887,6 +3898,7 @@ function infraMaintainabilityHygiene() {
     "hosted-workload-lock.sh",
     "hosted-workload-network-ownership.sh",
     "install-host-reliability-collector.sh",
+    "local-private-backup-filesystem-preflight.sh",
     "minio-service-identity.sh",
     "network-segmentation-sandbox-test.sh",
     "php-project-runtime.sh",

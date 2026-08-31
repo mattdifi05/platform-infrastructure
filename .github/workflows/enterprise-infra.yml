@@ -178,6 +178,28 @@ jobs:
           docker compose --env-file .env -p platform_ops_ci \
             -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml \
             config --quiet
+      - name: LOCAL_PRIVATE backup filesystem preflight
+        run: |
+          state_root="${RUNNER_TEMP}/local-private-state"
+          data_parent="${RUNNER_TEMP}/local-private-backup"
+          data_root="${data_parent}/data"
+          install -d -m 700 "$state_root" "$data_parent"
+          PLATFORM_STATE_DIR="$state_root" \
+          LOCAL_PRIVATE_BACKUP_DATA_DIR="$data_root" \
+          LOCAL_PRIVATE_BACKUP_UID="$(id -u)" \
+          LOCAL_PRIVATE_BACKUP_GID="$(id -g)" \
+            sh scripts/local-private-backup-filesystem-preflight.sh
+          test "$(stat -c '%a' "$data_root/backup-jobs")" = 700
+          ln -s "$state_root" "$state_root/rejected-symlink"
+          if PLATFORM_STATE_DIR="$state_root" \
+            LOCAL_PRIVATE_BACKUP_DATA_DIR="$data_root" \
+            LOCAL_PRIVATE_BACKUP_UID="$(id -u)" \
+            LOCAL_PRIVATE_BACKUP_GID="$(id -g)" \
+              sh scripts/local-private-backup-filesystem-preflight.sh; then
+            echo 'Symlinked state entry escaped backup filesystem preflight.' >&2
+            exit 1
+          fi
+          rm "$state_root/rejected-symlink"
       - name: Render VPS WAF compose
         run: |
           docker compose --env-file .env.vps.example -p platform_infra_vps_ci \
@@ -207,6 +229,8 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-docker-action-broker")][0].source) as $brokerStateSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/docker-action-broker/client")][0].source) as $brokerTrustSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/local-private-input/combined-render.yaml")][0].source) as $brokerRenderSource |
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/control-center-state")][0].source) as $controlStateSource |
+            ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
             (.services | length) == 35 and
             (.secrets | length) == 20 and
             (.networks | length) == 11 and
@@ -214,6 +238,7 @@ jobs:
             (.services["backup-scheduler"].network_mode == "none") and
             (.services["docker-action-broker"].user == "1000:1000") and
             (.services["backup-scheduler"].user == "1000:1000") and
+            (.services["control-center"].user == "1000:1000") and
             ((.services["docker-action-broker"].profiles // []) == []) and
             ((.services["backup-scheduler"].profiles // []) == []) and
             (.services["docker-action-broker"].entrypoint == ["node", "/opt/platform-infrastructure/scripts/local-private-docker-action-broker.mjs"]) and
@@ -227,6 +252,10 @@ jobs:
             (.services["docker-action-broker"].volumes | any(.target == "/run/platform/docker-action-broker/client" and .read_only == true)) and
             (.services["docker-action-broker"].volumes | any(.target == "/run/platform/critical" and .read_only == true)) and
             (.services["docker-action-broker"].volumes | any(.target == "/run/platform/critical/rclone" and ((.read_only // false) == false))) and
+            (.services["docker-action-broker"].volumes | any(.target == "/run/platform/control-center-state" and .read_only == true)) and
+            (.services["docker-action-broker"].volumes | any(.target == "/var/lib/platform-backup-data" and ((.read_only // false) == false))) and
+            (.services["control-center"].volumes | any(.source == $backupDataSource and .target == "/var/lib/platform-backup-data" and ((.read_only // false) == false))) and
+            (.services["backup-scheduler"].volumes | any(.target == "/var/lib/platform-backup-data/backup-jobs" and ((.read_only // false) == false))) and
             (.services["backup-scheduler"].volumes | any(.target == "/run/platform/docker-action-broker/client" and .read_only == true)) and
             (.services["backup-scheduler"].volumes | all(.source != "/var/run/docker.sock")) and
             (.services["docker-action-broker"].environment.DOCKER_ACTION_BROKER_STATE_DIR == "/var/lib/platform-docker-action-broker") and
@@ -234,6 +263,8 @@ jobs:
             (.services["docker-action-broker"].environment.LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT == $brokerStateSource) and
             ([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerStateSource)) | .key] == ["docker-action-broker"]) and
             ([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerRenderSource)) | .key] == ["docker-action-broker"]) and
+            (([.services | to_entries[] | select(any(.value.volumes[]?; .source == $controlStateSource)) | .key] | sort) == ["control-center", "docker-action-broker"]) and
+            ([.services | to_entries[] | select(.key != "control-center" and .key != "docker-action-broker") | .value.volumes[]? | select(.type == "bind") | select(.source == $controlStateSource or path_contains($controlStateSource; .source))] | length == 0) and
             (([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerRuntimeSource)) | .key] | sort) == ["backup-scheduler", "docker-action-broker"]) and
             (([.services | to_entries[] | select(any(.value.volumes[]?; .source == $brokerTrustSource)) | .key] | sort) == ["backup-scheduler", "docker-action-broker"]) and
             ([.services | to_entries[] | select(.key != "backup-scheduler" and .key != "docker-action-broker") | .value.volumes[]? | select(.type == "bind") | .source as $source | select(path_contains($source; $brokerStateSource) or path_contains($source; $brokerRuntimeSource) or path_contains($source; $brokerTrustSource) or path_contains($source; $brokerRenderSource))] | length == 0) and
@@ -242,7 +273,7 @@ jobs:
             (.services["docker-action-activation-sidecar"] == null) and
             (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
             (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
-            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 8, "php-fiplatform": 9, "php-matthewdifilippo": 8, "php-stream": 8, "php-workcalendar": 8} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
+            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 7, "php-fiplatform": 8, "php-matthewdifilippo": 7, "php-stream": 7, "php-workcalendar": 7} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
           ' "${RUNNER_TEMP}/v1-current-render.json"
       - name: Render staging and backup compose
         run: |

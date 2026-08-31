@@ -34,7 +34,6 @@ x-dedicated-php-app: &dedicated_php_app
     SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
     SMTP_PASSWORD_FILE: /run/secrets/smtp_password
     NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
-    PROJECT_STATE_FILE: /var/www/project-state/projects.json
   secrets:
     - projects_gateway_signing_keys
     - smtp_password
@@ -464,7 +463,6 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}/anniversary:/var/www/projects/anniversary
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?Set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available:ro
       - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
@@ -482,7 +480,6 @@ services:
       - ${PHP_PROJECTS_DIR:-../src}/fiplatform:/var/www/projects/fiplatform
       - ${PHP_PROJECTS_DIR:-../src}/fiplatform:/var/www/projects/fireport
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?Set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available:ro
       - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
@@ -499,7 +496,6 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}/matthewdifilippo:/var/www/projects/matthewdifilippo
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?Set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available:ro
       - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
@@ -515,7 +511,6 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}/stream:/var/www/projects/stream
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?Set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available:ro
       - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
@@ -533,7 +528,6 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}/workcalendar:/var/www/projects/workcalendar
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ${PLATFORM_STATE_DIR:?Set PLATFORM_STATE_DIR}:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available:ro
       - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
