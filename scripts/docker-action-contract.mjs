@@ -109,6 +109,7 @@ const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const DIGEST_IMAGE = /^[a-zA-Z0-9][a-zA-Z0-9._/:+-]*@sha256:[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
 const DNS_HOST = /^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*$/;
+const RESTIC_CREDENTIAL_FILE = "password";
 const ALLOWED_CONTAINER_PATHS = new Set([
   "/opt/platform-infrastructure",
   "/opt/platform-infrastructure/backups",
@@ -1109,7 +1110,7 @@ function normalizeResources(value) {
     "offsite.credentials": [
       "/run/platform/worker-secrets/offsite",
       "worker.input.offsite",
-      { password: "password", repository: "repository" },
+      { password: RESTIC_CREDENTIAL_FILE, repository: "repository" },
     ],
     "postgres.capture.credentials": [
       "/run/platform/worker-secrets/postgres-capture",

@@ -13821,7 +13821,6 @@ function secretScanPatterns() {
 
 const reviewedSecretScanFingerprints = new Set([
   "control-center/redis/operations.test.mjs:71:password-assignment:1dfff2c7878039cb3a6f1b16133a4c5ef4f2ec3312793ffb2c3dd120532248e7",
-  "scripts/docker-action-contract.mjs:1069:password-assignment:8a9053358dc4e2ddfd1ef679a71392fc866164a6e1ed95a0767b25be79dcb213",
   "scripts/docker-action-helper-plan.mjs:619:api-token-assignment:396dac1fb362c2819d23ede6fb220831d7e67055f8a3ade49e8510b99d803918",
   "scripts/docker-action-helper-plan.mjs:620:api-token-assignment:82e35d50d9a66a0081107b66e6425b2ed6c7bf6162251ce556d835559234f340",
   "scripts/postfix_evidence/tests/test_postfix_evidence.py:2913:password-assignment:de69f9405273dab37e09f2745491b748f0458ee5b26aaae167b68ce7960458ce",
