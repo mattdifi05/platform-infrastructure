@@ -4,9 +4,15 @@
 # actions (catalog, typed job execution and off-site sync) to the scheduler.
 services:
   control-center:
+    user: "1000:1000"
     environment:
       BACKUP_QUEUE_SHARED_UID: "1000"
       BACKUP_QUEUE_SHARED_GID: "1000"
+      PROJECT_BACKUP_JOBS_DIR: /var/lib/platform-backup-data/backup-jobs
+      CONTROL_CENTER_BACKUP_ROOT: /var/lib/platform-backup-data/backups
+      CONTROL_CENTER_REPORTS_ROOT: /var/lib/platform-backup-data/reports
+    volumes:
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}:/var/lib/platform-backup-data
 
   docker-action-broker:
     profiles: !reset []
@@ -31,17 +37,21 @@ services:
       DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE: /opt/platform-infrastructure/policy/local-private-backup-admission.pub.pem
       DOCKER_ACTION_LOCAL_RENDER_FILE: /run/platform/local-private-input/combined-render.yaml
       BACKUP_SIGNING_KEYS_FILE: /run/platform/local-private-input/backup_signing_keys
-      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_JOBS_DIR: /var/lib/platform-backup-data/backup-jobs
+      BACKUP_RUNTIME_STATE_ROOT: /var/lib/platform-backup-data/runtime-state
+      BACKUP_NODE_EXPORTER_TEXTFILE_DIR: /var/lib/node-exporter/textfile
       LOCAL_PRIVATE_INFRA_OPS_FILE: /opt/platform-infrastructure/scripts/infra-ops.mjs
       PLATFORM_ENVIRONMENT: production
       PLATFORM_INFRA_ROOT: /opt/platform-infrastructure
       PLATFORM_INFRA_CONTAINER_ROOT: /opt/platform-infrastructure
       PLATFORM_INFRA_HOST_ROOT: ${LOCAL_PRIVATE_RELEASE_ROOT:?set exact release root on the Dell host}
-      PLATFORM_DATA_ROOT: /var/www/project-state
-      PLATFORM_DATA_CONTAINER_ROOT: /var/www/project-state
-      PLATFORM_DATA_HOST_ROOT: ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}
-      PROJECT_STATE_ROOT: /var/www/project-state
-      PLATFORM_STATE_CONTAINER_ROOT: /var/www/project-state
+      PLATFORM_DATA_ROOT: /var/lib/platform-backup-data
+      PLATFORM_DATA_CONTAINER_ROOT: /var/lib/platform-backup-data
+      PLATFORM_DATA_HOST_ROOT: ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}
+      CONTROL_CENTER_STATE_ROOT: /run/platform/control-center-state
+      PROJECT_STATE_ROOT: /run/platform/control-center-state
+      PROJECT_DATABASES_FILE: /run/platform/control-center-state/databases.json
+      PLATFORM_STATE_CONTAINER_ROOT: /run/platform/control-center-state
       PLATFORM_STATE_HOST_ROOT: ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}
       PROJECT_SOURCE_ROOT: /var/www/projects
       PROJECT_SOURCE_HOST_ROOT: ${PHP_PROJECTS_DIR:?set PHP_PROJECTS_DIR}
@@ -61,7 +71,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR:?set dedicated broker runtime directory}:/run/platform/docker-action-broker
       - ${LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR:?set dedicated broker state directory}:/var/lib/platform-docker-action-broker
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/run/platform/control-center-state:ro
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}:/var/lib/platform-backup-data
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}/runtime-state/node-exporter-textfile:/var/lib/node-exporter/textfile
       - ${PHP_PROJECTS_DIR:?set PHP_PROJECTS_DIR}:/var/www/projects:ro
       - ${LOCAL_PRIVATE_BACKUP_TRUST_DIR:?set materialized signed trust directory}:/run/platform/docker-action-broker/client:ro
       - ${LOCAL_PRIVATE_CRITICAL_ROOT:?set migrated critical state root}:/run/platform/critical:ro
@@ -91,7 +103,7 @@ services:
       BACKUP_SCHEDULER_ENABLE_OFFSITE: "true"
       BACKUP_SCHEDULER_OFFSITE_CRON: "${BACKUP_SCHEDULER_OFFSITE_CRON:-35 */8 * * *}"
       BACKUP_SCHEDULER_RUN_ON_START: "false"
-      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_JOBS_DIR: /var/lib/platform-backup-data/backup-jobs
       BACKUP_SCHEDULER_LOG_DIR: /var/log/platform
       BACKUP_SCHEDULER_CRON_FILE: /run/platform/backup-scheduler/crontabs/node
       BACKUP_SCHEDULER_ENV_FILE: /run/platform/backup-scheduler/backup-scheduler.env
@@ -116,8 +128,8 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
       - /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700
     volumes: !override
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/backup-jobs:/var/www/project-state/backup-jobs
-      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/backup-scheduler-logs:/var/log/platform
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}/backup-jobs:/var/lib/platform-backup-data/backup-jobs
+      - ${LOCAL_PRIVATE_BACKUP_DATA_DIR:?set dedicated backup data directory}/scheduler-logs:/var/log/platform
       - ${LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR:?set dedicated broker runtime directory}:/run/platform/docker-action-broker:ro
       - ${LOCAL_PRIVATE_BACKUP_TRUST_DIR:?set materialized signed trust directory}:/run/platform/docker-action-broker/client:ro
     depends_on:

@@ -152,6 +152,7 @@ test("broker trust, render, state and UDS defaults stay outside shared checkout 
     environment.LOCAL_PRIVATE_BACKUP_TRUST_DIR,
     environment.LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR,
     environment.LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR,
+    environment.LOCAL_PRIVATE_BACKUP_DATA_DIR,
   ];
   const isContainedBy = (parent, candidate) => {
     const relative = path.posix.relative(parent, candidate);
@@ -166,4 +167,10 @@ test("broker trust, render, state and UDS defaults stay outside shared checkout 
   assert.doesNotMatch(compose, /\$\{PLATFORM_STATE_DIR[^}]*\}\/docker-action-broker-(?:runtime|state)/);
   assert.match(compose, /\$\{LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR[^}]*\}:\/var\/lib\/platform-docker-action-broker/);
   assert.match(compose, /\$\{LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR[^}]*\}:\/run\/platform\/docker-action-broker/);
+  assert.match(compose, /^\s{4}user: "1000:1000"$/m);
+  assert.match(compose, /\$\{PLATFORM_STATE_DIR[^}]*\}:\/run\/platform\/control-center-state:ro/);
+  assert.match(compose, /\$\{LOCAL_PRIVATE_BACKUP_DATA_DIR[^}]*\}:\/var\/lib\/platform-backup-data/);
+  assert.match(compose, /PROJECT_BACKUP_JOBS_DIR: \/var\/lib\/platform-backup-data\/backup-jobs/);
+  assert.match(compose, /BACKUP_RUNTIME_STATE_ROOT: \/var\/lib\/platform-backup-data\/runtime-state/);
+  assert.doesNotMatch(compose, /\$\{PLATFORM_STATE_DIR[^}]*\}:\/var\/www\/project-state(?:\s|$)/);
 });

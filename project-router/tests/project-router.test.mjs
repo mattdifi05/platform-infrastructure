@@ -492,7 +492,8 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
   assert.match(overlay, /node-opstudents:3000/);
   assert.match(overlay, /php-workcalendar:80/);
   assert.match(overlay, /\/var\/www\/projects:ro/);
-  assert.match(overlay, /\/var\/www\/project-state:ro/);
+  const routerOverlay = /\n  project-router:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:|\nsecrets:)/.exec(overlay)?.[0] || "";
+  assert.doesNotMatch(routerOverlay, /PLATFORM_STATE_DIR[^\n]*:\/var\/www\/project-state/);
 });
 
 test("LOCAL_PRIVATE keeps the project wildcard below portal, docs and identity routes", () => {

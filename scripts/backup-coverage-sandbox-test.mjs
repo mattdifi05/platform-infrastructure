@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -22,6 +23,7 @@ const sandboxRoot = mkdtempSync(path.join(os.tmpdir(), "platform-t07-coverage-")
 const replicaRoot = path.join(sandboxRoot, "infra");
 const sourceRoot = path.join(sandboxRoot, "source");
 const stateRoot = path.join(sandboxRoot, "state");
+const runtimeStateRoot = path.join(sandboxRoot, "backup-runtime-state");
 const jobsRoot = path.join(sandboxRoot, "jobs");
 const keyFile = path.join(sandboxRoot, "backup-signing-keys.txt");
 
@@ -32,7 +34,10 @@ function runOps(args, expectSuccess = true, envOverrides = {}) {
     env: {
       ...process.env,
       PROJECT_SOURCE_ROOT: sourceRoot,
-      PROJECT_STATE_ROOT: stateRoot,
+      CONTROL_CENTER_STATE_ROOT: stateRoot,
+      PROJECT_STATE_ROOT: runtimeStateRoot,
+      BACKUP_RUNTIME_STATE_ROOT: runtimeStateRoot,
+      BACKUP_NODE_EXPORTER_TEXTFILE_DIR: path.join(runtimeStateRoot, "node-exporter-textfile"),
       PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
       BACKUP_SCHEDULER_JOBS_DIR: jobsRoot,
       BACKUP_SIGNING_KEYS_FILE: keyFile,
@@ -85,6 +90,8 @@ try {
   mkdirSync(path.join(replicaRoot, "scripts"), { recursive: true });
   mkdirSync(path.join(replicaRoot, "control-center", "backup"), { recursive: true });
   mkdirSync(path.join(replicaRoot, "governance"), { recursive: true });
+  mkdirSync(path.join(replicaRoot, "vendor"), { recursive: true });
+  cpSync(path.join(repositoryRoot, "vendor", "json-schema"), path.join(replicaRoot, "vendor", "json-schema"), { recursive: true });
   cpSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), path.join(replicaRoot, "scripts", "infra-ops.mjs"));
   for (const moduleName of [
     "network-segmentation-policy.mjs",
@@ -112,6 +119,19 @@ try {
     "edge-provider-evidence.mjs",
     "admin-access-inventory.mjs",
     "provider-mfa-assurance.mjs",
+    "deployment-admission-policy.mjs",
+    "deployment-receipt-policy.mjs",
+    "trusted-provider-run-policy.mjs",
+    "release-go-no-go-policy.mjs",
+    "privileged-workflow-policy.mjs",
+    "stable-json-artifact.mjs",
+    "source-archive-policy.mjs",
+    "buildkit-sbom-policy.mjs",
+    "release-registry-resolution.mjs",
+    "local-private-compatibility-source-boundary.mjs",
+    "release-artifact-policy.mjs",
+    "runtime-intent-policy.mjs",
+    "cyclonedx-schema-policy.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   cpSync(path.join(repositoryRoot, "governance", "backup-data-policy.json"), path.join(replicaRoot, "governance", "backup-data-policy.json"));
@@ -127,7 +147,6 @@ try {
     deleted: { id: "old", projectId: "alpha", engine: "mariadb", name: "old", status: "deleted" },
   }, null, 2)}\n`, { mode: 0o600 });
   for (const [name, content] of [
-    ["projects.json", "{}\n"],
     ["secret-vault.json", '{"version":2,"items":{}}\n'],
     ["operations.jsonl", '{"event":"fixture"}\n'],
     ["audit.jsonl", '{"event":"fixture"}\n'],
@@ -185,6 +204,21 @@ try {
   const stateRestoreReport = JSON.parse(readFileSync(path.join(replicaRoot, completedStateRestore.reportPaths[0]), "utf8"));
   if (stateRestoreReport.status !== "passed" || stateRestoreReport.results[0]?.liveStateChanged !== false) throw new Error("Control Center state restore drill is incomplete or touched live state.");
 
+  const auditFile = path.join(stateRoot, "audit.jsonl");
+  const missingAuditFile = `${auditFile}.missing`;
+  renameSync(auditFile, missingAuditFile);
+  const incompleteStateJob = createBackupJobDocument({
+    id: "control-center-state-missing-audit",
+    operation: "backup",
+    scope: { kind: "platform", id: "platform" },
+    resources: [stateResource],
+    requestedBy: "state-sandbox",
+    environment: "sandbox",
+  });
+  const incompleteStateResult = runOps(["execute-backup-job", "--jobFile", writeJobDocument(incompleteStateJob)], false);
+  if (!`${incompleteStateResult.stderr}\n${incompleteStateResult.stdout}`.includes("audit.jsonl")) throw new Error("Missing required Control Center state did not fail closed.");
+  renameSync(missingAuditFile, auditFile);
+
   for (let index = 1; index <= 3; index += 1) {
     runOps(["execute-backup-job", "--jobFile", writeRunningJob(`retention-platform-${index}`)]);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
@@ -221,6 +255,8 @@ try {
     exactResourceCount: coverage.resourceCount,
     sourceDiscoveryExcludedTooling: true,
     controlCenterStateRestoreSandboxPassed: true,
+    optionalProjectsStatePassed: true,
+    missingRequiredStateRejected: true,
     completeManifestRetention: true,
     unmanifestedArtifactsDeleted: false,
     privateModes: true,
