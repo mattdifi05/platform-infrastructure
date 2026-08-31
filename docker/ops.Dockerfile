@@ -37,7 +37,8 @@ RUN curl --fail --location --silent --show-error \
 
 COPY control-center/package.json control-center/package-lock.json /tmp/control-center-dependencies/
 RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts --no-audit --no-fund \
-    && mv /tmp/control-center-dependencies/node_modules /node_modules \
+    && install -d -m 0755 /opt/platform-infrastructure \
+    && mv /tmp/control-center-dependencies/node_modules /opt/platform-infrastructure/node_modules \
     && rm -rf /tmp/control-center-dependencies
 
 COPY scripts/ /opt/platform-infrastructure/scripts/
