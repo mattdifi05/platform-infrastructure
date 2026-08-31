@@ -204,10 +204,14 @@ test("typed root-bound Docker admission rejects raw calls and admits only action
   assert.match(runner, /bin = "\/usr\/bin\/docker"/);
 
   const minioBackup = body("async function backupMinio", "const minioRestoreComparatorVersion");
+  const keycloakBackup = body("async function backupKeycloakConfig", "const keycloakConfigComparatorVersion");
   const secretBackup = body("async function backupSecretManagerMetadata", "async function restoreTestSecretManagerMetadata");
   const secretRestore = body("async function restoreTestSecretManagerMetadata", "async function backupRestoreDrillSecretManagerMetadata");
-  assert.match(minioBackup, /dockerRun\(\[\s*"--network", "none"/);
-  assert.match(secretBackup, /dockerRun\(\[\s*"--network", "none"/);
+  const archiveIdentity = body("function backupArchiveContainerIdentityArgs", "function makeOpsTempDir");
+  assert.match(archiveIdentity, /localPrivateBackupInvocation \? \["--user", "1000:1000"\] : \[\]/);
+  for (const backup of [minioBackup, keycloakBackup, secretBackup]) {
+    assert.match(backup, /dockerRun\(\[\s*"--network", "none",\s*\.\.\.backupArchiveContainerIdentityArgs\(\)/);
+  }
   assert.match(secretRestore, /dockerRun\(\[\s*"--network", "none"/);
   const temp = body("function hostPathForContainerMount", "function dockerStatsSnapshot");
   assert.match(temp, /typedEvidenceTransactionRoot\(\)/);

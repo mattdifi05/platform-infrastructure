@@ -62,18 +62,21 @@ test("LOCAL_PRIVATE catalog and job Docker policy admits only exact backup captu
     ["cp", "gf-keycloak:/tmp/platform-keycloak-config-backup", `${roots.dataContainer}/.tmp/ops/platform-keycloak-config-Abc123/keycloak-config`],
     [
       "run", "--rm", "--network", "none",
+      "--user", "1000:1000",
       "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
       "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
       `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
     ],
     [
       "run", "--rm", "--network", "none",
+      "--user", "1000:1000",
       "-v", `${roots.dataHost}/.tmp/ops/platform-keycloak-config-Abc123/keycloak-config:/work:ro`,
       "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
       `tar -czf /backup/'.keycloak-config-20260831-141503.tar.gz.staging-${pid}-${random}' -C /work .`,
     ],
     [
       "run", "--rm", "--network", "none",
+      "--user", "1000:1000",
       "-v", `${roots.dataHost}/.tmp/ops/infra-secret-manager-metadata-Abc123:/work:ro`,
       "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
       `tar -czf /backup/'.secret-manager-metadata-20260831-141504.tar.gz.staging-${pid}-${random}' -C /work .`,
@@ -96,6 +99,36 @@ test("LOCAL_PRIVATE Docker policy rejects arbitrary containers, mounts, flags, r
     [
       "run", "--rm", "--network", "none",
       "-v", `${roots.dataContainer}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
+    [
+      "run", "--rm", "--network", "none",
+      "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
+    [
+      "run", "--rm", "--network", "none", "--user", "0:0",
+      "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
+    [
+      "run", "--rm", "--network", "none", "--user", "1000:1001",
+      "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
+    [
+      "run", "--rm", "--network", "none", "--user", "1000:1000", "--user", "1000:1000",
+      "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
+      "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
+      `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
+    ],
+    [
+      "run", "--rm", "--user", "1000:1000", "--network", "none",
+      "-v", `${roots.dataHost}/.tmp/ops/platform-minio-data-Abc123/minio-data:/work:ro`,
       "-v", `${roots.stagingHost}:/backup`, nodeImage, "sh", "-lc",
       `tar -czf /backup/'.minio-data-20260831-141502.tar.gz.staging-${pid}-${random}' -C /work .`,
     ],

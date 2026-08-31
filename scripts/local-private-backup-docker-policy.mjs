@@ -482,13 +482,14 @@ function escapeRegExp(value) {
 }
 
 function localPrivateArchiveRunAllowed(invocation, args, processId) {
-  if (args.length !== 12 || !sameStringArray(args.slice(0, 4), ["run", "--rm", "--network", "none"])
-    || args[4] !== "-v" || args[6] !== "-v" || args[8] !== invocation.nodeImage
-    || !sameStringArray(args.slice(9, 11), ["sh", "-lc"])) return false;
+  const prefix = ["run", "--rm", "--network", "none", "--user", "1000:1000"];
+  if (args.length !== 14 || !sameStringArray(args.slice(0, prefix.length), prefix)
+    || args[6] !== "-v" || args[8] !== "-v" || args[10] !== invocation.nodeImage
+    || !sameStringArray(args.slice(11, 13), ["sh", "-lc"])) return false;
   const workSuffix = ":/work:ro";
   const outputSuffix = ":/backup";
-  const work = args[5].endsWith(workSuffix) ? args[5].slice(0, -workSuffix.length) : "";
-  const output = args[7].endsWith(outputSuffix) ? args[7].slice(0, -outputSuffix.length) : "";
+  const work = args[7].endsWith(workSuffix) ? args[7].slice(0, -workSuffix.length) : "";
+  const output = args[9].endsWith(outputSuffix) ? args[9].slice(0, -outputSuffix.length) : "";
   const families = [
     ["platform-minio-data-", /\/platform-minio-data-[A-Za-z0-9_-]+\/minio-data$/, "minio-data"],
     ["platform-keycloak-config-", /\/platform-keycloak-config-[A-Za-z0-9_-]+\/keycloak-config$/, "keycloak-config"],
@@ -497,7 +498,7 @@ function localPrivateArchiveRunAllowed(invocation, args, processId) {
   const family = families.find(([prefix, pattern]) => work.includes(`/${prefix}`) && pattern.test(work));
   if (!family || !pathInside(path.join(invocation.roots.dataHost, ".tmp/ops"), work)
     || output !== invocation.roots.stagingHost) return false;
-  const archive = args[11].match(/^tar -czf \/backup\/'([^']+)' -C \/work \.$/);
+  const archive = args[13].match(/^tar -czf \/backup\/'([^']+)' -C \/work \.$/);
   return Boolean(archive)
     && new RegExp(`^\\.${family[2]}-[0-9]{8}-[0-9]{6}\\.tar\\.gz\\.staging-${processId}-[a-f0-9]{24}$`).test(archive[1]);
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -122,6 +123,39 @@ test("an explicitly admitted private staging directory publishes by immutable cr
     publication.assertCurrent();
     assert.deepEqual(fs.readFileSync(publishedPath), artifactA);
     assert.equal(fs.readdirSync(stagingDirectory).length, 0);
+  } finally {
+    publication?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a same-owner archive of a restrictive copied tree publishes as mode 0400", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "backup-publication-archive-owner-"));
+  const workDirectory = path.join(root, "copied-tree");
+  const nestedDirectory = path.join(workDirectory, "private");
+  const stagingDirectory = path.join(root, "broker-only-staging");
+  const publishedDirectory = path.join(root, "shared-backups");
+  const stagingPath = path.join(stagingDirectory, ".copied-tree.tar.gz.staging-synthetic");
+  const publishedPath = path.join(publishedDirectory, "copied-tree.tar.gz");
+  fs.mkdirSync(nestedDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(stagingDirectory, { mode: 0o700 });
+  fs.mkdirSync(publishedDirectory, { mode: 0o700 });
+  fs.writeFileSync(path.join(nestedDirectory, "private.txt"), artifactA, { mode: 0o600 });
+  let publication;
+  try {
+    execFileSync("tar", ["-czf", stagingPath, "-C", workDirectory, "."]);
+    const stagingStat = fs.statSync(stagingPath);
+    if (typeof process.getuid === "function") assert.equal(stagingStat.uid, process.getuid());
+    publication = publishBackupArtifact({
+      stagingPath,
+      publishedPath,
+      allowSeparateStagingDirectory: true,
+      createSignature: signatureFactory,
+    });
+    publication.assertCurrent();
+    const publishedStat = fs.statSync(publishedPath);
+    if (typeof process.getuid === "function") assert.equal(publishedStat.uid, process.getuid());
+    assert.equal(publishedStat.mode & 0o777, 0o400);
   } finally {
     publication?.close();
     fs.rmSync(root, { recursive: true, force: true });
