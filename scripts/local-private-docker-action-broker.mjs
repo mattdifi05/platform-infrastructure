@@ -40,10 +40,14 @@ const DEFAULT_RENDER = "/run/platform/local-private-input/combined-render.yaml";
 const DEFAULT_SIGNING_KEY = "/run/platform/local-private-input/backup_signing_keys";
 const DEFAULT_JOBS_ROOT = "/var/lib/platform-backup-data/backup-jobs";
 const DEFAULT_INFRA_OPS = "/opt/platform-infrastructure/scripts/infra-ops.mjs";
+const DEFAULT_OFFSITE_RESTORE_PROOF = "/opt/platform-infrastructure/scripts/local-private-offsite-restore-drill.mjs";
 const DEFAULT_DATA_ROOT = "/var/lib/platform-backup-data";
 const ACTIVE_LOCK = "active-operation.json";
+const ACTIVE_OPERATION_SCHEMA = "platform.local-private-broker-active-operation/v2";
 const TERMINAL_RECEIPT_SCHEMA = "platform.local-private-broker-terminal/v1";
 const OFFSITE_RECONCILIATION_SCHEMA = "platform.local-private-offsite-reconciliation/v1";
+const OFFSITE_RESTORE_RECONCILIATION_SCHEMA = "platform.local-private-offsite-restore-reconciliation/v1";
+const OFFSITE_RESTORE_RCLONE_RECONCILIATION_SCHEMA = "platform.local-private-offsite-restore-rclone-reconciliation/v1";
 const MAX_TERMINAL_RECEIPTS = 4096;
 const MAX_RESPONSE_OUTPUT = 64 * 1024;
 const OPERATION_TIMEOUT_MS = 4 * 60 * 60_000;
@@ -245,6 +249,25 @@ function exactIsoTime(value, label) {
   return Date.parse(value);
 }
 
+function validateActiveOperationRecord(active, { action, now = Date.now() } = {}) {
+  exactRecord(active, [
+    "action", "admittedAt", "request", "requestId", "requestSha256", "schema", "terminalFile",
+  ], "active operation");
+  const admittedAt = exactIsoTime(active.admittedAt, "active operation admittedAt");
+  if (active.schema !== ACTIVE_OPERATION_SCHEMA
+    || (action && active.action !== action)
+    || active.request?.action !== active.action
+    || active.request?.requestId !== active.requestId
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(active.requestId ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(active.requestSha256 ?? ""))
+    || active.requestSha256 !== sha256(canonicalJson(active.request))
+    || active.terminalFile !== `terminal/${active.requestSha256}.json`
+    || admittedAt > now + 30_000) {
+    throw new Error("active operation identity is invalid");
+  }
+  return active;
+}
+
 function protectedJson(file, { maximumBytes = 2 * 1024 * 1024 } = {}) {
   const bytes = readProtectedBytes(file, { minimumBytes: 2, maximumBytes });
   return {
@@ -263,7 +286,7 @@ function exactProtectedChild(root, ...segments) {
   return path.join(parent, path.basename(candidate));
 }
 
-function backupSigningKeyMap(bytes) {
+export function backupSigningKeyMap(bytes) {
   const text = decodeUtf8(bytes, "backup signing keyring").trim();
   const entries = text.split(",").map((entry) => entry.trim()).filter(Boolean);
   const keys = new Map();
@@ -281,7 +304,7 @@ function backupSigningKeyMap(bytes) {
   return keys;
 }
 
-function verifyOffsiteManifest(file, signingKeyFile) {
+export function verifyOffsiteManifest(file, signingKeyFile) {
   const { bytes, value } = protectedJson(file, { maximumBytes: 16 * 1024 * 1024 });
   const manifest = parseBackupManifestDocument(value);
   if (!manifest.signature || manifest.signature.algorithm !== "HMAC-SHA256") {
@@ -406,14 +429,7 @@ export function reconcileCompletedOffsiteOperation({
   }
   const activeFile = path.join(stateDir, ACTIVE_LOCK);
   const active = readCanonicalState(activeFile);
-  exactRecord(active, ["action", "admittedAt", "requestId", "requestSha256", "terminalFile"], "active operation");
-  if (active.action !== "backup.offsite.sync"
-    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(active.requestId ?? ""))
-    || !/^[a-f0-9]{64}$/.test(String(active.requestSha256 ?? ""))
-    || active.terminalFile !== `terminal/${active.requestSha256}.json`
-    || exactIsoTime(active.admittedAt, "active operation admittedAt") > now + 30_000) {
-    throw new Error("active off-site operation identity is invalid");
-  }
+  validateActiveOperationRecord(active, { action: "backup.offsite.sync", now });
 
   const currentAdmission = readCanonicalState(path.join(stateDir, "active-admission.json"));
   exactRecord(currentAdmission, ["admissionSha256", "generation"], "active admission state");
@@ -502,7 +518,7 @@ export function reconcileCompletedOffsiteOperation({
   const response = completedOffsiteResponse(active, receipt, capabilityKey);
   const terminal = {
     recordedAt: reconciliationAt,
-    request: { action: active.action, parameters: {} },
+    request: active.request,
     requestId: active.requestId,
     requestSha256: active.requestSha256,
     response,
@@ -784,8 +800,10 @@ export function acquireOperation(stateDir, request) {
     writeExclusiveCanonical(file, {
       action: request.action,
       admittedAt: new Date().toISOString(),
+      request,
       requestId: request.requestId,
       requestSha256,
+      schema: ACTIVE_OPERATION_SCHEMA,
       terminalFile: path.relative(stateDir, terminalFile),
     });
   } catch (error) {
@@ -799,10 +817,7 @@ export function acquireOperation(stateDir, request) {
     recordTerminal(response) {
       writeExclusiveCanonical(terminalFile, {
         recordedAt: new Date().toISOString(),
-        request: {
-          action: request.action,
-          parameters: request.parameters ?? {},
-        },
+        request,
         requestId: request.requestId,
         requestSha256,
         response,
@@ -823,15 +838,15 @@ export function acquireOperation(stateDir, request) {
 }
 
 export async function runFixedOperation(action, parameters, {
-  jobsRoot, infraOps, requestSha256, signal, stateDir, trusted,
+  jobsRoot, infraOps, requestSha256, restoreProof = DEFAULT_OFFSITE_RESTORE_PROOF, signal, stateDir, trusted,
 } = {}) {
   const args = [infraOps];
-  let outputSchema;
-  let phaseId;
+  let command;
+  let phasePlan;
   if (action === "backup.catalog") {
     args.push("backup-platform-catalog");
-    outputSchema = "platform.backup-catalog/v1";
-    phaseId = "catalog.capture";
+    command = "backup-platform-catalog";
+    phasePlan = [["catalog.capture", "platform.backup-catalog/v1"]];
   } else if (action === "backup.job.execute") {
     const claimed = await readClaimedBackupJob(parameters.jobFileName, defaultClaimedJobPolicy({
       BACKUP_SCHEDULER_JOBS_DIR: jobsRoot,
@@ -844,12 +859,16 @@ export async function runFixedOperation(action, parameters, {
       throw brokerError(403, "RESTORE_JOB_NOT_ALLOWED", "LOCAL_PRIVATE queue execution is restricted to backup jobs");
     }
     args.push("execute-backup-job", "--jobFile", path.join(jobsRoot, "running", parameters.jobFileName));
-    outputSchema = "platform.backup-job-result/v1";
-    phaseId = "job.backup.capture";
+    command = "execute-backup-job";
+    phasePlan = [["job.backup.capture", "platform.backup-job-result/v1"]];
+  } else if (action === "restore.offsite.proof") {
+    args[0] = restoreProof;
+    command = "restore-offsite-proof";
+    phasePlan = [["offsite.restore", "platform.offsite-restore-proof/v1"]];
   } else if (action === "backup.offsite.sync") {
     args.push("offsite-backup-restic");
-    outputSchema = "platform.offsite-backup-receipt/v1";
-    phaseId = "offsite.sync";
+    command = "offsite-backup-restic";
+    phasePlan = [["offsite.sync", "platform.offsite-backup-receipt/v1"]];
   } else {
     throw brokerError(403, "ACTION_NOT_ALLOWED", "action is outside the LOCAL_PRIVATE backup surface");
   }
@@ -861,7 +880,7 @@ export async function runFixedOperation(action, parameters, {
   for (const key of Object.keys(childEnvironment)) {
     if (key.startsWith("PLATFORM_LOCAL_PRIVATE_BACKUP_")) delete childEnvironment[key];
   }
-  if (action === "backup.offsite.sync") {
+  if (["backup.offsite.sync", "restore.offsite.proof"].includes(action)) {
     stagedRclone = stageRcloneRefresh(trusted.offsiteFiles.rcloneConfig, stateDir);
     childEnvironment.HOME = "/tmp";
     childEnvironment.XDG_CACHE_HOME = "/tmp/.cache";
@@ -869,15 +888,24 @@ export async function runFixedOperation(action, parameters, {
     childEnvironment.RCLONE_CONFIG = stagedRclone.stagedFile;
     childEnvironment.RCLONE_CONFIG_WRITABLE = "1";
     childEnvironment.RESTIC_DOCKER_USER = `${SERVICE_UID}:${SERVICE_GID}`;
-    childEnvironment.RESTIC_HOSTNAME = "platform-infrastructure";
     childEnvironment.RESTIC_IMAGE = trusted.receipt.resources.offsite.resticImageId;
     childEnvironment.RESTIC_PASSWORD_FILE = trusted.offsiteFiles.resticPassword;
     childEnvironment.RESTIC_REPOSITORY = trusted.receipt.resources.offsite.repository;
     childEnvironment.RESTIC_REQUIRE_IMMUTABLE_IMAGE = "true";
+    if (action === "backup.offsite.sync") {
+      childEnvironment.RESTIC_HOSTNAME = "platform-infrastructure";
+    } else {
+      const restore = trusted.receipt.resources.offsite.restore;
+      childEnvironment.LOCAL_PRIVATE_RESTORE_MANIFEST_DIGEST = restore.manifestDigest;
+      childEnvironment.LOCAL_PRIVATE_RESTORE_MANIFEST_ID = restore.manifestId;
+      childEnvironment.LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_NAME = restore.receiptFileName;
+      childEnvironment.LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_SHA256 = restore.receiptFileSha256;
+      childEnvironment.LOCAL_PRIVATE_RESTORE_SNAPSHOT_ID = restore.snapshotId;
+    }
   }
   Object.assign(childEnvironment, localPrivateBackupChildBindings({
     action,
-    command: args[1],
+    command,
     egressNetwork: trusted.renderBinding.egressNetwork,
     jobSha256: action === "backup.job.execute" ? parameters.jobSha256 : "-",
     requestSha256,
@@ -908,32 +936,353 @@ export async function runFixedOperation(action, parameters, {
           error.preserveOperation = true;
           reject(error);
         } else if (code !== 0) reject(brokerError(502, "BACKUP_OPERATION_FAILED", `backup operation failed with exit ${code ?? "unknown"}`));
-        else resolve({ code });
+        else resolve({ code, output });
       });
       signal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
     });
   } finally {
     if (stagedRclone) stagedRclone.commit();
   }
-  const operationOutput = {
-    executedAt: new Date().toISOString(),
-    schema: outputSchema,
-    status: "completed",
-    ...(parameters.jobId ? { jobId: parameters.jobId, jobOperation: parameters.jobOperation } : {}),
-  };
-  return {
-    action,
-    job: action === "backup.job.execute" ? parameters : null,
-    phases: [{
+  let restoreSummary = null;
+  if (action === "restore.offsite.proof") {
+    const outputText = new TextDecoder("utf-8", { fatal: true }).decode(execution.output).trim();
+    const parsed = JSON.parse(outputText);
+    const restore = trusted.receipt.resources.offsite.restore;
+    const exactKeys = [
+      "artifactCount", "artifactSignaturesVerified", "exactSetVerified", "manifestDigest",
+      "manifestId", "manifestSignatureVerified", "receiptFile", "receiptFileSha256",
+      "resourceCount", "restoredBytes", "restorePayloadRemoved", "schema", "snapshotId",
+      "status",
+    ];
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || canonicalJson(Object.keys(parsed).sort()) !== canonicalJson(exactKeys.sort())
+      || outputText !== canonicalJson(parsed)
+      || parsed.schema !== "platform.offsite-restore-proof/v1"
+      || parsed.status !== "passed" || parsed.exactSetVerified !== true
+      || parsed.manifestSignatureVerified !== true
+      || parsed.artifactSignaturesVerified !== true
+      || parsed.restorePayloadRemoved !== true
+      || parsed.snapshotId !== restore.snapshotId
+      || parsed.manifestId !== restore.manifestId
+      || parsed.manifestDigest !== restore.manifestDigest
+      || parsed.receiptFile !== restore.receiptFileName
+      || parsed.receiptFileSha256 !== restore.receiptFileSha256
+      || !Number.isSafeInteger(parsed.artifactCount) || parsed.artifactCount < 1
+      || !Number.isSafeInteger(parsed.resourceCount) || parsed.resourceCount < 1
+      || !Number.isSafeInteger(parsed.restoredBytes) || parsed.restoredBytes < 1) {
+      throw new Error("LOCAL_PRIVATE off-site restore result is invalid");
+    }
+    restoreSummary = parsed;
+  }
+  const phases = phasePlan.map(([phaseId, outputSchema]) => {
+    const operationOutput = action === "restore.offsite.proof"
+      ? {
+        artifactCount: restoreSummary.artifactCount,
+        artifactSignaturesVerified: true,
+        exactSetVerified: true,
+        executedAt: new Date().toISOString(),
+        manifestDigest: restoreSummary.manifestDigest,
+        manifestId: restoreSummary.manifestId,
+        manifestSignatureVerified: true,
+        receiptFile: restoreSummary.receiptFile,
+        receiptFileSha256: restoreSummary.receiptFileSha256,
+        resourceCount: restoreSummary.resourceCount,
+        restoredBytes: restoreSummary.restoredBytes,
+        restorePayloadRemoved: true,
+        schema: outputSchema,
+        snapshotId: restoreSummary.snapshotId,
+        status: "completed",
+      }
+      : {
+        executedAt: new Date().toISOString(),
+        schema: outputSchema,
+        status: "completed",
+        ...(parameters.jobId ? { jobId: parameters.jobId, jobOperation: parameters.jobOperation } : {}),
+      };
+    return {
       output: operationOutput,
       outputSchema,
       outputSha256: sha256(canonicalJson(operationOutput)),
       phaseId,
       status: "completed",
-    }],
+    };
+  });
+  return {
+    action,
+    job: action === "backup.job.execute" ? parameters : null,
+    phases,
     schema: RESULT_SCHEMA,
     status: execution.code === 0 ? "completed" : "failed",
   };
+}
+
+function restoreReconciliationChildEnvironment({ environment, requestSha256, stateDir, trusted }) {
+  const childEnvironment = { ...environment };
+  delete childEnvironment.NODE_OPTIONS;
+  delete childEnvironment.NODE_PATH;
+  for (const key of Object.keys(childEnvironment)) {
+    if (key.startsWith("PLATFORM_LOCAL_PRIVATE_BACKUP_")) delete childEnvironment[key];
+  }
+  const restore = trusted.receipt.resources.offsite.restore;
+  Object.assign(childEnvironment, {
+    HOME: "/tmp",
+    XDG_CACHE_HOME: "/tmp/.cache",
+    PLATFORM_CLOSED_HOST_PATH_MAPPINGS: "1",
+    RCLONE_CONFIG: path.join(stateDir, "rclone-refresh", "rclone.conf"),
+    RCLONE_CONFIG_WRITABLE: "1",
+    RESTIC_DOCKER_USER: `${SERVICE_UID}:${SERVICE_GID}`,
+    RESTIC_IMAGE: trusted.receipt.resources.offsite.resticImageId,
+    RESTIC_PASSWORD_FILE: trusted.offsiteFiles.resticPassword,
+    RESTIC_REPOSITORY: trusted.receipt.resources.offsite.repository,
+    RESTIC_REQUIRE_IMMUTABLE_IMAGE: "true",
+    LOCAL_PRIVATE_RESTORE_MANIFEST_DIGEST: restore.manifestDigest,
+    LOCAL_PRIVATE_RESTORE_MANIFEST_ID: restore.manifestId,
+    LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_NAME: restore.receiptFileName,
+    LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_SHA256: restore.receiptFileSha256,
+    LOCAL_PRIVATE_RESTORE_SNAPSHOT_ID: restore.snapshotId,
+  }, localPrivateBackupChildBindings({
+    action: "restore.offsite.proof",
+    command: "restore-offsite-proof",
+    egressNetwork: trusted.renderBinding.egressNetwork,
+    requestSha256,
+    trusted,
+  }));
+  return childEnvironment;
+}
+
+async function runRestoreReconciliationCleanup({
+  environment = process.env,
+  requestSha256,
+  restoreProof = DEFAULT_OFFSITE_RESTORE_PROOF,
+  stateDir,
+  trusted,
+} = {}) {
+  const childEnvironment = restoreReconciliationChildEnvironment({
+    environment,
+    requestSha256,
+    stateDir,
+    trusted,
+  });
+  const execution = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [restoreProof, "reconcile-interrupted"], {
+      env: childEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = Buffer.alloc(0);
+    let oversized = false;
+    child.stdout.on("data", (chunk) => {
+      output = Buffer.concat([output, chunk]);
+      if (output.length > MAX_RESPONSE_OUTPUT) {
+        oversized = true;
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      output = Buffer.concat([output, chunk]);
+      if (output.length > MAX_RESPONSE_OUTPUT) {
+        oversized = true;
+        child.kill("SIGTERM");
+      }
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (oversized || signal || code !== 0) {
+        reject(new Error(`off-site restore cleanup failed (${signal ?? code ?? "unknown"})`));
+      } else resolve(output);
+    });
+  });
+  const outputText = decodeUtf8(execution, "off-site restore cleanup output").trim();
+  const result = JSON.parse(outputText);
+  exactRecord(result, [
+    "helperContainersAbsent", "requestSha256", "restorePayloadRemoved", "rcloneStagingPreserved", "schema", "status",
+  ], "off-site restore cleanup result");
+  if (outputText !== canonicalJson(result)
+    || result.schema !== "platform.offsite-restore-cleanup/v1"
+    || result.status !== "completed" || result.requestSha256 !== requestSha256
+    || result.helperContainersAbsent !== true || result.restorePayloadRemoved !== true
+    || result.rcloneStagingPreserved !== true) {
+    throw new Error("off-site restore cleanup result is invalid");
+  }
+  return result;
+}
+
+function reconcileInterruptedRestoreRclone({ active, createdAt, stateDir, trusted }) {
+  const refreshDir = path.join(stateDir, "rclone-refresh");
+  ensurePrivateDirectory(refreshDir);
+  const stagedFile = path.join(refreshDir, "rclone.conf");
+  const names = fs.readdirSync(refreshDir).sort();
+  if (canonicalJson(names) !== canonicalJson([])
+    && canonicalJson(names) !== canonicalJson(["rclone.conf"])) {
+    throw new Error("off-site restore rclone staging contains unexpected entries");
+  }
+  const journalFile = path.join(stateDir, "reconciliation", `${active.requestSha256}.rclone.json`);
+  const existing = fs.existsSync(journalFile) ? readCanonicalState(journalFile) : null;
+  const canonicalBytes = readProtectedBytes(trusted.offsiteFiles.rcloneConfig, {
+    minimumBytes: 2,
+    maximumBytes: 64 * 1024,
+  });
+  const stagedBytes = fs.existsSync(stagedFile)
+    ? readProtectedBytes(stagedFile, { minimumBytes: 2, maximumBytes: 64 * 1024 })
+    : null;
+  let journal;
+  if (existing) {
+    exactRecord(existing, ["createdAt", "requestSha256", "rclone", "schema"], "off-site restore rclone reconciliation");
+    exactRecord(existing.rclone, ["afterSha256", "beforeSha256", "mode"], "off-site restore rclone reconciliation state");
+    if (existing.schema !== OFFSITE_RESTORE_RCLONE_RECONCILIATION_SCHEMA
+      || existing.createdAt !== createdAt || existing.requestSha256 !== active.requestSha256
+      || !["absent", "refreshed", "unchanged"].includes(existing.rclone.mode)
+      || !/^[a-f0-9]{64}$/.test(String(existing.rclone.beforeSha256 ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(existing.rclone.afterSha256 ?? ""))
+      || (existing.rclone.mode === "refreshed"
+        ? existing.rclone.beforeSha256 === existing.rclone.afterSha256
+        : existing.rclone.beforeSha256 !== existing.rclone.afterSha256)) {
+      throw new Error("off-site restore rclone reconciliation journal is invalid");
+    }
+    journal = existing;
+  } else {
+    const beforeSha256 = sha256(canonicalBytes);
+    const replacement = stagedBytes ? validateRcloneTokenRefresh(canonicalBytes, stagedBytes) : null;
+    const afterSha256 = replacement ? sha256(replacement) : beforeSha256;
+    journal = {
+      createdAt,
+      requestSha256: active.requestSha256,
+      rclone: {
+        afterSha256,
+        beforeSha256,
+        mode: stagedBytes ? (afterSha256 === beforeSha256 ? "unchanged" : "refreshed") : "absent",
+      },
+      schema: OFFSITE_RESTORE_RCLONE_RECONCILIATION_SCHEMA,
+    };
+    writeExclusiveCanonical(journalFile, journal);
+  }
+
+  const { afterSha256, beforeSha256, mode } = journal.rclone;
+  const currentSha256 = sha256(canonicalBytes);
+  if (stagedBytes && sha256(stagedBytes) !== afterSha256) {
+    throw new Error("off-site restore staged rclone configuration differs from its reconciliation journal");
+  }
+  if (mode === "absent" && stagedBytes) {
+    throw new Error("off-site restore rclone staging appeared after an absent reconciliation record");
+  }
+  if (currentSha256 === beforeSha256 && mode === "refreshed") {
+    if (!stagedBytes) throw new Error("off-site restore refreshed rclone staging disappeared before commit");
+    const replacement = validateRcloneTokenRefresh(canonicalBytes, stagedBytes);
+    if (sha256(replacement) !== afterSha256) throw new Error("off-site restore refreshed rclone digest changed");
+    replaceProtectedBytes(trusted.offsiteFiles.rcloneConfig, canonicalBytes, replacement);
+  } else if (currentSha256 !== afterSha256) {
+    throw new Error("canonical rclone configuration is neither pre- nor post-restore reconciliation");
+  }
+  const committed = readProtectedBytes(trusted.offsiteFiles.rcloneConfig, {
+    minimumBytes: 2,
+    maximumBytes: 64 * 1024,
+  });
+  if (sha256(committed) !== afterSha256) {
+    throw new Error("off-site restore rclone refresh commit is not durable");
+  }
+  if (fs.existsSync(stagedFile)) {
+    if (sha256(readProtectedBytes(stagedFile, { minimumBytes: 2, maximumBytes: 64 * 1024 })) !== afterSha256) {
+      throw new Error("off-site restore rclone staging changed before cleanup");
+    }
+    fs.unlinkSync(stagedFile);
+    syncDirectory(refreshDir);
+  }
+  return journal;
+}
+
+export async function reconcileInterruptedOffsiteRestoreProof({
+  capabilityKey,
+  cleanup = runRestoreReconciliationCleanup,
+  dataRoot = DEFAULT_DATA_ROOT,
+  environment = process.env,
+  now = Date.now(),
+  restoreProof = DEFAULT_OFFSITE_RESTORE_PROOF,
+  stateDir,
+  trusted,
+} = {}) {
+  const activeFile = path.join(stateDir, ACTIVE_LOCK);
+  const active = validateActiveOperationRecord(readCanonicalState(activeFile), {
+    action: "restore.offsite.proof",
+    now,
+  });
+  const admittedAt = Date.parse(active.admittedAt);
+  normalizeActionRequest(active.request, trusted, capabilityKey, { now: admittedAt });
+  if (canonicalJson(active.request.parameters) !== canonicalJson({})) {
+    throw new Error("active off-site restore parameters are not empty");
+  }
+  const currentAdmission = readCanonicalState(path.join(stateDir, "active-admission.json"));
+  const expectedAdmission = {
+    admissionSha256: sha256(canonicalJson(trusted.document)),
+    generation: trusted.intent.generation,
+  };
+  exactRecord(currentAdmission, ["admissionSha256", "generation"], "active admission state");
+  if (canonicalJson(currentAdmission) !== canonicalJson(expectedAdmission)) {
+    throw new Error("active off-site restore admission differs from the loaded signed admission");
+  }
+
+  const reconciliationDir = path.join(stateDir, "reconciliation");
+  const journalFile = path.join(reconciliationDir, `${active.requestSha256}.json`);
+  const terminalFile = path.join(stateDir, active.terminalFile);
+  const existingJournal = fs.existsSync(journalFile) ? readCanonicalState(journalFile) : null;
+  const createdAt = existingJournal?.createdAt ?? new Date(now).toISOString();
+  exactIsoTime(createdAt, "off-site restore reconciliation createdAt");
+  const interrupted = brokerError(
+    503,
+    "OFFSITE_RESTORE_PROOF_INTERRUPTED",
+    "off-site restore proof was interrupted and its isolated resources were reconciled",
+  );
+  const response = signedResponse(active.request, capabilityKey, { error: interrupted });
+  const terminal = {
+    recordedAt: createdAt,
+    request: active.request,
+    requestId: active.requestId,
+    requestSha256: active.requestSha256,
+    response,
+    schema: TERMINAL_RECEIPT_SCHEMA,
+  };
+  const journal = {
+    active,
+    createdAt,
+    plannedCleanup: {
+      helperContainers: [
+        `gf-restic-restore-${active.requestSha256.slice(0, 12)}`,
+        `gf-restic-snapshots-${active.requestSha256.slice(0, 12)}`,
+      ].sort(),
+      rcloneStagingFile: path.join(stateDir, "rclone-refresh", "rclone.conf"),
+      rcloneRefreshJournal: path.join(stateDir, "reconciliation", `${active.requestSha256}.rclone.json`),
+      scratchRoot: path.join(dataRoot, ".offsite-restore-proof", active.requestSha256),
+    },
+    schema: OFFSITE_RESTORE_RECONCILIATION_SCHEMA,
+    terminal,
+  };
+  if (existingJournal) {
+    if (canonicalJson(existingJournal) !== canonicalJson(journal)) {
+      throw new Error("off-site restore reconciliation journal changed");
+    }
+  } else {
+    ensurePrivateDirectory(reconciliationDir);
+    writeExclusiveCanonical(journalFile, journal);
+  }
+
+  await cleanup({ environment, requestSha256: active.requestSha256, restoreProof, stateDir, trusted });
+  reconcileInterruptedRestoreRclone({ active, createdAt, stateDir, trusted });
+  ensurePrivateDirectory(path.dirname(terminalFile));
+  if (fs.existsSync(terminalFile)) {
+    if (canonicalJson(readCanonicalState(terminalFile)) !== canonicalJson(terminal)) {
+      throw new Error("off-site restore reconciliation terminal receipt changed");
+    }
+  } else {
+    writeExclusiveCanonical(terminalFile, terminal);
+  }
+  if (canonicalJson(readCanonicalState(activeFile)) !== canonicalJson(active)) {
+    throw new Error("active off-site restore changed before reconciliation release");
+  }
+  fs.unlinkSync(activeFile);
+  syncDirectory(stateDir);
+  return Object.freeze({
+    requestId: active.requestId,
+    requestSha256: active.requestSha256,
+    status: "reconciled",
+  });
 }
 
 function signedResponse(request, capabilityKey, { error, result }) {
@@ -962,10 +1311,10 @@ async function handleRequest(frame, environment, now = Date.now()) {
   ensurePrivateDirectory(stateDir);
   const trusted = loadLocalPrivateTrust(environment, now);
   verifyRuntimeImages(trusted, {
-    requireRestic: request.action === "backup.offsite.sync",
+    requireRestic: ["backup.offsite.sync", "restore.offsite.proof"].includes(request.action),
     requireScheduler: true,
   });
-  if (request.action === "backup.offsite.sync") verifyRuntimeEgressNetwork(trusted);
+  if (["backup.offsite.sync", "restore.offsite.proof"].includes(request.action)) verifyRuntimeEgressNetwork(trusted);
   admitGeneration(stateDir, trusted);
   const capabilityKey = readProtectedBytes(trusted.capabilityFiles[request.action]);
   normalizeActionRequest(request, trusted, capabilityKey, { now });
@@ -1075,14 +1424,48 @@ async function main() {
     process.stdout.write(`${canonicalJson(result)}\n`);
     return;
   }
+  if (process.argv[2] === "reconcile-offsite-restore-proof") {
+    if (process.argv.length !== 3) {
+      throw new Error("reconcile-offsite-restore-proof accepts no selectors or arguments");
+    }
+    const stateDir = process.env.DOCKER_ACTION_BROKER_STATE_DIR || DEFAULT_STATE_DIR;
+    const dataRoot = process.env.PLATFORM_DATA_ROOT || DEFAULT_DATA_ROOT;
+    ensurePrivateDirectory(stateDir);
+    const active = readCanonicalState(path.join(stateDir, ACTIVE_LOCK));
+    const trusted = loadLocalPrivateTrust(process.env, exactIsoTime(
+      active.admittedAt,
+      "active operation admittedAt",
+    ));
+    verifyRuntimeImages(trusted);
+    const result = await reconcileInterruptedOffsiteRestoreProof({
+      capabilityKey: readProtectedBytes(trusted.capabilityFiles["restore.offsite.proof"]),
+      dataRoot,
+      stateDir,
+      trusted,
+    });
+    process.stdout.write(`${canonicalJson(result)}\n`);
+    return;
+  }
   if (process.argv.length > 2) throw new Error("unsupported LOCAL_PRIVATE broker command");
   const socketPath = process.env.DOCKER_ACTION_BROKER_SOCKET || DEFAULT_SOCKET;
   const stateDir = process.env.DOCKER_ACTION_BROKER_STATE_DIR || DEFAULT_STATE_DIR;
   ensurePrivateDirectory(stateDir);
+  let trusted;
   if (fs.existsSync(path.join(stateDir, ACTIVE_LOCK))) {
-    throw new Error("an unresolved LOCAL_PRIVATE broker operation requires reconciliation");
+    const active = readCanonicalState(path.join(stateDir, ACTIVE_LOCK));
+    if (active?.action !== "restore.offsite.proof") {
+      throw new Error("an unresolved LOCAL_PRIVATE broker operation requires reconciliation");
+    }
+    trusted = loadLocalPrivateTrust(process.env, exactIsoTime(active.admittedAt, "active operation admittedAt"));
+    verifyRuntimeImages(trusted);
+    await reconcileInterruptedOffsiteRestoreProof({
+      capabilityKey: readProtectedBytes(trusted.capabilityFiles["restore.offsite.proof"]),
+      dataRoot: process.env.PLATFORM_DATA_ROOT || DEFAULT_DATA_ROOT,
+      stateDir,
+      trusted,
+    });
   }
-  const trusted = loadLocalPrivateTrust(process.env);
+  trusted = loadLocalPrivateTrust(process.env);
   verifyRuntimeImages(trusted);
   ensurePrivateDirectory(path.dirname(socketPath));
   const existing = fs.lstatSync(socketPath, { throwIfNoEntry: false });

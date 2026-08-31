@@ -2501,6 +2501,13 @@ function typedBackupJobPath(options = {}) {
   return requested;
 }
 
+function relativeDataArtifactPath(filePath) {
+  const root = path.resolve(dataRoot);
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(`${root}${path.sep}`)) fail("Backup report escaped the data root.");
+  return path.relative(root, resolved).replaceAll("\\", "/");
+}
+
 function relativeBackupArtifactPath(filePath) {
   const root = path.resolve(backupRootPath());
   const resolved = path.resolve(filePath);
@@ -2770,7 +2777,7 @@ async function executeBackupJob(options = {}) {
   };
   const reportName = `typed-${job.operation}-${job.id}`;
   const reportPath = writeJsonReport("backup-jobs", reportName, report);
-  const relativeReportPath = path.relative(infraRoot, reportPath).replaceAll("\\", "/");
+  const relativeReportPath = relativeDataArtifactPath(reportPath);
   updateTypedBackupJob(jobPath, {
     manifestPath,
     reportPaths: [relativeReportPath],

@@ -1,7 +1,7 @@
 # Canonical V1.1 LOCAL_PRIVATE backup execution path. This overlay replaces
 # the external provider admission path only for the Dell local runtime. The
-# broker remains the sole Docker socket owner and exposes exactly three signed
-# actions (catalog, typed job execution and off-site sync) to the scheduler.
+# broker remains the sole Docker socket owner and exposes only the signed
+# catalog, typed-job, off-site-sync and isolated off-site restore-proof actions.
 services:
   control-center:
     user: "1000:1000"

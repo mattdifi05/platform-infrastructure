@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
   ACTIONS,
   CLI_ACTIONS,
+  LOCAL_PRIVATE_ACTIONS,
   MAX_REQUEST_BYTES,
   REQUEST_SCHEMA,
   canonicalJson,
@@ -44,7 +45,7 @@ const CLAIMED_JOB_METADATA_FIELDS = Object.freeze([
 ]);
 
 export function buildClientRequest(command, args, options = {}) {
-  const action = resolveClientAction(command);
+  const action = resolveClientAction(command, { localPrivate: options.localPrivate === true });
   if (action === "backup.job.execute") {
     throw new Error("execute-backup-job requires runClientCommand with --jobFileName <basename>");
   }
@@ -276,7 +277,7 @@ export async function readClaimedBackupJob(fileName, {
 }
 
 export async function runClientCommand(command, args, options = {}) {
-  const action = resolveClientAction(command);
+  const action = resolveClientAction(command, { localPrivate: options.localPrivate === true });
   let parameters;
   if (action === "backup.job.execute") {
     if (!Array.isArray(args) || args.length !== 2 || args[0] !== "--jobFileName") {
@@ -298,9 +299,10 @@ export async function runClientCommand(command, args, options = {}) {
   );
 }
 
-function resolveClientAction(command) {
+function resolveClientAction(command, { localPrivate = false } = {}) {
   const action = typeof command === "string" ? CLI_ACTIONS[command] : undefined;
-  if (!action || !ACTIONS[action]) {
+  if (!action || !ACTIONS[action]
+    || (Object.hasOwn(LOCAL_PRIVATE_ACTIONS, action) && !localPrivate)) {
     throw new Error(`Unsupported Docker action command: ${command || "(empty)"}`);
   }
   return action;
@@ -586,10 +588,10 @@ function readDescriptor(descriptor, size) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  const action = resolveClientAction(command);
-  const contract = ACTIONS[action];
   const localAdmissionFile = process.env.DOCKER_ACTION_LOCAL_ADMISSION_FILE;
   const localCapabilityDir = process.env.DOCKER_ACTION_LOCAL_CAPABILITY_DIR;
+  const action = resolveClientAction(command, { localPrivate: Boolean(localAdmissionFile) });
+  const contract = ACTIONS[action];
   const capabilityFile = localAdmissionFile && localCapabilityDir
     ? path.join(localCapabilityDir, path.basename(contract.capabilityFile))
     : contract.capabilityFile;
@@ -626,6 +628,7 @@ async function main() {
     combinedRenderSha256,
     capabilityKey,
     claimedJobPolicy: defaultClaimedJobPolicy(process.env),
+    localPrivate: Boolean(localAdmissionFile),
     socketPath: process.env.DOCKER_ACTION_BROKER_SOCKET || DEFAULT_SOCKET,
   });
   process.stdout.write(`${canonicalJson(response)}\n`);

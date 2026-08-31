@@ -229,6 +229,9 @@ function assertRenderedEnvironment(rendered, environment) {
 function exactCli(action, processArgs, jobsRoot) {
   if (action === "backup.catalog") return sameStringArray(processArgs, ["backup-platform-catalog"]);
   if (action === "backup.offsite.sync") return sameStringArray(processArgs, ["offsite-backup-restic"]);
+  if (action === "restore.offsite.proof") {
+    return sameStringArray(processArgs, []) || sameStringArray(processArgs, ["reconcile-interrupted"]);
+  }
   if (action !== "backup.job.execute" || processArgs.length !== 3 || processArgs[0] !== "execute-backup-job"
     || processArgs[1] !== "--jobFile") return false;
   const file = path.resolve(processArgs[2]);
@@ -279,6 +282,7 @@ export function initializeLocalPrivateBackupInvocation({
   const commandByAction = {
     "backup.catalog": "backup-platform-catalog",
     "backup.job.execute": "execute-backup-job",
+    "restore.offsite.proof": "restore-offsite-proof",
     "backup.offsite.sync": "offsite-backup-restic",
   };
   if (!verified.payload.allowedActions.includes(action)
@@ -311,6 +315,9 @@ export function initializeLocalPrivateBackupInvocation({
   const offsiteOnly = [
     "RCLONE_CONFIG", "RCLONE_CONFIG_WRITABLE", "RESTIC_DOCKER_USER", "RESTIC_HOSTNAME",
     "RESTIC_IMAGE", "RESTIC_PASSWORD_FILE", "RESTIC_REPOSITORY", "RESTIC_REQUIRE_IMMUTABLE_IMAGE",
+    "LOCAL_PRIVATE_RESTORE_MANIFEST_DIGEST", "LOCAL_PRIVATE_RESTORE_MANIFEST_ID",
+    "LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_NAME", "LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_SHA256",
+    "LOCAL_PRIVATE_RESTORE_SNAPSHOT_ID",
   ];
   if (action === "backup.offsite.sync") {
     const expectedOffsite = {
@@ -328,6 +335,30 @@ export function initializeLocalPrivateBackupInvocation({
     if (Object.entries(expectedOffsite).some(([key, value]) => environment[key] !== value)
       || environment.RESTIC_SKIP_RETENTION !== undefined || environment.RESTIC_NO_PRUNE !== undefined) {
       fail("LOCAL_PRIVATE off-site process environment is not exact");
+    }
+  } else if (action === "restore.offsite.proof") {
+    const restore = verified.payload.resources.offsite.restore;
+    const expectedRestore = {
+      HOME: "/tmp",
+      XDG_CACHE_HOME: "/tmp/.cache",
+      RCLONE_CONFIG: "/var/lib/platform-docker-action-broker/rclone-refresh/rclone.conf",
+      RCLONE_CONFIG_WRITABLE: "1",
+      RESTIC_DOCKER_USER: "1000:1000",
+      RESTIC_IMAGE: verified.payload.resources.offsite.resticImageId,
+      RESTIC_PASSWORD_FILE: verified.payload.resources.offsite.resticPasswordPath,
+      RESTIC_REPOSITORY: verified.payload.resources.offsite.repository,
+      RESTIC_REQUIRE_IMMUTABLE_IMAGE: "true",
+      LOCAL_PRIVATE_RESTORE_MANIFEST_DIGEST: restore.manifestDigest,
+      LOCAL_PRIVATE_RESTORE_MANIFEST_ID: restore.manifestId,
+      LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_NAME: restore.receiptFileName,
+      LOCAL_PRIVATE_RESTORE_RECEIPT_FILE_SHA256: restore.receiptFileSha256,
+      LOCAL_PRIVATE_RESTORE_SNAPSHOT_ID: restore.snapshotId,
+    };
+    if (Object.entries(expectedRestore).some(([key, value]) => environment[key] !== value)
+      || environment.RESTIC_HOSTNAME !== undefined
+      || environment.RESTIC_SKIP_RETENTION !== undefined
+      || environment.RESTIC_NO_PRUNE !== undefined) {
+      fail("LOCAL_PRIVATE off-site restore process environment is not exact");
     }
   } else if (offsiteOnly.some((key) => environment[key] !== undefined)) {
     fail("LOCAL_PRIVATE non-offsite action received off-site credentials or controls");
@@ -567,6 +598,78 @@ function localPrivateOffsiteRunAllowed(invocation, args, options) {
   return sameStringArray(args, size) && options.env === undefined;
 }
 
+function localPrivateOffsiteRestoreRunAllowed(invocation, args, options) {
+  const requestSha256 = String(invocation.requestSha256 ?? "");
+  const short = requestSha256.slice(0, 12);
+  const expected = invocation.receipt.resources.offsite.restore;
+  if (!SHA256.test(requestSha256) || !expected || expected.snapshotId !== String(expected.snapshotId)
+    || !SHA256.test(String(expected.snapshotId ?? ""))) return false;
+  const snapshotsName = `gf-restic-snapshots-${short}`;
+  const restoreName = `gf-restic-restore-${short}`;
+  const name = args[3];
+  if (!sameStringArray(args.slice(0, 3), ["run", "--rm", "--name"])
+    || ![snapshotsName, restoreName].includes(name)) return false;
+  const prefix = [
+    "--pull", "never",
+    "--network", invocation.egressNetwork,
+    "--read-only",
+    "--user", "1000:1000",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges:true",
+    "--pids-limit", "128",
+    "--log-driver", "none",
+    "--label", `com.platform.local-private.offsite-restore-request-sha256=${requestSha256}`,
+    "--label", `com.platform.local-private.offsite-restore-role=${name === snapshotsName ? "snapshots" : "restore"}`,
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
+    "-e", "HOME=/tmp",
+    "-e", "XDG_CACHE_HOME=/tmp/.cache",
+    "-e", "RESTIC_REPOSITORY",
+    "-e", "RESTIC_PASSWORD_FILE",
+    "-e", "RCLONE_CONFIG=/rclone-config/rclone.conf",
+    "--mount", `type=bind,src=${path.join(invocation.roots.brokerStateHost, "rclone-refresh")},dst=/rclone-config`,
+    "--mount", `type=bind,src=${path.join(invocation.roots.secretsHost, "restic_password.txt")},dst=/restic-password/restic_password.txt,readonly`,
+  ];
+  if (!sameStringArray(args.slice(4, 4 + prefix.length), prefix)) return false;
+  const exactProcessEnv = sameStringArray(Object.keys(options.env ?? {}).sort(), ["RESTIC_PASSWORD_FILE", "RESTIC_REPOSITORY"])
+    && options.env.RESTIC_REPOSITORY === invocation.receipt.resources.offsite.repository
+    && options.env.RESTIC_PASSWORD_FILE === "/restic-password/restic_password.txt";
+  if (!exactProcessEnv) return false;
+  const remainder = args.slice(4 + prefix.length);
+  const image = invocation.receipt.resources.offsite.resticImageId;
+  if (name === snapshotsName) {
+    return sameStringArray(remainder, [
+      image, "--no-lock", "snapshots", "--json", "--tag", "platform-backups",
+    ]);
+  }
+  const scratch = path.join(invocation.roots.dataHost, ".offsite-restore-proof", requestSha256);
+  return sameStringArray(remainder, [
+    "--mount", `type=bind,src=${scratch},dst=/restore`, image,
+    "--no-lock", "restore", expected.snapshotId, "--target", "/restore",
+  ]);
+}
+
+function localPrivateOffsiteRestoreControlAllowed(invocation, args, options) {
+  if (options.env !== undefined || options.input !== undefined) return false;
+  const short = String(invocation.requestSha256 ?? "").slice(0, 12);
+  const roles = new Map([
+    [`gf-restic-snapshots-${short}`, "snapshots"],
+    [`gf-restic-restore-${short}`, "restore"],
+  ]);
+  if (args[0] === "ps") {
+    return Object.keys(options).length === 0 && [...roles.keys()].some((name) => sameStringArray(args, [
+      "ps", "-aq", "--no-trunc", "--filter", `name=^/${name}$`,
+    ]));
+  }
+  const binding = options.restoreContainer;
+  if (!plainRecord(binding)
+    || !sameStringArray(Object.keys(options), ["restoreContainer"])
+    || !sameStringArray(Object.keys(binding).sort(), ["id", "name", "role"])
+    || !/^[a-f0-9]{64}$/.test(String(binding.id ?? ""))
+    || roles.get(binding.name) !== binding.role || args.at(-1) !== binding.id) return false;
+  return (args[0] === "container" && args[1] === "inspect" && args.length === 3)
+    || (args[0] === "rm" && args[1] === "-f" && args.length === 3);
+}
+
 export function localPrivateBackupDockerInvocationAllowed(invocation, args, options = {}, processId = process.pid) {
   if (!invocation || !LOCAL_PRIVATE_ALLOWED_ACTIONS.includes(invocation.action)
     || !Array.isArray(args) || args.length < 1 || args.length > 2048
@@ -574,6 +677,10 @@ export function localPrivateBackupDockerInvocationAllowed(invocation, args, opti
     || options.input !== undefined) return false;
   if (invocation.action === "backup.offsite.sync") {
     return localPrivateOffsiteRunAllowed(invocation, args, options);
+  }
+  if (invocation.action === "restore.offsite.proof") {
+    return localPrivateOffsiteRestoreRunAllowed(invocation, args, options)
+      || localPrivateOffsiteRestoreControlAllowed(invocation, args, options);
   }
   return localPrivateExecAllowed(invocation, args)
     || localPrivateCopyAllowed(invocation, args, processId)

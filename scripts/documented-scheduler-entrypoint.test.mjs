@@ -267,8 +267,8 @@ test("FG-005 execute-backup-job accepts only a claimed queue basename", () => {
   }
 });
 
-test("LOCAL_PRIVATE scheduler admits catalog, typed jobs and offsite only", () => {
-  for (const command of ["backup-platform-catalog", "offsite-backup-restic"]) {
+test("LOCAL_PRIVATE scheduler admits only catalog, typed jobs, offsite sync and the manual restore proof", () => {
+  for (const command of ["backup-platform-catalog", "offsite-backup-restic", "offsite-restore-proof"]) {
     const accepted = runSchedulerWithFakeClient(["--run", command], {
       BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true",
     });
@@ -290,13 +290,23 @@ test("LOCAL_PRIVATE scheduler cron contains only catalog and the explicitly enab
   assert.match(enabled, /backup-platform-catalog/);
   assert.match(enabled, /restic-offsite/);
   assert.match(enabled, /offsite-backup-restic/);
-  assert.doesNotMatch(enabled, /prune-manifest|full-restore-drill/);
+  assert.doesNotMatch(enabled, /prune-manifest|full-restore-drill|offsite-restore-proof/);
   assert.equal(enabled.trim().split("\n").length, 2);
 
   const disabled = renderLocalPrivateSchedulerCron(false);
   assert.match(disabled, /platform-catalog-backup/);
-  assert.doesNotMatch(disabled, /restic-offsite|offsite-backup-restic|prune-manifest|full-restore-drill/);
+  assert.doesNotMatch(disabled, /restic-offsite|offsite-backup-restic|prune-manifest|full-restore-drill|offsite-restore-proof/);
   assert.equal(disabled.trim().split("\n").length, 1);
+});
+
+test("typed backup report paths stay data-root relative when release and data roots differ", () => {
+  const source = fs.readFileSync(path.join(root, "scripts", "infra-ops.mjs"), "utf8");
+  assert.match(source, /const relativeReportPath = relativeDataArtifactPath\(reportPath\);/);
+  assert.match(
+    source,
+    /function relativeDataArtifactPath\(filePath\) \{[\s\S]*?path\.resolve\(dataRoot\)[\s\S]*?Backup report escaped the data root\.[\s\S]*?path\.relative\(root, resolved\)/,
+  );
+  assert.doesNotMatch(source, /const relativeReportPath = path\.relative\(infraRoot, reportPath\)/);
 });
 
 test("LOCAL_PRIVATE non-root scheduler owns its cron spool and uses its real account name", () => {

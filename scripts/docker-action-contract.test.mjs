@@ -437,7 +437,7 @@ const EXPECTED_PHASE_ENDPOINT_HELPER_IDS = Object.freeze({
   }),
 });
 
-test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, modeled and uniquely bound", () => {
+test("RED v2: runtime and LOCAL_PRIVATE registries are disjoint, complete, modeled and uniquely bound", () => {
   assert.ok(
     contract.SCHEDULER_ACTIONS && typeof contract.SCHEDULER_ACTIONS === "object",
     "the product must export the six-action SCHEDULER_ACTIONS registry",
@@ -446,18 +446,34 @@ test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, 
     contract.EVIDENCE_ACTIONS && typeof contract.EVIDENCE_ACTIONS === "object",
     "the product must export the disjoint EVIDENCE_ACTIONS registry",
   );
+  assert.ok(
+    contract.LOCAL_PRIVATE_ACTIONS && typeof contract.LOCAL_PRIVATE_ACTIONS === "object",
+    "the product must export the disjoint LOCAL_PRIVATE_ACTIONS registry",
+  );
 
   assert.deepEqual(Object.keys(contract.SCHEDULER_ACTIONS).sort(), [...SCHEDULER_ACTION_NAMES].sort());
   assert.deepEqual(Object.keys(contract.EVIDENCE_ACTIONS).sort(), [...EVIDENCE_ACTION_NAMES].sort());
+  assert.deepEqual(Object.keys(contract.LOCAL_PRIVATE_ACTIONS), ["restore.offsite.proof"]);
+  assert.deepEqual(
+    Object.keys(contract.RUNTIME_ACTIONS).sort(),
+    [...SCHEDULER_ACTION_NAMES, ...EVIDENCE_ACTION_NAMES].sort(),
+  );
   assert.deepEqual(
     Object.keys(contract.ACTIONS).sort(),
-    [...SCHEDULER_ACTION_NAMES, ...EVIDENCE_ACTION_NAMES].sort(),
-    "ACTIONS must be only the exact union of the two disjoint registries",
+    [...SCHEDULER_ACTION_NAMES, ...EVIDENCE_ACTION_NAMES, "restore.offsite.proof"].sort(),
+    "ACTIONS must be only the exact union of the three disjoint registries",
   );
 
+  const localPrivateBinding = {
+    capabilityFile: "/run/secrets/docker_action_restore_offsite_proof",
+    capabilityId: "restore.offsite.proof.v2",
+    profileId: "scheduler.restore.offsite.proof.v2",
+  };
   const entries = Object.entries(contract.ACTIONS);
   for (const [action, entry] of entries) {
-    const expected = EXPECTED_ACTION_BINDINGS[action];
+    const expected = action === "restore.offsite.proof"
+      ? localPrivateBinding
+      : EXPECTED_ACTION_BINDINGS[action];
     assert.ok(expected, `${action} is not an approved action binding`);
     assert.equal(entry.modeled, true, `${action} must have an implemented fixed model`);
     assert.equal(entry.capabilityId, expected.capabilityId, `${action} capability identity`);
@@ -467,6 +483,64 @@ test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, 
   assertUnique(entries.map(([, entry]) => entry.capabilityId), "capabilityId");
   assertUnique(entries.map(([, entry]) => entry.capabilityFile), "capabilityFile");
   assertUnique(entries.map(([, entry]) => entry.profileId), "profileId");
+});
+
+test("LOCAL_PRIVATE off-site restore proof preserves one exact authenticated request and result phase", () => {
+  const action = "restore.offsite.proof";
+  const key = Buffer.from("local-private-offsite-restore-proof-capability".repeat(2));
+  const trusted = {
+    intent: { allowedActions: [action], intentId: "local-private-proof" },
+    receipt: {
+      combinedRenderSha256: "c".repeat(64),
+      resources: {
+        backupResources: {},
+        capabilityFiles: {
+          [`capability.${action}`]: {
+            brokerPath: contract.ACTIONS[action].capabilityFile,
+            sha256: contract.sha256(key),
+          },
+        },
+      },
+    },
+    receiptDigest: "d".repeat(64),
+  };
+  const request = contract.signActionRequest(contract.buildUnsignedRequest(action, {}, trusted, {
+    now: NOW,
+    requestId: "123e4567-e89b-42d3-a456-426614174099",
+    nonce: "Z".repeat(43),
+  }), key);
+  assert.equal(contract.normalizeActionRequest(request, trusted, key, { now: NOW }).action, action);
+  const output = {
+    artifactCount: 20,
+    exactSetVerified: true,
+    schema: "platform.offsite-restore-proof/v1",
+    status: "completed",
+  };
+  const result = {
+    action,
+    job: null,
+    phases: [{
+      output,
+      outputSchema: output.schema,
+      outputSha256: contract.sha256(contract.canonicalJson(output)),
+      phaseId: "offsite.restore",
+      status: "completed",
+    }],
+    schema: RESULT_SCHEMA_V2,
+    status: "completed",
+  };
+  const response = contract.signActionResponse({
+    action,
+    errorCode: null,
+    requestId: request.requestId,
+    requestSha256: contract.sha256(contract.canonicalJson(request)),
+    result,
+    resultSha256: contract.sha256(contract.canonicalJson(result)),
+    schema: RESPONSE_SCHEMA_V2,
+    status: "completed",
+    statusCode: 200,
+  }, key);
+  assert.equal(contract.normalizeActionResponse(response, request, key).status, "completed");
 });
 
 test("RED v2: request schema has exact keys and rejects extensions", () => {
@@ -558,6 +632,23 @@ test("runtime intent v1 preserves its legacy bare-canonical MAC contract", () =>
     signed.mac,
     schemaDomainMac,
     "the v1 intent compatibility MAC must not inherit the v2 request/response domain format",
+  );
+});
+
+test("provider runtime intent rejects LOCAL_PRIVATE-only actions before receipt admission", () => {
+  const { intent, rawReceipt } = buildTrustedContextV2(contract, {
+    allowedActions: ["backup.catalog"],
+    now: NOW,
+    trustKey: TRUST_KEY,
+  });
+  const { mac: ignored, ...unsigned } = intent;
+  const widened = contract.signRuntimeIntent({
+    ...unsigned,
+    allowedActions: ["restore.offsite.proof"],
+  }, TRUST_KEY);
+  assert.throws(
+    () => contract.normalizeTrustedContext(widened, rawReceipt, TRUST_KEY, { now: NOW }),
+    /unsupported or duplicate action/,
   );
 });
 
