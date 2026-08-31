@@ -1,0 +1,123 @@
+# Canonical V1.1 LOCAL_PRIVATE backup execution path. This overlay replaces
+# the external provider admission path only for the Dell local runtime. The
+# broker remains the sole Docker socket owner and exposes exactly three signed
+# actions (catalog, typed job execution and off-site sync) to the scheduler.
+services:
+  docker-action-broker:
+    profiles: !reset []
+    image: platform/docker-action-broker:local
+    build:
+      context: .
+      dockerfile: docker/ops.Dockerfile
+    container_name: gf-docker-action-broker
+    user: "1000:1000"
+    group_add: !override
+      - ${LOCAL_PRIVATE_DOCKER_SOCKET_GID:?set Docker socket numeric gid on Dell}
+    entrypoint:
+      - node
+      - /opt/platform-infrastructure/scripts/local-private-docker-action-broker.mjs
+    environment: !override
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_BROKER_STATE_DIR: /var/lib/platform-docker-action-broker
+      LOCAL_PRIVATE_BACKUP_BROKER_STATE_CONTAINER_ROOT: /var/lib/platform-docker-action-broker
+      LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT: ${LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR:?set dedicated broker state directory}
+      DOCKER_ACTION_LOCAL_ADMISSION_FILE: /run/platform/docker-action-broker/client/admission.json
+      DOCKER_ACTION_LOCAL_CAPABILITY_DIR: /run/platform/docker-action-broker/client
+      DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE: /opt/platform-infrastructure/policy/local-private-backup-admission.pub.pem
+      DOCKER_ACTION_LOCAL_RENDER_FILE: /run/platform/local-private-input/combined-render.yaml
+      BACKUP_SIGNING_KEYS_FILE: /run/platform/local-private-input/backup_signing_keys
+      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      LOCAL_PRIVATE_INFRA_OPS_FILE: /opt/platform-infrastructure/scripts/infra-ops.mjs
+      PLATFORM_ENVIRONMENT: production
+      PLATFORM_INFRA_ROOT: /opt/platform-infrastructure
+      PLATFORM_INFRA_CONTAINER_ROOT: /opt/platform-infrastructure
+      PLATFORM_INFRA_HOST_ROOT: ${LOCAL_PRIVATE_RELEASE_ROOT:?set exact release root on the Dell host}
+      PLATFORM_DATA_ROOT: /var/www/project-state
+      PLATFORM_DATA_CONTAINER_ROOT: /var/www/project-state
+      PLATFORM_DATA_HOST_ROOT: ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}
+      PROJECT_STATE_ROOT: /var/www/project-state
+      PLATFORM_STATE_CONTAINER_ROOT: /var/www/project-state
+      PLATFORM_STATE_HOST_ROOT: ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}
+      PROJECT_SOURCE_ROOT: /var/www/projects
+      PROJECT_SOURCE_HOST_ROOT: ${PHP_PROJECTS_DIR:?set PHP_PROJECTS_DIR}
+      PLATFORM_SECRETS_ROOT: /run/platform/critical
+      PLATFORM_SECRETS_CONTAINER_ROOT: /run/platform/critical
+      PLATFORM_SECRETS_HOST_ROOT: ${LOCAL_PRIVATE_CRITICAL_ROOT:?set migrated critical state root}
+      PLATFORM_CLOSED_HOST_PATH_MAPPINGS: "1"
+      RESTIC_KEEP_LAST: ${RESTIC_KEEP_LAST:-42}
+      RESTIC_MAX_REPOSITORY_BYTES: ${RESTIC_MAX_REPOSITORY_BYTES:-2500000000000}
+      BACKUP_POSTGRES_CONTAINER: gf-postgres
+      BACKUP_MARIADB_CONTAINER: gf-mariadb
+      BACKUP_MINIO_CONTAINER: gf-minio
+      BACKUP_KEYCLOAK_CONTAINER: gf-keycloak
+      KEYCLOAK_DB_NAME: keycloak
+    secrets: !reset []
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR:?set dedicated broker runtime directory}:/run/platform/docker-action-broker
+      - ${LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR:?set dedicated broker state directory}:/var/lib/platform-docker-action-broker
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}:/var/www/project-state
+      - ${PHP_PROJECTS_DIR:?set PHP_PROJECTS_DIR}:/var/www/projects:ro
+      - ${LOCAL_PRIVATE_BACKUP_TRUST_DIR:?set materialized signed trust directory}:/run/platform/docker-action-broker/client:ro
+      - ${LOCAL_PRIVATE_CRITICAL_ROOT:?set migrated critical state root}:/run/platform/critical:ro
+      - ${LOCAL_PRIVATE_CRITICAL_ROOT:?set migrated critical state root}/rclone:/run/platform/critical/rclone
+      - ${PLATFORM_SECRETS_ROOT:?set PLATFORM_SECRETS_ROOT}/backup_signing_keys.txt:/run/platform/local-private-input/backup_signing_keys:ro
+      - ${LOCAL_PRIVATE_BACKUP_RENDER_FILE:?set exact canonical combined render}:/run/platform/local-private-input/combined-render.yaml:ro
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    depends_on: !reset {}
+    healthcheck:
+      test: ["CMD", "node", "/opt/platform-infrastructure/scripts/local-private-docker-action-readiness.mjs"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  backup-scheduler:
+    profiles: !reset []
+    image: platform/backup-scheduler:local
+    build:
+      context: .
+      dockerfile: docker/backup-scheduler.Dockerfile
+    container_name: gf-backup-scheduler
+    user: "1000:1000"
+    environment: !override
+      BACKUP_SCHEDULER_LOCAL_PRIVATE_FIXED_ACTIONS: "true"
+      BACKUP_SCHEDULER_CATALOG_CRON: "${BACKUP_SCHEDULER_CATALOG_CRON:-5 */8 * * *}"
+      BACKUP_SCHEDULER_ENABLE_OFFSITE: "true"
+      BACKUP_SCHEDULER_OFFSITE_CRON: "${BACKUP_SCHEDULER_OFFSITE_CRON:-35 */8 * * *}"
+      BACKUP_SCHEDULER_RUN_ON_START: "false"
+      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_LOG_DIR: /var/log/platform
+      BACKUP_SCHEDULER_CRON_FILE: /run/platform/backup-scheduler/crontabs/node
+      BACKUP_SCHEDULER_ENV_FILE: /run/platform/backup-scheduler/backup-scheduler.env
+      BACKUP_SCHEDULER_TIMER_READY_FILE: /run/platform/backup-scheduler/local-private-timer.ready
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_LOCAL_ADMISSION_FILE: /run/platform/docker-action-broker/client/admission.json
+      DOCKER_ACTION_LOCAL_CAPABILITY_DIR: /run/platform/docker-action-broker/client
+      DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE: /opt/platform-backup-scheduler/policy/local-private-backup-admission.pub.pem
+      BACKUP_QUEUE_MAX_OUTSTANDING: ${BACKUP_QUEUE_MAX_OUTSTANDING:-32}
+      BACKUP_QUEUE_MAX_PER_PRINCIPAL: ${BACKUP_QUEUE_MAX_PER_PRINCIPAL:-4}
+      BACKUP_QUEUE_RATE_WINDOW_SECONDS: ${BACKUP_QUEUE_RATE_WINDOW_SECONDS:-900}
+      BACKUP_QUEUE_MAX_CONCURRENCY: ${BACKUP_QUEUE_MAX_CONCURRENCY:-1}
+      BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS: ${BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS:-200}
+      BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS: ${BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS:-30}
+      BACKUP_QUEUE_LEDGER_MAX_ENTRIES: ${BACKUP_QUEUE_LEDGER_MAX_ENTRIES:-4096}
+      BACKUP_QUEUE_MAX_SCAN_ENTRIES: ${BACKUP_QUEUE_MAX_SCAN_ENTRIES:-4096}
+      BACKUP_QUEUE_LOCK_TIMEOUT_MS: ${BACKUP_QUEUE_LOCK_TIMEOUT_MS:-2000}
+    secrets: !reset []
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700
+    volumes: !override
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/backup-jobs:/var/www/project-state/backup-jobs
+      - ${PLATFORM_STATE_DIR:?set PLATFORM_STATE_DIR}/backup-scheduler-logs:/var/log/platform
+      - ${LOCAL_PRIVATE_BACKUP_BROKER_RUNTIME_DIR:?set dedicated broker runtime directory}:/run/platform/docker-action-broker:ro
+      - ${LOCAL_PRIVATE_BACKUP_TRUST_DIR:?set materialized signed trust directory}:/run/platform/docker-action-broker/client:ro
+    depends_on:
+      docker-action-broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/platform/backup-scheduler/crontabs/node && test -s /run/platform/backup-scheduler/local-private-timer.ready && test -S /run/platform/docker-action-broker/broker.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

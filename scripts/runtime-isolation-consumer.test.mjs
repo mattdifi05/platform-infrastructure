@@ -42,6 +42,7 @@ const requiredCoreEnvironmentLines = [
   `DOCKER_ACTION_COMBINED_RENDER_SHA256=${"b".repeat(64)}`,
   "DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json",
   "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.offline-compose-v2",
+  "LOCAL_DNS_BIND=127.0.0.1",
   "MAILER_FROM=qa@fixture.invalid",
   "MAILER_REPLY_TO=qa@fixture.invalid",
   "PHP_PROJECTS_DIR=../src",
@@ -759,6 +760,7 @@ function qa8EnvironmentObject(sandbox) {
     PROJECT_SOURCE_DIR: "../compose-source",
     HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: sandbox.canonicalLock,
     ALERT_EMAIL_TO: "qa@fixture.invalid",
+    LOCAL_DNS_BIND: "127.0.0.1",
     MAILER_FROM: "qa@fixture.invalid",
     MAILER_REPLY_TO: "qa@fixture.invalid",
     SMTP_HOST: "smtp.fixture.invalid",
@@ -3275,7 +3277,16 @@ test("LOCAL_PRIVATE exact overlay binds all base secrets outside the release", (
         `${serviceName} must preserve the exact opt-in admin profile`,
       );
     }
-    assert.doesNotMatch(overlay, /profiles: !reset \[\]/);
+    assert.match(
+      overlay,
+      /  node-exporter:\n(?:    [^\n]*\n)*?    profiles: !reset \[\]/,
+      "LOCAL_PRIVATE must enable the canonical node-exporter telemetry service",
+    );
+    assert.equal(
+      [...overlay.matchAll(/profiles: !reset \[\]/g)].length,
+      1,
+      "only node-exporter may clear its inherited profile gate",
+    );
     assert.match(
       overlay,
       /group_add: !override\n\s+- \$\{WAF_TLS_KEY_GID:\?set WAF_TLS_KEY_GID\}/,

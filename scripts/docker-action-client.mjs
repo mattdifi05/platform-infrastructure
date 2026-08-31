@@ -14,6 +14,11 @@ import {
   normalizeActionResponse,
   signActionRequest,
 } from "./docker-action-contract.mjs";
+import {
+  LOCAL_PRIVATE_ALLOWED_ACTIONS,
+  readCanonicalAdmission,
+  verifyAdmissionDocument,
+} from "./local-private-backup-admission.mjs";
 
 const DEFAULT_SOCKET = "/run/platform/docker-action-broker/broker.sock";
 const DEFAULT_BACKUP_JOBS_ROOT = "/var/www/project-state/backup-jobs";
@@ -172,9 +177,11 @@ export function defaultClaimedJobPolicy(environment = process.env) {
   const jobsRoot = typeof configuredRoot === "string" && configuredRoot.length > 0
     ? configuredRoot
     : DEFAULT_BACKUP_JOBS_ROOT;
+  const localPrivateIdentity = typeof environment?.DOCKER_ACTION_LOCAL_ADMISSION_FILE === "string"
+    && environment.DOCKER_ACTION_LOCAL_ADMISSION_FILE.length > 0;
   return Object.freeze({
-    expectedGid: 0,
-    expectedUid: 0,
+    expectedGid: localPrivateIdentity ? process.getgid() : 0,
+    expectedUid: localPrivateIdentity ? process.getuid() : 0,
     maximumBytes: MAX_CLAIMED_JOB_BYTES,
     trustedRoot: path.join(jobsRoot, "running"),
   });
@@ -385,7 +392,7 @@ function assertClaimedJobDocument(document, fileName) {
     "updatedAt",
   ];
   if (!isPlainRecord(document)
-    || !hasExactKeys(document, requiredKeys, ["manifestPath", "sourceManifestPath"])) {
+    || !hasExactKeys(document, requiredKeys, ["logPath", "manifestPath", "sourceManifestPath"])) {
     throw new Error("Claimed job document fields are invalid");
   }
   if (document.schema !== BACKUP_JOB_SCHEMA) throw new Error("Backup job schema is invalid");
@@ -439,6 +446,11 @@ function assertClaimedJobDocument(document, fileName) {
   if (Object.hasOwn(document, "manifestPath")
     && !isExactRelativeBackupPath(document.manifestPath)) {
     throw new Error("Claimed job manifest path is invalid");
+  }
+  if (Object.hasOwn(document, "logPath")
+    && (typeof document.logPath !== "string" || !path.isAbsolute(document.logPath)
+      || path.basename(document.logPath) !== `manual-backup-${document.id}.log`)) {
+    throw new Error("Claimed job log path is invalid");
   }
 }
 
@@ -576,11 +588,42 @@ async function main() {
   const [command, ...args] = process.argv.slice(2);
   const action = resolveClientAction(command);
   const contract = ACTIONS[action];
-  const capabilityKey = protectedCapability(contract.capabilityFile);
+  const localAdmissionFile = process.env.DOCKER_ACTION_LOCAL_ADMISSION_FILE;
+  const localCapabilityDir = process.env.DOCKER_ACTION_LOCAL_CAPABILITY_DIR;
+  const capabilityFile = localAdmissionFile && localCapabilityDir
+    ? path.join(localCapabilityDir, path.basename(contract.capabilityFile))
+    : contract.capabilityFile;
+  const capabilityKey = protectedCapability(capabilityFile, localAdmissionFile ? {
+    expectedGid: process.getgid(),
+    expectedUid: process.getuid(),
+    parentRoot: localCapabilityDir,
+  } : undefined);
+  let runtimeIntentId = process.env.DOCKER_ACTION_RUNTIME_INTENT_ID;
+  let activeReceiptSha256 = process.env.DOCKER_ACTION_ACTIVE_RECEIPT_SHA256;
+  let combinedRenderSha256 = process.env.DOCKER_ACTION_COMBINED_RENDER_SHA256;
+  if (localAdmissionFile) {
+    if (!localCapabilityDir || !process.env.DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE) {
+      throw new Error("LOCAL_PRIVATE client admission paths are incomplete");
+    }
+    const capabilityFiles = Object.fromEntries(LOCAL_PRIVATE_ALLOWED_ACTIONS.map((localAction) => [
+      localAction,
+      path.join(localCapabilityDir, path.basename(ACTIONS[localAction].capabilityFile)),
+    ]));
+    const verified = verifyAdmissionDocument(readCanonicalAdmission(localAdmissionFile), {
+      capabilityFiles,
+      publicKeyPem: fs.readFileSync(process.env.DOCKER_ACTION_LOCAL_PUBLIC_KEY_FILE),
+    });
+    if (!verified.payload.allowedActions.includes(action)) {
+      throw new Error(`LOCAL_PRIVATE admission does not allow ${action}`);
+    }
+    runtimeIntentId = verified.payload.admissionId;
+    activeReceiptSha256 = verified.receiptDigest;
+    combinedRenderSha256 = verified.payload.combinedRenderSha256;
+  }
   const response = await runClientCommand(command, args, {
-    runtimeIntentId: process.env.DOCKER_ACTION_RUNTIME_INTENT_ID,
-    activeReceiptSha256: process.env.DOCKER_ACTION_ACTIVE_RECEIPT_SHA256,
-    combinedRenderSha256: process.env.DOCKER_ACTION_COMBINED_RENDER_SHA256,
+    runtimeIntentId,
+    activeReceiptSha256,
+    combinedRenderSha256,
     capabilityKey,
     claimedJobPolicy: defaultClaimedJobPolicy(process.env),
     socketPath: process.env.DOCKER_ACTION_BROKER_SOCKET || DEFAULT_SOCKET,

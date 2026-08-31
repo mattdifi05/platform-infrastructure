@@ -87,8 +87,10 @@ They are not recovery or admission instructions for the existing V1 server.
 - [ ] Backup execution reports under `reports/backups/` reviewed and archived outside Git.
 - [ ] `sh ./scripts/full-restore-drill.sh` passed.
 - [ ] `sh ./scripts/dr-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/dr/` were archived outside Git.
-- [ ] `compose.backup-scheduler.yaml` enabled with `--profile backup` or an equivalent scheduler approved.
-- [ ] `docker exec enterprise-backup-scheduler crontab -l` reviewed, if using the Dockerized scheduler.
+- [ ] Provider/VPS: `compose.backup-scheduler.yaml` enabled with `--profile backup`; Dell LOCAL_PRIVATE: `compose.local-private-backup.yaml` rendered from the source-lock with provider sidecar absent.
+- [ ] Dell render proves broker as sole `docker.sock` owner, scheduler without that socket, exact catalog/job/offsite admission, external trust/critical mounts and image IDs bound by the signed admission.
+- [ ] Dell trust/render/broker-state/broker-runtime paths are outside every checkout/shared-state bind parent; only broker mounts trust/state RW as designed and only scheduler additionally mounts the UDS runtime read-only.
+- [ ] Provider scheduler crontab, or Dell LOCAL_PRIVATE unprivileged timer schedule, contains both platform catalog and Restic off-site entries when off-site is enabled; Dell health also proves `local-private-timer.ready`.
 - [ ] Restic repository configured outside Git.
 - [ ] `sh ./scripts/offsite-backup-restic.sh` passed.
 - [ ] `sh ./scripts/offsite-restore-drill-restic.sh --dryRun --passwordFile ./secrets/restic_password.txt` validated the off-site repository and snapshot.

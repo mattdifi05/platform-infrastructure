@@ -1240,6 +1240,7 @@ function deterministicComposeEnvironment() {
     "HOSTED_WORKLOAD_MODE=no-hosted",
     "KC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/run/secrets/keycloak_admin_password",
     "KC_DB_PASSWORD_FILE=/run/secrets/keycloak_db_password",
+    "LOCAL_DNS_BIND=127.0.0.1",
     "MAILER_FROM=no-reply@example.invalid",
     "MAILER_REPLY_TO=no-reply@example.invalid",
     "MARIADB_ROOT_PASSWORD=offline-not-a-secret",

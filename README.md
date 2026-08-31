@@ -86,7 +86,7 @@ Terminologia canonica:
   esplicitamente alle applicazioni ospitate.
 - Redis per rate limit, cache/runtime state, heartbeat worker e uso applicativo
   opzionale.
-- Keycloak, NATS JetStream, MinIO, Prometheus, node-exporter, cAdvisor, Grafana, Loki e Promtail.
+- Keycloak, NATS JetStream, MinIO, Prometheus, node-exporter, Grafana, Loki e Promtail.
 - Runtime Node/PHP/Static collegati soltanto tramite un contratto workload
   esterno verificato; nessun backend, frontend o worker applicativo e' core.
 
@@ -302,9 +302,9 @@ fornisce le metriche host e legge le serie workload generate dal collector
 host-side `platform-container-metrics.service`. Il collector riconcilia
 `docker ps`, `docker stats` e i soli campi non-secret necessari di
 `docker inspect`, conserva gli zero reali, espone i limiti cgroup effettivi e
-fallisce se manca un container in esecuzione. cAdvisor resta una scrape di
-compatibilita', ma il suo healthcheck non e' prova di copertura workload. Vedi
-`WORKLOAD-METRICS.md`.
+fallisce se manca un container in esecuzione. La V1.1 Dell non avvia ne'
+esegue lo scrape di cAdvisor: le metriche workload canoniche sono esclusivamente le serie
+`platform_container_*` del textfile collector. Vedi `WORKLOAD-METRICS.md`.
 
 I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail
 legge i log JSON bounded dei container, applica una redaction pipeline su
@@ -464,13 +464,17 @@ Restic carica esclusivamente l'ultimo manifest platform completo e firmato, tutt
 `offsite-restore-drill-restic.sh --dryRun` verifica soltanto raggiungibilità e metadata dello snapshot e resta `EXTERNAL-PENDING`. Senza `--dryRun`, il comando verifica firma e tag del manifest, confronta esattamente path snapshot/restaurati/attesi, rifiuta file mancanti, extra, duplicati o sostituiti ed esegue il restore-test tipizzato per ogni risorsa dichiarata.
 Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, `gs:`, `sftp:`, `rest:` o `rclone:`). Il report è completo soltanto con firma manifest verificata, set esatto, ogni resource ID riuscito e `infra-health` positivo. Restore per famiglie e `--allowPartial` sono rifiutati e non possono produrre evidenza completa.
 
-La schedulazione container-first production e' parte della release immutabile
-ammessa: `backup-scheduler` puo' essere attivato o aggiornato soltanto dal
-workflow trusted `deploy-vps.sh`, non con un comando Compose diretto.
+Sul provider/VPS la schedulazione container-first production e' parte della
+release immutabile ammessa: `backup-scheduler` puo' essere attivato o aggiornato
+soltanto dal workflow trusted `deploy-vps.sh`, non con un comando Compose
+diretto. Il Dell LOCAL_PRIVATE usa invece l'overlay canonico
+`compose.local-private-backup.yaml` nell'ordine fissato dal source-lock; il suo
+boundary ristretto e' descritto nella sezione V1.1 LOCAL_PRIVATE seguente.
 
-Il wrapper `compose-vps.sh` e' l'unico entrypoint supportato per rendere e
-ispezionare lo scheduler: carica anche gli overlay runtime, network e isolamento
-che non devono essere ricostruiti manualmente. Il servizio `backup-scheduler` usa l'immagine ops
+Sul provider/VPS il wrapper `compose-vps.sh` serve solo a render e ispezione
+dello scheduler: carica anche gli overlay runtime,
+network e isolamento che non devono essere ricostruiti manualmente. Il servizio
+`backup-scheduler` usa l'immagine ops
 Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host.
 Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret
 Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale.
@@ -1021,9 +1025,9 @@ La piattaforma hosting deve esporre runtime, database, Redis, proxy, WAF,
 backup, observability e deployment sicuri. I flussi utente specifici restano
 fuori dal GO/NO-GO infra.
 
-## V1.0 LOCAL_PRIVATE corrente
+## V1.1 LOCAL_PRIVATE corrente
 
-La V1.0 attiva non e' piu' descritta dal solo core. Il contratto riproducibile
+La V1.1 attiva non e' descritta dal solo core. Il contratto riproducibile
 e' composto da questa repository, dal lock
 `config/v1-local-private-source-lock.json` e dalle tre revisioni applicative
 immutabili indicate nel lock. Le sorgenti vengono materializzate sotto
@@ -1033,14 +1037,50 @@ upload, log e cache restano esterni a Git.
 
 Il runtime si rende caricando, nell'ordine registrato nel lock, il core, gli
 overlay VPS/WAF, `compose.backup-scheduler.yaml`, gli overlay runtime/network,
-`compose.local-private.yaml`, `compose.local-private-applications.yaml` e per
-ultimo `compose.greenfield.yaml`. Il file backup-scheduler completa le
-definizioni referenziate dagli overlay di rete, ma il profilo `backup` resta
-inattivo: il lock abilita esattamente il solo profilo `admin` e registra anche
-renderer e profili intenzionalmente inattivi. I backup diretti del Control
-Center non richiedono l'attivazione della vecchia transaction. Le variabili
-provider richieste dal parsing devono comunque essere definite nell'ambiente
-esterno.
+`compose.local-private.yaml`, `compose.local-private-backup.yaml`, gli overlay
+applicativi e per ultimo `compose.greenfield.yaml`. Il vecchio profilo provider
+`backup` resta inattivo. L'overlay LOCAL_PRIVATE rende invece canonici
+`docker-action-broker` e `backup-scheduler`: il broker e' l'unico owner di
+`docker.sock`; lo scheduler usa soltanto il suo UDS ed e' ammesso alle tre
+azioni `backup.catalog`, `backup.job.execute` e `backup.offsite.sync`.
+Prune, full restore ed evidence snapshot non sono esposti da questo boundary.
+
+L'ammissione LOCAL_PRIVATE e' firmata Ed25519 sul Mac e lega target Dell,
+commit/tree, render, immagini broker/scheduler/Restic, capability, generazione,
+predecessore e scadenza. Sul Dell viene installata solo la chiave pubblica; la
+chiave privata offline non deve mai lasciare il Mac. Password Restic,
+`rclone.conf`, chiave di firma backup, trust materializzato, report e artefatti
+restano stato esterno a Git con permessi privati. Il file OAuth rclone canonico
+e' scrivibile soltanto dal broker; il container Restic confinato riceve una
+copia privata per il refresh. Nessun reconnect interattivo viene eseguito
+automaticamente.
+
+Trust, render, ledger, active lock, receipt terminali, staging OAuth e UDS del
+broker vivono in directory host dedicate esterne al checkout e a
+`PLATFORM_STATE_DIR`; nessun workload o servizio web monta quei parent. Solo lo
+scheduler riceve il runtime UDS in sola lettura.
+
+Sul Dell lo scheduler resta UID/GID `1000:1000` e usa il timer minuto-per-minuto
+integrato nell'entrypoint, non `crond` (che su Alpine richiede root). Il file
+schedule privato deve contenere catalogo piattaforma e upload Restic off-site e
+il marker `local-private-timer.ready` deve essere presente nell'healthcheck.
+Il pulsante Control Center accoda documenti di backup tipizzati che lo scheduler
+consegna allo stesso broker. Il broker rifiuta sempre un job queue con operazione
+`restore-drill`: un restore reale resta un'operazione esplicita dell'operatore in
+target isolati e non e' una capability del scheduler. Il helper Restic riceve
+solo una copia privata di `rclone.conf`; il broker copia sul file canonico
+esclusivamente un aggiornamento OAuth confinato al campo `token`, dopo verifica
+byte/semantica e sostituzione atomica. Il helper riceve inoltre soltanto il file
+password Restic esatto, mai la directory `critical` che contiene gli altri
+segreti. Prima di rilasciare il lock, il broker fsynca una receipt terminale
+privata con richiesta e risposta firmata; una risposta persa dal client resta
+riconciliabile senza rieseguire il backup.
+
+La telemetria V1.1 LOCAL_PRIVATE usa `node-exporter` per host CPU/RAM/disk e il
+collector host `install-container-metrics-collector.sh --user-cron` per le
+metriche per-container nel textfile collector. cAdvisor resta nel profilo
+inattivo `raw-host-metrics-disabled`; Prometheus, alert e dashboard non devono
+dipendere da quel target nel render Dell.
 
 Le quattro immagini Stexor vengono costruite dalla revisione bloccata con
 `compose.local-private-applications-build.yaml`; le altre applicazioni usano
@@ -1057,13 +1097,14 @@ e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.runtime.yaml`: servizi runtime platform opzionali; non definisce app concrete.
 - `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload.
-- `compose.runtime-isolation.yaml`: overlay di hardening core con mount allowlist, proxy Docker e budget cgroup; nella V1.0 precede le proiezioni LOCAL_PRIVATE, applicative e greenfield.
+- `compose.runtime-isolation.yaml`: overlay di hardening core con mount allowlist, proxy Docker e budget cgroup; nella V1.1 precede le proiezioni LOCAL_PRIVATE, applicative e greenfield.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
-- `compose.local-private-applications.yaml`: topologia applicativa esatta della V1.0 LOCAL_PRIVATE.
+- `compose.local-private-backup.yaml`: attivazione backup V1.1 Dell con broker a tre capability, admission firmata e credenziali off-site esterne.
+- `compose.local-private-applications.yaml`: topologia applicativa esatta della V1.1 LOCAL_PRIVATE.
 - `compose.local-private-applications-build.yaml`: build riproducibile delle immagini Stexor bloccate.
-- `config/v1-local-private-source-lock.json`: repository, commit, tree, layout sorgenti e ordine Compose della V1.0.
+- `config/v1-local-private-source-lock.json`: repository, commit, tree, layout sorgenti e ordine Compose della V1.1.
 - `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
 - `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo sul target, dentro l'image ID ops autenticato. Un env non-default deve essere l'esatto `/srv/platform-infrastructure/release-states/<releaseId>-<envSha256>/environment.env`, root-owned, group-readable dal deployment e mode `0640`; il bind nel runner e' file-only/read-only. Il lock risultante e' target-local, non portabile. Con la policy inclusa il percorso termina `EXTERNAL-PENDING`.
 - `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.

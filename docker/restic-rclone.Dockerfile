@@ -6,4 +6,5 @@ ARG RCLONE_IMAGE=rclone/rclone:1.70.3@sha256:34c729127386abec1c610b2aa024e39b449
 FROM ${RCLONE_IMAGE} AS rclone
 
 FROM ${RESTIC_IMAGE}
+RUN mkdir -p /restic-password /rclone-config
 COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone

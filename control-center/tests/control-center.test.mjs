@@ -874,7 +874,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(monitoringApi.productionEvidence, false);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "platform-alert-dispatcher" && job.targets.includes("platform-alert-dispatcher:3000")), true);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "node-exporter" && job.category === "host"), true);
-  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor" && job.category === "container"), true);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor"), false);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Prometheus" && datasource.url === "http://prometheus:9090"), true);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Loki" && datasource.url === "http://loki:3100"), true);
   assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Platform container logs" && panel.signal === "platform-errors"), true);
@@ -2960,8 +2960,26 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(backupPlan.body.backup.status, "queued");
   assert.equal(backupPlan.body.backup.productionEvidence, false);
   assert.equal(backupPlan.body.job.status, "queued");
+  const platformBackupResourceIds = new Set(backupPlan.body.job.resources.map((item) => item.id));
+  for (const resourceId of [
+    "database:platform-postgres-keycloak",
+    "platform-state:minio-data",
+    "platform-state:keycloak-config",
+    "platform-state:control-center-state",
+    "platform-state:secret-manager-metadata",
+  ]) {
+    assert.equal(platformBackupResourceIds.has(resourceId), true, `missing platform backup resource ${resourceId}`);
+  }
   assert.equal(existsSync(path.join(backupJobsDir, "queued", `${backupPlan.body.job.id}.json`)), true);
   assert.doesNotMatch(JSON.stringify(backupPlan.body), /backup-secret-should-not-leak/);
+
+  const postgresBackupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "backup",
+    scope: "postgres",
+  });
+  assert.equal(postgresBackupPlan.status, 202);
+  assert.equal(postgresBackupPlan.body.job.resources.some((item) => item.id === "database:platform-postgres-keycloak"), true);
+  assert.equal(postgresBackupPlan.body.job.resources.every((item) => item.kind === "database" && item.engine === "postgres"), true);
 
   const appBackupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "backup",

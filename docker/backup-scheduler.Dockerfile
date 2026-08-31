@@ -6,7 +6,8 @@ USER root
 WORKDIR /opt/platform-backup-scheduler
 
 COPY --chmod=0555 scripts/backup-scheduler.sh /opt/platform-backup-scheduler/backup-scheduler.sh
-COPY --chmod=0444 scripts/docker-action-client.mjs scripts/docker-action-contract.mjs /opt/platform-backup-scheduler/
+COPY --chmod=0444 scripts/docker-action-client.mjs scripts/docker-action-contract.mjs scripts/local-private-backup-admission.mjs /opt/platform-backup-scheduler/
+COPY --chmod=0444 policy/local-private-backup-admission.pub.pem /opt/platform-backup-scheduler/policy/local-private-backup-admission.pub.pem
 COPY --chmod=0444 scripts/backup-queue-control.mjs /opt/platform-backup-scheduler/scripts/backup-queue-control.mjs
 COPY --chmod=0444 control-center/backup/contracts.mjs control-center/backup/queue-admission.mjs control-center/backup/queue-operation-adapter.mjs /opt/platform-backup-scheduler/control-center/backup/
 

@@ -11,6 +11,7 @@ RUN apk add --no-cache \
     bash \
     bind-tools \
     ca-certificates \
+    coreutils \
     curl \
     dcron \
     docker-cli \
@@ -21,6 +22,9 @@ RUN apk add --no-cache \
     python3 \
     ruby \
     tini
+
+RUN if [ ! -e /usr/bin/stat ]; then ln -s /bin/stat /usr/bin/stat; fi \
+    && /usr/bin/stat -c '%d' / >/dev/null
 
 RUN curl --fail --location --silent --show-error \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
@@ -38,6 +42,7 @@ RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts
 
 COPY scripts/ /opt/platform-infrastructure/scripts/
 COPY governance/ /opt/platform-infrastructure/governance/
+COPY policy/local-private-backup-admission.pub.pem /opt/platform-infrastructure/policy/local-private-backup-admission.pub.pem
 COPY control-center/backup/ /opt/platform-infrastructure/control-center/backup/
 RUN chmod -R a-w /opt/platform-infrastructure \
     && chmod 0555 /opt/platform-infrastructure \
@@ -52,6 +57,7 @@ RUN chmod -R a-w /opt/platform-infrastructure \
       /opt/platform-infrastructure/scripts/dast-activation-authorization.mjs \
       /opt/platform-infrastructure/scripts/docker-action-activation.mjs \
       /opt/platform-infrastructure/scripts/docker-action-contract.mjs \
+      /opt/platform-infrastructure/scripts/local-private-docker-action-readiness.mjs \
       /opt/platform-infrastructure/scripts/ssh-known-host-endpoint.sh \
       /opt/platform-infrastructure/scripts/pinned-ssh-host-key.mjs
 

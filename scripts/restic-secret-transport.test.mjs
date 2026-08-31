@@ -26,6 +26,20 @@ test("infra Restic execution uses the key-only environment transport", () => {
   assert.match(source, /invocation\.secretTransport\.processEnv/);
   assert.match(source, /invocation\.secretTransport\.sensitiveValues/);
   assert.match(source, /invocation\.secretTransport\.sensitiveEnvironmentKeys/);
+  assert.match(
+    source,
+    /hostPathForContainerMount\(passwordFile\)}:\/restic-password\/\$\{resticPasswordName\}:ro/,
+    "Restic helper must receive only the exact password file, never its secret-bearing parent directory",
+  );
+  assert.doesNotMatch(source, /hostPathForContainerMount\(resticPasswordDir\)/);
+  assert.match(
+    source,
+    /\[process\.env\.LOCAL_PRIVATE_BACKUP_BROKER_STATE_CONTAINER_ROOT, process\.env\.LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT\]/,
+    "Restic OAuth staging needs an exact closed container-to-host mapping outside shared platform state",
+  );
+  const compose = fs.readFileSync(path.join(here, "..", "compose.local-private-backup.yaml"), "utf8");
+  assert.match(compose, /LOCAL_PRIVATE_BACKUP_BROKER_STATE_CONTAINER_ROOT: \/var\/lib\/platform-docker-action-broker/);
+  assert.match(compose, /LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT: \$\{LOCAL_PRIVATE_BACKUP_BROKER_STATE_DIR[^}]*\}/);
 });
 
 test("raw, URI, percent-encoded, and base64 repository credentials are redacted", () => {

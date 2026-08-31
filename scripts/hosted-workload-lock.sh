@@ -327,10 +327,11 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       ($lock.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
       and ($lock.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     else true end)
-    and ($catalog_records | length == 1 and .[0].snapshot == true)
-    and ($core_environment_records | length == 1
-      and .[0] as $core_environment_record
-      | $core_environment_record.snapshot != true
+    and (($catalog_records | length) == 1)
+    and ($catalog_records[0].snapshot == true)
+    and (($core_environment_records | length) == 1)
+    and ($core_environment_records[0] as $core_environment_record
+      | ($core_environment_record.snapshot != true)
       and $core_environment_record.path == $lock.coreEnvFile
       and ([256, 384, 416] | index($core_environment_record.mode)) != null)
     and (($core_records | map(.path) | sort) == ($lock.coreFiles | unique | sort))
