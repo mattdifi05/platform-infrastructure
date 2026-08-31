@@ -201,6 +201,8 @@ EOF
   crontab "$cron_tmp"
   rm -f "$cron_tmp"
   trap - EXIT HUP INT TERM
+  . "$ENV_FILE"
+  export PROJECT_DOCKER_STATS_FILE PLATFORM_CONTAINER_METRICS_FILE PROJECT_DOCKER_STATS_INTERVAL_SECONDS
   "$INSTALL_FILE"
   verify_installation
   exit 0

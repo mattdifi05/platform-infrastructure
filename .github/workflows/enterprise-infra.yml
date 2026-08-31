@@ -56,8 +56,10 @@ jobs:
               sh -n "$file"
             fi
           done
-      - name: Host reliability collector sandbox
-        run: sh scripts/host-reliability-sandbox-test.sh
+      - name: Host and container telemetry collector sandboxes
+        run: |
+          sh scripts/host-reliability-sandbox-test.sh
+          sh scripts/container-metrics-sandbox-test.sh
       - name: Maintainability policy
         run: node ./scripts/infra-ops.mjs maintainability-hygiene
       - name: Install locked Control Center test dependencies

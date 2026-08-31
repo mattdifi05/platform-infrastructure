@@ -85,4 +85,38 @@ jq -e '
 ' "$WORK_DIR/state/incomplete.json" >/dev/null
 grep -Fqx 'platform_container_metrics_collector_healthy 0' "$WORK_DIR/textfile/incomplete.prom"
 
+mkdir -p "$WORK_DIR/home"
+cat > "$WORK_DIR/bin/crontab" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+case "${1:-}" in
+  -l)
+    [ -f "$FAKE_CRONTAB_FILE" ] || exit 1
+    cat "$FAKE_CRONTAB_FILE"
+    ;;
+  *)
+    cp "${1:?crontab source file is required}" "$FAKE_CRONTAB_FILE"
+    ;;
+esac
+EOF
+chmod 0755 "$WORK_DIR/bin/crontab"
+
+HOME="$WORK_DIR/home" \
+XDG_CONFIG_HOME="$WORK_DIR/home/config" \
+XDG_DATA_HOME="$WORK_DIR/home/data" \
+FAKE_CRONTAB_FILE="$WORK_DIR/user-crontab" \
+PATH="$WORK_DIR/bin:$PATH" \
+  sh "$ROOT_DIR/scripts/install-container-metrics-collector.sh" \
+    --apply \
+    --user-cron \
+    --deploy-user sandbox-user \
+    --repo-root "$ROOT_DIR" \
+    --state-dir "$WORK_DIR/installed-state"
+
+jq -e '.collector.healthy == true and .collector.expectedRunning == 2 and .collector.observed == 2' \
+  "$WORK_DIR/installed-state/docker-stats.json" >/dev/null
+grep -Fqx 'platform_container_metrics_collector_healthy 1' \
+  "$WORK_DIR/installed-state/node-exporter-textfile/platform-container.prom"
+grep -Fq '# platform-container-metrics' "$WORK_DIR/user-crontab"
+
 echo "Container metrics sandbox passed: exact zero, limits, complete inventory and fail-closed coverage verified."
