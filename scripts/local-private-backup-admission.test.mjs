@@ -122,12 +122,18 @@ test("repository boundary never contains the offline private admission key", () 
 test("LOCAL_PRIVATE broker dependencies resolve from the immutable release tree without NODE_PATH", () => {
   const repositoryRoot = path.resolve(import.meta.dirname, "..");
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, "docker", "ops.Dockerfile"), "utf8");
+  const dockerignore = fs.readFileSync(path.join(repositoryRoot, ".dockerignore"), "utf8");
   const broker = fs.readFileSync(path.join(repositoryRoot, "scripts", "local-private-docker-action-broker.mjs"), "utf8");
   assert.match(
     dockerfile,
     /mv \/tmp\/control-center-dependencies\/node_modules \/opt\/platform-infrastructure\/node_modules/,
   );
   assert.doesNotMatch(dockerfile, /mv \/tmp\/control-center-dependencies\/node_modules \/node_modules/);
+  assert.match(dockerignore, /^!vendor\/json-schema\/\*\*$/m);
+  assert.match(dockerfile, /COPY vendor\/json-schema\/ \/opt\/platform-infrastructure\/vendor\/json-schema\//);
+  assert.match(dockerfile, /createRequire\("\/opt\/platform-infrastructure\/vendor\/json-schema\/package\.json"\)/);
+  assert.match(dockerfile, /require\("ajv"\)/);
+  assert.match(dockerfile, /require\("ajv-formats"\)/);
   assert.match(broker, /delete childEnvironment\.NODE_PATH;/);
 });
 

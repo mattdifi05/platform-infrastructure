@@ -43,8 +43,10 @@ RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts
 
 COPY scripts/ /opt/platform-infrastructure/scripts/
 COPY governance/ /opt/platform-infrastructure/governance/
+COPY vendor/json-schema/ /opt/platform-infrastructure/vendor/json-schema/
 COPY policy/local-private-backup-admission.pub.pem /opt/platform-infrastructure/policy/local-private-backup-admission.pub.pem
 COPY control-center/backup/ /opt/platform-infrastructure/control-center/backup/
+RUN node --input-type=module -e 'import { createRequire } from "node:module"; const require = createRequire("/opt/platform-infrastructure/vendor/json-schema/package.json"); require("ajv"); require("ajv-formats");'
 RUN chmod -R a-w /opt/platform-infrastructure \
     && chmod 0555 /opt/platform-infrastructure \
     && find /opt/platform-infrastructure -type d -exec chmod 0555 {} + \
