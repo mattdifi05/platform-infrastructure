@@ -677,6 +677,14 @@ Prima dell'avvio verificare che:
 - broker, scheduler e helper Restic corrispondano agli image ID firmati;
 - il broker sia l'unico servizio con `docker.sock` e lo scheduler non lo monti.
 
+Control Center e scheduler devono condividere esclusivamente l'ownership della
+coda `backup-jobs` come `1000:1000`: directory `0700` e file `0600`. Il Control
+Center root effettua l'handoff sui file temporanei prima di `fsync` e rename;
+lo scheduler rifiuta una configurazione UID/GID parziale o diversa. Dopo un
+restore di stato legacy, adottare una sola volta soltanto l'albero
+`backup-jobs` gia' validato e con consumer fermi; non cambiare ownership al
+resto di `PLATFORM_STATE_DIR`.
+
 Il boundary queue LOCAL_PRIVATE ammette solo job `backup`: qualunque
 `restore-drill` viene rifiutato nel broker prima di avviare `infra-ops`. I
 restore di prova si eseguono invece in target usa-e-getta tramite la procedura

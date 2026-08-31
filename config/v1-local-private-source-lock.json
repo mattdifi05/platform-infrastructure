@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "capturedAt": "2026-08-31T10:41:21Z",
+  "capturedAt": "2026-08-31T11:53:48Z",
   "scope": "V1.1 LOCAL_PRIVATE canonical cutover runtime",
   "runtime": {
     "composeProject": "platform_infra_greenfield",
     "serviceCount": 35,
-    "liveBaseRenderSha256": "ba715c5e1d3a6f8426f81657573f0b858af57564328b21130520d5f6a3508e7c",
+    "liveBaseRenderSha256": "0b7dfa5555344dd30c5158c691e638ac3e82ee1398d4ec979427a735a3888d0c",
     "liveObservedHostedWorkloadRuntimeLockSha256": "064bb44eaa1841ede96e46b705cd8afa834e0d5ac4455bd51d219625834af0ab",
     "hostedWorkloadRuntimeLockSha256": "612fe4c801584753b285c9e7fccbb1602419fab1a636e8b0919b235b17f38963",
     "sourceRootVariable": "PHP_PROJECTS_DIR",
