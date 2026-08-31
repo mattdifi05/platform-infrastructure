@@ -91,6 +91,25 @@ test("client rejects raw argument injection before constructing a request", () =
   );
 });
 
+test("client exposes the off-site restore proof only behind explicit LOCAL_PRIVATE admission", () => {
+  const options = {
+    runtimeIntentId: INTENT_ID,
+    activeReceiptSha256: RECEIPT_SHA256,
+    combinedRenderSha256: COMBINED_RENDER_SHA256,
+    capabilityKey: CAPABILITY,
+  };
+  assert.throws(
+    () => buildClientRequest("offsite-restore-proof", [], options),
+    /Unsupported Docker action command/,
+  );
+  const request = buildClientRequest("offsite-restore-proof", [], {
+    ...options,
+    localPrivate: true,
+  });
+  assert.equal(request.action, "restore.offsite.proof");
+  assert.deepEqual(request.parameters, {});
+});
+
 test("RED v2: real builder emits the exact fixed schema and domain-separated request MAC", () => {
   const request = buildClientRequest("prune-manifest-backups-plan", [], {
     runtimeIntentId: INTENT_ID,

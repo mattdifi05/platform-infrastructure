@@ -20,6 +20,7 @@ function fixture() {
     catalog: "catalog-capability-material-00000000000000000000000000000000\n",
     job: "job-capability-material-000000000000000000000000000000000000\n",
     offsite: "offsite-capability-material-000000000000000000000000000000000\n",
+    offsiteRestore: "offsite-restore-capability-material-00000000000000000000000000000\n",
     render: "services:\n  broker:\n    image: exact\n",
   }).map(([name, contents]) => {
     const file = path.join(root, name);
@@ -35,9 +36,15 @@ function fixture() {
     expiresAt: "2026-09-30T12:00:00.000Z",
     issuedAt: "2026-08-31T12:00:00.000Z",
     jobCapabilitySha256: fileSha256(files.job),
+    offsiteRestoreCapabilitySha256: fileSha256(files.offsiteRestore),
     offsiteCapabilitySha256: fileSha256(files.offsite),
     releaseCommitSha1: "a".repeat(40),
     resticImageId: `sha256:${"3".repeat(64)}`,
+    restoreManifestDigest: "4".repeat(64),
+    restoreManifestId: "manifest-scheduled-platform-20260831-154830-867cad",
+    restoreReceiptFileName: "offsite-backup-20260831160759-cba697.json",
+    restoreReceiptFileSha256: "5".repeat(64),
+    restoreSnapshotId: "6".repeat(64),
     schedulerImageId: `sha256:${"2".repeat(64)}`,
     treeSha256: "b".repeat(64),
   });
@@ -58,6 +65,7 @@ function verify(value, subject) {
       "backup.catalog": value.files.catalog,
       "backup.job.execute": value.files.job,
       "backup.offsite.sync": value.files.offsite,
+      "restore.offsite.proof": value.files.offsiteRestore,
     },
     now: value.now,
     publicKeyPem: value.publicKey,
@@ -65,15 +73,18 @@ function verify(value, subject) {
   });
 }
 
-test("signed LOCAL_PRIVATE admission binds target, render, images and exactly three backup capabilities", () => {
+test("signed LOCAL_PRIVATE admission binds target, render, images and the fixed backup/restore capabilities", () => {
   const value = fixture();
   try {
     const verified = verify(value);
     assert.equal(verified.payload.targetId, "dell-192-168-1-202");
-    assert.deepEqual(verified.payload.allowedActions, ["backup.catalog", "backup.job.execute", "backup.offsite.sync"]);
+    assert.deepEqual(verified.payload.allowedActions, [
+      "backup.catalog", "backup.job.execute", "backup.offsite.sync", "restore.offsite.proof",
+    ]);
     assert.match(verified.payload.brokerImageId, /^sha256:[a-f0-9]{64}$/);
     assert.match(verified.payload.schedulerImageId, /^sha256:[a-f0-9]{64}$/);
     assert.match(verified.payload.resources.offsite.resticImageId, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(verified.payload.resources.offsite.restore.snapshotId, "6".repeat(64));
     assert.equal(
       verified.payload.resources.backupResources["control-center.backup-queue"].brokerRoot,
       "/var/lib/platform-backup-data/backup-jobs/running",
@@ -97,6 +108,8 @@ test("signature, target, action widening, expiry, render and capability substitu
       (payload) => { payload.brokerImageId = `sha256:${"0".repeat(64)}`; },
       (payload) => { payload.resources.offsite.repository = "rclone:other:repository"; },
       (payload) => { payload.resources.offsite.resticImageId = `sha256:${"0".repeat(64)}`; },
+      (payload) => { payload.resources.offsite.restore.snapshotId = "latest"; },
+      (payload) => { payload.resources.offsite.restore.receiptFileName = "../receipt.json"; },
     ]) {
       const payload = structuredClone(value.document.payload);
       mutate(payload);

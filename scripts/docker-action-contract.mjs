@@ -62,6 +62,20 @@ export const SCHEDULER_ACTIONS = deepFreeze({
   }),
 });
 
+// LOCAL_PRIVATE-only actions share the authenticated wire contract, but they
+// are deliberately absent from the provider/runtime receipt surface.  Their
+// authority comes exclusively from the offline-signed Dell admission.
+export const LOCAL_PRIVATE_ACTIONS = deepFreeze({
+  "restore.offsite.proof": Object.freeze({
+    capabilityId: "restore.offsite.proof.v2",
+    capabilityFile: "/run/secrets/docker_action_restore_offsite_proof",
+    profileId: "scheduler.restore.offsite.proof.v2",
+    modeled: true,
+    workerCommand: "restore-offsite-proof",
+    parameters: Object.freeze([]),
+  }),
+});
+
 export const EVIDENCE_ACTIONS = deepFreeze({
   "evidence.runtime.snapshot": Object.freeze({
     capabilityId: "evidence.runtime.snapshot.v2",
@@ -73,7 +87,8 @@ export const EVIDENCE_ACTIONS = deepFreeze({
   }),
 });
 
-export const ACTIONS = Object.freeze({ ...SCHEDULER_ACTIONS, ...EVIDENCE_ACTIONS });
+export const RUNTIME_ACTIONS = Object.freeze({ ...SCHEDULER_ACTIONS, ...EVIDENCE_ACTIONS });
+export const ACTIONS = Object.freeze({ ...RUNTIME_ACTIONS, ...LOCAL_PRIVATE_ACTIONS });
 
 export const CLI_ACTIONS = Object.freeze({
   "backup-platform-catalog": "backup.catalog",
@@ -82,6 +97,7 @@ export const CLI_ACTIONS = Object.freeze({
   "prune-manifest-backups-apply": "backup.prune.apply",
   "full-restore-drill": "restore.drill.full",
   "offsite-backup-restic": "backup.offsite.sync",
+  "offsite-restore-proof": "restore.offsite.proof",
   "runtime-docker-snapshot": "evidence.runtime.snapshot",
 });
 
@@ -93,6 +109,7 @@ const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const DIGEST_IMAGE = /^[a-zA-Z0-9][a-zA-Z0-9._/:+-]*@sha256:[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
 const DNS_HOST = /^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*$/;
+const RESTIC_CREDENTIAL_FILE = "password";
 const ALLOWED_CONTAINER_PATHS = new Set([
   "/opt/platform-infrastructure",
   "/opt/platform-infrastructure/backups",
@@ -136,7 +153,7 @@ const PHASE_PROFILE_KEYS = Object.freeze([
   "writableSubpathIds",
 ]);
 
-const ACTION_PLANS = deepFreeze({
+const RUNTIME_ACTION_PLANS = deepFreeze({
   "backup.catalog": {
     claimedJobSourceId: null,
     jobOperations: [],
@@ -178,7 +195,18 @@ const ACTION_PLANS = deepFreeze({
   },
 });
 
-const PHASE_PLANS = deepFreeze({
+const LOCAL_PRIVATE_ACTION_PLANS = deepFreeze({
+  "restore.offsite.proof": {
+    claimedJobSourceId: null,
+    jobOperations: [],
+    operationPhaseIds: {},
+    phaseIds: ["offsite.restore"],
+  },
+});
+
+const ACTION_PLANS = deepFreeze({ ...RUNTIME_ACTION_PLANS, ...LOCAL_PRIVATE_ACTION_PLANS });
+
+const RUNTIME_PHASE_PLANS = deepFreeze({
   "catalog.capture": phasePlan({
     command: "backup-catalog",
     endpointPurpose: "capture",
@@ -263,6 +291,22 @@ const PHASE_PLANS = deepFreeze({
     workerSecretSetIds: ["manifest.verification"],
   }),
 });
+
+const LOCAL_PRIVATE_PHASE_PLANS = deepFreeze({
+  "offsite.restore": phasePlan({
+    command: "restore-offsite-proof",
+    endpointPurpose: "offsite",
+    mountIds: [],
+    mutationPolicy: "restore-disposable",
+    networkIds: ["platform_egress"],
+    outputSchema: "platform.offsite-restore-proof/v1",
+    scratchVolumeIds: ["restore.scratch"],
+    helperProfileIds: ["helper.offsite.restic"],
+    workerSecretSetIds: ["manifest.verification", "offsite.credentials"],
+  }),
+});
+
+const PHASE_PLANS = deepFreeze({ ...RUNTIME_PHASE_PLANS, ...LOCAL_PRIVATE_PHASE_PLANS });
 
 const SERVICE_ENDPOINT_PLANS = deepFreeze({
   "capture.database.mariadb": {
@@ -541,7 +585,7 @@ export function normalizeTrustedContext(intentValue, receiptValue, trustKey, { n
   if (!SHA256.test(String(intent.dastChainSha256 ?? ""))) fail(403, "runtime intent DAST chain digest is invalid");
   if (!Array.isArray(intent.allowedActions) || intent.allowedActions.length < 1) fail(403, "runtime intent has no allowed actions");
   const allowedActions = [...new Set(intent.allowedActions.map(String))];
-  if (allowedActions.length !== intent.allowedActions.length || allowedActions.some((action) => !ACTIONS[action]?.modeled)) {
+  if (allowedActions.length !== intent.allowedActions.length || allowedActions.some((action) => !RUNTIME_ACTIONS[action]?.modeled)) {
     fail(403, "runtime intent contains an unsupported or duplicate action");
   }
   verifyMac(intent, trustKey, "runtime intent");
@@ -882,7 +926,7 @@ function normalizeResources(value) {
 
   const capabilityFiles = normalizeExactMap(
     resources.capabilityFiles,
-    Object.keys(ACTIONS).map((action) => `capability.${action}`),
+    Object.keys(RUNTIME_ACTIONS).map((action) => `capability.${action}`),
     "capabilityFiles",
     (entry, fileId) => {
       assertExactKeys(entry, [
@@ -1066,7 +1110,7 @@ function normalizeResources(value) {
     "offsite.credentials": [
       "/run/platform/worker-secrets/offsite",
       "worker.input.offsite",
-      { password: "password", repository: "repository" },
+      { password: RESTIC_CREDENTIAL_FILE, repository: "repository" },
     ],
     "postgres.capture.credentials": [
       "/run/platform/worker-secrets/postgres-capture",
@@ -1323,7 +1367,7 @@ function normalizePhaseProfiles(value, {
   workerSecretSets,
   writableSubpaths,
 }) {
-  return normalizeExactMap(value, Object.keys(PHASE_PLANS), "phaseProfiles", (entry, phaseId) => {
+  return normalizeExactMap(value, Object.keys(RUNTIME_PHASE_PLANS), "phaseProfiles", (entry, phaseId) => {
     assertExactKeys(entry, PHASE_PROFILE_KEYS, `phase profile ${phaseId}`);
     if (entry.phaseId !== phaseId) fail(403, `phase profile ${phaseId} identity is invalid`);
     const unsigned = withoutKey(entry, "phaseSha256");
@@ -1331,7 +1375,7 @@ function normalizePhaseProfiles(value, {
       || !constantEqual(entry.phaseSha256, sha256(canonicalJson(unsigned)))) {
       fail(403, `phase profile ${phaseId} digest is invalid`);
     }
-    const expected = PHASE_PLANS[phaseId];
+    const expected = RUNTIME_PHASE_PLANS[phaseId];
     for (const field of [
       "command",
       "helperProfileIds",

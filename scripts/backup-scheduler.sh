@@ -329,8 +329,9 @@ if [ "${1:-}" = "--run" ]; then
   if { [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "true" ] || [ "$LOCAL_PRIVATE_FIXED_ACTIONS" = "1" ]; } \
     && [ "$operation" != "backup-platform-catalog" ] \
     && [ "$operation" != "execute-backup-job" ] \
-    && [ "$operation" != "offsite-backup-restic" ]; then
-    echo "LOCAL_PRIVATE scheduler rejects capability outside catalog/job/offsite." >&2
+    && [ "$operation" != "offsite-backup-restic" ] \
+    && [ "$operation" != "offsite-restore-proof" ]; then
+    echo "LOCAL_PRIVATE scheduler rejects capability outside catalog/job/offsite/restore-proof." >&2
     exit 64
   fi
   case "$operation" in
@@ -340,7 +341,7 @@ if [ "${1:-}" = "--run" ]; then
         exit 64
       fi
       ;;
-    backup-platform-catalog|prune-manifest-backups-plan|prune-manifest-backups-apply|full-restore-drill|offsite-backup-restic)
+    backup-platform-catalog|prune-manifest-backups-plan|prune-manifest-backups-apply|full-restore-drill|offsite-backup-restic|offsite-restore-proof)
       if [ "$#" -ne 0 ]; then
         echo "Typed scheduler operation $operation accepts no parameters" >&2
         exit 64

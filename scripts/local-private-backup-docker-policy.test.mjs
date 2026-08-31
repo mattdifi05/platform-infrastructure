@@ -29,11 +29,15 @@ function invocation(action = "backup.catalog") {
     action,
     egressNetwork: "platform_infra_greenfield_platform_egress",
     nodeImage,
+    requestSha256: sha("c"),
     receipt: {
       resources: {
         offsite: {
           repository: "rclone:platform-onedrive:platform-infrastructure/restic",
           resticImageId: resticImage,
+          restore: {
+            snapshotId: sha("d"),
+          },
         },
       },
     },
@@ -201,6 +205,62 @@ test("LOCAL_PRIVATE off-site policy binds egress, image, credential mounts and e
   ]) {
     assert.equal(localPrivateBackupDockerInvocationAllowed(current, mutated, { env: offsiteProcessEnvironment() }, pid), false);
   }
+});
+
+test("LOCAL_PRIVATE off-site restore policy admits only the bound snapshot and disposable scratch", () => {
+  const current = invocation("restore.offsite.proof");
+  const short = current.requestSha256.slice(0, 12);
+  const fixed = (role) => [
+    "--pull", "never",
+    "--network", current.egressNetwork,
+    "--read-only", "--user", "1000:1000",
+    "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+    "--pids-limit", "128", "--log-driver", "none",
+    "--label", `com.platform.local-private.offsite-restore-request-sha256=${current.requestSha256}`,
+    "--label", `com.platform.local-private.offsite-restore-role=${role}`,
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
+    "-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp/.cache",
+    "-e", "RESTIC_REPOSITORY", "-e", "RESTIC_PASSWORD_FILE",
+    "-e", "RCLONE_CONFIG=/rclone-config/rclone.conf",
+    "--mount", `type=bind,src=${roots.brokerStateHost}/rclone-refresh,dst=/rclone-config`,
+    "--mount", `type=bind,src=${roots.secretsHost}/restic_password.txt,dst=/restic-password/restic_password.txt,readonly`,
+  ];
+  const processEnvironment = { env: offsiteProcessEnvironment() };
+  const snapshots = [
+    "run", "--rm", "--name", `gf-restic-snapshots-${short}`,
+    ...fixed("snapshots"), resticImage, "--no-lock", "snapshots", "--json", "--tag", "platform-backups",
+  ];
+  const scratch = `${roots.dataHost}/.offsite-restore-proof/${current.requestSha256}`;
+  const restore = [
+    "run", "--rm", "--name", `gf-restic-restore-${short}`,
+    ...fixed("restore"), "--mount", `type=bind,src=${scratch},dst=/restore`, resticImage,
+    "--no-lock", "restore", current.receipt.resources.offsite.restore.snapshotId, "--target", "/restore",
+  ];
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, snapshots, processEnvironment, pid), true);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, restore, processEnvironment, pid), true);
+  const containerId = "a".repeat(64);
+  const restoreBinding = { id: containerId, name: `gf-restic-restore-${short}`, role: "restore" };
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, [
+    "ps", "-aq", "--no-trunc", "--filter", `name=^/gf-restic-restore-${short}$`,
+  ], {}, pid), true);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, [
+    "container", "inspect", containerId,
+  ], { restoreContainer: restoreBinding }, pid), true);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, [
+    "rm", "-f", containerId,
+  ], { restoreContainer: restoreBinding }, pid), true);
+  for (const rejected of [
+    restore.with(restore.indexOf(current.receipt.resources.offsite.restore.snapshotId), "latest"),
+    restore.with(restore.indexOf(`type=bind,src=${scratch},dst=/restore`), "type=bind,src=/,dst=/restore"),
+    restore.with(restore.indexOf("--read-only"), "--privileged"),
+    snapshots.with(snapshots.indexOf(current.egressNetwork), "bridge"),
+  ]) assert.equal(localPrivateBackupDockerInvocationAllowed(current, rejected, processEnvironment, pid), false);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, ["rm", "-f", containerId], {
+    restoreContainer: { ...restoreBinding, role: "snapshots" },
+  }, pid), false);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, ["container", "inspect", "b".repeat(64)], {
+    restoreContainer: restoreBinding,
+  }, pid), false);
 });
 
 test("LOCAL_PRIVATE child authority is complete and partial or root execution fails closed", () => {

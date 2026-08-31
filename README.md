@@ -1041,8 +1041,10 @@ overlay VPS/WAF, `compose.backup-scheduler.yaml`, gli overlay runtime/network,
 applicativi e per ultimo `compose.greenfield.yaml`. Il vecchio profilo provider
 `backup` resta inattivo. L'overlay LOCAL_PRIVATE rende invece canonici
 `docker-action-broker` e `backup-scheduler`: il broker e' l'unico owner di
-`docker.sock`; lo scheduler usa soltanto il suo UDS ed e' ammesso alle tre
-azioni `backup.catalog`, `backup.job.execute` e `backup.offsite.sync`.
+`docker.sock`; lo scheduler usa soltanto il suo UDS ed e' ammesso alle quattro
+azioni `backup.catalog`, `backup.job.execute`, `backup.offsite.sync` e
+`restore.offsite.proof`. L'ultima e' solo operator-driven e ripristina lo
+snapshot Restic vincolato dall'admission in uno scratch isolato e disposable.
 Prune, full restore ed evidence snapshot non sono esposti da questo boundary.
 
 L'ammissione LOCAL_PRIVATE e' firmata Ed25519 sul Mac e lega target Dell,
@@ -1101,7 +1103,7 @@ e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
-- `compose.local-private-backup.yaml`: attivazione backup V1.1 Dell con broker a tre capability, admission firmata e credenziali off-site esterne.
+- `compose.local-private-backup.yaml`: attivazione backup V1.1 Dell con capability firmate per catalogo, job, sync off-site e prova restore off-site isolata; credenziali off-site esterne.
 - `compose.local-private-applications.yaml`: topologia applicativa esatta della V1.1 LOCAL_PRIVATE.
 - `compose.local-private-applications-build.yaml`: build riproducibile delle immagini Stexor bloccate.
 - `config/v1-local-private-source-lock.json`: repository, commit, tree, layout sorgenti e ordine Compose della V1.1.

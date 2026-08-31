@@ -11,6 +11,7 @@ export const LOCAL_PRIVATE_ALLOWED_ACTIONS = Object.freeze([
   "backup.catalog",
   "backup.job.execute",
   "backup.offsite.sync",
+  "restore.offsite.proof",
 ]);
 const SHA256 = /^[a-f0-9]{64}$/;
 const SHA1 = /^[a-f0-9]{40}$/;
@@ -22,6 +23,7 @@ const CAPABILITY_BINDINGS = Object.freeze({
   "capability.backup.catalog": "/run/secrets/docker_action_backup_catalog",
   "capability.backup.job.execute": "/run/secrets/docker_action_backup_job_execute",
   "capability.backup.offsite.sync": "/run/secrets/docker_action_backup_offsite_sync",
+  "capability.restore.offsite.proof": "/run/secrets/docker_action_restore_offsite_proof",
 });
 const LOCAL_PRIVATE_RESTIC_REPOSITORY = "rclone:platform-onedrive:platform-infrastructure/restic";
 const LOCAL_PRIVATE_RESTIC_PASSWORD_PATH = "/run/platform/critical/restic_password.txt";
@@ -72,11 +74,17 @@ export function createAdmissionPayload({
   generation = 1,
   issuedAt,
   jobCapabilitySha256,
+  offsiteRestoreCapabilitySha256,
   offsiteCapabilitySha256,
   previousAdmissionSha256 = "0".repeat(64),
   releaseCommitSha1,
   resticImageId,
   resticRepository = LOCAL_PRIVATE_RESTIC_REPOSITORY,
+  restoreManifestDigest,
+  restoreManifestId,
+  restoreReceiptFileName,
+  restoreReceiptFileSha256,
+  restoreSnapshotId,
   sourceRenderSha256 = combinedRenderSha256,
   schedulerImageId,
   targetId = "dell-192-168-1-202",
@@ -103,12 +111,23 @@ export function createAdmissionPayload({
         brokerPath: CAPABILITY_BINDINGS["capability.backup.offsite.sync"],
         sha256: offsiteCapabilitySha256,
       },
+      "capability.restore.offsite.proof": {
+        brokerPath: CAPABILITY_BINDINGS["capability.restore.offsite.proof"],
+        sha256: offsiteRestoreCapabilitySha256,
+      },
     },
     offsite: {
       rcloneConfigPath: LOCAL_PRIVATE_RCLONE_CONFIG_PATH,
       repository: resticRepository,
       resticImageId,
       resticPasswordPath: LOCAL_PRIVATE_RESTIC_PASSWORD_PATH,
+      restore: {
+        manifestDigest: restoreManifestDigest,
+        manifestId: restoreManifestId,
+        receiptFileName: restoreReceiptFileName,
+        receiptFileSha256: restoreReceiptFileSha256,
+        snapshotId: restoreSnapshotId,
+      },
     },
   };
   return {
@@ -231,7 +250,7 @@ export function verifyAdmissionDocument(document, {
     }
   }
   exactKeys(payload.resources.offsite, [
-    "rcloneConfigPath", "repository", "resticImageId", "resticPasswordPath",
+    "rcloneConfigPath", "repository", "resticImageId", "resticPasswordPath", "restore",
   ], "offsite admission");
   if (payload.resources.offsite.repository !== LOCAL_PRIVATE_RESTIC_REPOSITORY
     || payload.resources.offsite.resticPasswordPath !== LOCAL_PRIVATE_RESTIC_PASSWORD_PATH
@@ -239,6 +258,17 @@ export function verifyAdmissionDocument(document, {
     || !/^sha256:[a-f0-9]{64}$/.test(String(payload.resources.offsite.resticImageId ?? ""))
     || payload.resources.offsite.resticImageId === `sha256:${"0".repeat(64)}`) {
     fail("offsite admission is invalid");
+  }
+  exactKeys(payload.resources.offsite.restore, [
+    "manifestDigest", "manifestId", "receiptFileName", "receiptFileSha256", "snapshotId",
+  ], "offsite restore admission");
+  const restore = payload.resources.offsite.restore;
+  if (!SHA256.test(String(restore.manifestDigest ?? ""))
+    || !SHA256.test(String(restore.receiptFileSha256 ?? ""))
+    || !SHA256.test(String(restore.snapshotId ?? ""))
+    || !/^manifest-[a-z0-9][a-z0-9-]{15,127}$/.test(String(restore.manifestId ?? ""))
+    || !/^offsite-backup-\d{14}-[a-f0-9]{6}\.json$/.test(String(restore.receiptFileName ?? ""))) {
+    fail("offsite restore admission is invalid");
   }
 
   if (renderFile && fileSha256(renderFile) !== payload.combinedRenderSha256) fail("runtime render hash differs from signed admission");
@@ -310,10 +340,16 @@ async function main() {
       generation: Number(args.generation ?? 1),
       issuedAt,
       jobCapabilitySha256: fileSha256(args.jobCapability),
+      offsiteRestoreCapabilitySha256: fileSha256(args.offsiteRestoreCapability),
       offsiteCapabilitySha256: fileSha256(args.offsiteCapability),
       previousAdmissionSha256: args.previousAdmissionSha256,
       releaseCommitSha1: args.releaseCommit,
       resticImageId: args.resticImageId,
+      restoreManifestDigest: args.restoreManifestDigest,
+      restoreManifestId: args.restoreManifestId,
+      restoreReceiptFileName: args.restoreReceiptFileName,
+      restoreReceiptFileSha256: args.restoreReceiptFileSha256,
+      restoreSnapshotId: args.restoreSnapshotId,
       schedulerImageId: args.schedulerImageId,
       treeSha256: args.treeSha256,
     });
@@ -326,10 +362,11 @@ async function main() {
     const document = readCanonicalAdmission(args.admission);
     const verified = verifyAdmissionDocument(document, {
       backupSigningKeyFile: args.backupSigningKey,
-      capabilityFiles: args.catalogCapability && args.jobCapability && args.offsiteCapability ? {
+      capabilityFiles: args.catalogCapability && args.jobCapability && args.offsiteCapability && args.offsiteRestoreCapability ? {
         "backup.catalog": args.catalogCapability,
         "backup.job.execute": args.jobCapability,
         "backup.offsite.sync": args.offsiteCapability,
+        "restore.offsite.proof": args.offsiteRestoreCapability,
       } : undefined,
       publicKeyPem: fs.readFileSync(args.publicKey),
       renderFile: args.renderFile,
