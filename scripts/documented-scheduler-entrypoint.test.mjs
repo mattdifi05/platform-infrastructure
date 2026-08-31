@@ -109,6 +109,11 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
     /^COPY --chmod=0444 control-center\/backup\/contracts\.mjs control-center\/backup\/queue-admission\.mjs control-center\/backup\/queue-operation-adapter\.mjs \/opt\/platform-backup-scheduler\/control-center\/backup\/$/m,
     "queue control dependencies must preserve their repository-relative import graph",
   );
+  assert.match(
+    candidates[0].source,
+    /^RUN chmod 0555 \/opt\/platform-backup-scheduler\/policy \\\n    && chmod 0444 \/opt\/platform-backup-scheduler\/policy\/local-private-backup-admission\.pub\.pem$/m,
+    "the non-root scheduler must be able to traverse the public-key directory",
+  );
   const executableSurface = instructions
     .filter(({ opcode }) => ["FROM", "RUN", "ENTRYPOINT", "CMD"].includes(opcode))
     .map(({ value }) => value)
