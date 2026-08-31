@@ -26,6 +26,10 @@ import {
   localPrivateBackupChildBindings,
   readLocalPrivateRenderBinding,
 } from "./local-private-backup-docker-policy.mjs";
+import {
+  backupDocumentDigest,
+  parseBackupManifestDocument,
+} from "../control-center/backup/contracts.mjs";
 
 const DEFAULT_SOCKET = "/run/platform/docker-action-broker/broker.sock";
 const DEFAULT_STATE_DIR = "/var/lib/platform/docker-action-broker";
@@ -36,8 +40,10 @@ const DEFAULT_RENDER = "/run/platform/local-private-input/combined-render.yaml";
 const DEFAULT_SIGNING_KEY = "/run/platform/local-private-input/backup_signing_keys";
 const DEFAULT_JOBS_ROOT = "/var/lib/platform-backup-data/backup-jobs";
 const DEFAULT_INFRA_OPS = "/opt/platform-infrastructure/scripts/infra-ops.mjs";
+const DEFAULT_DATA_ROOT = "/var/lib/platform-backup-data";
 const ACTIVE_LOCK = "active-operation.json";
 const TERMINAL_RECEIPT_SCHEMA = "platform.local-private-broker-terminal/v1";
+const OFFSITE_RECONCILIATION_SCHEMA = "platform.local-private-offsite-reconciliation/v1";
 const MAX_TERMINAL_RECEIPTS = 4096;
 const MAX_RESPONSE_OUTPUT = 64 * 1024;
 const OPERATION_TIMEOUT_MS = 4 * 60 * 60_000;
@@ -192,7 +198,9 @@ export function validateRcloneTokenRefresh(beforeBytes, afterBytes) {
   }
   const beforeKeys = Object.keys(before.token).sort();
   const afterKeys = Object.keys(after.token).sort();
-  if (canonicalJson(beforeKeys) !== canonicalJson(afterKeys)) {
+  const schemaWithoutOptionalLifetime = (keys) => keys.filter((key) => key !== "expires_in");
+  if (canonicalJson(schemaWithoutOptionalLifetime(beforeKeys))
+    !== canonicalJson(schemaWithoutOptionalLifetime(afterKeys))) {
     throw new Error("rclone refresh changed the OAuth token schema");
   }
   const mutable = new Set(["access_token", "expiry", "expires_in", "refresh_token"]);
@@ -211,7 +219,362 @@ export function validateRcloneTokenRefresh(beforeBytes, afterBytes) {
     || !Number.isFinite(Date.parse(after.token.expiry))) {
     throw new Error("rclone refreshed expiry is invalid");
   }
+  if (Object.hasOwn(after.token, "expires_in")
+    && (!Number.isSafeInteger(after.token.expires_in)
+      || after.token.expires_in < 1
+      || after.token.expires_in > 31 * 24 * 60 * 60)) {
+    throw new Error("rclone refreshed expires_in is invalid");
+  }
   return Buffer.from(after.text);
+}
+
+function exactRecord(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || canonicalJson(Object.keys(value).sort()) !== canonicalJson([...keys].sort())) {
+    throw new Error(`${label} fields are invalid`);
+  }
+  return value;
+}
+
+function exactIsoTime(value, label) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))
+    || new Date(Date.parse(value)).toISOString() !== value) {
+    throw new Error(`${label} is not an exact ISO timestamp`);
+  }
+  return Date.parse(value);
+}
+
+function protectedJson(file, { maximumBytes = 2 * 1024 * 1024 } = {}) {
+  const bytes = readProtectedBytes(file, { minimumBytes: 2, maximumBytes });
+  return {
+    bytes,
+    value: JSON.parse(decodeUtf8(bytes, file)),
+  };
+}
+
+function exactProtectedChild(root, ...segments) {
+  const canonicalRoot = fs.realpathSync(root);
+  const candidate = path.join(canonicalRoot, ...segments);
+  const parent = fs.realpathSync(path.dirname(candidate));
+  if (parent !== canonicalRoot && !parent.startsWith(`${canonicalRoot}${path.sep}`)) {
+    throw new Error("protected evidence path escaped its fixed root");
+  }
+  return path.join(parent, path.basename(candidate));
+}
+
+function backupSigningKeyMap(bytes) {
+  const text = decodeUtf8(bytes, "backup signing keyring").trim();
+  const entries = text.split(",").map((entry) => entry.trim()).filter(Boolean);
+  const keys = new Map();
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    const id = separator > 0 ? entry.slice(0, separator).trim() : "";
+    const secret = separator > 0 ? entry.slice(separator + 1).trim() : "";
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)
+      || secret.length < 48 || secret.length > 16 * 1024 || keys.has(id)) {
+      throw new Error("backup signing keyring is invalid");
+    }
+    keys.set(id, secret);
+  }
+  if (!keys.size) throw new Error("backup signing keyring is empty");
+  return keys;
+}
+
+function verifyOffsiteManifest(file, signingKeyFile) {
+  const { bytes, value } = protectedJson(file, { maximumBytes: 16 * 1024 * 1024 });
+  const manifest = parseBackupManifestDocument(value);
+  if (!manifest.signature || manifest.signature.algorithm !== "HMAC-SHA256") {
+    throw new Error("off-site manifest signature is missing or unsupported");
+  }
+  const digest = backupDocumentDigest(manifest);
+  if (manifest.signature.digest !== digest) throw new Error("off-site manifest digest is invalid");
+  const keys = backupSigningKeyMap(readProtectedBytes(signingKeyFile, {
+    minimumBytes: 48,
+    maximumBytes: 64 * 1024,
+  }));
+  const secret = keys.get(manifest.signature.keyId);
+  const expected = secret
+    ? crypto.createHmac("sha256", secret)
+      .update(`platform-backup-manifest-v1\n${manifest.id}\n${digest}\n`)
+      .digest("base64url")
+    : "";
+  const supplied = String(manifest.signature.value ?? "");
+  if (!secret || supplied.length !== expected.length
+    || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+    throw new Error("off-site manifest signature verification failed");
+  }
+  return { fileSha256: sha256(bytes), manifest };
+}
+
+function validateCompletedOffsiteReceipt(receipt, active, manifest, {
+  expectedManifestDigest,
+  expectedSnapshotId,
+} = {}) {
+  exactRecord(receipt, [
+    "artifactCount", "credentialsExposed", "durationMs", "evidenceContext", "finishedAt",
+    "generatedAt", "hostname", "manifestDigest", "manifestId", "manifestPath",
+    "repositoryHost", "repositoryMaxBytes", "repositoryOffsite", "repositorySizeBytes",
+    "repositoryType", "resourceIds", "schema", "snapshotId", "startedAt", "status", "tag",
+  ], "off-site backup receipt");
+  if (receipt.schema !== "platform.offsite-backup-receipt/v1" || receipt.status !== "passed"
+    || receipt.hostname !== "platform-infrastructure" || receipt.tag !== "platform-backups"
+    || receipt.repositoryType !== "rclone" || receipt.repositoryHost !== null
+    || receipt.repositoryOffsite !== true || receipt.credentialsExposed !== false) {
+    throw new Error("off-site backup receipt identity or status is invalid");
+  }
+  const admittedAt = exactIsoTime(active.admittedAt, "active operation admittedAt");
+  const startedAt = exactIsoTime(receipt.startedAt, "off-site receipt startedAt");
+  const finishedAt = exactIsoTime(receipt.finishedAt, "off-site receipt finishedAt");
+  if (receipt.generatedAt !== receipt.finishedAt
+    || startedAt < admittedAt || startedAt - admittedAt > 30_000
+    || finishedAt < startedAt || finishedAt - startedAt !== receipt.durationMs
+    || receipt.durationMs < 1 || receipt.durationMs > OPERATION_TIMEOUT_MS) {
+    throw new Error("off-site backup receipt timing is invalid");
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(receipt.snapshotId ?? ""))
+    || receipt.snapshotId !== expectedSnapshotId
+    || !/^[a-f0-9]{64}$/.test(String(receipt.manifestDigest ?? ""))
+    || receipt.manifestDigest !== expectedManifestDigest
+    || receipt.manifestDigest !== manifest.signature.digest
+    || receipt.manifestId !== manifest.id
+    || receipt.manifestPath !== `manifests/${manifest.id}.json`) {
+    throw new Error("off-site backup receipt snapshot or manifest binding is invalid");
+  }
+  const resourceIds = manifest.resources.map((resource) => resource.id);
+  if (canonicalJson(receipt.resourceIds) !== canonicalJson(resourceIds)
+    || receipt.artifactCount !== manifest.artifacts.length
+    || !Number.isSafeInteger(receipt.artifactCount) || receipt.artifactCount < 1
+    || !Number.isSafeInteger(receipt.repositorySizeBytes) || receipt.repositorySizeBytes < 1
+    || !Number.isSafeInteger(receipt.repositoryMaxBytes)
+    || receipt.repositoryMaxBytes < receipt.repositorySizeBytes) {
+    throw new Error("off-site backup receipt coverage or repository bounds are invalid");
+  }
+}
+
+function completedOffsiteResponse(active, receipt, capabilityKey) {
+  const output = {
+    executedAt: receipt.finishedAt,
+    schema: "platform.offsite-backup-receipt/v1",
+    status: "completed",
+  };
+  const result = {
+    action: active.action,
+    job: null,
+    phases: [{
+      output,
+      outputSchema: output.schema,
+      outputSha256: sha256(canonicalJson(output)),
+      phaseId: "offsite.sync",
+      status: "completed",
+    }],
+    schema: RESULT_SCHEMA,
+    status: "completed",
+  };
+  return signActionResponse({
+    action: active.action,
+    errorCode: null,
+    requestId: active.requestId,
+    requestSha256: active.requestSha256,
+    result,
+    resultSha256: sha256(canonicalJson(result)),
+    schema: RESPONSE_SCHEMA,
+    status: "completed",
+    statusCode: 200,
+  }, capabilityKey);
+}
+
+export function reconcileCompletedOffsiteOperation({
+  backupsRoot,
+  capabilityKey,
+  expectedManifestDigest,
+  expectedOriginalRcloneSha256,
+  expectedSnapshotId,
+  rcloneConfigFile,
+  receiptFileName,
+  reportsRoot,
+  signingKeyFile,
+  stateDir,
+  trusted,
+  now = Date.now(),
+} = {}) {
+  if (!/^[a-f0-9]{64}$/.test(String(expectedManifestDigest ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(expectedOriginalRcloneSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(expectedSnapshotId ?? ""))
+    || !/^offsite-backup-\d{14}-[a-f0-9]{6}\.json$/.test(String(receiptFileName ?? ""))) {
+    throw new Error("off-site reconciliation evidence selectors are invalid");
+  }
+  const activeFile = path.join(stateDir, ACTIVE_LOCK);
+  const active = readCanonicalState(activeFile);
+  exactRecord(active, ["action", "admittedAt", "requestId", "requestSha256", "terminalFile"], "active operation");
+  if (active.action !== "backup.offsite.sync"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(active.requestId ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(active.requestSha256 ?? ""))
+    || active.terminalFile !== `terminal/${active.requestSha256}.json`
+    || exactIsoTime(active.admittedAt, "active operation admittedAt") > now + 30_000) {
+    throw new Error("active off-site operation identity is invalid");
+  }
+
+  const currentAdmission = readCanonicalState(path.join(stateDir, "active-admission.json"));
+  exactRecord(currentAdmission, ["admissionSha256", "generation"], "active admission state");
+  const candidateAdmission = trusted?.document ? {
+    admissionSha256: sha256(canonicalJson(trusted.document)),
+    generation: trusted.intent?.generation,
+  } : null;
+  const previousAdmission = candidateAdmission ? {
+    admissionSha256: trusted.receipt?.previousAdmissionSha256,
+    generation: candidateAdmission.generation - 1,
+  } : null;
+  if (!candidateAdmission || !previousAdmission
+    || trusted.intent?.activationBundleSha256 !== candidateAdmission.admissionSha256
+    || !Number.isSafeInteger(candidateAdmission.generation) || candidateAdmission.generation < 2
+    || !/^[a-f0-9]{64}$/.test(String(candidateAdmission.admissionSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(previousAdmission.admissionSha256 ?? ""))
+    || (canonicalJson(currentAdmission) !== canonicalJson(previousAdmission)
+      && canonicalJson(currentAdmission) !== canonicalJson(candidateAdmission))) {
+    throw new Error("off-site reconciliation admission does not extend the active generation");
+  }
+
+  const reportFile = exactProtectedChild(reportsRoot, receiptFileName);
+  const { bytes: reportBytes, value: receipt } = protectedJson(reportFile);
+  if (!/^manifest-[a-z0-9][a-z0-9-]{15,127}$/.test(String(receipt?.manifestId ?? ""))
+    || receipt?.manifestPath !== `manifests/${receipt.manifestId}.json`) {
+    throw new Error("off-site receipt manifest identity is invalid");
+  }
+  const manifestFile = exactProtectedChild(backupsRoot, "manifests", `${receipt.manifestId}.json`);
+  if (path.basename(manifestFile) !== path.basename(String(receipt?.manifestPath ?? ""))) {
+    throw new Error("off-site receipt manifest path is not exact");
+  }
+  const { fileSha256: manifestFileSha256, manifest } = verifyOffsiteManifest(manifestFile, signingKeyFile);
+  validateCompletedOffsiteReceipt(receipt, active, manifest, {
+    expectedManifestDigest,
+    expectedSnapshotId,
+  });
+
+  const refreshDir = path.join(stateDir, "rclone-refresh");
+  ensurePrivateDirectory(refreshDir);
+  const stagedFile = path.join(refreshDir, "rclone.conf");
+  const refreshNames = fs.readdirSync(refreshDir).sort();
+  if (canonicalJson(refreshNames) !== canonicalJson(["rclone.conf"])
+    && canonicalJson(refreshNames) !== canonicalJson([])) {
+    throw new Error("rclone refresh staging contains unexpected entries");
+  }
+  const reconciliationDir = path.join(stateDir, "reconciliation");
+  const journalFile = path.join(reconciliationDir, `${active.requestSha256}.json`);
+  const terminalFile = path.join(stateDir, active.terminalFile);
+
+  const existingJournal = fs.existsSync(journalFile) ? readCanonicalState(journalFile) : null;
+  const canonicalBytes = readProtectedBytes(rcloneConfigFile, { minimumBytes: 2, maximumBytes: 64 * 1024 });
+  const stagedBytes = fs.existsSync(stagedFile)
+    ? readProtectedBytes(stagedFile, { minimumBytes: 2, maximumBytes: 64 * 1024 })
+    : null;
+  let beforeSha256;
+  let afterSha256;
+  if (existingJournal) {
+    exactRecord(existingJournal, [
+      "active", "admission", "createdAt", "manifest", "rclone", "receipt", "schema", "snapshotId", "terminal",
+    ], "off-site reconciliation journal");
+    beforeSha256 = existingJournal.rclone?.beforeSha256;
+    afterSha256 = existingJournal.rclone?.afterSha256;
+  } else {
+    if (!stagedBytes) throw new Error("staged rclone refresh is missing");
+    const replacement = validateRcloneTokenRefresh(canonicalBytes, stagedBytes);
+    beforeSha256 = sha256(canonicalBytes);
+    afterSha256 = sha256(replacement);
+    if (beforeSha256 !== expectedOriginalRcloneSha256) {
+      throw new Error("canonical rclone configuration differs from the operator-confirmed pre-operation digest");
+    }
+    if (beforeSha256 === afterSha256) throw new Error("staged rclone refresh did not change the OAuth token");
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(beforeSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(afterSha256 ?? ""))) {
+    throw new Error("off-site reconciliation rclone digests are invalid");
+  }
+  if (beforeSha256 !== expectedOriginalRcloneSha256) {
+    throw new Error("off-site reconciliation original rclone digest is invalid");
+  }
+  if (stagedBytes && sha256(stagedBytes) !== afterSha256) {
+    throw new Error("staged rclone refresh differs from the reconciliation journal");
+  }
+
+  const reconciliationAt = existingJournal?.createdAt ?? new Date(now).toISOString();
+  exactIsoTime(reconciliationAt, "off-site reconciliation createdAt");
+  const response = completedOffsiteResponse(active, receipt, capabilityKey);
+  const terminal = {
+    recordedAt: reconciliationAt,
+    request: { action: active.action, parameters: {} },
+    requestId: active.requestId,
+    requestSha256: active.requestSha256,
+    response,
+    schema: TERMINAL_RECEIPT_SCHEMA,
+  };
+  const journal = {
+    active,
+    admission: { from: previousAdmission, to: candidateAdmission },
+    createdAt: reconciliationAt,
+    manifest: {
+      digest: manifest.signature.digest,
+      fileSha256: manifestFileSha256,
+      id: manifest.id,
+    },
+    rclone: { afterSha256, beforeSha256 },
+    receipt: { fileName: receiptFileName, fileSha256: sha256(reportBytes) },
+    schema: OFFSITE_RECONCILIATION_SCHEMA,
+    snapshotId: receipt.snapshotId,
+    terminal,
+  };
+  if (existingJournal) {
+    if (canonicalJson(existingJournal) !== canonicalJson(journal)) {
+      throw new Error("off-site reconciliation journal evidence changed");
+    }
+  } else {
+    ensurePrivateDirectory(reconciliationDir);
+    writeExclusiveCanonical(journalFile, journal);
+  }
+
+  admitGeneration(stateDir, trusted);
+  if (canonicalJson(readCanonicalState(path.join(stateDir, "active-admission.json")))
+    !== canonicalJson(candidateAdmission)) {
+    throw new Error("off-site reconciliation admission transition was not durable");
+  }
+
+  const currentSha256 = sha256(canonicalBytes);
+  if (currentSha256 === beforeSha256) {
+    if (!stagedBytes) throw new Error("staged rclone refresh disappeared before commit");
+    const replacement = validateRcloneTokenRefresh(canonicalBytes, stagedBytes);
+    if (sha256(replacement) !== afterSha256) throw new Error("validated rclone refresh digest changed");
+    replaceProtectedBytes(rcloneConfigFile, canonicalBytes, replacement);
+  } else if (currentSha256 !== afterSha256) {
+    throw new Error("canonical rclone configuration is neither pre- nor post-reconciliation");
+  }
+
+  ensurePrivateDirectory(path.dirname(terminalFile));
+  if (fs.existsSync(terminalFile)) {
+    if (canonicalJson(readCanonicalState(terminalFile)) !== canonicalJson(terminal)) {
+      throw new Error("off-site reconciliation terminal receipt changed");
+    }
+  } else {
+    writeExclusiveCanonical(terminalFile, terminal);
+  }
+  if (fs.existsSync(stagedFile)) {
+    if (sha256(readProtectedBytes(stagedFile, { minimumBytes: 2, maximumBytes: 64 * 1024 })) !== afterSha256) {
+      throw new Error("staged rclone refresh changed before cleanup");
+    }
+    fs.unlinkSync(stagedFile);
+    syncDirectory(refreshDir);
+  }
+  if (canonicalJson(readCanonicalState(activeFile)) !== canonicalJson(active)) {
+    throw new Error("active operation changed before reconciliation release");
+  }
+  fs.unlinkSync(activeFile);
+  syncDirectory(stateDir);
+  return Object.freeze({
+    manifestDigest: manifest.signature.digest,
+    requestId: active.requestId,
+    requestSha256: active.requestSha256,
+    snapshotId: receipt.snapshotId,
+    status: "reconciled",
+  });
 }
 
 function stageRcloneRefresh(originalFile, stateDir) {
@@ -669,7 +1032,50 @@ export function assertBrokerStateReady(stateDir, now = Date.now()) {
   }
 }
 
+function parseOffsiteReconciliationArgs(tokens) {
+  const values = {};
+  const allowed = new Set(["manifest-digest", "original-rclone-sha256", "report", "snapshot"]);
+  for (let index = 0; index < tokens.length; index += 2) {
+    const option = tokens[index];
+    const value = tokens[index + 1];
+    const name = typeof option === "string" && option.startsWith("--") ? option.slice(2) : "";
+    if (!allowed.has(name) || !value || value.startsWith("--") || Object.hasOwn(values, name)) {
+      throw new Error("reconcile-offsite-refresh requires exact report, snapshot, manifest and original-rclone digest options");
+    }
+    values[name] = value;
+  }
+  if (tokens.length !== 8 || Object.keys(values).length !== allowed.size) {
+    throw new Error("reconcile-offsite-refresh requires exact report, snapshot, manifest and original-rclone digest options");
+  }
+  return values;
+}
+
 async function main() {
+  if (process.argv[2] === "reconcile-offsite-refresh") {
+    const args = parseOffsiteReconciliationArgs(process.argv.slice(3));
+    const stateDir = process.env.DOCKER_ACTION_BROKER_STATE_DIR || DEFAULT_STATE_DIR;
+    const dataRoot = process.env.PLATFORM_DATA_ROOT || DEFAULT_DATA_ROOT;
+    ensurePrivateDirectory(stateDir);
+    const trusted = loadLocalPrivateTrust(process.env);
+    verifyRuntimeImages(trusted, { requireRestic: true, requireScheduler: true });
+    verifyRuntimeEgressNetwork(trusted);
+    const result = reconcileCompletedOffsiteOperation({
+      backupsRoot: path.join(dataRoot, "backups"),
+      capabilityKey: readProtectedBytes(trusted.capabilityFiles["backup.offsite.sync"]),
+      expectedManifestDigest: args["manifest-digest"],
+      expectedOriginalRcloneSha256: args["original-rclone-sha256"],
+      expectedSnapshotId: args.snapshot,
+      rcloneConfigFile: trusted.offsiteFiles.rcloneConfig,
+      receiptFileName: args.report,
+      reportsRoot: path.join(dataRoot, "reports", "offsite-backups"),
+      signingKeyFile: process.env.BACKUP_SIGNING_KEYS_FILE || DEFAULT_SIGNING_KEY,
+      stateDir,
+      trusted,
+    });
+    process.stdout.write(`${canonicalJson(result)}\n`);
+    return;
+  }
+  if (process.argv.length > 2) throw new Error("unsupported LOCAL_PRIVATE broker command");
   const socketPath = process.env.DOCKER_ACTION_BROKER_SOCKET || DEFAULT_SOCKET;
   const stateDir = process.env.DOCKER_ACTION_BROKER_STATE_DIR || DEFAULT_STATE_DIR;
   ensurePrivateDirectory(stateDir);
