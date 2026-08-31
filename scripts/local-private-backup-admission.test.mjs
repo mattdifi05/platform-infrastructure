@@ -119,6 +119,18 @@ test("repository boundary never contains the offline private admission key", () 
   assert.match(dockerfile, /local-private-backup-admission\.pub\.pem/);
 });
 
+test("LOCAL_PRIVATE broker dependencies resolve from the immutable release tree without NODE_PATH", () => {
+  const repositoryRoot = path.resolve(import.meta.dirname, "..");
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, "docker", "ops.Dockerfile"), "utf8");
+  const broker = fs.readFileSync(path.join(repositoryRoot, "scripts", "local-private-docker-action-broker.mjs"), "utf8");
+  assert.match(
+    dockerfile,
+    /mv \/tmp\/control-center-dependencies\/node_modules \/opt\/platform-infrastructure\/node_modules/,
+  );
+  assert.doesNotMatch(dockerfile, /mv \/tmp\/control-center-dependencies\/node_modules \/node_modules/);
+  assert.match(broker, /delete childEnvironment\.NODE_PATH;/);
+});
+
 test("broker trust, render, state and UDS defaults stay outside shared checkout and state parents", () => {
   const repositoryRoot = path.resolve(import.meta.dirname, "..");
   const environment = Object.fromEntries(
