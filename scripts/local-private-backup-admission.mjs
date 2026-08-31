@@ -26,6 +26,7 @@ const CAPABILITY_BINDINGS = Object.freeze({
 const LOCAL_PRIVATE_RESTIC_REPOSITORY = "rclone:platform-onedrive:platform-infrastructure/restic";
 const LOCAL_PRIVATE_RESTIC_PASSWORD_PATH = "/run/platform/critical/restic_password.txt";
 const LOCAL_PRIVATE_RCLONE_CONFIG_PATH = "/run/platform/critical/rclone/rclone.conf";
+const LOCAL_PRIVATE_BACKUP_JOBS_ROOT = "/var/lib/platform-backup-data/backup-jobs";
 
 function fail(message) {
   throw new Error(message);
@@ -86,7 +87,7 @@ export function createAdmissionPayload({
     backupResources: {
       "control-center.backup-queue": {
         authority: "local-private-backup-only-service-queue",
-        brokerRoot: "/var/www/project-state/backup-jobs/running",
+        brokerRoot: `${LOCAL_PRIVATE_BACKUP_JOBS_ROOT}/running`,
       },
     },
     capabilityFiles: {
@@ -218,7 +219,7 @@ export function verifyAdmissionDocument(document, {
   exactKeys(payload.resources.backupResources, ["control-center.backup-queue"], "backup resource admission");
   exactKeys(payload.resources.backupResources["control-center.backup-queue"], ["authority", "brokerRoot"], "backup queue admission");
   if (payload.resources.backupResources["control-center.backup-queue"].authority !== "local-private-backup-only-service-queue"
-    || payload.resources.backupResources["control-center.backup-queue"].brokerRoot !== "/var/www/project-state/backup-jobs/running") {
+    || payload.resources.backupResources["control-center.backup-queue"].brokerRoot !== `${LOCAL_PRIVATE_BACKUP_JOBS_ROOT}/running`) {
     fail("backup queue admission is invalid");
   }
   exactKeys(payload.resources.capabilityFiles, Object.keys(CAPABILITY_BINDINGS), "capability bindings");

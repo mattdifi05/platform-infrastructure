@@ -74,6 +74,10 @@ test("signed LOCAL_PRIVATE admission binds target, render, images and exactly th
     assert.match(verified.payload.brokerImageId, /^sha256:[a-f0-9]{64}$/);
     assert.match(verified.payload.schedulerImageId, /^sha256:[a-f0-9]{64}$/);
     assert.match(verified.payload.resources.offsite.resticImageId, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(
+      verified.payload.resources.backupResources["control-center.backup-queue"].brokerRoot,
+      "/var/lib/platform-backup-data/backup-jobs/running",
+    );
   } finally {
     value.cleanup();
   }
@@ -173,4 +177,9 @@ test("broker trust, render, state and UDS defaults stay outside shared checkout 
   assert.match(compose, /PROJECT_BACKUP_JOBS_DIR: \/var\/lib\/platform-backup-data\/backup-jobs/);
   assert.match(compose, /BACKUP_RUNTIME_STATE_ROOT: \/var\/lib\/platform-backup-data\/runtime-state/);
   assert.doesNotMatch(compose, /\$\{PLATFORM_STATE_DIR[^}]*\}:\/var\/www\/project-state(?:\s|$)/);
+
+  const admission = fs.readFileSync(path.join(repositoryRoot, "scripts", "local-private-backup-admission.mjs"), "utf8");
+  const broker = fs.readFileSync(path.join(repositoryRoot, "scripts", "local-private-docker-action-broker.mjs"), "utf8");
+  assert.match(admission, /LOCAL_PRIVATE_BACKUP_JOBS_ROOT = "\/var\/lib\/platform-backup-data\/backup-jobs"/);
+  assert.match(broker, /DEFAULT_JOBS_ROOT = "\/var\/lib\/platform-backup-data\/backup-jobs"/);
 });
