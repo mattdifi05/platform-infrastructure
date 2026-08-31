@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createBackupJobDocument } from "../control-center/backup/contracts.mjs";
+import {
+  backupDocumentDigest,
+  createBackupJobDocument,
+  createBackupManifestDocument,
+} from "../control-center/backup/contracts.mjs";
 import { canonicalJson, sha256 } from "./docker-action-contract.mjs";
 import { readClaimedBackupJob } from "./docker-action-client.mjs";
 import {
@@ -13,6 +18,7 @@ import {
   admitGeneration,
   consumeReplay,
   createLocalPrivateBackupBroker,
+  reconcileCompletedOffsiteOperation,
   runFixedOperation,
   validateRcloneTokenRefresh,
 } from "./local-private-docker-action-broker.mjs";
@@ -71,6 +77,23 @@ test("LOCAL_PRIVATE rclone refresh permits only the platform-onedrive OAuth toke
   )));
   assert.deepEqual(validateRcloneTokenRefresh(before, after), after);
 
+  const withOptionalLifetime = token(
+    "c".repeat(32),
+    "d".repeat(32),
+    "2026-09-01T13:00:00.123456789Z",
+  );
+  withOptionalLifetime.expires_in = 3599;
+  const refreshedWithOptionalLifetime = Buffer.from(rcloneConfig(withOptionalLifetime));
+  assert.deepEqual(
+    validateRcloneTokenRefresh(before, refreshedWithOptionalLifetime),
+    refreshedWithOptionalLifetime,
+  );
+  assert.deepEqual(
+    validateRcloneTokenRefresh(refreshedWithOptionalLifetime, after),
+    after,
+    "expires_in is optional refresh metadata and may be removed by rclone",
+  );
+
   assert.throws(
     () => validateRcloneTokenRefresh(before, Buffer.from(rcloneConfig(token("c".repeat(32), "d".repeat(32)), "s3"))),
     /outside the OAuth token/,
@@ -86,6 +109,13 @@ test("LOCAL_PRIVATE rclone refresh permits only the platform-onedrive OAuth toke
     () => validateRcloneTokenRefresh(before, Buffer.from(rcloneConfig(widened))),
     /token schema/,
   );
+  for (const expiresIn of ["3599", -1, 1.5]) {
+    const invalidLifetime = { ...token("c".repeat(32), "d".repeat(32)), expires_in: expiresIn };
+    assert.throws(
+      () => validateRcloneTokenRefresh(before, Buffer.from(rcloneConfig(invalidLifetime))),
+      /expires_in is invalid/,
+    );
+  }
 });
 
 test("LOCAL_PRIVATE admission generations, replay ledger and terminal receipts fail closed", () => {
@@ -333,6 +363,170 @@ fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
     });
     assert.notEqual(path.resolve(configFile), path.resolve(path.join(stateDir, "rclone-refresh", "rclone.conf")));
     assert.deepEqual(fs.readdirSync(path.join(stateDir, "rclone-refresh")), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("LOCAL_PRIVATE reconciliation commits one proven offsite refresh without rerunning the remote operation", () => {
+  const root = temporaryDirectory("local-private-broker-reconcile-");
+  const stateDir = path.join(root, "state");
+  const reportsRoot = path.join(root, "data", "reports", "offsite-backups");
+  const backupsRoot = path.join(root, "data", "backups");
+  const configFile = path.join(root, "critical", "rclone", "rclone.conf");
+  const signingKeyFile = path.join(root, "critical", "backup_signing_keys.txt");
+  const reportFileName = "offsite-backup-20260831160759-cba697.json";
+  const manifestId = "manifest-scheduled-platform-20260831-154830-867cad";
+  const snapshotId = "4".repeat(64);
+  const admissionSha256 = "5".repeat(64);
+  const capabilityKey = Buffer.from("c".repeat(64));
+  const signingSecret = "s".repeat(64);
+  const candidateDocument = { payload: "candidate-admission" };
+  const candidateAdmissionSha256 = sha256(canonicalJson(candidateDocument));
+  const active = {
+    action: "backup.offsite.sync",
+    admittedAt: "2026-08-31T15:52:19.398Z",
+    requestId: "34cea6a1-d78b-4f85-a7f4-bcbd6611def9",
+    requestSha256: "8".repeat(64),
+    terminalFile: `terminal/${"8".repeat(64)}.json`,
+  };
+  const original = Buffer.from(rcloneConfig(token("a".repeat(32), "b".repeat(32))));
+  const refreshedToken = token("c".repeat(32), "d".repeat(32), "2026-09-01T13:00:00.123456789Z");
+  refreshedToken.expires_in = 3599;
+  const refreshed = Buffer.from(rcloneConfig(refreshedToken));
+  try {
+    writePrivate(path.join(stateDir, "active-operation.json"), `${canonicalJson(active)}\n`);
+    writePrivate(path.join(stateDir, "active-admission.json"), `${canonicalJson({ admissionSha256, generation: 6 })}\n`);
+    writePrivate(path.join(stateDir, "rclone-refresh", "rclone.conf"), refreshed);
+    writePrivate(configFile, original);
+    writePrivate(signingKeyFile, `test-key=${signingSecret}\n`);
+
+    const resource = {
+      externalId: "stexor",
+      kind: "source",
+      name: "stexor",
+      projectId: "stexor",
+      sourceDirectory: "stexor",
+    };
+    const job = createBackupJobDocument({
+      id: "scheduled-platform-20260831-154830-867cad",
+      operation: "backup",
+      scope: { kind: "platform", id: "platform" },
+      resources: [resource],
+      requestedBy: "scheduler",
+      environment: "production",
+      createdAt: "2026-08-31T15:48:30.000Z",
+    });
+    const unsignedManifest = createBackupManifestDocument({
+      id: manifestId,
+      job,
+      artifacts: [{
+        id: "artifact-stexor",
+        path: "sources/stexor.tar.zst",
+        resourceId: "source:stexor",
+        sha256: "9".repeat(64),
+        signatureKeyId: "test-key",
+        sizeBytes: 4096,
+      }],
+      createdAt: "2026-08-31T15:49:06.486Z",
+    });
+    const manifestDigest = backupDocumentDigest(unsignedManifest);
+    const manifest = {
+      ...unsignedManifest,
+      signature: {
+        algorithm: "HMAC-SHA256",
+        digest: manifestDigest,
+        keyId: "test-key",
+        value: crypto.createHmac("sha256", signingSecret)
+          .update(`platform-backup-manifest-v1\n${manifestId}\n${manifestDigest}\n`)
+          .digest("base64url"),
+      },
+    };
+    writePrivate(path.join(backupsRoot, "manifests", `${manifestId}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
+    const receipt = {
+      artifactCount: 1,
+      credentialsExposed: false,
+      durationMs: 940102,
+      evidenceContext: { schema: "platform.evidence-report-context/v1" },
+      finishedAt: "2026-08-31T16:07:59.770Z",
+      generatedAt: "2026-08-31T16:07:59.770Z",
+      hostname: "platform-infrastructure",
+      manifestDigest,
+      manifestId,
+      manifestPath: `manifests/${manifestId}.json`,
+      repositoryHost: null,
+      repositoryMaxBytes: 2500000000000,
+      repositoryOffsite: true,
+      repositorySizeBytes: 8793217059,
+      repositoryType: "rclone",
+      resourceIds: ["source:stexor"],
+      schema: "platform.offsite-backup-receipt/v1",
+      snapshotId,
+      startedAt: "2026-08-31T15:52:19.668Z",
+      status: "passed",
+      tag: "platform-backups",
+    };
+    writePrivate(path.join(reportsRoot, reportFileName), `${JSON.stringify(receipt, null, 2)}\n`);
+
+    const options = {
+      backupsRoot,
+      capabilityKey,
+      expectedManifestDigest: manifestDigest,
+      expectedOriginalRcloneSha256: sha256(original),
+      expectedSnapshotId: snapshotId,
+      now: Date.parse("2026-08-31T16:10:00.000Z"),
+      rcloneConfigFile: configFile,
+      receiptFileName: reportFileName,
+      reportsRoot,
+      signingKeyFile,
+      stateDir,
+      trusted: {
+        document: candidateDocument,
+        intent: { activationBundleSha256: candidateAdmissionSha256, generation: 7 },
+        receipt: { previousAdmissionSha256: admissionSha256 },
+      },
+    };
+    assert.throws(
+      () => reconcileCompletedOffsiteOperation({
+        ...options,
+        expectedOriginalRcloneSha256: "0".repeat(64),
+      }),
+      /operator-confirmed pre-operation digest/,
+    );
+    assert.deepEqual(fs.readFileSync(configFile), original);
+    assert.equal(fs.existsSync(path.join(stateDir, "active-operation.json")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "rclone-refresh", "rclone.conf")), true);
+    assert.equal(fs.existsSync(path.join(stateDir, "terminal")), false);
+
+    const result = reconcileCompletedOffsiteOperation(options);
+    assert.equal(result.status, "reconciled");
+    assert.deepEqual(fs.readFileSync(configFile), refreshed);
+    assert.equal(fs.existsSync(path.join(stateDir, "active-operation.json")), false);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(stateDir, "active-admission.json"), "utf8")),
+      { admissionSha256: candidateAdmissionSha256, generation: 7 },
+    );
+    assert.equal(fs.existsSync(path.join(stateDir, "rclone-refresh", "rclone.conf")), false);
+    assert.equal(fs.readdirSync(path.join(stateDir, "terminal")).length, 1);
+    assert.equal(fs.readdirSync(path.join(stateDir, "reconciliation")).length, 1);
+
+    const terminalFile = path.join(stateDir, active.terminalFile);
+    writePrivate(configFile, original);
+    writePrivate(path.join(stateDir, "rclone-refresh", "rclone.conf"), refreshed);
+    fs.rmSync(terminalFile);
+    writePrivate(path.join(stateDir, "active-operation.json"), `${canonicalJson(active)}\n`);
+    const resumedAfterAdmissionAdvance = reconcileCompletedOffsiteOperation(options);
+    assert.equal(resumedAfterAdmissionAdvance.status, "reconciled");
+    assert.deepEqual(fs.readFileSync(configFile), refreshed);
+    assert.equal(fs.existsSync(path.join(stateDir, "active-operation.json")), false);
+    assert.equal(fs.existsSync(path.join(stateDir, "rclone-refresh", "rclone.conf")), false);
+    assert.equal(fs.existsSync(terminalFile), true);
+
+    writePrivate(path.join(stateDir, "active-operation.json"), `${canonicalJson(active)}\n`);
+    const retried = reconcileCompletedOffsiteOperation(options);
+    assert.equal(retried.status, "reconciled");
+    assert.equal(fs.existsSync(path.join(stateDir, "active-operation.json")), false);
+    assert.equal(fs.readdirSync(path.join(stateDir, "terminal")).length, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
