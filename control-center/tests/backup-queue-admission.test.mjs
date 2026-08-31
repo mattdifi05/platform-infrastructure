@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -16,8 +20,11 @@ import { createBackupJobDocument } from "../backup/contracts.mjs";
 import {
   BackupQueueAdmissionError,
   acquireBackupSchedulerLease,
+  applyBackupQueueFileOwnership,
   admitBackupJob,
+  backupQueueSharedIdentityFromEnvironment,
   claimNextBackupJob,
+  ensureBackupQueueDirectoryOwnership,
   finishBackupJob,
   markBackupJobOutcomeUnknown,
   pruneBackupQueue,
@@ -151,6 +158,64 @@ test("Control Center and scheduler share one declared queue policy and consumer"
   assert.match(consumer, /operation:\s*identity\?\.operation/);
   assert.match(consumer, /requestedBy:\s*principal/);
   assert.doesNotMatch(consumer, /writePrivateJsonAtomic|requestedBy:\s*identity\?\.subject\s*\|\|/);
+
+  const localPrivateCompose = readFileSync(path.join(infraRoot, "compose.local-private-backup.yaml"), "utf8");
+  for (const variable of ["BACKUP_QUEUE_SHARED_UID", "BACKUP_QUEUE_SHARED_GID"]) {
+    assert.equal(
+      localPrivateCompose.match(new RegExp(`^\\s+${variable}: "1000"$`, "gm"))?.length || 0,
+      2,
+      `${variable} must bind Control Center and scheduler to the same LOCAL_PRIVATE queue owner`,
+    );
+  }
+});
+
+test("LOCAL_PRIVATE queue ownership requires a complete non-root identity and exact private modes", (t) => {
+  assert.equal(backupQueueSharedIdentityFromEnvironment({}), null);
+  rejectedCode(
+    () => backupQueueSharedIdentityFromEnvironment({ BACKUP_QUEUE_SHARED_UID: "1000" }),
+    "queue_shared_identity_invalid",
+  );
+  rejectedCode(
+    () => backupQueueSharedIdentityFromEnvironment({ BACKUP_QUEUE_SHARED_UID: "0", BACKUP_QUEUE_SHARED_GID: "1000" }),
+    "queue_shared_identity_invalid",
+  );
+
+  const uid = process.getuid() === 0 ? 1000 : process.getuid();
+  const gid = process.getgid() === 0 ? 1000 : process.getgid();
+  const identity = backupQueueSharedIdentityFromEnvironment({
+    BACKUP_QUEUE_SHARED_UID: String(uid),
+    BACKUP_QUEUE_SHARED_GID: String(gid),
+  });
+  const { root } = fixture(t);
+  const directory = path.join(root, "owned-queue");
+  mkdirSync(directory, { mode: 0o755 });
+  ensureBackupQueueDirectoryOwnership(directory, identity);
+  const directoryStat = statSync(directory);
+  assert.equal(directoryStat.uid, uid);
+  assert.equal(directoryStat.gid, gid);
+  assert.equal(directoryStat.mode & 0o777, 0o700);
+
+  const file = path.join(directory, "job.json");
+  const descriptor = openSync(file, "wx", 0o644);
+  try {
+    writeFileSync(descriptor, "{}\n", "utf8");
+    applyBackupQueueFileOwnership(descriptor, identity);
+  } finally {
+    closeSync(descriptor);
+  }
+  const fileStat = statSync(file);
+  assert.equal(fileStat.uid, uid);
+  assert.equal(fileStat.gid, gid);
+  assert.equal(fileStat.mode & 0o777, 0o600);
+
+  const realDirectory = path.join(root, "real-queue");
+  const linkedDirectory = path.join(root, "linked-queue");
+  mkdirSync(realDirectory, { mode: 0o700 });
+  symlinkSync(realDirectory, linkedDirectory);
+  rejectedCode(
+    () => ensureBackupQueueDirectoryOwnership(linkedDirectory, identity),
+    "queue_path_invalid",
+  );
 });
 
 test("active deduplication spans API aliases and principals", (t) => {

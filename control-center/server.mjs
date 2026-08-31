@@ -44,7 +44,9 @@ import {
 import { safeBackupPreview } from "./backup/preview.mjs";
 import {
   BackupQueueAdmissionError,
+  applyBackupQueueFileOwnership,
   admitBackupJob,
+  backupQueueSharedIdentityFromEnvironment,
   backupQueuePolicyFromEnvironment,
 } from "./backup/queue-admission.mjs";
 import { BackupQueueOperationError } from "./backup/queue-operation-adapter.mjs";
@@ -12162,11 +12164,17 @@ function writeDatabasePrincipalsState(state) {
 
 function writePrivateJsonAtomic(filePath, value) {
   mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const resolvedFile = path.resolve(filePath);
+  const resolvedQueueRoot = path.resolve(backupJobsDir);
+  const queueIdentity = resolvedFile.startsWith(`${resolvedQueueRoot}${path.sep}`)
+    ? backupQueueSharedIdentityFromEnvironment()
+    : null;
   const temporary = `${filePath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   let fd = null;
   try {
     fd = openSync(temporary, "wx", 0o600);
     writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    applyBackupQueueFileOwnership(fd, queueIdentity);
     fsyncSync(fd);
     closeSync(fd);
     fd = null;

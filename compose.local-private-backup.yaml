@@ -3,6 +3,11 @@
 # broker remains the sole Docker socket owner and exposes exactly three signed
 # actions (catalog, typed job execution and off-site sync) to the scheduler.
 services:
+  control-center:
+    environment:
+      BACKUP_QUEUE_SHARED_UID: "1000"
+      BACKUP_QUEUE_SHARED_GID: "1000"
+
   docker-action-broker:
     profiles: !reset []
     image: platform/docker-action-broker:local
@@ -104,6 +109,8 @@ services:
       BACKUP_QUEUE_LEDGER_MAX_ENTRIES: ${BACKUP_QUEUE_LEDGER_MAX_ENTRIES:-4096}
       BACKUP_QUEUE_MAX_SCAN_ENTRIES: ${BACKUP_QUEUE_MAX_SCAN_ENTRIES:-4096}
       BACKUP_QUEUE_LOCK_TIMEOUT_MS: ${BACKUP_QUEUE_LOCK_TIMEOUT_MS:-2000}
+      BACKUP_QUEUE_SHARED_UID: "1000"
+      BACKUP_QUEUE_SHARED_GID: "1000"
     secrets: !reset []
     tmpfs: !override
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777

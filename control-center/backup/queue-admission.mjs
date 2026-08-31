@@ -1,7 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fchownSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -33,6 +37,92 @@ export class BackupQueueAdmissionError extends Error {
     this.code = code;
     this.status = status;
     this.details = Object.freeze({ ...details });
+  }
+}
+
+export function backupQueueSharedIdentityFromEnvironment(env = process.env) {
+  const rawUid = String(env?.BACKUP_QUEUE_SHARED_UID ?? "").trim();
+  const rawGid = String(env?.BACKUP_QUEUE_SHARED_GID ?? "").trim();
+  if (!rawUid && !rawGid) return null;
+  if (!rawUid || !rawGid) {
+    throw admissionError("queue_shared_identity_invalid", "Backup queue shared UID and GID must be configured together.", 503);
+  }
+  if (!/^[1-9][0-9]*$/.test(rawUid) || !/^[1-9][0-9]*$/.test(rawGid)) {
+    throw admissionError("queue_shared_identity_invalid", "Backup queue shared UID and GID must be positive decimal identifiers.", 503);
+  }
+  const uid = Number(rawUid);
+  const gid = Number(rawGid);
+  if (!Number.isSafeInteger(uid) || !Number.isSafeInteger(gid) || uid > 0x7fffffff || gid > 0x7fffffff) {
+    throw admissionError("queue_shared_identity_invalid", "Backup queue shared UID or GID is outside the supported range.", 503);
+  }
+  return Object.freeze({ uid, gid });
+}
+
+export function applyBackupQueueFileOwnership(descriptor, identity = backupQueueSharedIdentityFromEnvironment()) {
+  if (!identity) return;
+  const effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid();
+  const effectiveGid = typeof process.getegid === "function" ? process.getegid() : process.getgid();
+  const before = fstatSync(descriptor);
+  if (!before.isFile() || before.nlink !== 1) {
+    throw admissionError("queue_shared_identity_unavailable", "Backup queue ownership handoff requires one regular file.", 503);
+  }
+  if (effectiveUid === 0) {
+    if (!((before.uid === 0 && before.gid === 0)
+      || (before.uid === identity.uid && before.gid === identity.gid))) {
+      throw admissionError("queue_shared_identity_unavailable", "Backup queue file has a foreign pre-handoff owner.", 503);
+    }
+    fchownSync(descriptor, identity.uid, identity.gid);
+  } else if (effectiveUid !== identity.uid || effectiveGid !== identity.gid) {
+    throw admissionError("queue_shared_identity_unavailable", "Process identity cannot materialize the configured backup queue owner.", 503);
+  }
+  fchmodSync(descriptor, 0o600);
+  const stat = fstatSync(descriptor);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== identity.uid || stat.gid !== identity.gid
+    || (stat.mode & 0o777) !== 0o600) {
+    throw admissionError("queue_shared_identity_unavailable", "Backup queue file ownership or mode handoff failed.", 503);
+  }
+}
+
+export function ensureBackupQueueDirectoryOwnership(directory, identity = backupQueueSharedIdentityFromEnvironment()) {
+  if (!identity) return;
+  let descriptor;
+  try {
+    descriptor = openSync(
+      directory,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+    );
+    const before = fstatSync(descriptor);
+    if (!before.isDirectory()) {
+      throw admissionError("queue_path_invalid", "Backup queue paths must be real directories.", 503);
+    }
+    const effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid();
+    const effectiveGid = typeof process.getegid === "function" ? process.getegid() : process.getgid();
+    if (before.uid !== identity.uid || before.gid !== identity.gid) {
+      if (effectiveUid !== 0) {
+        throw admissionError("queue_shared_identity_unavailable", "Backup queue directory is not owned by the configured shared identity.", 503);
+      }
+      if (before.uid !== 0 || before.gid !== 0) {
+        throw admissionError("queue_shared_identity_unavailable", "Backup queue directory has a foreign pre-handoff owner.", 503);
+      }
+      fchownSync(descriptor, identity.uid, identity.gid);
+    } else if (effectiveUid !== 0 && (effectiveUid !== identity.uid || effectiveGid !== identity.gid)) {
+      throw admissionError("queue_shared_identity_unavailable", "Process identity cannot use the configured backup queue owner.", 503);
+    }
+    fchmodSync(descriptor, 0o700);
+    fsyncSync(descriptor);
+    const after = fstatSync(descriptor);
+    const namespace = lstatSync(directory);
+    if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino
+      || namespace.isSymbolicLink() || !namespace.isDirectory()
+      || namespace.dev !== after.dev || namespace.ino !== after.ino
+      || after.uid !== identity.uid || after.gid !== identity.gid || (after.mode & 0o777) !== 0o700) {
+      throw admissionError("queue_shared_identity_unavailable", "Backup queue directory ownership, mode or namespace handoff failed.", 503);
+    }
+  } catch (error) {
+    if (error instanceof BackupQueueAdmissionError) throw error;
+    throw admissionError("queue_path_invalid", "Backup queue path could not be opened without following links.", 503, { cause: error?.code || "error" });
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -325,6 +415,7 @@ function withQueueLock(root, policy, action) {
   while (true) {
     try {
       mkdirSync(lockPath, { mode: 0o700 });
+      ensureBackupQueueDirectoryOwnership(lockPath);
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw admissionError("queue_lock_failed", "Backup queue lock could not be created.", 503, { cause: error?.code || "error" });
@@ -337,7 +428,15 @@ function withQueueLock(root, policy, action) {
   }
   const ownerPath = path.join(lockPath, "owner.json");
   try {
-    writeFileSync(ownerPath, `${JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const identity = backupQueueSharedIdentityFromEnvironment();
+    const ownerDescriptor = openSync(ownerPath, "wx", 0o600);
+    try {
+      writeFileSync(ownerDescriptor, `${JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+      applyBackupQueueFileOwnership(ownerDescriptor, identity);
+      fsyncSync(ownerDescriptor);
+    } finally {
+      closeSync(ownerDescriptor);
+    }
     return action();
   } finally {
     try {
@@ -361,9 +460,11 @@ function prepareQueueRoot(jobsDir) {
 }
 
 function ensureRealDirectory(directory) {
+  const identity = backupQueueSharedIdentityFromEnvironment();
   if (!existsSync(directory)) mkdirSync(directory, { recursive: true, mode: 0o700 });
   const stat = lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw admissionError("queue_path_invalid", "Backup queue paths must be real directories.", 503);
+  ensureBackupQueueDirectoryOwnership(directory, identity);
 }
 
 function readQueueSnapshot(root, policy) {
@@ -503,11 +604,13 @@ function writeJsonExclusiveAtomic(filePath, value) {
 
 function writeJsonAtomic(filePath, value, exclusiveTarget = false) {
   const directory = path.dirname(filePath);
+  const identity = backupQueueSharedIdentityFromEnvironment();
   const temporary = path.join(directory, `.${path.basename(filePath)}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`);
   let descriptor;
   try {
     descriptor = openSync(temporary, "wx", 0o600);
     writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    applyBackupQueueFileOwnership(descriptor, identity);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
