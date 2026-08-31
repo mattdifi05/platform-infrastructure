@@ -343,8 +343,10 @@ export function initializeLocalPrivateBackupInvocation({
     roots: Object.freeze({
       backupHost: path.join(render.brokerEnvironment.PLATFORM_DATA_HOST_ROOT, "backups"),
       brokerStateHost: render.brokerEnvironment.LOCAL_PRIVATE_BACKUP_BROKER_STATE_HOST_ROOT,
+      dataContainer: render.brokerEnvironment.PLATFORM_DATA_CONTAINER_ROOT,
       dataHost: render.brokerEnvironment.PLATFORM_DATA_HOST_ROOT,
       secretsHost: render.brokerEnvironment.PLATFORM_SECRETS_HOST_ROOT,
+      stagingContainer: path.join(render.brokerEnvironment.PLATFORM_DATA_CONTAINER_ROOT, ".tmp", "broker-artifact-staging"),
       stagingHost: path.join(render.brokerEnvironment.PLATFORM_DATA_HOST_ROOT, ".tmp", "broker-artifact-staging"),
     }),
   });
@@ -456,11 +458,14 @@ function localPrivateExecAllowed(invocation, args) {
 function localPrivateCopyAllowed(invocation, args, processId) {
   if (args[0] !== "cp" || args.length !== 3) return false;
   const [source, destination] = args.slice(1);
-  const dataRoot = invocation.roots.dataHost;
+  // Unlike daemon-side bind mounts, `docker cp` writes through the CLI client
+  // filesystem. The broker client may therefore write only into its admitted
+  // container-side data bind, never to a daemon-host path.
+  const dataRoot = invocation.roots.dataContainer;
   let match = source.match(/^gf-postgres:(\/tmp\/([a-z][a-z0-9_]*)-[0-9]{8}-[0-9]{6}\.dump)$/);
-  if (match) return new RegExp(`^${escapeRegExp(path.join(invocation.roots.stagingHost, `.${path.basename(match[1])}.staging-${processId}-`))}[a-f0-9]{24}$`).test(destination);
+  if (match) return new RegExp(`^${escapeRegExp(path.join(invocation.roots.stagingContainer, `.${path.basename(match[1])}.staging-${processId}-`))}[a-f0-9]{24}$`).test(destination);
   match = source.match(/^gf-mariadb:(\/tmp\/mariadb-(?:all|[a-z][a-z0-9_]*)-[0-9]{8}-[0-9]{6}\.sql\.gz)$/);
-  if (match) return new RegExp(`^${escapeRegExp(path.join(invocation.roots.stagingHost, `.${path.basename(match[1])}.staging-${processId}-`))}[a-f0-9]{24}$`).test(destination);
+  if (match) return new RegExp(`^${escapeRegExp(path.join(invocation.roots.stagingContainer, `.${path.basename(match[1])}.staging-${processId}-`))}[a-f0-9]{24}$`).test(destination);
   if (source === "gf-minio:/data") {
     return pathInside(path.join(dataRoot, ".tmp/ops"), destination)
       && /\/platform-minio-data-[A-Za-z0-9_-]+\/minio-data$/.test(destination);

@@ -2165,7 +2165,11 @@ async function backupPostgres(options = {}) {
   try {
     log(`Creating PostgreSQL backup for database '${database}'...`);
     dockerExec(container, ["pg_dump", "-U", user, "-d", database, "--format=custom", "--no-owner", "--no-acl", `--file=${containerPath}`]);
-    run("docker", ["cp", `${container}:${containerPath}`, hostPathForContainerMount(stagingPath)]);
+    // `docker cp` materializes into the Docker CLI client's filesystem. In the
+    // LOCAL_PRIVATE broker that client is this container, where stagingPath is
+    // the admitted data bind; daemon-host translation is only for `docker run
+    // -v` source paths.
+    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const publication = publishBackupArtifact({
@@ -12191,7 +12195,7 @@ async function backupMariadb(options = {}) {
       "-ec",
       mariadbBackupProgram(containerPath, database),
     ]);
-    run("docker", ["cp", `${container}:${containerPath}`, hostPathForContainerMount(stagingPath)]);
+    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const publication = publishBackupArtifact({
@@ -12567,7 +12571,7 @@ async function backupMinio(options = {}) {
 
   try {
     log("Creating MinIO data backup...");
-    run("docker", ["cp", `${container}:/data`, hostPathForContainerMount(hostWorkDir)]);
+    run("docker", ["cp", `${container}:/data`, hostWorkDir]);
     dockerRun([
       "--network", "none",
       "-v",
@@ -12953,7 +12957,7 @@ async function backupKeycloakConfig(options = {}) {
     // backup program inside the authority-bound exact release and pass it as
     // one fixed shell argument instead of opening a generic stdin channel.
     dockerExec(container, ["sh", "-ec", backupScript]);
-    run("docker", ["cp", `${container}:${containerWorkDir}`, hostPathForContainerMount(hostWorkDir)]);
+    run("docker", ["cp", `${container}:${containerWorkDir}`, hostWorkDir]);
     assertBackupExecutionPrivateDirectory(hostWorkDir, "Keycloak configuration backup staging directory");
     dockerExec(container, ["sh", "-ec", keycloakBackupCleanupProgram()]);
     dockerExec(container, ["sh", "-ec", keycloakBackupResidueAssertionProgram()]);
