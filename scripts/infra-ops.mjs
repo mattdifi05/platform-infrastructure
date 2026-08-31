@@ -1614,6 +1614,10 @@ function dockerRun(args, options = {}) {
   return run("docker", ["run", "--rm", ...args], options);
 }
 
+function backupArchiveContainerIdentityArgs() {
+  return localPrivateBackupInvocation ? ["--user", "1000:1000"] : [];
+}
+
 function makeOpsTempDir(prefix) {
   const transactionRoot = typedEvidenceTransactionRoot();
   if (transactionRoot) assertRootOwnedPrivateDirectory(transactionRoot, "typed V1 evidence transaction root");
@@ -12574,6 +12578,7 @@ async function backupMinio(options = {}) {
     run("docker", ["cp", `${container}:/data`, hostWorkDir]);
     dockerRun([
       "--network", "none",
+      ...backupArchiveContainerIdentityArgs(),
       "-v",
       `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
       "-v",
@@ -12963,6 +12968,7 @@ async function backupKeycloakConfig(options = {}) {
     dockerExec(container, ["sh", "-ec", keycloakBackupResidueAssertionProgram()]);
     dockerRun([
       "--network", "none",
+      ...backupArchiveContainerIdentityArgs(),
       "-v",
       `${hostPathForContainerMount(hostWorkDir)}:/work:ro`,
       "-v",
@@ -13269,6 +13275,7 @@ async function backupSecretManagerMetadata(options = {}) {
     ].join("\n"), "utf8");
     dockerRun([
       "--network", "none",
+      ...backupArchiveContainerIdentityArgs(),
       "-v",
       `${hostPathForContainerMount(workDir)}:/work:ro`,
       "-v",
