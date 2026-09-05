@@ -578,6 +578,45 @@ test("previous-manifest reads reject writable ancestors before opening the prote
   }
 });
 
+test("previous-manifest root containment accepts protected paths and rejects boundary escapes", () => {
+  const rootedFixture = fs.realpathSync.native("/etc/hosts");
+  assert.ok(readProtectedManifest(rootedFixture).length > 0);
+
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "local-private-egress-containment-")));
+  const boundary = path.join(base, "authority");
+  const sibling = path.join(base, "authority-sibling");
+  const manifestPath = path.join(boundary, "previous.json");
+  const siblingPath = path.join(sibling, "previous.json");
+  const symlinkPath = path.join(boundary, "previous-link.json");
+  try {
+    fs.chmodSync(base, 0o700);
+    fs.mkdirSync(boundary, { mode: 0o700 });
+    fs.mkdirSync(sibling, { mode: 0o700 });
+    fs.writeFileSync(manifestPath, "{}\n", { mode: 0o600 });
+    fs.writeFileSync(siblingPath, "{}\n", { mode: 0o600 });
+    fs.symlinkSync(manifestPath, symlinkPath);
+
+    assert.equal(
+      readProtectedManifest(manifestPath, { requiredUid: process.getuid(), boundary }),
+      "{}\n"
+    );
+    assert.throws(
+      () => readProtectedManifest(siblingPath, { requiredUid: process.getuid(), boundary }),
+      /path or trust boundary is not canonical/i
+    );
+    assert.throws(
+      () => readProtectedManifest(symlinkPath, { requiredUid: process.getuid(), boundary }),
+      /path or trust boundary is not canonical/i
+    );
+    assert.throws(
+      () => readProtectedManifest(manifestPath, { requiredUid: process.getuid() + 1, boundary }),
+      /untrusted owner/i
+    );
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 function hostBoundarySources() {
   return {
     helper: fs.readFileSync(path.join(import.meta.dirname, "local-private-egress-firewall.sh"), "utf8"),

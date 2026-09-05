@@ -954,8 +954,11 @@ function readRegularFile(filePath, label) {
 export function readProtectedManifest(filePath, { requiredUid = 0, boundary = "/" } = {}) {
   const resolvedPath = fs.realpathSync.native(filePath);
   const resolvedBoundary = fs.realpathSync.native(boundary);
+  const relativePath = path.relative(resolvedBoundary, resolvedPath);
   if (resolvedPath !== filePath
-      || (resolvedPath !== resolvedBoundary && !resolvedPath.startsWith(`${resolvedBoundary}${path.sep}`))) {
+      || path.isAbsolute(relativePath)
+      || relativePath === ".."
+      || relativePath.startsWith(`..${path.sep}`)) {
     fail("Previous admitted manifest path or trust boundary is not canonical.");
   }
   let current = path.dirname(resolvedPath);
