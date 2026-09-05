@@ -168,6 +168,21 @@ function existingApplicationNetwork(application, overrides = {}) {
   });
 }
 
+function unmaterializedApplicationNetwork(application, overrides = {}) {
+  return existingApplicationNetwork(application, {
+    consumers: application.allowedConsumers.map((serviceName, index) => ({
+      attachmentState: "configured-unmaterialized",
+      containerId: String(index + 1).repeat(64),
+      containerState: "created",
+      desiredNetworkId: null,
+      endpointId: null,
+      projectName: basePolicyDocument.projectName,
+      serviceName
+    })),
+    ...overrides
+  });
+}
+
 test("tracked proposal validates source ownership and compiles an interface-first fail-closed nft boundary", () => {
   const validated = validatePolicy({ policy: policyText, sourceLock: sourceLockText });
   assert.equal(validated.networkNamePrefix, "platform_infra_greenfield_platform");
@@ -280,7 +295,7 @@ test("runtime admission binds daemon, renderer and complete non-overlapping inve
   }
 });
 
-test("previous authority admits exact configured-stopped joins then active endpoints, never missing or pending consumers", () => {
+test("previous authority admits full-ID stopped, created-unmaterialized, and active endpoint states without inventing IDs", () => {
   const first = compileFixture();
   const renderText = text(renderDocument());
   const application = basePolicyDocument.applications[0];
@@ -300,6 +315,31 @@ test("previous authority admits exact configured-stopped joins then active endpo
   const reconciled = compileFixture({ inventory, previousManifest: first });
   assert.equal(reconciled.applications[0].runtimeNetworkId, "f".repeat(64));
   assert.equal(reconciled.nftables.expectedPreimageNormalizedSha256, first.nftables.normalizedSha256);
+
+  const unmaterialized = unmaterializedApplicationNetwork(application);
+  const unmaterializedInventory = inventoryDocument(renderText, basePolicyDocument, {
+    networks: [runtimeNetwork(), unmaterialized],
+    routes
+  });
+  const firstMaterialization = compileFixture({ inventory: unmaterializedInventory, previousManifest: first });
+  assert.equal(firstMaterialization.applications[0].runtimeNetworkId, "f".repeat(64));
+
+  const sameNetworkRecreate = compileFixture({
+    inventory: unmaterializedInventory,
+    previousManifest: reconciled
+  });
+  assert.equal(sameNetworkRecreate.applications[0].runtimeNetworkId, "f".repeat(64));
+
+  const exitedExisting = existingApplicationNetwork(application);
+  exitedExisting.consumers[0].containerState = "exited";
+  const exitedInventory = inventoryDocument(renderText, basePolicyDocument, {
+    networks: [runtimeNetwork(), exitedExisting],
+    routes
+  });
+  assert.equal(
+    compileFixture({ inventory: exitedInventory, previousManifest: reconciled }).applications[0].runtimeNetworkId,
+    "f".repeat(64)
+  );
 
   const activeExisting = existingApplicationNetwork(application);
   activeExisting.consumers = activeExisting.consumers.map((consumer) => ({
@@ -341,10 +381,60 @@ test("previous authority admits exact configured-stopped joins then active endpo
     /desired network ID differs/i
   );
 
+  const invalidUnmaterialized = [
+    [(consumer) => { delete consumer.desiredNetworkId; }, /foreign or missing fields/i],
+    [(consumer) => { consumer.desiredNetworkId = "f".repeat(64); }, /configured-unmaterialized.*absent Engine IDs/i],
+    [(consumer) => { consumer.endpointId = "d".repeat(64); }, /configured-unmaterialized.*absent Engine IDs/i],
+    [(consumer) => { consumer.containerState = "exited"; }, /configured-unmaterialized.*created container/i],
+    [(consumer) => { consumer.containerState = "running"; }, /configured-unmaterialized.*created container/i]
+  ];
+  for (const [mutate, pattern] of invalidUnmaterialized) {
+    const forged = structuredClone(unmaterializedInventory);
+    const consumer = forged.networks
+      .find(({ name }) => name === application.network.physicalName).consumers[0];
+    mutate(consumer);
+    assert.throws(
+      () => compileFixture({ inventory: forged, previousManifest: first }),
+      pattern
+    );
+  }
+
+  const missingFullId = structuredClone(exitedInventory);
+  missingFullId.networks
+    .find(({ name }) => name === application.network.physicalName).consumers[0].desiredNetworkId = null;
+  assert.throws(
+    () => compileFixture({ inventory: missingFullId, previousManifest: first }),
+    /desired network ID differs/i
+  );
+
+  const activeMissingFullId = structuredClone(activeInventory);
+  activeMissingFullId.networks
+    .find(({ name }) => name === application.network.physicalName).consumers[0].desiredNetworkId = null;
+  assert.throws(
+    () => compileFixture({ inventory: activeMissingFullId, previousManifest: reconciled }),
+    /desired network ID differs/i
+  );
+
+  const activeMissingEndpoint = structuredClone(activeInventory);
+  activeMissingEndpoint.networks
+    .find(({ name }) => name === application.network.physicalName).consumers[0].endpointId = null;
+  assert.throws(
+    () => compileFixture({ inventory: activeMissingEndpoint, previousManifest: reconciled }),
+    /active endpoint is inconsistent/i
+  );
+
   const crossAppInventory = structuredClone(inventory);
   crossAppInventory.networks.find(({ name }) => name === application.network.physicalName).consumers[0].serviceName = "php-stream";
   assert.throws(
     () => compileFixture({ inventory: crossAppInventory, previousManifest: first }),
+    /identity or consumers differ/i
+  );
+
+  const foreignOwnerInventory = structuredClone(unmaterializedInventory);
+  foreignOwnerInventory.networks
+    .find(({ name }) => name === application.network.physicalName).policyOwner = "stream";
+  assert.throws(
+    () => compileFixture({ inventory: foreignOwnerInventory, previousManifest: first }),
     /identity or consumers differ/i
   );
 

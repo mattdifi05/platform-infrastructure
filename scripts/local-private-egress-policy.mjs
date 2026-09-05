@@ -8,10 +8,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 export const POLICY_SCHEMA = "platform.local-private-app-egress-policy/v1";
-export const INVENTORY_SCHEMA = "platform.local-private-app-egress-runtime-inventory/v2";
+export const INVENTORY_SCHEMA = "platform.local-private-app-egress-runtime-inventory/v3";
 export const MANIFEST_SCHEMA = "platform.local-private-app-egress-manifest/v1";
 export const CANONICAL_DOCKER_HOST = "unix:///var/run/docker.sock";
-export const CONSUMER_INVENTORY_SOURCE = "all-container-desired-attachments+active-network-endpoints/v1";
+export const CONSUMER_INVENTORY_SOURCE = "all-container-desired-attachments+active-network-endpoints/v2";
 
 export const NON_PUBLIC_IPV4 = Object.freeze([
   "0.0.0.0/8",
@@ -517,20 +517,28 @@ function validateInventoryNetwork(entry, index) {
       "serviceName"
     ], consumerLabel);
     if (!/^[a-f0-9]{64}$/.test(String(consumer.containerId))) fail(`${label} consumer container ID is invalid.`);
-    if (consumer.desiredNetworkId !== id) fail(`${consumerLabel} desired network ID differs from its inspected network.`);
     const attachmentState = String(consumer.attachmentState);
     const containerState = String(consumer.containerState);
+    let desiredNetworkId = null;
     let endpointId = null;
-    if (attachmentState === "active-endpoint") {
+    if (attachmentState === "configured-unmaterialized") {
+      if (containerState !== "created" || consumer.desiredNetworkId !== null || consumer.endpointId !== null) {
+        fail(`${consumerLabel} configured-unmaterialized attachment is inconsistent with its created container or absent Engine IDs.`);
+      }
+    } else if (attachmentState === "active-endpoint") {
+      if (consumer.desiredNetworkId !== id) fail(`${consumerLabel} desired network ID differs from its inspected network.`);
       if (!new Set(["paused", "restarting", "running"]).has(containerState)
           || !/^[a-f0-9]{64}$/.test(String(consumer.endpointId))) {
         fail(`${consumerLabel} active endpoint is inconsistent with container state or endpoint ID.`);
       }
+      desiredNetworkId = String(consumer.desiredNetworkId);
       endpointId = String(consumer.endpointId);
     } else if (attachmentState === "configured-stopped") {
+      if (consumer.desiredNetworkId !== id) fail(`${consumerLabel} desired network ID differs from its inspected network.`);
       if (!new Set(["created", "exited"]).has(containerState) || consumer.endpointId !== null) {
         fail(`${consumerLabel} configured-stopped attachment is inconsistent with container state or endpoint ID.`);
       }
+      desiredNetworkId = String(consumer.desiredNetworkId);
     } else {
       fail(`${consumerLabel} attachment state is invalid.`);
     }
@@ -538,7 +546,7 @@ function validateInventoryNetwork(entry, index) {
       attachmentState,
       containerId: String(consumer.containerId),
       containerState,
-      desiredNetworkId: String(consumer.desiredNetworkId),
+      desiredNetworkId,
       endpointId,
       projectName: consumer.projectName === null
         ? null
@@ -549,7 +557,7 @@ function validateInventoryNetwork(entry, index) {
     };
   });
   const consumerIds = consumers.map(({ containerId }) => containerId);
-  const consumerKeys = consumers.map((consumer) => `${consumer.containerId}|${consumer.attachmentState}|${consumer.containerState}|${consumer.endpointId ?? ""}|${consumer.projectName ?? ""}|${consumer.serviceName ?? ""}`);
+  const consumerKeys = consumers.map((consumer) => `${consumer.containerId}|${consumer.attachmentState}|${consumer.containerState}|${consumer.desiredNetworkId ?? ""}|${consumer.endpointId ?? ""}|${consumer.projectName ?? ""}|${consumer.serviceName ?? ""}`);
   if (new Set(consumerIds).size !== consumerIds.length
       || new Set(consumerKeys).size !== consumerKeys.length
       || JSON.stringify(consumerKeys) !== JSON.stringify([...consumerKeys].sort())) {

@@ -56,6 +56,13 @@ chain.
 
 The controller creates the FIP replacement stopped, verifies the exact Engine
 inventory, installs and verifies its own firewall state, then starts only FIP.
+Inventory v3 distinguishes a never-started `configured-unmaterialized` join
+(created container, actual named network key, absent Engine IDs) from a
+full-ID `configured-stopped` join and an `active-endpoint`. It never invents a
+container NetworkID before Docker allocates it. The controller separately
+captures the real empty network's full ID, labels and IPAM, then rechecks both
+that identity and the created container's exact physical network names just
+before start. Post-start admission still requires full network/endpoint IDs.
 Its systemd guard reapplies the admitted nftables program before Docker can
 restart containers after a host/Docker restart. This is boot-time firewall
 restoration, not a continuous Engine identity monitor: the helper does not
