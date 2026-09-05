@@ -1,0 +1,37 @@
+{
+  "schema": "platform.local-private-app-egress-policy/v1",
+  "projectName": "platform_infra_greenfield",
+  "networkNamePrefix": "platform_infra_greenfield_platform",
+  "ownershipSourceLock": {
+    "path": "config/v1-local-private-source-lock.json",
+    "sha256": "01bee7638c4a47ce629a46455db885dab7d1e1bca53e49b9b87a0d1703ed4c88"
+  },
+  "nftables": {
+    "family": "inet",
+    "table": "platform_local_private_egress",
+    "hookPriority": -5
+  },
+  "applications": [
+    {
+      "state": "proposed",
+      "owner": "fiplatform",
+      "allowedConsumers": [
+        "php-fiplatform"
+      ],
+      "requiredInternalNetworks": {
+        "php-fiplatform": [
+          "enterprise_net",
+          "platform_db_admin",
+          "platform_routing"
+        ]
+      },
+      "network": {
+        "logicalName": "fiplatform_egress",
+        "physicalName": "platform_infra_greenfield_platform_fiplatform_egress",
+        "bridgeName": "lpe-fiplatform",
+        "subnet": "172.31.240.0/28",
+        "gateway": "172.31.240.1"
+      }
+    }
+  ]
+}

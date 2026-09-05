@@ -474,6 +474,11 @@ services:
   php-fiplatform:
     <<: *dedicated_php_app
     container_name: php-fiplatform
+    # The only LOCAL_PRIVATE workload allowed a dedicated public egress path.
+    # Keep this narrow: the render/policy controller rejects any other
+    # non-internal FIP attachment and the host guard owns destination policy.
+    cap_drop:
+      - NET_RAW
     volumes:
       - ${PHP_SOURCE_DIR:-./php-runtime-root}:/var/www/html
       - .:/var/www/infra-docs:ro
@@ -487,6 +492,7 @@ services:
       - enterprise_net
       - platform_routing
       - platform_db_admin
+      - fiplatform_egress
 
   php-matthewdifilippo:
     <<: *dedicated_php_app
@@ -607,3 +613,21 @@ networks:
     name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_ingress
     labels:
       com.platform.trust-zone: edge-ingress
+  # The LOCAL_PRIVATE egress compiler validates this exact single-consumer
+  # projection against the source-lock render and Engine inventory before FIP
+  # may start. The bridge identifier is deliberately short and fixed so nft
+  # forward rules can bind interface and CIDR; it is not operator input.
+  fiplatform_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_greenfield_platform}_fiplatform_egress
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+    labels:
+      com.platform.trust-zone: isolated-application-egress
+      com.platform.egress-owner: fiplatform
+    driver_opts:
+      com.docker.network.bridge.name: lpe-fiplatform
+    ipam:
+      config:
+        - subnet: 172.31.240.0/28
+          gateway: 172.31.240.1

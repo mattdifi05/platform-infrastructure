@@ -12,6 +12,64 @@ This is a candidate only. Applying it recreates Docker network attachments and
 must happen in an approved maintenance window after backup evidence. T12 does
 not change the live networks.
 
+## LOCAL_PRIVATE FIP dedicated egress
+
+This section is separate from the Hosted candidate above. The active Dell V1.1
+is the **no-hosted** `LOCAL_PRIVATE` source-lock render; do not activate a
+Hosted workload, use its helper, or attach FIP to shared `platform_egress`.
+
+The approved opt-in projection is one new logical network,
+`fiplatform_egress`, with the physical name
+`platform_infra_greenfield_platform_fiplatform_egress` in the active release. It is a
+non-internal IPv4 bridge with only `php-fiplatform` attached:
+
+| Property | Fixed value |
+| --- | --- |
+| bridge interface | `lpe-fiplatform` |
+| IPv4 subnet / gateway | `172.31.240.0/28` / `172.31.240.1` |
+| IPv6 | disabled |
+| consumer | only `php-fiplatform` |
+| retained FIP networks | `enterprise_net`, `platform_routing`, `platform_db_admin` |
+| rendered labels | `com.platform.trust-zone=isolated-application-egress`; `com.platform.egress-owner=fiplatform` |
+
+`php-fiplatform` drops `NET_RAW`; it must not add `NET_RAW` or `ALL`. The
+network/compiler policy rejects an additional non-internal FIP network, any
+other member, a changed bridge/CIDR/name, or a route inventory that overlaps
+the proposed subnet. A later application needs its own explicit policy record
+and an exact consumer list. Each consumer declares its own
+`requiredInternalNetworks`; the compiler preserves that exact internal set,
+including for previously admitted owners when another application opts in.
+This declaration does not make egress available to every LOCAL_PRIVATE service.
+
+The root-owned LOCAL_PRIVATE guard must derive the Engine bridge and CIDR from
+the accepted render/inventory, not from operator arguments. Its `input` hook
+drops **all** traffic arriving through `iifname "lpe-fiplatform"`, before any
+source-address condition. Its dedicated `forward` hook first drops spoofed
+traffic matching `iifname "lpe-fiplatform" ip saddr != 172.31.240.0/28`; only
+then may rules match that same interface plus the accepted source CIDR and
+apply the reviewed public-destination policy. Those rules deny private,
+metadata, link-local, CGNAT, documentation, multicast and reserved ranges. A
+CIDR-only rule is invalid: it could capture traffic from a different bridge,
+while an interface-plus-CIDR input drop could be bypassed with a spoofed source.
+The guard must not modify UFW, Docker `DOCKER-USER`, or any Hosted firewall
+chain.
+
+The controller creates the FIP replacement stopped, verifies the exact Engine
+inventory, installs and verifies its own firewall state, then starts only FIP.
+Its systemd guard reapplies the admitted nftables program before Docker can
+restart containers after a host/Docker restart. This is boot-time firewall
+restoration, not a continuous Engine identity monitor: the helper does not
+query Docker before the daemon starts. Root/Docker-admin topology changes
+require fresh render/inventory admission; application containers and the typed
+backup broker cannot perform those changes. The interface/source/destination
+guard remains independent of Docker's network ID. Record actual runtime
+activation separately from reboot, daemon-restart and UFW-reload validation;
+do not claim those disruptive lifecycle checks from unit syntax or namespace
+tests alone. Rollback stops only FIP, restores its
+prior reviewed attachment and the prior private firewall state, then restarts
+that prior FIP container. Never use `docker network connect`, `compose down`,
+or a hand-written firewall command for this boundary.
+
 ## Core trust zones
 
 | Network | Members/purpose | Internet route |

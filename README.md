@@ -1062,6 +1062,20 @@ broker vivono in directory host dedicate esterne al checkout e a
 `PLATFORM_STATE_DIR`; nessun workload o servizio web monta quei parent. Solo lo
 scheduler riceve il runtime UDS in sola lettura.
 
+L'egress applicativo non e' una capability del broker o dell'admission backup.
+Il primo canary LOCAL_PRIVATE e' `php-fiplatform`: il render source-lock gli
+aggiunge soltanto la rete dedicata `fiplatform_egress`, mantenendo le sue tre
+reti interne e senza collegarlo alla rete condivisa `platform_egress`. Il
+contratto dichiarativo `config/local-private-egress.json`, il render/inventory
+verificato e il controller root limitano ogni opt-in a una coppia
+owner/rete, con consumer e reti interne obbligatorie espliciti per servizio;
+una nuova applicazione richiede un record esplicito e non riceve
+egress per ereditarieta'. Il controller ricrea FIP fermo, verifica bridge/CIDR
+e stato firewall dedicato, quindi avvia solo FIP. Non usare attach live,
+`compose down`, un riavvio Docker globale, il helper Hosted o il broker backup
+per questa procedura. `NETWORK-SEGMENTATION.md` definisce il boundary e
+le prove distinte di attivazione e di ripristino dopo restart Docker/host.
+
 Sul Dell lo scheduler resta UID/GID `1000:1000` e usa il timer minuto-per-minuto
 integrato nell'entrypoint, non `crond` (che su Alpine richiede root). Il file
 schedule privato deve contenere catalogo piattaforma e upload Restic off-site e

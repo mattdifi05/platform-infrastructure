@@ -692,6 +692,46 @@ Control Center soltanto read-only; queue, artifact, report e runtime evidence
 restano nel data root separato. Project router e workload PHP non montano lo
 stato Control Center.
 
+### Canary egress dedicato FIP
+
+Questo canary e' un percorso operatore LOCAL_PRIVATE separato dalle capability
+backup firmate e dalla topologia Hosted. Prima di qualunque mutazione il
+controller deve riprodurre i 13 file Compose del source lock con il profilo
+`admin`, verificare il record esplicito FIP in
+`config/local-private-egress.json`, e rifiutare sovrapposizioni tra
+`172.31.240.0/28`, route host e reti Engine. Il render accettato deve contenere
+esattamente `php-fiplatform` su `fiplatform_egress`, bridge
+`lpe-fiplatform`, IPv6 disabilitato e nessun altro consumer; FIP conserva
+`enterprise_net`, `platform_routing` e `platform_db_admin` e perde `NET_RAW`.
+
+Il controller crea soltanto il replacement FIP fermo e con `--no-deps`,
+`--no-build` e `--pull never`; prima dell'avvio il controller root convalida
+nuovamente Engine/render e il helper installa il proprio stato nft. Il chain `input`
+dedicato deve effettuare `iifname "lpe-fiplatform" drop`, senza condizione IP:
+nessuna eccezione verso l'host. Il `forward` dedicato deve prima rifiutare
+`iifname "lpe-fiplatform" ip saddr != 172.31.240.0/28`, poi applicare la
+coppia interfaccia+CIDR valida alla policy destinazione; mai il CIDR da solo.
+UFW, `DOCKER-USER` e chain Hosted restano immutati. Dopo l'avvio
+verificare route predefinita FIP, risoluzione tramite Docker DNS, TLS FCM,
+health applicativo, diniego verso le destinazioni private e identita'/health di
+tutti i container non-FIP.
+
+Il guard systemd riapplica il programma nft accettato prima che Docker riavvii
+automaticamente i consumer; non e' un monitor continuo delle identita' Engine.
+Modifiche topologiche da root/Docker-admin richiedono nuova ammissione con
+render/inventory; conservare per ciascun consumer il contratto esplicito
+`requiredInternalNetworks`, anche quando viene ammessa un'altra applicazione.
+Registrare separatamente l'esito del canary live e le prove di restart Docker,
+riavvio host e `ufw reload`: le ultime richiedono una finestra di manutenzione
+dedicata e non sono dimostrate dai test isolati o dalla verifica delle unit.
+Non riavviare tutto l'host per chiudere il solo canary applicativo. La procedura
+e gli artefatti di rollback devono essere root-owned su disco persistente,
+fuori da `/tmp` e `/run`, con digest approvato fuori dal bundle e comandi Docker
+vincolati al socket locale. In rollback fermare solo FIP, ripristinare
+la sua precedente proiezione approvata e lo stato nft privato, quindi
+riavviarlo; non usare `docker network connect`, `compose down`, prune,
+cancellazione rete/volume o aggiornamenti DB.
+
 Il boundary queue LOCAL_PRIVATE ammette solo job `backup`: qualunque
 `restore-drill` viene rifiutato nel broker prima di avviare `infra-ops`. I
 restore di prova si eseguono invece in target usa-e-getta tramite la procedura

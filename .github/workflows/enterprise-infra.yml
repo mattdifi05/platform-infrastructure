@@ -223,7 +223,9 @@ jobs:
             test -f "$file"
             compose_args+=( -f "$file" )
           done
-          docker compose --env-file .env -p platform_infra_greenfield \
+          # This source-lock assertion renders the active greenfield namespace,
+          # not the local-development prefix supplied by .env.example.
+          PLATFORM_NETWORK_PREFIX=platform_infra_greenfield_platform docker compose --env-file .env -p platform_infra_greenfield \
             "${compose_args[@]}" --profile admin config --format json > "${RUNNER_TEMP}/v1-current-render.json"
           jq -e '
             def path_contains($parent; $child):
@@ -237,7 +239,7 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
             (.services | length) == 35 and
             (.secrets | length) == 20 and
-            (.networks | length) == 11 and
+            (.networks | length) == 12 and
             (.volumes | length) == 12 and
             (.services["backup-scheduler"].network_mode == "none") and
             (.services["docker-action-broker"].user == "1000:1000") and
@@ -280,6 +282,20 @@ jobs:
             (.services["cadvisor"] == null) and
             (.services["docker-action-activation-sidecar"] == null) and
             (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
+            (($root.services["php-fiplatform"].networks | keys | sort) == ["enterprise_net", "fiplatform_egress", "platform_db_admin", "platform_routing"]) and
+            (([$root.services | to_entries[] | select(.key != "php-fiplatform") | select((.value.networks // {}) | has("fiplatform_egress"))] | length) == 0) and
+            (($root.services["php-fiplatform"].cap_drop // []) | index("NET_RAW") != null) and
+            ((($root.services["php-fiplatform"].cap_add // []) | index("NET_RAW")) == null) and
+            ((($root.services["php-fiplatform"].cap_add // []) | index("ALL")) == null) and
+            ($root.networks["fiplatform_egress"].name == "platform_infra_greenfield_platform_fiplatform_egress") and
+            ($root.networks["fiplatform_egress"].driver == "bridge") and
+            (($root.networks["fiplatform_egress"].internal // false) == false) and
+            ($root.networks["fiplatform_egress"].enable_ipv6 == false) and
+            ($root.networks["fiplatform_egress"].labels["com.platform.trust-zone"] == "isolated-application-egress") and
+            ($root.networks["fiplatform_egress"].labels["com.platform.egress-owner"] == "fiplatform") and
+            ($root.networks["fiplatform_egress"].driver_opts["com.docker.network.bridge.name"] == "lpe-fiplatform") and
+            ($root.networks["fiplatform_egress"].ipam.config == [{subnet: "172.31.240.0/28", gateway: "172.31.240.1"}]) and
+            (["enterprise_net", "fiplatform_egress", "platform_db_admin", "platform_routing"] | map(select($root.networks[.].internal != true)) == ["fiplatform_egress"]) and
             (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
             ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 7, "php-fiplatform": 8, "php-matthewdifilippo": 7, "php-stream": 7, "php-workcalendar": 7} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
           ' "${RUNNER_TEMP}/v1-current-render.json"

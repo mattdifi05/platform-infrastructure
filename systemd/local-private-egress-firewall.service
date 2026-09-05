@@ -1,0 +1,32 @@
+[Unit]
+Description=Platform LOCAL_PRIVATE application egress boundary
+DefaultDependencies=no
+After=local-fs.target
+Before=docker.socket docker.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/platform-infrastructure/local-private-egress-firewall --apply --manifest /etc/platform-infrastructure/local-private-egress.manifest.json --confirm APPLY-LOCAL-PRIVATE-EGRESS
+ExecStartPost=/usr/local/libexec/platform-infrastructure/local-private-egress-firewall --verify --manifest /etc/platform-infrastructure/local-private-egress.manifest.json
+RemainAfterExit=yes
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadWritePaths=/run
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

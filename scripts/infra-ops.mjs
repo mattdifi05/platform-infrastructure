@@ -3462,6 +3462,8 @@ function infraTestingHygiene() {
     "scripts/local-private-docker-action-broker.mjs",
     "scripts/local-private-docker-action-broker.test.mjs",
     "scripts/local-private-docker-action-readiness.mjs",
+    "scripts/local-private-egress-policy.mjs",
+    "scripts/local-private-egress-policy.test.mjs",
     "scripts/platform-release-context.mjs",
     "scripts/platform-release-context.test.mjs",
     "scripts/provider-evidence-auth.mjs",
@@ -3530,6 +3532,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-restore-semantic-comparator.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/local-private-compatibility-source-boundary.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/local-private-egress-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
@@ -3948,6 +3951,10 @@ function infraMaintainabilityHygiene() {
     "hosted-workload-network-ownership.sh",
     "install-host-reliability-collector.sh",
     "local-private-backup-filesystem-preflight.sh",
+    // The egress guard and its installer must run on the host before Docker is
+    // available, so they cannot delegate to the Dockerized infra-ops runner.
+    "local-private-egress-firewall.sh",
+    "local-private-egress-install.sh",
     "minio-service-identity.sh",
     "network-segmentation-sandbox-test.sh",
     "php-project-runtime.sh",
