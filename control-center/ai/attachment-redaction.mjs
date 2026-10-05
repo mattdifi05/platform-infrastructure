@@ -13,11 +13,12 @@ const FIELD_NAMES = [
 ];
 FIELD_NAMES.sort((left, right) => right.length - left.length);
 
+const REDACTED_PRIVATE_MATERIAL = "[chiave privata rimossa]";
 const REPLACEMENTS = Object.freeze({
   assignment: "[redatto]",
   credential: "[credenziale rimossa]",
   token: "[token rimosso]",
-  privateKey: "[chiave privata rimossa]",
+  privateKey: REDACTED_PRIVATE_MATERIAL,
 });
 const PRIORITY = Object.freeze({ assignment: 1, credential: 2, token: 3, privateKey: 4 });
 
