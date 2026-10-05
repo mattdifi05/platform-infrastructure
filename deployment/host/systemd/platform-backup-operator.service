@@ -1,0 +1,36 @@
+[Unit]
+Description=Signed native FTPS and RustFS recovery operator
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-backup-operator.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+RuntimeDirectory=platform-backup-operator
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=platform-backup-operator
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/platform-backup-schedule /var/lib/platform-backup-operator /var/lib/platform-ftps-backup /var/lib/platform-rustfs-recovery /home/platform_infrastructure/v1-fresh-runtime/state/host-recovery /run/platform-backup-operator
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=2G
+CPUQuota=200%
+IOWeight=20
+TasksMax=256
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

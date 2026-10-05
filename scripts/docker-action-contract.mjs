@@ -97,6 +97,7 @@ export const CLI_ACTIONS = Object.freeze({
   "prune-manifest-backups-apply": "backup.prune.apply",
   "full-restore-drill": "restore.drill.full",
   "offsite-backup-restic": "backup.offsite.sync",
+  "offsite-backup-ftps": "backup.offsite.sync",
   "offsite-restore-proof": "restore.offsite.proof",
   "runtime-docker-snapshot": "evidence.runtime.snapshot",
 });
@@ -840,9 +841,16 @@ function normalizeActionResult(value, request) {
       "status",
     ], `action result phase ${index}`);
     const expectedPhaseId = expectedPhaseIds[index];
-    const expectedOutputSchema = isEvidence
+    let expectedOutputSchema = isEvidence
       ? "platform.docker-runtime-snapshot/v2"
       : PHASE_PLANS[expectedPhaseId].outputSchema;
+    if(['offsite.sync','offsite.restore'].includes(expectedPhaseId)&&phase.output?.backend==='ftps-multipart-v2'){
+      const nativeSchema=expectedPhaseId==='offsite.sync'?'platform.offsite-backup-receipt/v2':'platform.offsite-restore-proof/v2';
+      if(phase.outputSchema===nativeSchema){
+        if(phase.output.productionModified!==false||phase.output.actualDownloadVerified!==true||phase.output.decryptVerified!==true||phase.output.everyArtifactShaAndHmacVerified!==true)fail(403,'Native output recovery proof rejected');
+        expectedOutputSchema=nativeSchema;
+      }
+    }
     if (phase.phaseId !== expectedPhaseId || phase.status !== "completed"
       || phase.outputSchema !== expectedOutputSchema) {
       fail(403, `action result phase ${index} identity, status or output schema is invalid`);

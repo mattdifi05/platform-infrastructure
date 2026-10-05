@@ -1,0 +1,8 @@
+[Unit]
+Description=Check internal database certificate expiration every six hours
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=6h
+Persistent=true
+[Install]
+WantedBy=timers.target

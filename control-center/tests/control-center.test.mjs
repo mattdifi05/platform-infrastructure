@@ -874,7 +874,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(monitoringApi.productionEvidence, false);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "platform-alert-dispatcher" && job.targets.includes("platform-alert-dispatcher:3000")), true);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "node-exporter" && job.category === "host"), true);
-  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor"), false);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor"), true);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Prometheus" && datasource.url === "http://prometheus:9090"), true);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Loki" && datasource.url === "http://loki:3100"), true);
   assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Platform container logs" && panel.signal === "platform-errors"), true);
@@ -2114,7 +2114,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(bucketApply.body.details.credentialsExposed, false);
 
   const storageAfterApply = await getJson(`${baseUrl}/control/storage`);
-  assert.equal(storageAfterApply.provider.id, "minio");
+  assert.equal(storageAfterApply.provider.id, "rustfs");
   assert.equal(storageAfterApply.buckets.some((bucket) => bucket.id === "node-demo-node-demo-assets"), true);
   assert.equal(existsSync(storageBucketsFile), true);
   const storageStateText = readFileSync(storageBucketsFile, "utf8");

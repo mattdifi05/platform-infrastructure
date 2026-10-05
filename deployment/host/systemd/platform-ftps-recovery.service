@@ -1,0 +1,7 @@
+[Unit]
+Description=Explicit recovery of g10 FTPS receipt after verified bulk roundtrip
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-ftps-recover-final.py
+TimeoutStartSec=3600
+UMask=0077

@@ -1,0 +1,14 @@
+[Unit]
+Description=Collect internal database TLS certificate expiration
+After=local-fs.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/platform-db-tls-metrics.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=64M
+TimeoutStartSec=35

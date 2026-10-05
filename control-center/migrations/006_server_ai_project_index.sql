@@ -1,0 +1,7 @@
+begin;
+create table if not exists server_ai.project_chunks (
+ id uuid primary key, owner_id text not null check(length(owner_id) between 1 and 256), machine_id text not null check(machine_id ~ '^[0-9a-f]{64}$'), project_id text not null check(project_id ~ '^[a-z0-9][a-z0-9-]{0,63}$'), source_id text not null check(length(source_id) between 1 and 128), source_kind text not null default 'file' check(source_kind in ('file','database')), path text not null check(length(path) between 1 and 512), start_line integer not null check(start_line>0), end_line integer not null check(end_line>=start_line), sha256 text not null check(sha256 ~ '^[0-9a-f]{64}$'), mtime_ms bigint not null check(mtime_ms>=0), language text not null default '' check(length(language)<=48), symbol text not null default '' check(length(symbol)<=160), chunk_index smallint not null check(chunk_index between 0 and 255), content text not null check(octet_length(content) between 1 and 2048), embedding real[] not null check(cardinality(embedding)=1024), scan_id uuid not null, deleted_at timestamptz, updated_at timestamptz not null default now(), unique(owner_id,machine_id,project_id,source_id,chunk_index)
+);
+create index if not exists project_chunks_scope_idx on server_ai.project_chunks(owner_id,machine_id,project_id,scan_id,updated_at desc) where deleted_at is null;
+grant select,insert,update on table server_ai.project_chunks to control_center_runtime;
+commit;

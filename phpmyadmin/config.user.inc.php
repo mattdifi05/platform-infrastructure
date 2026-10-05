@@ -52,5 +52,5 @@ if (is_readable($controlPasswordFile)) {
 
 /* TLS to MariaDB with verification */
 $cfg['Servers'][$i]['ssl'] = true;
-$cfg['Servers'][$i]['ssl_ca'] = '/etc/phpmyadmin/certs/ca.pem';
+$cfg['Servers'][$i]['ssl_ca'] = getenv('PMA_SSL_CA') ?: '/etc/phpmyadmin/certs/ca.pem';
 $cfg['Servers'][$i]['ssl_verify'] = true;

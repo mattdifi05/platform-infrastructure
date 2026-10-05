@@ -42,3 +42,5 @@ secrets/*
 !secrets/README.md
 .DS_Store
 Thumbs.db
+
+!.env.server-ai.example

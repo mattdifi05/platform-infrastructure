@@ -1,0 +1,15 @@
+[Unit]
+Description=Expire authenticated server FTPS recovery points without creating backups
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-ftps-expiry.py
+TimeoutStartSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/platform-ftps-backup /var/lib/platform-backup-schedule /home/platform_infrastructure/v1-fresh-runtime/state/host-recovery
+MemoryMax=128M
+TasksMax=32

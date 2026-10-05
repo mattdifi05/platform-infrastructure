@@ -95,7 +95,7 @@ function capabilityFiles(capabilityDir) {
   ]));
 }
 
-export function readLocalPrivateRenderBinding(renderFile) {
+export function readLocalPrivateRenderBinding(renderFile,admission=null) {
   let render;
   try {
     render = JSON.parse(fs.readFileSync(renderFile, "utf8"));
@@ -116,7 +116,7 @@ export function readLocalPrivateRenderBinding(renderFile) {
   const requiredEnvironment = {
     BACKUP_KEYCLOAK_CONTAINER: "gf-keycloak",
     BACKUP_MARIADB_CONTAINER: "gf-mariadb",
-    BACKUP_MINIO_CONTAINER: "gf-minio",
+    ...(admission?.resources?.offsite?.backend==="ftps-multipart-v2"?{BACKUP_OBJECT_STORE_BACKEND:"rustfs",BACKUP_RUSTFS_CONTAINER:"gf-rustfs"}:{BACKUP_MINIO_CONTAINER:"gf-minio"}),
     BACKUP_POSTGRES_CONTAINER: "gf-postgres",
     BACKUP_SCHEDULER_JOBS_DIR: DEFAULT_JOBS_ROOT,
     BACKUP_SIGNING_KEYS_FILE: DEFAULT_SIGNING_KEY,
@@ -136,8 +136,7 @@ export function readLocalPrivateRenderBinding(renderFile) {
     PLATFORM_STATE_CONTAINER_ROOT: "/run/platform/control-center-state",
     PROJECT_SOURCE_ROOT: "/var/www/projects",
     PROJECT_STATE_ROOT: "/run/platform/control-center-state",
-    RESTIC_KEEP_LAST: "42",
-    RESTIC_MAX_REPOSITORY_BYTES: "2500000000000",
+    ...(admission?.resources?.offsite?.backend==='ftps-multipart-v2'?{}:{RESTIC_KEEP_LAST:"2",RESTIC_MAX_REPOSITORY_BYTES:"2500000000000"}),
   };
   if (Object.entries(requiredEnvironment).some(([key, value]) => broker.environment[key] !== value)
     || !IMAGE.test(String(broker.environment.NODE_IMAGE ?? ""))) {
@@ -155,6 +154,10 @@ export function readLocalPrivateRenderBinding(renderFile) {
     if (typeof value !== "string" || !path.posix.isAbsolute(value) || path.posix.normalize(value) !== value) {
       fail(`LOCAL_PRIVATE canonical render host mapping is invalid: ${key}`);
     }
+  }
+  if(admission?.resources?.offsite?.backend==='ftps-multipart-v2'){
+    const mounts=(broker.volumes??[]).filter(v=>v.target==='/run/platform/backup-operator');
+    if(mounts.length!==1||mounts[0].type!=='bind'||mounts[0].source!=='/run/platform-backup-operator'||mounts[0].read_only!==true)fail('Native operator socket mount differs');
   }
   const controlCenter = render?.services?.["control-center"];
   const controlCenterDataVolumes = Array.isArray(controlCenter?.volumes)
@@ -274,9 +277,10 @@ export function initializeLocalPrivateBackupInvocation({
     publicKeyPem: fs.readFileSync(publicKeyFile),
     renderFile,
   });
-  const render = readLocalPrivateRenderBinding(renderFile);
+  const render = readLocalPrivateRenderBinding(renderFile,verified.payload);
   assertRenderedEnvironment(render.brokerEnvironment, environment);
   const action = environment.PLATFORM_LOCAL_PRIVATE_BACKUP_ACTION;
+  if(verified.payload.resources.offsite.backend==='ftps-multipart-v2' && ['backup.offsite.sync','restore.offsite.proof'].includes(action))fail('Native offsite actions cannot enter legacy Docker child policy');
   const command = environment.PLATFORM_LOCAL_PRIVATE_BACKUP_COMMAND;
   const jobsRoot = environment.BACKUP_SCHEDULER_JOBS_DIR;
   const commandByAction = {
@@ -585,10 +589,7 @@ function localPrivateOffsiteRunAllowed(invocation, args, options) {
       && options.env?.RESTIC_REPOSITORY === repository
       && options.env?.RESTIC_PASSWORD_FILE === "/restic-password/restic_password.txt";
     if (!exactProcessEnv) return false;
-    return localPrivateResticBackupTailAllowed(tail)
-      || sameStringArray(tail, [
-        "forget", "--tag", "platform-backups", "--group-by", "tags", "--keep-last", "42", "--prune",
-      ]);
+    return localPrivateResticBackupTailAllowed(tail);
   }
   const size = [
     ...prefix,
@@ -675,6 +676,7 @@ export function localPrivateBackupDockerInvocationAllowed(invocation, args, opti
     || !Array.isArray(args) || args.length < 1 || args.length > 2048
     || args.some((item) => typeof item !== "string" || !item || item.length > 4096 || item.includes("\0"))
     || options.input !== undefined) return false;
+  if(invocation.receipt?.resources?.offsite?.backend==='ftps-multipart-v2' && ['backup.offsite.sync','restore.offsite.proof'].includes(invocation.action))return false;
   if (invocation.action === "backup.offsite.sync") {
     return localPrivateOffsiteRunAllowed(invocation, args, options);
   }

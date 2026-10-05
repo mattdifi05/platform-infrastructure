@@ -239,7 +239,7 @@
   async function submitPasskeyForm(form, submitter) {
     if (passkeyActionInFlight || formSubmissions.has(form)) return true;
     var action = sameOriginUrl(form.getAttribute("action") || "");
-    var allowedActions = new Set(["/actions/backup-delete-command", "/actions/database-delete-command", "/actions/vault-command", "/actions/redis-restore-command", "/actions/redis-backup-delete-command"]);
+    var allowedActions = new Set(["/actions/backup-delete-command", "/actions/database-delete-command", "/actions/vault-command", "/actions/redis-restore-command", "/actions/redis-backup-delete-command", "/actions/project-remove-from-list"]);
     if (!action || !allowedActions.has(action.pathname)) return false;
     passkeyActionInFlight = true;
     formSubmissions.add(form);
@@ -1824,6 +1824,7 @@
     });
 
     document.addEventListener("submit", function (event) {
+      if (event.defaultPrevented) return;
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
       if (form.hasAttribute("data-passkey-submit")) {

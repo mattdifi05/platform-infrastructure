@@ -1,0 +1,12 @@
+[Unit]
+Description=Resume same RustFS container after interrupted operator backup
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-rustfs-resume.py
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target

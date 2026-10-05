@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly coherent RustFS backup with brief S3 maintenance interruption
+[Timer]
+OnCalendar=*-*-* 23:30:00 UTC
+Persistent=false
+AccuracySec=5s
+Unit=platform-rustfs-recovery.service
+[Install]
+WantedBy=timers.target

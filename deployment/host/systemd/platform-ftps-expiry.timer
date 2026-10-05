@@ -1,0 +1,8 @@
+[Unit]
+Description=Check local authenticated FTPS expiry metadata each minute
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+AccuracySec=1s
+[Install]
+WantedBy=timers.target

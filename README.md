@@ -1126,3 +1126,9 @@ e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
 - `postgres/init/`: solo bootstrap database platform. Migrazioni applicative e
   relativi rollback appartengono alle repository dei workload.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.
+
+### Server remediation source synchronization (October 2026)
+
+The current Control Center, OpenAI-only Server AI, native FTPS/RustFS backup integration and infrastructure host helpers are versioned in this repository. See [deployment/README.md](deployment/README.md) for the installed host source snapshot and [server-ai/README.md](server-ai/README.md) for the optional AI stack. Live credentials, signed admissions, replay state, backups and application data stay outside Git. OpenAI credentials are supplied exclusively through a protected runtime file; examples contain file references only.
+
+The source synchronization does not deploy or migrate a server. A new Hostinger instance is intended to start with no hosted applications or VPN and a separately configured domain/Cloudflare origin. Historical home-specific backup catalogs are not a workload seed for that instance.

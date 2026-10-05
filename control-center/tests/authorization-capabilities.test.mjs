@@ -101,10 +101,11 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
 
   for (const method of ["GET", "POST"]) {
     const branchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}"`, "g"))].length;
+    const aiBranchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}" && operation\\.operationId (?:===|\\.startsWith\\()`, "g"))].length;
     assert.equal(
-      definitions.filter((definition) => definition.method === method).length,
-      branchCount,
-      `${method} dispatcher branches and catalog entries must change together`,
+      definitions.filter((definition) => definition.method === method && !definition.operationId.startsWith("ai.")).length,
+      branchCount - aiBranchCount,
+      `${method} ordinary dispatcher branches and catalog entries must change together`,
     );
   }
 

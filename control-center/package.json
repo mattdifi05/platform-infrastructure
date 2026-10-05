@@ -6,9 +6,11 @@
   "description": "Docker-first generic infrastructure dashboard and Admin Control Center.",
   "main": "./server.mjs",
   "dependencies": {
-    "@simplewebauthn/server": "13.3.3",
-    "pg": "8.16.3",
-    "redis": "6.2.1"
+    "@simplewebauthn/server": "14.0.3",
+    "busboy": "1.6.0",
+    "pg": "8.23.0",
+    "redis": "6.2.1",
+    "sharp": "0.35.5"
   },
   "scripts": {
     "start": "node server.mjs",

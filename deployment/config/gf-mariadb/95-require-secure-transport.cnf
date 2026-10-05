@@ -1,0 +1,2 @@
+[mariadb]
+require_secure_transport=ON

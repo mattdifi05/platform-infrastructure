@@ -1,0 +1,13 @@
+[Unit]
+Description=Complete backup with RustFS, encrypted host configuration and original signed broker
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-backup-schedule.py
+TimeoutStartSec=43200
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=512M
+TasksMax=128
