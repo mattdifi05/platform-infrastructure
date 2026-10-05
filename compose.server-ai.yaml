@@ -1,0 +1,243 @@
+name: platform_server_ai
+
+x-server-ai-logging: &server-ai-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  searxng:
+    profiles: [server-ai]
+    image: searxng/searxng@sha256:5286edb35782454ab8a102c5eff6b54bff745853191b46aeead95f225aa6dfb6
+    container_name: gf-searxng
+    labels:
+      io.platform.server-ai.machine-id: ${SERVER_AI_MACHINE_ID:?Set the reviewed host machine identity}
+    restart: unless-stopped
+    user: "977:977"
+    read_only: true
+    environment:
+      SEARXNG_SETTINGS_PATH: /run/secrets/searxng-settings.yml
+      FORCE_OWNERSHIP: "false"
+      GRANIAN_HOST: 0.0.0.0
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - type: bind
+        source: ${SERVER_AI_SEARXNG_CONFIG_DIR:?Set the operator-managed SearXNG config directory}
+        target: /etc/searxng
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_SEARXNG_SETTINGS_FILE:?Set the operator-managed SearXNG settings file path}
+        target: /run/secrets/searxng-settings.yml
+        read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/cache/searxng:size=64m,uid=977,gid=977,mode=0700
+    networks: [search, egress]
+    dns: [1.1.1.1, 8.8.8.8]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1.0
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, /usr/local/searxng/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *server-ai-logging
+
+  server-ai-controller:
+    profiles: [server-ai]
+    image: ${SERVER_AI_CONTROLLER_IMAGE:-platform/server-ai-controller:local}
+    build:
+      context: .
+      dockerfile: server-ai/docker/server-ai-controller.Dockerfile
+    container_name: gf-server-ai-controller
+    user: "1000:1000"
+    group_add: ["${SERVER_AI_DOCKER_GID:?Set the host Docker socket group ID}"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: /etc/machine-id
+        target: /run/host-machine-id
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_CONTROLLER_REGISTRY_FILE:?Set the operator-generated controller registry JSON path}
+        target: /etc/server-ai-controller/registry.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_CONTROLLER_SOCKET_DIR:?Set the private host controller socket directory}
+        target: /run/server-ai-controller
+    cpus: 0.25
+    mem_limit: 96m
+    memswap_limit: 96m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *server-ai-logging
+
+  server-ai-observer:
+    profiles: [server-ai]
+    image: ${SERVER_AI_OBSERVER_IMAGE:-platform/server-ai-observer:local}
+    build:
+      context: .
+      dockerfile: server-ai/docker/server-ai-observer.Dockerfile
+    container_name: gf-server-ai-observer
+    labels:
+      io.platform.server-ai.machine-id: ${SERVER_AI_MACHINE_ID:?Set the reviewed host machine identity}
+    user: "1000:1000"
+    group_add: ["${SERVER_AI_OBSERVER_PROXY_GID:?Set the observer proxy socket group ID}"]
+    environment:
+      SERVER_AI_OBSERVER_TOKEN_FILE: /run/secrets/server_ai_observer_token
+      SERVER_AI_DOCKER_SOCKET_PATH: /run/platform-docker-observer/docker.sock
+    volumes:
+      - type: bind
+        source: /run/platform-docker-observer
+        target: /run/platform-docker-observer
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_OBSERVER_TOKEN_FILE:?Set the operator-generated observer HMAC token file}
+        target: /run/secrets/server_ai_observer_token
+        read_only: true
+    networks: [observer]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,uid=1000,gid=1000,mode=0700"]
+    expose: ["8090"]
+    cpus: 0.5
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8090/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *server-ai-logging
+
+  server-ai-project-source-reader:
+    profiles: [server-ai-project-readers]
+    image: ${SERVER_AI_SOURCE_READER_IMAGE:-platform/server-ai-project-source-reader:local}
+    build:
+      context: .
+      dockerfile: server-ai/docker/server-ai-project-source-reader.Dockerfile
+    container_name: gf-server-ai-project-source-reader
+    labels:
+      io.platform.server-ai.machine-id: ${SERVER_AI_MACHINE_ID:?Set the reviewed host machine identity}
+    user: "1000:1000"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - type: bind
+        source: ${SERVER_AI_PROJECTS_ROOT:-/REPLACE/WITH/APPROVED/PROJECTS/ROOT}
+        target: /projects
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_PROJECT_READERS_TOKEN_FILE:-/REPLACE/WITH/PRIVATE/server-ai-project-readers-token}
+        target: /run/secrets/server_ai_project_readers_token
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_PLATFORM_SOURCE_PATH:-/var/lib/platform-infrastructure/server-ai-placeholder/repo}
+        target: /platform
+        read_only: true
+    networks: [project-source]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=64m,uid=1000,gid=1000,mode=0700"]
+    expose: ["8110"]
+    cpus: 1.0
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *server-ai-logging
+
+  server-ai-project-query-reader:
+    profiles: [server-ai-project-readers]
+    image: ${SERVER_AI_QUERY_READER_IMAGE:-platform/server-ai-project-query-reader:local}
+    build:
+      context: .
+      dockerfile: server-ai/docker/server-ai-project-query-reader.Dockerfile
+    container_name: gf-server-ai-project-query-reader
+    labels:
+      io.platform.server-ai.machine-id: ${SERVER_AI_MACHINE_ID:?Set the reviewed host machine identity}
+    user: "1000:1000"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SERVER_AI_DB_TLS_CA_FILE: /run/platform-db-tls/ca.crt
+    volumes:
+      - type: bind
+        source: ${SERVER_AI_DB_TLS_DIR:-/REPLACE/WITH/OPERATOR/GENERATED/db-tls-clients}
+        target: /run/platform-db-tls
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_PROJECT_READERS_TOKEN_FILE:-/REPLACE/WITH/PRIVATE/server-ai-project-readers-token}
+        target: /run/secrets/server_ai_project_readers_token
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_FIPLATFORM_FIP_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-fiplatform-fiplatform-ro.json}
+        target: /run/secrets/server_ai_fiplatform_mariadb_fiplatform_ro.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_FIPLATFORM_U778675014_FIP_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-fiplatform-u778675014-fip-ro.json}
+        target: /run/secrets/server_ai_fiplatform_mariadb_u778675014_fip_ro.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_WORKCALENDAR_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-workcalendar-workcalendar-ro.json}
+        target: /run/secrets/server_ai_workcalendar_mariadb_workcalendar_ro.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_ANNIVERSARY_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-anniversary-anniversary-ro.json}
+        target: /run/secrets/server_ai_anniversary_mariadb_anniversary_ro.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_STREAM_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-stream-stream-ro.json}
+        target: /run/secrets/server_ai_stream_mariadb_stream_ro.json
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_DB_ACCOUNT_POSTGRES_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-stexor-postgres-stexor-ro.json}
+        target: /run/secrets/server_ai_account_postgres_stexor_ro.json
+        read_only: true
+    networks: [project-query, database]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=64m,uid=1000,gid=1000,mode=0700"]
+    expose: ["8111"]
+    cpus: 1.0
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: *server-ai-logging
+
+networks:
+  search:
+    name: platform_server_ai_search
+    internal: true
+  egress:
+    name: platform_server_ai_egress
+  observer:
+    name: platform_server_ai_observer
+    internal: true
+  project-source:
+    name: platform_server_ai_project_source
+    internal: true
+  project-query:
+    name: platform_server_ai_project_query
+    internal: true
+  database:
+    name: ${SERVER_AI_DATABASE_NETWORK:-platform_infra_greenfield_platform_db_admin}
+    external: true

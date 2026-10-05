@@ -1,0 +1,14 @@
+[Unit]
+Description=Verify local DNS and certificate-validated DoH answers
+After=network-online.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/platform-dns-probe.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
+RestrictAddressFamilies=AF_UNIX AF_INET
+MemoryMax=64M
+TimeoutStartSec=20

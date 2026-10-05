@@ -1,0 +1,16 @@
+[Unit]
+Description=Process manual backup jobs through the unchanged admitted client and broker
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-backup-manual-queue.py
+TimeoutStartSec=43200
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/platform-backup-schedule /var/lib/platform-local-dedup /var/lib/platform-ftps-backup /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/backups /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/repository-local /home/platform_infrastructure/v1-fresh-runtime/state/host-recovery /home/platform_infrastructure/v1-fresh-runtime/state/rustfs-recovery
+MemoryMax=256M
+TasksMax=64

@@ -1,0 +1,29 @@
+# Layer with the repository's existing Compose application file. This fragment
+# augments the existing control-center service; it is not a standalone stack.
+services:
+  control-center:
+    environment:
+      OPENAI_API_KEY_FILE: /run/secrets/server_ai_openai_api_key
+      SERVER_AI_MACHINE_REGISTRY_FILE: /run/platform/server-ai/machine-registry.json
+      CONTROL_CENTER_MACHINE_ID_FILE: /run/platform/host-machine-id
+    volumes:
+      - type: bind
+        source: ${SERVER_AI_OPENAI_API_KEY_FILE:?Set the operator-managed OpenAI API key file path}
+        target: /run/secrets/server_ai_openai_api_key
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_MACHINE_REGISTRY_SOURCE:?Set the operator-generated machine registry JSON path}
+        target: /run/platform/server-ai/machine-registry.json
+        read_only: true
+      - type: bind
+        source: /etc/machine-id
+        target: /run/platform/host-machine-id
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_ADMIN_HMAC_TOKEN_SOURCE:?Set the protected server-admin HMAC token file path}
+        target: /run/secrets/server_ai_infrastructure_token
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_ADMIN_SOCKET_SOURCE:?Set the protected server-admin socket directory}
+        target: /run/platform-server-ai-admin
+        read_only: true

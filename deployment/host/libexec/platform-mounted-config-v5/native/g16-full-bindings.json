@@ -1,0 +1,403 @@
+{
+  "manifestDigest": "baf72a7c4ff5d2266b71afe4865ebffeb8be6c363dfc31c12f3a865389009b2c",
+  "manifestId": "manifest-scheduled-platform-20260929-182357-1f9954",
+  "resources": {
+    "cold-volume:jetstream-currently-empty": {
+      "container": "gf-nats",
+      "destination": "/data",
+      "kind": "cold-volume",
+      "target": "/var/lib/docker/volumes/greenfield_nats_data/_data",
+      "volume": "greenfield_nats_data"
+    },
+    "cold-volume:keycloak-gzip-cache-only": {
+      "container": "gf-keycloak",
+      "destination": "/opt/keycloak/data",
+      "kind": "cold-volume",
+      "target": "/var/lib/docker/volumes/greenfield_keycloak_data/_data",
+      "volume": "greenfield_keycloak_data"
+    },
+    "cold-volume:loki-logs": {
+      "container": "gf-loki",
+      "destination": "/loki",
+      "kind": "cold-volume",
+      "target": "/var/lib/docker/volumes/greenfield_loki_data/_data",
+      "volume": "greenfield_loki_data"
+    },
+    "cold-volume:prometheus-metrics": {
+      "container": "gf-prometheus",
+      "destination": "/prometheus",
+      "kind": "cold-volume",
+      "target": "/var/lib/docker/volumes/greenfield_prometheus_data/_data",
+      "volume": "greenfield_prometheus_data"
+    },
+    "cold-volume:rustfs-logs": {
+      "container": "gf-rustfs",
+      "destination": "/logs",
+      "kind": "cold-volume",
+      "target": "/var/lib/docker/volumes/platform_rustfs_logs/_data",
+      "volume": "platform_rustfs_logs"
+    },
+    "cold-volume:stream-sessions": {
+      "container": "php-stream",
+      "destination": "/var/lib/php/sessions",
+      "kind": "cold-volume",
+      "target": "/home/platform_infrastructure/v1-fresh-runtime/stream-sessions",
+      "volume": null
+    },
+    "extra-tree:alloy-state": {
+      "container": "gf-promtail",
+      "destination": "/var/lib/alloy",
+      "kind": "extra-mounted-tree",
+      "target": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/alloy-state"
+    },
+    "extra-tree:backup-reports": {
+      "container": "gf-control-center",
+      "destination": "/var/lib/platform-backup-data/reports",
+      "kind": "extra-mounted-tree",
+      "target": "/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/reports"
+    },
+    "extra-tree:infra-docs": {
+      "container": "gf-control-center",
+      "destination": "/var/www/infra-docs",
+      "kind": "extra-mounted-tree",
+      "target": "/home/platform_infrastructure/v11-main-43fe7f4"
+    },
+    "extra-tree:nats-auth-config": {
+      "container": "gf-nats",
+      "destination": "/run/platform-broker",
+      "kind": "extra-mounted-tree",
+      "target": "/var/lib/docker/volumes/greenfield_nats_auth_config/_data",
+      "volume": "greenfield_nats_auth_config"
+    },
+    "extra-tree:phppgadmin-mail-log": {
+      "container": "gf-phppgadmin",
+      "destination": "/var/log/nullmailer",
+      "kind": "extra-mounted-tree",
+      "target": "/var/lib/docker/volumes/2de2c9b42bc79d334614b20a551ee91bff74b844da13453e0491f143455d93f9/_data",
+      "volume": "2de2c9b42bc79d334614b20a551ee91bff74b844da13453e0491f143455d93f9"
+    },
+    "extra-tree:phppgadmin-nginx-log": {
+      "container": "gf-phppgadmin",
+      "destination": "/var/log/nginx",
+      "kind": "extra-mounted-tree",
+      "target": "/var/lib/docker/volumes/5121738e7e30cc5e4d26a634cec3c1a26fc773b65c57d2ad766dfefe8f71ee72/_data",
+      "volume": "5121738e7e30cc5e4d26a634cec3c1a26fc773b65c57d2ad766dfefe8f71ee72"
+    },
+    "extra-tree:project-reader-repository": {
+      "container": "gf-server-ai-project-source-reader",
+      "destination": "/platform",
+      "kind": "extra-mounted-tree",
+      "target": "/var/lib/platform-infrastructure/server-ai-background-20260907/repo"
+    },
+    "extra-tree:redis-auth-config": {
+      "container": "gf-redis",
+      "destination": "/run/platform-broker",
+      "kind": "extra-mounted-tree",
+      "target": "/var/lib/docker/volumes/greenfield_redis_auth_config/_data",
+      "volume": "greenfield_redis_auth_config"
+    },
+    "extra-tree:searxng-search": {
+      "container": "gf-searxng",
+      "destination": "/etc/searxng",
+      "kind": "extra-mounted-tree",
+      "target": "/home/platform_infrastructure/server-ai-provision-20260906/config/server-ai/search"
+    },
+    "persistent:alertmanager": {
+      "container": "gf-alertmanager",
+      "destination": "/alertmanager",
+      "kind": "durable-volume",
+      "target": "/var/lib/docker/volumes/greenfield_alertmanager_data/_data",
+      "volume": "greenfield_alertmanager_data"
+    },
+    "persistent:attachments": {
+      "container": "gf-control-center",
+      "destination": "/var/lib/server-ai-attachments",
+      "kind": "durable-volume",
+      "target": "/var/lib/docker/volumes/platform_server_ai_attachments/_data",
+      "volume": "platform_server_ai_attachments"
+    },
+    "persistent:grafana": {
+      "container": "gf-grafana",
+      "destination": "/var/lib/grafana",
+      "kind": "durable-volume",
+      "target": "/var/lib/docker/volumes/greenfield_grafana_data/_data",
+      "volume": "greenfield_grafana_data"
+    },
+    "persistent:mariadb": {
+      "container": "gf-mariadb",
+      "destination": "/var/lib/mysql",
+      "kind": "native-database-volume",
+      "target": "/var/lib/docker/volumes/greenfield_mariadb_data/_data",
+      "volume": "greenfield_mariadb_data"
+    },
+    "persistent:postgres": {
+      "container": "gf-postgres",
+      "destination": "/var/lib/postgresql",
+      "kind": "native-database-volume",
+      "target": "/var/lib/docker/volumes/greenfield_postgres_data/_data",
+      "volume": "greenfield_postgres_data"
+    },
+    "persistent:redis": {
+      "container": "gf-redis",
+      "destination": "/data",
+      "kind": "consistent-redis-volume",
+      "target": "/var/lib/docker/volumes/greenfield_redis_data/_data",
+      "volume": "greenfield_redis_data"
+    },
+    "persistent:rustfs": {
+      "container": "gf-rustfs",
+      "destination": "/data",
+      "kind": "verified-object-volume",
+      "target": "/var/lib/docker/volumes/platform_rustfs_data/_data",
+      "volume": "platform_rustfs_data"
+    },
+    "persistent:students-data": {
+      "container": "node-scriptastudents",
+      "destination": "/data",
+      "kind": "durable-volume",
+      "target": "/home/platform_infrastructure/v1-fresh-data/students-beta",
+      "volume": null
+    },
+    "persistent:students-redis": {
+      "container": "students-beta-redis",
+      "destination": "/data",
+      "kind": "consistent-redis-volume",
+      "target": "/home/platform_infrastructure/v1-fresh-data/students-beta-redis",
+      "volume": null
+    },
+    "source:anniversary": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/anniversary"
+    },
+    "source:carrozzeriatasso": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/carrozzeriatasso"
+    },
+    "source:fiplatform": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/fiplatform"
+    },
+    "source:matthewdifilippo": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/matthewdifilippo"
+    },
+    "source:officinadibella": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/officinadibella"
+    },
+    "source:platform-alert-dispatcher-runtime-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/platform-alert-dispatcher-runtime-20260927"
+    },
+    "source:public": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/public"
+    },
+    "source:scripta-local-network": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scripta-local-network"
+    },
+    "source:scripta-native-qa-20260919": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scripta-native-qa-20260919"
+    },
+    "source:scriptastudents": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents"
+    },
+    "source:scriptastudents-adaptive-quiz-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-adaptive-quiz-20260921"
+    },
+    "source:scriptastudents-agenda-edit-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-agenda-edit-20260921"
+    },
+    "source:scriptastudents-ai-maps-20260923": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-ai-maps-20260923"
+    },
+    "source:scriptastudents-ai-performance-20260926": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-ai-performance-20260926"
+    },
+    "source:scriptastudents-android-fonts-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-android-fonts-20260924"
+    },
+    "source:scriptastudents-apple-intelligence-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-apple-intelligence-20260922"
+    },
+    "source:scriptastudents-audio-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-audio-20260922"
+    },
+    "source:scriptastudents-before-web-parity-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-before-web-parity-20260924"
+    },
+    "source:scriptastudents-document-tools-20260925": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-document-tools-20260925"
+    },
+    "source:scriptastudents-explanations-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-explanations-20260921"
+    },
+    "source:scriptastudents-gaps-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-gaps-20260921"
+    },
+    "source:scriptastudents-image-layout-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-image-layout-20260924"
+    },
+    "source:scriptastudents-live-maps-20260923": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-live-maps-20260923"
+    },
+    "source:scriptastudents-luna-whisper-20260925": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-luna-whisper-20260925"
+    },
+    "source:scriptastudents-manual-maps-20260925": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-manual-maps-20260925"
+    },
+    "source:scriptastudents-map-attachments-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-map-attachments-20260922"
+    },
+    "source:scriptastudents-map-schema-20260923": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-map-schema-20260923"
+    },
+    "source:scriptastudents-native-20260919": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-native-20260919"
+    },
+    "source:scriptastudents-native-ui-20260920": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-native-ui-20260920"
+    },
+    "source:scriptastudents-parallel-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-parallel-20260921"
+    },
+    "source:scriptastudents-performance-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-performance-20260922"
+    },
+    "source:scriptastudents-planning-links-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-planning-links-20260921"
+    },
+    "source:scriptastudents-preparation-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-preparation-20260924"
+    },
+    "source:scriptastudents-quiz-coverage-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-quiz-coverage-20260922"
+    },
+    "source:scriptastudents-quiz-minimum-20260920": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-quiz-minimum-20260920"
+    },
+    "source:scriptastudents-quiz-recovery-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-quiz-recovery-20260922"
+    },
+    "source:scriptastudents-rich-study-20260923": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-rich-study-20260923"
+    },
+    "source:scriptastudents-runtime-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-runtime-20260927"
+    },
+    "source:scriptastudents-short-notes-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-short-notes-20260921"
+    },
+    "source:scriptastudents-study-20260920": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-study-20260920"
+    },
+    "source:scriptastudents-study-tools-20260923": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-study-tools-20260923"
+    },
+    "source:scriptastudents-study-tools-20260925": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-study-tools-20260925"
+    },
+    "source:scriptastudents-test-refine-20260921": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-test-refine-20260921"
+    },
+    "source:scriptastudents-tests-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-tests-20260927"
+    },
+    "source:scriptastudents-tests-polish-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-tests-polish-20260927"
+    },
+    "source:scriptastudents-uishell-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-uishell-20260927"
+    },
+    "source:scriptastudents-visual-exercises-20260922": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-visual-exercises-20260922"
+    },
+    "source:scriptastudents-web-app-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-web-app-20260924"
+    },
+    "source:scriptastudents-web-parity-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-web-parity-20260924"
+    },
+    "source:scriptastudents-web-polish-20260924": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-web-polish-20260924"
+    },
+    "source:scriptastudents-web-workspace-20260926": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/scriptastudents-web-workspace-20260926"
+    },
+    "source:server-ai-runtime-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/server-ai-runtime-20260927"
+    },
+    "source:stexor": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/stexor"
+    },
+    "source:stexor-runtime-20260927": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/stexor-runtime-20260927"
+    },
+    "source:stream": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/stream"
+    },
+    "source:students-beta": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/students-beta"
+    },
+    "source:workcalendar": {
+      "kind": "source-directory",
+      "target": "/home/platform_infrastructure/v1-fresh-data/src/workcalendar"
+    }
+  },
+  "schema": "platform.manual-full-server-bindings/v1",
+  "unclassifiedSelectiveResources": [
+    "platform-state:control-center-state",
+    "platform-state:keycloak-config",
+    "platform-state:secret-manager-metadata"
+  ]
+}

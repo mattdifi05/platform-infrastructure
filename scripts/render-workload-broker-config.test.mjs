@@ -59,7 +59,7 @@ test("renders deterministic Redis ACL hashes with default user off and an explic
     const repeated = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
     assert.equal(rendered.text, repeated.text);
     assert.match(rendered.text, /^user default reset off$/m);
-    assert.match(rendered.text, /^user platform reset on #[a-f0-9]{64} ~\* &\* \+@all$/m);
+    assert.match(rendered.text, /^user platform reset on #[a-f0-9]{64} ~\* &\* \+@all -config -acl -module -debug -shutdown -replicaof -slaveof -migrate -flushall -flushdb -restore$/m);
     assert.match(rendered.text, /^user wl_alpha_app reset on #[a-f0-9]{64} ~alpha-app:\* &alpha-app:\* -@all /m);
     assert.ok(rendered.text.indexOf("wl_alpha_app") < rendered.text.indexOf("wl_beta_app"));
     assert.doesNotMatch(rendered.text, /platform-secret|alpha-secret|beta-secret/);
@@ -311,7 +311,7 @@ test("accepts a verified hosted-contract-v4 no-hosted lock with empty workloads"
     const lock = noHostedLock();
     const redis = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
     assert.match(redis.text, /^user default reset off$/m);
-    assert.match(redis.text, /^user platform reset on #[a-f0-9]{64} ~\* &\* \+@all$/m);
+    assert.match(redis.text, /^user platform reset on #[a-f0-9]{64} ~\* &\* \+@all -config -acl -module -debug -shutdown -replicaof -slaveof -migrate -flushall -flushdb -restore$/m);
     assert.equal(redis.workloadUsers, 0);
     assert.equal(redis.policySha256, lock.brokerPolicySha256);
     assert.doesNotMatch(redis.text, /^user wl_/m);

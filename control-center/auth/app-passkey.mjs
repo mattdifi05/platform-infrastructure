@@ -15,6 +15,11 @@ const { Pool } = pg;
 
 const SESSION_COOKIE = "__Host-platform_cc_session";
 const CSRF_COOKIE = "__Host-platform_cc_csrf";
+const STREAMED_MULTIPART_OPERATIONS = new Set([
+  "ai.conversations.attachments.create",
+  "ai.conversations.uploads.chunk",
+]);
+const MULTIPART_CONTENT_TYPE = /^multipart\/form-data\s*;\s*boundary=(?:[A-Za-z0-9'()+_,.\/:=?-]{1,70}|"[A-Za-z0-9'()+_,.\/:=? -]{1,70}")\s*$/i;
 
 export class AuthConfigurationError extends Error {}
 
@@ -361,7 +366,9 @@ export class AppPasskeyAuth {
     const token = cookies[SESSION_COOKIE] || "";
     if (!token) return denied(401, "Admin authentication required.");
     const session = await this.store.getSession(sha256(token), this.config.sessionIdleSeconds);
-    if (!session || session.policyVersion !== this.config.sessionPolicyVersion || session.subject !== this.config.adminSubject) {
+    const testFixtureSubject = this.config.nodeEnvironment === "test" && this.config.store === "memory"
+      && isLoopback(this.config.bindHost) && this.config.testFixtureSubjects?.has(session?.subject);
+    if (!session || session.policyVersion !== this.config.sessionPolicyVersion || session.subject !== this.config.adminSubject && !testFixtureSubject) {
       return denied(401, "Admin authentication required.");
     }
     const csrfToken = cookies[CSRF_COOKIE] || "";
@@ -371,6 +378,7 @@ export class AppPasskeyAuth {
       status: 200,
       message: "",
       role: session.role,
+      sessionTokenHash: sha256(token),
       identity: { ...session, csrfToken: csrfCookieValid ? csrfToken : "" },
     };
   }
@@ -407,8 +415,22 @@ export class AppPasskeyAuth {
     }
     if (String(req?.headers?.origin || "") !== this.config.publicOrigin) return denied(403, "Exact request origin is required.", { error: "csrf_origin_rejected" });
     if (String(req?.headers?.["sec-fetch-site"] || "").toLowerCase() !== "same-origin") return denied(403, "Same-origin Fetch Metadata is required.", { error: "csrf_fetch_site_rejected" });
-    const payload = await readRequestPayload(req);
-    const provided = String(req?.headers?.["x-csrf-token"] || payload._csrf || "");
+    const operation = req?.controlCenterOperation;
+    const streamedMultipart = Boolean(operation)
+      && Object.isFrozen(operation)
+      && operation.classified === true
+      && operation.control === true
+      && operation.method === "POST"
+      && operation.capability === "viewer"
+      && STREAMED_MULTIPART_OPERATIONS.has(operation.operationId);
+    if (streamedMultipart && !MULTIPART_CONTENT_TYPE.test(String(req?.headers?.["content-type"] || ""))) {
+      return denied(415, "Multipart upload content type is required.", { error: "upload_content_type_rejected" });
+    }
+    // The attachment parser owns this one bounded stream. Reading it here
+    // would consume the file before dispatch, so this route requires the
+    // same-origin CSRF token in the header and never accepts a body fallback.
+    const payload = streamedMultipart ? null : await readRequestPayload(req);
+    const provided = String(req?.headers?.["x-csrf-token"] || payload?._csrf || "");
     const expected = String(session?.identity?.csrfToken || "");
     if (!provided || !expected || !safeEqualText(provided, expected)) return denied(403, "CSRF validation failed.", { error: "csrf_token_rejected" });
     return session;
@@ -737,10 +759,14 @@ async function seedTestSessions(store, config, env) {
   if (!Array.isArray(fixtures) || fixtures.length > 32) {
     throw new AuthConfigurationError("CONTROL_CENTER_TEST_SESSION_FIXTURES must contain at most 32 sessions.");
   }
+  config.testFixtureSubjects = new Set();
   for (const fixture of fixtures) {
     const token = requiredFixtureToken(fixture?.token, "token");
     const csrf = requiredFixtureToken(fixture?.csrf, "csrf");
     const role = String(fixture?.role || "");
+    const subject = fixture?.subject === undefined ? config.adminSubject : String(fixture.subject);
+    if (!subject.trim() || subject.length > 256) throw new AuthConfigurationError("Test session subject is invalid.");
+    config.testFixtureSubjects.add(subject);
     if (!["viewer", "admin", "owner"].includes(role)) {
       throw new AuthConfigurationError("Test session roles must be viewer, admin, or owner.");
     }
@@ -753,7 +779,7 @@ async function seedTestSessions(store, config, env) {
       tokenHash: sha256(token),
       csrfHash: sha256(csrf),
       policyVersion: config.sessionPolicyVersion,
-      subject: config.adminSubject,
+      subject,
       email: config.adminEmail,
       displayName: config.adminDisplayName,
       role,
@@ -986,8 +1012,10 @@ async function readRequestPayload(req) {
   if (type.includes("application/json")) {
     try {
       const parsed = JSON.parse(body || "{}");
+      req.controlCenterPayloadMalformed = !parsed || typeof parsed !== "object" || Array.isArray(parsed);
       req.controlCenterPayload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
     } catch {
+      req.controlCenterPayloadMalformed = true;
       req.controlCenterPayload = {};
     }
   } else {

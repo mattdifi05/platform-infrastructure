@@ -31,6 +31,9 @@ import {
   parseBackupManifestDocument,
 } from "../control-center/backup/contracts.mjs";
 
+import {runNativeOperator} from './backup-native-operator-client.mjs';
+import {NATIVE_SCHEMA,NATIVE_ACTIONS} from './backup-native-v2-contract.mjs';
+
 const DEFAULT_SOCKET = "/run/platform/docker-action-broker/broker.sock";
 const DEFAULT_STATE_DIR = "/var/lib/platform/docker-action-broker";
 const DEFAULT_ADMISSION = "/run/platform/docker-action-broker/client/admission.json";
@@ -651,16 +654,17 @@ export function loadLocalPrivateTrust(environment = process.env, now = Date.now(
   if (Object.keys(environment).some((key) => key.startsWith("PLATFORM_LOCAL_PRIVATE_BACKUP_"))) {
     throw new Error("broker runtime must not inherit child-only LOCAL_PRIVATE authority markers");
   }
-  const renderBinding = readLocalPrivateRenderBinding(renderFile);
+  const renderBinding = readLocalPrivateRenderBinding(renderFile,verified.payload);
   for (const [key, value] of Object.entries(renderBinding.brokerEnvironment)) {
     if (environment[key] !== value) throw new Error(`broker runtime differs from canonical render: ${key}`);
   }
-  const offsiteFiles = Object.freeze({
+  const native=verified.document.schema===NATIVE_SCHEMA;
+  const offsiteFiles = native?Object.freeze({}):Object.freeze({
     rcloneConfig: verified.payload.resources.offsite.rcloneConfigPath,
     resticPassword: verified.payload.resources.offsite.resticPasswordPath,
   });
-  readProtectedBytes(offsiteFiles.rcloneConfig, { maximumBytes: 64 * 1024, minimumBytes: 2 });
-  readProtectedBytes(offsiteFiles.resticPassword);
+  if(!native){readProtectedBytes(offsiteFiles.rcloneConfig, { maximumBytes: 64 * 1024, minimumBytes: 2 });
+  readProtectedBytes(offsiteFiles.resticPassword);}
   return Object.freeze({
     activation: null,
     capabilityFiles: Object.freeze(capabilityFiles),
@@ -840,6 +844,7 @@ export function acquireOperation(stateDir, request) {
 export async function runFixedOperation(action, parameters, {
   jobsRoot, infraOps, requestSha256, restoreProof = DEFAULT_OFFSITE_RESTORE_PROOF, signal, stateDir, trusted,
 } = {}) {
+  if(trusted.document?.schema===NATIVE_SCHEMA && NATIVE_ACTIONS.includes(action))return runNativeOperator({action,requestSha256,trusted,stateDir,signal});
   const args = [infraOps];
   let command;
   let phasePlan;
@@ -1311,10 +1316,10 @@ async function handleRequest(frame, environment, now = Date.now()) {
   ensurePrivateDirectory(stateDir);
   const trusted = loadLocalPrivateTrust(environment, now);
   verifyRuntimeImages(trusted, {
-    requireRestic: ["backup.offsite.sync", "restore.offsite.proof"].includes(request.action),
+    requireRestic: trusted.document.schema!==NATIVE_SCHEMA && ["backup.offsite.sync", "restore.offsite.proof"].includes(request.action),
     requireScheduler: true,
   });
-  if (["backup.offsite.sync", "restore.offsite.proof"].includes(request.action)) verifyRuntimeEgressNetwork(trusted);
+  if (trusted.document.schema!==NATIVE_SCHEMA && ["backup.offsite.sync", "restore.offsite.proof"].includes(request.action)) verifyRuntimeEgressNetwork(trusted);
   admitGeneration(stateDir, trusted);
   const capabilityKey = readProtectedBytes(trusted.capabilityFiles[request.action]);
   normalizeActionRequest(request, trusted, capabilityKey, { now });
@@ -1400,12 +1405,30 @@ function parseOffsiteReconciliationArgs(tokens) {
 }
 
 async function main() {
+  if (process.argv[2] === 'reconcile-native-offsite') {
+    if(process.argv.length!==3)throw Error('Native reconciliation accepts no arguments');
+    const stateDir=process.env.DOCKER_ACTION_BROKER_STATE_DIR||DEFAULT_STATE_DIR;const trusted=loadLocalPrivateTrust(process.env);
+    if(trusted.document.schema!==NATIVE_SCHEMA)throw Error('Native reconciliation requires v2 admission');
+    verifyRuntimeImages(trusted,{requireRestic:false,requireScheduler:true});
+    const active=readCanonicalState(path.join(stateDir,ACTIVE_LOCK));
+    if(!NATIVE_ACTIONS.includes(active.action))throw Error('Active operation is not native offsite');
+    const result=await runNativeOperator({action:active.action,requestSha256:active.requestSha256,trusted,stateDir});
+    const file=path.join(stateDir,active.terminalFile);
+    if(active.terminalFile!==`terminal/${active.requestSha256}.json`)throw Error('Native terminal path rejected');
+    const response=signedResponse(active.request,readProtectedBytes(trusted.capabilityFiles[active.action]),{result});
+    const prior=fs.existsSync(file)?readCanonicalState(file):null;
+    const terminal={schema:TERMINAL_RECEIPT_SCHEMA,recordedAt:prior?.recordedAt??new Date().toISOString(),request:active.request,requestId:active.requestId,requestSha256:active.requestSha256,response};
+    if(prior){if(canonicalJson(prior)!==canonicalJson(terminal))throw Error('Native terminal conflict');}else{ensurePrivateDirectory(path.dirname(file));writeExclusiveCanonical(file,terminal);}
+    if(canonicalJson(readCanonicalState(path.join(stateDir,ACTIVE_LOCK)))!==canonicalJson(active))throw Error('Active operation changed');
+    fs.unlinkSync(path.join(stateDir,ACTIVE_LOCK));syncDirectory(stateDir);process.stdout.write(canonicalJson(terminal)+'\n');return;
+  }
   if (process.argv[2] === "reconcile-offsite-refresh") {
     const args = parseOffsiteReconciliationArgs(process.argv.slice(3));
     const stateDir = process.env.DOCKER_ACTION_BROKER_STATE_DIR || DEFAULT_STATE_DIR;
     const dataRoot = process.env.PLATFORM_DATA_ROOT || DEFAULT_DATA_ROOT;
     ensurePrivateDirectory(stateDir);
     const trusted = loadLocalPrivateTrust(process.env);
+    if(trusted.document.schema===NATIVE_SCHEMA)throw Error("Legacy offsite reconciliation is not valid for native v2");
     verifyRuntimeImages(trusted, { requireRestic: true, requireScheduler: true });
     verifyRuntimeEgressNetwork(trusted);
     const result = reconcileCompletedOffsiteOperation({

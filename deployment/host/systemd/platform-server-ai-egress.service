@@ -1,0 +1,22 @@
+[Unit]
+Description=Server AI scoped egress firewall
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/platform-server-ai-egress-apply
+ExecReload=/usr/local/sbin/platform-server-ai-egress-apply
+ExecStop=/usr/local/sbin/platform-server-ai-egress-apply --delete
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/nftables.d/platform-server-ai-egress.nft
+
+[Install]
+WantedBy=multi-user.target

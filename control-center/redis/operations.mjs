@@ -23,6 +23,7 @@ export function createRedisOperations({
   port = 6379,
   username = "platform",
   passwordFile = "",
+  tlsCaFile = "",
   database = 0,
   workloadLockFile = "",
   connectTimeoutMs = 1200,
@@ -40,6 +41,7 @@ export function createRedisOperations({
     port: boundedInteger(port, 1, 65535, 6379),
     username: String(username || "platform").trim() || "platform",
     passwordFile: String(passwordFile || "").trim(),
+    tlsCaFile: String(tlsCaFile || "").trim(),
     database: boundedInteger(database, 0, 63, 0),
     workloadLockFile: String(workloadLockFile || "").trim(),
     connectTimeoutMs: boundedInteger(connectTimeoutMs, 250, 10_000, 1200),
@@ -57,13 +59,21 @@ export function createRedisOperations({
     if (sharedClient?.isOpen) return sharedClient;
     if (connectPending) return connectPending;
     const password = readRedisPassword(configuration.passwordFile);
+    const socket = {
+      host: configuration.host,
+      port: configuration.port,
+      connectTimeout: configuration.connectTimeoutMs,
+      reconnectStrategy: false,
+    };
+    if (configuration.tlsCaFile) {
+      // Explicit CA path enables TLS. Missing or unreadable CA fails closed.
+      socket.tls = true;
+      socket.ca = readFileSync(configuration.tlsCaFile);
+      socket.rejectUnauthorized = true;
+      socket.servername = configuration.host;
+    }
     const rawClient = clientFactory({
-      socket: {
-        host: configuration.host,
-        port: configuration.port,
-        connectTimeout: configuration.connectTimeoutMs,
-        reconnectStrategy: false,
-      },
+      socket,
       username: configuration.username,
       password,
       database: configuration.database,

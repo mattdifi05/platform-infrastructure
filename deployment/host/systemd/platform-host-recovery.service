@@ -1,0 +1,24 @@
+[Unit]
+Description=Capture encrypted host recovery configuration before scheduled backups
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-host-recovery.py
+TimeoutStartSec=180
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/platform-host-recovery /home/platform_infrastructure/v1-fresh-runtime/state/host-recovery
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+MemoryMax=512M
+TasksMax=32

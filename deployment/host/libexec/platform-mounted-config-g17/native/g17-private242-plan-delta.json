@@ -1,0 +1,22 @@
+{
+  "expectedG17MountCount": 242,
+  "grafanaAddedMounts": [
+    {
+      "container": "gf-grafana",
+      "provider": "fresh-capsule-regular-file",
+      "readOnly": true,
+      "source": "/home/platform_infrastructure/v1-fresh-runtime/secrets/grafana_secret_key.txt",
+      "target": "/run/secrets/grafana_secret_key"
+    },
+    {
+      "container": "gf-grafana",
+      "provider": "fresh-capsule-regular-file",
+      "readOnly": true,
+      "source": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/grafana-13.2.3-preserved.ini",
+      "target": "/etc/grafana/grafana.ini"
+    }
+  ],
+  "historicalMountCount": 240,
+  "historicalPrivatePlanSha256": "c6f09fd00d7f8a7e1dc8794e214dfec1f0bf48f663fec2b0f26b8575b34d4c29",
+  "schema": "platform.g17-private242-mount-delta/v1"
+}

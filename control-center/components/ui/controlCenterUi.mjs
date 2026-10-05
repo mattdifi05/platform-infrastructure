@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
 export const controlCenterComponents = [
   "OperationsShell",
   "OperationsTopbar",
@@ -14,19 +17,31 @@ export const controlCenterComponents = [
 
 export const controlCenterCssEntrypoints = [
   "/assets/control-center/control-center.css",
+  "/assets/control-center/server-ai.css",
 ];
 
 export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
+  "/assets/control-center/server-ai.js",
 ];
 
-// Keep the default version in sync with the current UI contract so browsers
-// revalidate the stylesheet/script after a Control Center image update. Hosts
-// may still override it explicitly through CONTROL_CENTER_ASSET_VERSION.
-const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260830-preload-quiet-window-1";
+// Derive each cache token from the exact asset bytes. A stale environment
+// variable or forgotten manual version bump must never keep old AI controls
+// in the browser after a container update.
+const assetVersionByHref = new Map([
+  ["/assets/control-center/control-center.css", "../../styles/control-center.css"],
+  ["/assets/control-center/server-ai.css", "../../styles/server-ai.css"],
+  ["/assets/control-center/control-center.js", "../../styles/control-center.js"],
+  ["/assets/control-center/server-ai.js", "../../styles/server-ai.js"],
+].map(([href, relativePath]) => [
+  href,
+  createHash("sha256").update(readFileSync(new URL(relativePath, import.meta.url))).digest("hex").slice(0, 20),
+]));
 
 function versionedAssetHref(href) {
-  return `${href}${href.includes("?") ? "&" : "?"}v=${encodeURIComponent(controlCenterAssetVersion)}`;
+  const version = assetVersionByHref.get(href);
+  if (!version) throw new Error("Unknown Control Center UI asset.");
+  return `${href}${href.includes("?") ? "&" : "?"}v=${version}`;
 }
 
 export function controlCenterStylesheetLinks() {

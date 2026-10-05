@@ -1,0 +1,9 @@
+[Unit]
+Description=Additive local deduplicated copy after scheduled full backup
+[Timer]
+OnCalendar=*-*-* 00/8:50:00 UTC
+Persistent=true
+AccuracySec=30s
+Unit=platform-local-dedup.service
+[Install]
+WantedBy=timers.target

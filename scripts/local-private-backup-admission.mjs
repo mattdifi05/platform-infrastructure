@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 
 import { canonicalJson, sha256 } from "./docker-action-contract.mjs";
 
+import {NATIVE_SCHEMA,validateNativeResources} from './backup-native-v2-contract.mjs';
+
 export const LOCAL_PRIVATE_ADMISSION_SCHEMA = "platform.local-private-backup-admission/v1";
 export const LOCAL_PRIVATE_ALLOWED_ACTIONS = Object.freeze([
   "backup.catalog",
@@ -61,8 +63,8 @@ function publicKeyId(publicKey) {
   return `ed25519-${sha256(der).slice(0, 24)}`;
 }
 
-function signedBytes(payload) {
-  return Buffer.from(`${LOCAL_PRIVATE_ADMISSION_SCHEMA}\0${canonicalJson(payload)}`);
+function signedBytes(payload, schema = LOCAL_PRIVATE_ADMISSION_SCHEMA) {
+  return Buffer.from(`${schema}\0${canonicalJson(payload)}`);
 }
 
 export function createAdmissionPayload({
@@ -155,15 +157,24 @@ export function createAdmissionPayload({
   };
 }
 
+export function createNativeAdmissionPayload(options) {
+  const payload=createAdmissionPayload(options);
+  payload.resources={...payload.resources,offsite:options.nativeOffsite,objectStore:options.objectStore,operator:options.operator};
+  validateNativeResources(payload.resources);
+  if(payload.resources.operator.peerImageId!==payload.brokerImageId)throw Error('Operator peer must be the admitted broker image');
+  return payload;
+}
+
 export function signAdmission(payload, privateKeyPem) {
+  const schema=payload.resources?.offsite?.backend==='ftps-multipart-v2'?NATIVE_SCHEMA:LOCAL_PRIVATE_ADMISSION_SCHEMA;
   const publicKey = crypto.createPublicKey(privateKeyPem);
   return {
-    schema: LOCAL_PRIVATE_ADMISSION_SCHEMA,
+    schema,
     payload,
     signature: {
       algorithm: "Ed25519",
       keyId: publicKeyId(publicKey),
-      value: crypto.sign(null, signedBytes(payload), privateKeyPem).toString("base64"),
+      value: crypto.sign(null, signedBytes(payload,schema), privateKeyPem).toString("base64"),
     },
   };
 }
@@ -176,7 +187,7 @@ export function verifyAdmissionDocument(document, {
   renderFile,
 } = {}) {
   exactKeys(document, ["payload", "schema", "signature"], "admission document");
-  if (document.schema !== LOCAL_PRIVATE_ADMISSION_SCHEMA) fail("unsupported local-private admission schema");
+  if (![LOCAL_PRIVATE_ADMISSION_SCHEMA,NATIVE_SCHEMA].includes(document.schema)) fail("unsupported local-private admission schema");
   exactKeys(document.signature, ["algorithm", "keyId", "value"], "admission signature");
   if (document.signature.algorithm !== "Ed25519") fail("unsupported admission signature algorithm");
   const publicKey = publicKeyPem?.type === "public" ? publicKeyPem : crypto.createPublicKey(publicKeyPem);
@@ -188,7 +199,7 @@ export function verifyAdmissionDocument(document, {
     fail("admission signature encoding is invalid");
   }
   if (signature.toString("base64") !== document.signature.value) fail("admission signature encoding is invalid");
-  if (signature.length !== 64 || !crypto.verify(null, signedBytes(document.payload), publicKey, signature)) {
+  if (signature.length !== 64 || !crypto.verify(null, signedBytes(document.payload,document.schema), publicKey, signature)) {
     fail("local-private admission signature rejected");
   }
 
@@ -234,7 +245,9 @@ export function verifyAdmissionDocument(document, {
     || !SHA256.test(String(payload.backupSigningKey.sha256 ?? ""))) {
     fail("backup signing key binding is invalid");
   }
-  exactKeys(payload.resources, ["backupResources", "capabilityFiles", "offsite"], "admission resources");
+  const native=document.schema===NATIVE_SCHEMA;
+  if(native){validateNativeResources(payload.resources);if(payload.resources.operator.peerImageId!==payload.brokerImageId)fail('Operator peer image differs from admitted broker');}
+  else exactKeys(payload.resources, ["backupResources", "capabilityFiles", "offsite"], "admission resources");
   exactKeys(payload.resources.backupResources, ["control-center.backup-queue"], "backup resource admission");
   exactKeys(payload.resources.backupResources["control-center.backup-queue"], ["authority", "brokerRoot"], "backup queue admission");
   if (payload.resources.backupResources["control-center.backup-queue"].authority !== "local-private-backup-only-service-queue"
@@ -249,6 +262,7 @@ export function verifyAdmissionDocument(document, {
       fail(`capability binding ${id} is invalid`);
     }
   }
+  if(!native){
   exactKeys(payload.resources.offsite, [
     "rcloneConfigPath", "repository", "resticImageId", "resticPasswordPath", "restore",
   ], "offsite admission");
@@ -269,6 +283,8 @@ export function verifyAdmissionDocument(document, {
     || !/^manifest-[a-z0-9][a-z0-9-]{15,127}$/.test(String(restore.manifestId ?? ""))
     || !/^offsite-backup-\d{14}-[a-f0-9]{6}\.json$/.test(String(restore.receiptFileName ?? ""))) {
     fail("offsite restore admission is invalid");
+  }
+
   }
 
   if (renderFile && fileSha256(renderFile) !== payload.combinedRenderSha256) fail("runtime render hash differs from signed admission");
@@ -331,7 +347,10 @@ async function main() {
   if (command === "create") {
     const issuedAt = args.issuedAt ?? new Date().toISOString();
     const expiresAt = args.expiresAt ?? new Date(Date.parse(issuedAt) + 30 * 24 * 60 * 60_000).toISOString();
-    const payload = createAdmissionPayload({
+    const nativeResources=args.nativeResources?JSON.parse(fs.readFileSync(args.nativeResources,"utf8")):null;
+    if(nativeResources)exactKeys(nativeResources,["offsite","objectStore","operator"],"native CLI resources");
+    const payload = (nativeResources?createNativeAdmissionPayload:createAdmissionPayload)({
+      ...(nativeResources?{nativeOffsite:nativeResources.offsite,objectStore:nativeResources.objectStore,operator:nativeResources.operator}:{}),
       backupSigningKeySha256: fileSha256(args.backupSigningKey),
       brokerImageId: args.brokerImageId,
       catalogCapabilitySha256: fileSha256(args.catalogCapability),

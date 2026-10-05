@@ -1,0 +1,22 @@
+[Unit]
+Description=Publish complete backup and offsite outcome metrics
+
+[Service]
+Type=oneshot
+User=platform_infrastructure
+Group=platform_infrastructure
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-backup-health-metrics.py
+TimeoutStartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=128M
+TasksMax=16
+UMask=0022

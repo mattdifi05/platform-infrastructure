@@ -1,0 +1,37 @@
+[Unit]
+Description=Read-only bounded Docker API for platform observer
+After=systemd-tmpfiles-setup.service
+Before=docker.service
+
+[Service]
+Type=simple
+User=platform-observer-proxy
+Group=docker
+SupplementaryGroups=docker
+RuntimeDirectory=platform-docker-observer
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-docker-observer-proxy.py
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=128M
+CPUQuota=50%
+TasksMax=32
+LimitNOFILE=128
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target docker.service

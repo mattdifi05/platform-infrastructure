@@ -1,0 +1,13 @@
+[Unit]
+Description=Consistent encrypted Redis snapshots with isolated restore proof
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-redis-recovery.py
+TimeoutStartSec=900
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=512M
+TasksMax=96

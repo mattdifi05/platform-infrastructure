@@ -20,7 +20,7 @@ function renderRedisAclWithCredentials(lock, { platformUsername, credentials }) 
   assertPlatformUsername(platformUsername, "Redis", { denyDefault: true });
   const lines = [
     "user default reset off",
-    `user ${platformUsername} reset on #${credentials.platform.digest} ~* &* +@all`,
+    `user ${platformUsername} reset on #${credentials.platform.digest} ~* &* +@all -config -acl -module -debug -shutdown -replicaof -slaveof -migrate -flushall -flushdb -restore`,
   ];
   const workloads = [...lock.workloads].sort((left, right) => left.id.localeCompare(right.id));
   for (const workload of workloads) {

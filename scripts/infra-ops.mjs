@@ -28,6 +28,7 @@ import { publishBackupArtifact } from "./backup-artifact-publication.mjs";
 import { runCommandSync } from "./command-safety.mjs";
 import { resticPassthroughEnvironmentKeys, resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
+import { validateNativeRustfsCheckpoint, copyBoundRustfsArchive } from "./rustfs-native-checkpoint.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
 import { readBackupImportProvenance, validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
@@ -2461,6 +2462,55 @@ async function backupControlCenterState(options = {}) {
   return { hostPath, hash, signature, stateRoot };
 }
 
+function nativeRustfsStore() {
+  const store = localPrivateBackupInvocation?.receipt?.resources?.objectStore;
+  return store?.backend === "rustfs" ? store : null;
+}
+
+function backupRustfsData() {
+  if (!nativeRustfsStore() || !["backup.catalog", "backup.job.execute"].includes(localPrivateBackupInvocation?.action)) {
+    fail("RustFS catalog artifact requires an authenticated native catalog or backup job invocation.");
+  }
+  const checkpointRoot = path.join(controlCenterStateRoot(), "rustfs-recovery");
+  const { proof, archive } = validateNativeRustfsCheckpoint({
+    checkpointRoot,
+    admission: localPrivateBackupInvocation.receipt,
+    capabilityFile: path.join(process.env.DOCKER_ACTION_LOCAL_CAPABILITY_DIR, "docker_action_backup_job_execute"),
+  });
+  const startedAt = new Date();
+  const stamp = proof.archive.match(/rustfs-([0-9]{8}T[0-9]{6}Z)\.tar\.gz\.gpg$/)?.[1];
+  if (!stamp) fail("RustFS proof archive name is invalid.");
+  const outputDir = ensureBackupOutputDir(path.join(backupsRoot, "rustfs-data"));
+  const hostPath = path.join(outputDir, `rustfs-data-${stamp}-${backupTimestamp()}-${crypto.randomBytes(3).toString("hex")}.tar`);
+  const stagingPath = backupArtifactStagingPath(hostPath);
+  const scratch = fs.mkdtempSync(path.join(path.dirname(stagingPath), "rustfs-stage-"));
+  fs.chmodSync(scratch, 0o700);
+  try {
+    copyBoundRustfsArchive({ archive, stagingPath: path.join(scratch, "rustfs-data.tar.gz.gpg"), proof });
+    fs.writeFileSync(path.join(scratch, "proof.json"), `${JSON.stringify(proof)}\n`, { flag: "wx", mode: 0o600 });
+    run("tar", ["-cf", stagingPath, "-C", scratch, "proof.json", "rustfs-data.tar.gz.gpg"]);
+    const { hash, signature } = publishBackupArtifactWithEvidence({
+      stagingPath,
+      hostPath,
+      engine: "rustfs-data",
+      sourceContainer: "gf-rustfs",
+      startedAt,
+      metadata: {
+        scope: "admitted-native-rustfs-checkpoint",
+        sourceImage: proof.image,
+        sourceImageId: proof.imageId,
+        encryptedArchiveSha256: proof.encryptedArchiveSha256,
+        sourceRestoreVerified: proof.s3SemanticRestoreVerified,
+        legacyMinioModified: false,
+      },
+    });
+    return { hostPath, hash, signature };
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+    fs.rmSync(stagingPath, { force: true });
+  }
+}
+
 function restoreTestControlCenterState(options = {}) {
   const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
   if (!backupFileArg) fail("Provide --backupFile <path>.");
@@ -2579,6 +2629,9 @@ async function executeTypedBackupResource(resource) {
     return typedArtifactRecord(resource, await backupMinio({
       container: process.env.BACKUP_MINIO_CONTAINER || "enterprise-minio",
     }));
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "rustfs-data") {
+    return typedArtifactRecord(resource, backupRustfsData());
   }
   if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
     return typedArtifactRecord(resource, await backupKeycloakConfig({
@@ -2714,6 +2767,9 @@ async function executeTypedRestoreResource(resource, artifact, options = {}) {
       sourceAfterComparatorSha256: result.sourceAfterComparatorSha256,
     };
   }
+  if (resource.kind === "platform-state" && resource.externalId === "rustfs-data") {
+    fail("Native RustFS restore requires the isolated root operator proof; this legacy Docker child cannot assert it.");
+  }
   if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
     const result = await restoreTestKeycloakConfig({
       backupFile,
@@ -2830,7 +2886,7 @@ function platformBackupResources(options = {}) {
     sourceDirectory: application.name,
   }));
   const platformState = [
-    "minio-data",
+    nativeRustfsStore() ? "rustfs-data" : "minio-data",
     "keycloak-config",
     "control-center-state",
     "secret-manager-metadata",
@@ -2850,7 +2906,9 @@ function writeBackupCoverageReport(resources, options = {}) {
   const policy = JSON.parse(fs.readFileSync(policyFile, "utf8"));
   if (policy.schema !== "platform.backup-data-policy/v1") fail("Unsupported backup data policy schema.");
   const resourceIds = resources.map((resource) => resource.id);
-  const missingPlatformStateIds = policy.requiredPlatformStateIds.filter((id) => !resourceIds.includes(id));
+  // The signed native object-store admission maps only the legacy MinIO state ID.
+  const requiredPlatformStateIds = policy.requiredPlatformStateIds.map((id) => nativeRustfsStore() && id === "platform-state:minio-data" ? "platform-state:rustfs-data" : id);
+  const missingPlatformStateIds = requiredPlatformStateIds.filter((id) => !resourceIds.includes(id));
   if (missingPlatformStateIds.length) fail(`Backup catalog is missing required platform state: ${missingPlatformStateIds.join(", ")}`);
   if (policy.backupIntervalHours !== 8 || policy.localRetention?.keepCompleteManifests !== 42 || policy.localRetention?.maximumAgeDays !== 14) {
     fail("Backup data policy must retain 42 complete eight-hour restore points covering 14 days.");
@@ -2867,7 +2925,7 @@ function writeBackupCoverageReport(resources, options = {}) {
     byKind,
     resourceIds,
     rebuildOnlyServices: policy.rebuildOnlyServices,
-    requiredPlatformStateIds: policy.requiredPlatformStateIds,
+    requiredPlatformStateIds,
     exactResourceCoverage: true,
     mutableRuntimeStatePolicyDeclared: true,
     missingPlatformStateIds,
@@ -5299,6 +5357,10 @@ function verifyResticRepositorySizeLimit(repository) {
 }
 
 function resticForgetOldSnapshots({ repository, passwordFile, tag }) {
+  if (localPrivateBackupInvocation) {
+    log("LOCAL_PRIVATE retention delegated to the root operator: keep two successful backups plus the current admission restore anchor.");
+    return;
+  }
   if (booleanFlag(argv.skipRetention) || booleanFlag(process.env.RESTIC_SKIP_RETENTION)) {
     log("Restic retention skipped by configuration.");
     return;
@@ -10887,23 +10949,26 @@ function repoCoverageCategory(filePath) {
   const rules = [
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
     ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
-    ["platform-config", /^config\/.+\.json$/],
+    ["database", /^deployment\/config\/gf-mariadb\//],
+    ["observability", /^deployment\/config\/gf-promtail\//],
+    ["object-storage", /^deployment\/config\/storage\//],
+    ["platform-config", /^(?:config\/.+\.json|deployment\/config\/.+|deployment\/host\/libexec\/.+\.json|deployment\/reference\/home-server\/.+\.conf\.txt)$/],
     ["object-storage", /^minio\//],
-    ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
+    ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets|deployment|server-ai)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
-    ["host-service", /^systemd\/[^/]+\.service$/],
+    ["host-service", /^(?:systemd\/[^/]+\.service|deployment\/host\/systemd\/.+\.(?:service|timer|conf))$/],
     ["host-privilege-policy", /^sudoers\/[^/]+$/],
-    ["dns", /^dns\//],
-    ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
+    ["dns", /^(?:dns\/|deployment\/docker\/coredns-)/],
+    ["docker-build", /^(?:docker\/[^/]+\.Dockerfile|deployment\/docker\/[^/]+\.Dockerfile|server-ai\/docker\/[^/]+\.Dockerfile)$/],
     ["messaging", /^(?:nats\/|scripts\/(?:render-workload-broker-config|workload-broker-policy)\.mjs$)/],
     ["security-regression", /^(?:scripts\/postfix_evidence\/|tests\/pre-fix\/)/],
-    ["operations-script", /^scripts\/.+\.(?:awk|sh|mjs|py|rb)$/],
+    ["operations-script", /^(?:scripts\/.+\.(?:awk|sh|mjs|py|rb)|deployment\/host\/libexec\/.+\.(?:sh|mjs|py)|server-ai\/scripts\/.+\.(?:sh|mjs|py))$/],
     ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/.+\.(?:json|pem))$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
     ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
     ["identity", /^keycloak\//],
     ["database", /^(?:postgres|mariadb|phppgadmin)\//],
-    ["control-plane", /^control-center\//],
+    ["control-plane", /^(?:control-center|server-ai)\/|^deployment\/phpmyadmin\/composer\.(?:json|lock)$/],
     ["php-runtime", /^(?:php-apache|phpmyadmin|php-runtime-root|projects-portal)\//],
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],

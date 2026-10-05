@@ -15,8 +15,8 @@ assert.match(installer, /sha256sum -c -/);
 assert.match(installer, /sudo install -o root -g root -m 0755/);
 assert.match(trust, /verifyGithubAttestation\(options, \{ verifierBinary = "\/usr\/local\/bin\/gh" \} = \{\}\)/);
 assert.doesNotMatch(trust, /GITHUB_CLI_BIN|PLATFORM_RELEASE_TRUST_TEST_MODE/);
-assert.match(dockerfile, /ARG GH_VERSION=2\.93\.0/);
-assert.match(dockerfile, /ARG GH_SHA256=02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0/);
+assert.match(dockerfile, /ARG GH_VERSION=2\.101\.0/);
+assert.match(dockerfile, /ARG GH_SHA256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8/);
 assert.match(release, /node \.\/scripts\/infra-ops\.mjs github-attestation-evidence/);
 assert.doesNotMatch(release, /sh \.\/scripts\/github-attestation-evidence\.sh/);
 

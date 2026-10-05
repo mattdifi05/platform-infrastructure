@@ -1,0 +1,8 @@
+[Unit]
+Description=Check manual backup queue without restoring legacy eight-hour schedule
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=2s
+[Install]
+WantedBy=timers.target

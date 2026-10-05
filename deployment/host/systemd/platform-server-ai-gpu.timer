@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Platform Server AI GPU snapshot every 15 seconds
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Persistent=false
+Unit=platform-server-ai-gpu.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,374 @@
+{
+  "historicalRegistryOrigin": {
+    "catalogSha256": "f5cea1410282bcf5df8b722b11b7e1ccb67cc497c5fc401bab549152b5b52e69",
+    "manifestDigest": "baf72a7c4ff5d2266b71afe4865ebffeb8be6c363dfc31c12f3a865389009b2c",
+    "manifestId": "manifest-scheduled-platform-20260929-182357-1f9954"
+  },
+  "schema": "platform.g17-mounted-config-source-paths/v1",
+  "sources": [
+    {
+      "resourceId": "mounted-config:755a1240eb0514eb5848bc400d38053b8ccf72e56be42ebc7ba3b56060992515",
+      "sourcePath": "/etc/machine-id"
+    },
+    {
+      "resourceId": "mounted-config:fbeaa13ed33a483dc387c132d0c9260ff197b143d05e25afce8bab88109b4b94",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/controller-registry.json"
+    },
+    {
+      "resourceId": "mounted-config:7c7892938efbab62b3bc9c7f13a845d452d042d86964f10e8b4e88a64c6290d2",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-anniversary-anniversary-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:c2514f1e4cbb6f377c586ef31d831784e63404454ad5896b02718ccfb5e4cc56",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-fiplatform-fiplatform-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:5f707a9f6fe4799af9e2da96f4b7d2629fe7a40bec299a23101d16903dabe034",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-fiplatform-u778675014-fip-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:3ad3e0d727dd527b16e94f3cde5e46bffc7eb2883eb8194df8c2ae819a8dcf1c",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-stexor-postgres-stexor-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:12de6096c8f19091f90ea358723f08624708ecda7c95242fa16a9f7da5f5fd58",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-stream-stream-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:422732ce72261a0177b3c2d13f70b2a2863eae6123a1578f39d853c8594fe683",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/db-workcalendar-workcalendar-ro.json"
+    },
+    {
+      "resourceId": "mounted-config:fe58c6fb5e1d0182fd76edc7d8e8b4dcad47deeff81d67523274cd37d43fc476",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/infrastructure-token"
+    },
+    {
+      "resourceId": "mounted-config:d9920c2b2d6eda4ccf6a4c2d7de8ca82c2fc2b1ff223d9184e8ae8e4ee1f97e3",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/machine-registry-context32-c0abbc4.json"
+    },
+    {
+      "resourceId": "mounted-config:5d3cbc535902783b80382f3c08d372a53c8ed2bebf69ac78f27d1ba9e157385f",
+      "sourcePath": "/etc/platform-infrastructure/server-ai/project-readers-token"
+    },
+    {
+      "resourceId": "mounted-config:2b7466c9b78eebd986f0c904b1f13ed854ed8fbee7476b6183e5672bac6d666c",
+      "sourcePath": "/home/platform_infrastructure/remediation-20260927-hosting/database_url_pg_tls.txt"
+    },
+    {
+      "resourceId": "mounted-config:b9ad68193b930298f942d1ad44f837fac7291e88847d45dd34304d1e34a2de06",
+      "sourcePath": "/home/platform_infrastructure/remediation-20260927-hosting/scripta_database_url_tls.txt"
+    },
+    {
+      "resourceId": "mounted-config:d872dae442caa7e67a76d09f1dfb2f6d7d0d9a537d83675a72d8e72c87dea358",
+      "sourcePath": "/home/platform_infrastructure/remediation-20260927-hosting/scripta_redis_url_tls.txt"
+    },
+    {
+      "resourceId": "mounted-config:16a5f40fe59533da608e030b0319944363551251da34d1af73ec45a13b98e659",
+      "sourcePath": "/home/platform_infrastructure/server-ai-control-center/candidates/os-security-20260927/control_center_database_url.txt"
+    },
+    {
+      "resourceId": "mounted-config:988705173909f4b92e329603de21798117e87ac9b518184e4d0b9b0a1d8d6186",
+      "sourcePath": "/home/platform_infrastructure/server-ai-provision-20260906/candidates/os-security-20260927/settings.yml"
+    },
+    {
+      "resourceId": "mounted-config:abd26bb4fdc108eef8895a7c865f681b201313b7c401f4ed748cccd7c2b918f1",
+      "sourcePath": "/home/platform_infrastructure/server-ai-runtime/secrets/observer-token"
+    },
+    {
+      "resourceId": "mounted-config:7e36558d507b067666d873ca9fdeaf233510bc0ac79df71c7687ad637abeeb86",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/certs"
+    },
+    {
+      "resourceId": "mounted-config:ee0ab491d37b5f19800aed0f26706958465d834d754701e014f52bb2d2e189d8",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/certs/ca.pem"
+    },
+    {
+      "resourceId": "mounted-config:d8d45afed6002e4525c91c03497e4ceaafd113687ec3be88136ea2af257dec71",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/certs/local-key.pem"
+    },
+    {
+      "resourceId": "mounted-config:84083ea428732d7db7d5fed19ecc8485dae2e853a868589b0699bbf391387357",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/certs/portal-cross-fullchain.pem"
+    },
+    {
+      "resourceId": "mounted-config:02407e5124042789a7460e807412e91d6b3e63137e32173e9e0f53e07c2b5665",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/critical"
+    },
+    {
+      "resourceId": "mounted-config:acc44aa9106378ac6ab00c3b64173315efcdc127fb5bf7d1a6929648a232f6ab",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/critical/rclone"
+    },
+    {
+      "resourceId": "mounted-config:fa821669d72165701a98853e4e0faf57e7b258f9fc6ffcffd03c1e1cdb0ba8ca",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/dns"
+    },
+    {
+      "resourceId": "mounted-config:a9188f53cf2de9c04600c933a386a2746b33c317ef6b6b80eb5bc0dcfe073b72",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/enterprise-traefik-routes.yml"
+    },
+    {
+      "resourceId": "mounted-config:78da312639a3a8259b69e738e0668bd65702c25d9a28dd8fd85fcd316678db7a",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/fresh-application-routes.yml"
+    },
+    {
+      "resourceId": "mounted-config:b02786ccddea0cdb77a03d23787c60ac62887bf49358779c912d76137fe2fe03",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/render/combined-render.json"
+    },
+    {
+      "resourceId": "mounted-config:20d9c04823817f63a3565aa4ae74fba441f1a8c9c21cbeabf3e317471224cdb4",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/trust"
+    },
+    {
+      "resourceId": "mounted-config:91d2089b8536db56e74ab6c70c79084339265b19cf1cb4741e99e6056072649c",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/alloy.config"
+    },
+    {
+      "resourceId": "mounted-config:9bc5fa14605fdb85f31c370c2e352988eeb1b96878db027a49387b4ac0f288f2",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/clients"
+    },
+    {
+      "resourceId": "mounted-config:dee90f3cea88839f594f90b539dd6346aa192754e301f46a61012fcef7a9fe8b",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/mariadb"
+    },
+    {
+      "resourceId": "mounted-config:2c8489fae08344c9016464e5184e5f0e5985c5d675639ac7f7a3d7a45e26be4d",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/postgres"
+    },
+    {
+      "resourceId": "mounted-config:c60dea027f217868739287586e370a766ea5dab2e4f76fdd367f374c6dcbc204",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/redis"
+    },
+    {
+      "resourceId": "mounted-config:11ac8671dd0cf5751656b76946f6829d44de937d9878d22198025a3917c1551d",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/students-beta-redis"
+    },
+    {
+      "resourceId": "mounted-config:f54c0d5656244c790b93a8a5d2635b8641ec06ba404f4b70dae1f6995fbe0c85",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/grafana-13.2.3-preserved.ini"
+    },
+    {
+      "resourceId": "mounted-config:dde381fd6ea497926f0ef6e13d11360eca0d2b6a9d660454bb66adfce0e2656a",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/minio-build/minio-gateway.conf"
+    },
+    {
+      "resourceId": "mounted-config:3a59bf05536bd487e4c694837036848c3117d1ce0e25f38a8c696b3ff464d409",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/rustfs-production/secrets"
+    },
+    {
+      "resourceId": "mounted-config:c9d85556b1bbab51bdd2f036c6f1c5269c56c94957a485b0c32b85ad0ae7f2e0",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/alertmanager_webhook_token.txt"
+    },
+    {
+      "resourceId": "mounted-config:4b46ba66be8efeef7f911b334ef5cd9b2934c6a3a1ee0b80b5b2d109ea395504",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/backup_signing_keys.txt"
+    },
+    {
+      "resourceId": "mounted-config:f37ff6b4aebee78378d5c350a7cbec1d37ee62ea776d13bf9fd4835dced05322",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/cloudflare_turnstile_secret_key.txt"
+    },
+    {
+      "resourceId": "mounted-config:f774d87ff7ee141946cd5e4cd6bff696849931550a2ea9d1d220bba928bb82a7",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/control_center_vault_keys.txt"
+    },
+    {
+      "resourceId": "mounted-config:71982c689551f83ccd5ec661f236defa0f1bab0de04f667e9672ceca8122b3c4",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/grafana_admin_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:87ad31cad022960de093c72ff1cc87e38c5aced43bb2cf98042629886982640c",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/grafana_secret_key.txt"
+    },
+    {
+      "resourceId": "mounted-config:47e6c787e4749b16375ce680d24733fe5dbea9f2a64311ce8749c43ca647fce1",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/hash_pepper_keys.txt"
+    },
+    {
+      "resourceId": "mounted-config:dd048b7f448d08d12f1270477a79b0f7b9e5f92425d5fe0b93c944fda8b47ac0",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/keycloak_admin_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:6362b10a2264aa3f572e74861b749b3259d8911b1fc9844532927d26d12c62ab",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/keycloak_db_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:055787aa8bcf8809e3ef27283be9029a9c4b78f1b4bece64e2ee23a16d128403",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/mariadb_root_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:0a6ff2c18269c0fb90c97b94cfb2711e2373e5c6220fead0bce1a277a6193c2e",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/minio_root_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:f850ef3c28829bc92ff38b3fc8ef84bcf5528d87a3ab69907541ed35ba51c532",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/nats_url.txt"
+    },
+    {
+      "resourceId": "mounted-config:cf1f8f029dd3d6c6d19c21da67c1bc318d520fe58f59710a913c9e53c4abb4b5",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/postgres_superuser_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:9b236ba5ab2711b91893c9a14e54619da5131ea14a22ee8eec6dfaa71e416950",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/projects_gateway_signing_keys.txt"
+    },
+    {
+      "resourceId": "mounted-config:6dfb3a8c5f68fb8675c7fbca7ffe9d717752a03e6be6d5f5ce5e86883aa4b6f0",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/redis_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:dafe1591db2f534e0fe84e2bd0d197f9b7f15f4f30407953599febd802b5d214",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/server_ai_openai_api_key"
+    },
+    {
+      "resourceId": "mounted-config:9cc5aa5d43ba3e9f135c7fcb9bb661f9b08c1f0e4f816f0b12b83b3c95eb136f",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/session_secret.txt"
+    },
+    {
+      "resourceId": "mounted-config:ca9dcd286a11974f9e79cc758f4412bfb6a8288ef3505e7591dc4e417b9d4bfd",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/session_signing_keys.txt"
+    },
+    {
+      "resourceId": "mounted-config:a8f09cda1deb3e968c3676ee4525690cd7e607ff5ed3286fe15e159f66925361",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/smtp_password.txt"
+    },
+    {
+      "resourceId": "mounted-config:40d5c3d56221213a1358caaa948e9ef1039ef9010a82a87f48c1723e805bbc8b",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/secrets/workcalendar_db_password"
+    },
+    {
+      "resourceId": "mounted-config:eb17d0869f4d4fa70237485438af04fab15c1a556be646df2c11236849e7a3fc",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/redis-recovery"
+    },
+    {
+      "resourceId": "mounted-config:4a42f4ba5a61958240aba4a02b72d02e0f89bf6f4c25b42fa4bd78706b0fd718",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/students-beta-secrets/account-secret"
+    },
+    {
+      "resourceId": "mounted-config:5a770db64e0534c21fddb98e3d75afd60273345ceaa70f81573c88206206fe30",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/students-beta-secrets/groq-api-key"
+    },
+    {
+      "resourceId": "mounted-config:ced8eaf143dbbfc5bdb90caae81d26ef0d917c7a2fed4bc8b44533d7f0539660",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/students-beta-secrets/openai-api-key"
+    },
+    {
+      "resourceId": "mounted-config:36a2f7443f1a9f87b06e574d21b6422bbd2103216c825e53f2c52cdc2eca75f1",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/students-beta-secrets/redis-password"
+    },
+    {
+      "resourceId": "mounted-config:c2b056d08b628090e3fbbdb0ad724859970893398910893a44566c480450e488",
+      "sourcePath": "/home/platform_infrastructure/v1-fresh-runtime/state/students-beta-secrets/smtp-config"
+    },
+    {
+      "resourceId": "mounted-config:b6add285d382883ccb56fc6113f8771685a95e74137a2e44c1c2b11211982225",
+      "sourcePath": "/home/platform_infrastructure/v11-candidate-cutover-closure"
+    },
+    {
+      "resourceId": "mounted-config:d83055193d13e1ea2e5906b309f268b6c5200706f83bf120f52d098f50594174",
+      "sourcePath": "/home/platform_infrastructure/v11-candidate-cutover-closure/php-apache/apache"
+    },
+    {
+      "resourceId": "mounted-config:9821ee4406812a5189c813ff822d1ec7e9d2440904867a0c6f48b9e0caccc635",
+      "sourcePath": "/home/platform_infrastructure/v11-candidate-cutover-closure/php-apache/php/custom.ini"
+    },
+    {
+      "resourceId": "mounted-config:2e44e5418cba5dfcbbd96ce630606ee04b3982091067f9d5079e0a16c0741348",
+      "sourcePath": "/home/platform_infrastructure/v11-candidate-cutover-closure/php-apache/php/stream.ini"
+    },
+    {
+      "resourceId": "mounted-config:8a3160d2dfec0577e609c5136210611a7996dd649a30248af9797740d0094d77",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/alertmanager/alertmanager.yml"
+    },
+    {
+      "resourceId": "mounted-config:c4e18d83623398bb0dd20f42d442e326aa79fa545cb1cde8a7fd8227900f4292",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/config/no-hosted-workloads.local-private.lock.json"
+    },
+    {
+      "resourceId": "mounted-config:b2eef4904cd598cde8df46a205a856009b2e80498d2bd7fa504a5535e10ab5fe",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/grafana/dashboards"
+    },
+    {
+      "resourceId": "mounted-config:52adacc88fe09cd32cca900b99f949c14c12bdcb344d02bc4170b370a76562e9",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/grafana/provisioning"
+    },
+    {
+      "resourceId": "mounted-config:d0ca5be7829cb86c59cd050f82fa7cebc01007bb53d5440be2971035cd9f188a",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/keycloak/import"
+    },
+    {
+      "resourceId": "mounted-config:0fda8bd6e99cd9e11b49daa8463111515ab8c8a841649577d0ee553594430b8d",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/loki/config.yml"
+    },
+    {
+      "resourceId": "mounted-config:cddf02408541562992d0c1d706da1b2ff15576cd7f37ff684048456815b998c9",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/loki/rules"
+    },
+    {
+      "resourceId": "mounted-config:5240f9360a9e46c60e877db1a4b463f72431cb09cc5dc67d847c25331fe36146",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/mariadb/conf.d"
+    },
+    {
+      "resourceId": "mounted-config:deb56e01b5bbd224469bad4a3f081c0a04a32a843d4eec2968a32e2d2b7cf195",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/mariadb/initdb"
+    },
+    {
+      "resourceId": "mounted-config:ee0219964b3d10ebd1f630c3b3b5aaab30c4ef811244cf228be91dc8b6716344",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/php-runtime-root"
+    },
+    {
+      "resourceId": "mounted-config:44822c8782ab717aa8777feb3e5a1dc528cd25c90371c462246bed55a149724f",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/phpmyadmin/apache-forwarded-proto.conf"
+    },
+    {
+      "resourceId": "mounted-config:59ce02ea6272470ab212619ed9513c311e363886af8f1e9a716e0bf68f8c0be9",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/phpmyadmin/config.user.inc.php"
+    },
+    {
+      "resourceId": "mounted-config:1974bb5cffce213d79bf6b2fe63f43f16081e889caad66bf6e6161e1ab345232",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/phppgadmin/config.inc.php"
+    },
+    {
+      "resourceId": "mounted-config:53f2d8c7bcbb9c0aeeb0807075902a21448bd362daaaa05e2ee02cb032a53341",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/postgres/entrypoint-with-init-secrets.sh"
+    },
+    {
+      "resourceId": "mounted-config:85a41e78bede91cf4722a269dded6cc65480f6e8f861fafb6fc2341244b3eb4d",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/postgres/init"
+    },
+    {
+      "resourceId": "mounted-config:2649f01dccfccd52c3f3c6d51ff4f04a836034fc4d0c7024762edc0b8cd6751d",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/scripts/node-project-runtime.sh"
+    },
+    {
+      "resourceId": "mounted-config:0d8f24d37aff683ca6198af13a420cf4605da1fa7e3fb947e9c3c3bec75a7cb3",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/traefik/dynamic/admin-routes.yml"
+    },
+    {
+      "resourceId": "mounted-config:345a9e7cfb5e1bba6dbdc79063a8bcc2aa41d52bb4536c57d8d194f13e682691",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/traefik/dynamic/middlewares.yml"
+    },
+    {
+      "resourceId": "mounted-config:5521cfeb21bfc09d017807162fedd65ed607a622d7da81b9bbfaa992e3ccd806",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/traefik/dynamic/project-routes.yml"
+    },
+    {
+      "resourceId": "mounted-config:2b904dee532fd670de07e6ee758b1b6c3cc2d738fae1d6bdea87b35907570a27",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/traefik/traefik.edge-http.greenfield.yml"
+    },
+    {
+      "resourceId": "mounted-config:7dac14a3260c91e868dee5b706e378d9e2b0808722ad0d9990ba8eaa7c466bfb",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf"
+    },
+    {
+      "resourceId": "mounted-config:b5a94511abf80bd7c0909f9c91e0582a922481093b223b9bba0bd4417bc9551c",
+      "sourcePath": "/home/platform_infrastructure/v11-main-a9588f0/waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf"
+    },
+    {
+      "resourceId": "mounted-config:649e144547cfd40adbf6aedd167baa8c0f279f01174b06c8793abb1e1016feaa",
+      "sourcePath": "/home/platform_infrastructure/v11-main-f282212/prometheus/prometheus.yml"
+    },
+    {
+      "resourceId": "mounted-config:b86ccce36e92da02b4792fa780dde14fcf7e680955c957e42e4017bf0ef33b6b",
+      "sourcePath": "/home/platform_infrastructure/v11-main-f282212/prometheus/rules"
+    }
+  ]
+}

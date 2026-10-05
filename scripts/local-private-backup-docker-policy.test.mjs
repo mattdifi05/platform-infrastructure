@@ -193,7 +193,8 @@ test("LOCAL_PRIVATE off-site policy binds egress, image, credential mounts and e
     "size", "platform-onedrive:platform-infrastructure/restic", "--json",
   ];
   assert.equal(localPrivateBackupDockerInvocationAllowed(current, backup, { env: offsiteProcessEnvironment() }, pid), true);
-  assert.equal(localPrivateBackupDockerInvocationAllowed(current, retention, { env: offsiteProcessEnvironment() }, pid), true);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, retention, { env: offsiteProcessEnvironment() }, pid), false);
+  assert.equal(localPrivateBackupDockerInvocationAllowed(current, retention.map(value => value === "42" ? "2" : value), { env: offsiteProcessEnvironment() }, pid), false);
   assert.equal(localPrivateBackupDockerInvocationAllowed(current, size, {}, pid), true);
 
   for (const mutated of [

@@ -2,6 +2,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
+import { cpus, loadavg } from "node:os";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -67,6 +68,28 @@ import {
 } from "./status/event-stream.mjs";
 import { createProjectDiskUsageReader, unavailableUsage as unavailableProjectDiskUsage } from "./resources/project-disk-usage.mjs";
 import { createRedisOperations, RedisOperationsError, validateRedisBackupDocument } from "./redis/operations.mjs";
+import { createAIService } from "./ai/service.mjs";
+import { createInfrastructureAdmin, createInfrastructureSessionAuthorizer } from "./ai/infrastructure-admin.mjs";
+import { createPortalApplicationRemoval } from "./ai/portal-application-removal.mjs";
+import { createToolRegistry } from "./ai/tools.mjs";
+import { readGpuSnapshot } from "./ai/diagnostics.mjs";
+import { createMachineAiManager, readMachineRegistry, MachineAiError } from "./ai/machines.mjs";
+import { createWebTools } from "./ai/web.mjs";
+import { renderServerAi } from "./ai/ui.mjs";
+import { createPostgresConversationStore, createMemoryConversationStore, ConversationStoreError } from "./ai/conversations.mjs";
+import { createConversationHttp, ConversationHttpError } from "./ai/conversation-http.mjs";
+import { createContinuationAuthorizer } from "./ai/continuation-auth.mjs";
+import { createAttachmentStorage } from "./ai/attachment-storage.mjs";
+import { createArtifactStorage } from "./ai/artifacts.mjs";
+import { PostgresAttachmentScanStore } from "./ai/scan-store.mjs";
+import { attachmentCapabilities } from "./ai/attachments.mjs";
+import { composeRetrievalContext, createAuxiliaryRetrievalClient, createRetrievalPipeline } from "./ai/retrieval.mjs";
+import { createPostgresVectorStore } from "./ai/vector-store.mjs";
+import { createProjectRegistry } from "./ai/project-registry.mjs";
+import { createProjectReaders } from "./ai/project-readers.mjs";
+import { createMachineProjectCatalog } from "./ai/machine-project-catalog.mjs";
+import { createProjectIndexPipeline, shouldPauseProjectIndex } from "./ai/project-index.mjs";
+import { createProjectVectorStore } from "./ai/project-vector-store.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -152,6 +175,7 @@ const redisOperations = createRedisOperations({
   port: clampNumber(Number(process.env.CONTROL_CENTER_REDIS_PORT || 6379), 1, 65535),
   username: String(process.env.CONTROL_CENTER_REDIS_USERNAME || "platform").trim(),
   passwordFile: process.env.CONTROL_CENTER_REDIS_PASSWORD_FILE || "",
+  tlsCaFile: process.env.CONTROL_CENTER_REDIS_TLS_CA_FILE || "",
   database: clampNumber(Number(process.env.CONTROL_CENTER_REDIS_DATABASE || 0), 0, 63),
   workloadLockFile: process.env.CONTROL_CENTER_HOSTED_WORKLOAD_LOCK_FILE || "/run/platform/hosted-workloads.lock.json",
   cachePrefix: process.env.CONTROL_CENTER_REDIS_CACHE_PREFIX || "control-center:cache:v1",
@@ -197,6 +221,277 @@ const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
 const firstConfiguration = await createFirstConfiguration({ auth: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
+const serverAiIdentityOptions = {
+  identityFile: process.env.CONTROL_CENTER_MACHINE_ID_FILE,
+  label: process.env.CONTROL_CENTER_MACHINE_LABEL || "Server locale",
+};
+let serverAiMachines;
+try {
+  serverAiMachines = readMachineRegistry({ ...serverAiIdentityOptions, registryFile: process.env.SERVER_AI_MACHINE_REGISTRY_FILE });
+} catch {
+  console.warn(JSON.stringify({ service: "server-ai", event: "machine-registry-unavailable" }));
+  serverAiMachines = readMachineRegistry(serverAiIdentityOptions);
+}
+let serverAiAttachmentStorage = null;
+try {
+  if (process.env.SERVER_AI_ATTACHMENTS_ROOT === "/var/lib/server-ai-attachments") {
+    serverAiAttachmentStorage = createAttachmentStorage({ root: process.env.SERVER_AI_ATTACHMENTS_ROOT });
+    await serverAiAttachmentStorage.ready();
+  }
+} catch {
+  await serverAiAttachmentStorage?.close?.();
+  serverAiAttachmentStorage = null;
+  console.warn(JSON.stringify({ service: "server-ai", event: "attachment-storage-unavailable" }));
+}
+let serverAiArtifactStorage = null;
+let serverAiScanStore = null;
+if (serverAiAttachmentStorage) {
+  try {
+    serverAiArtifactStorage = createArtifactStorage({ root: process.env.SERVER_AI_ATTACHMENTS_ROOT + "/generated" });
+    await serverAiArtifactStorage.ready();
+  } catch {
+    serverAiArtifactStorage = null;
+    console.warn(JSON.stringify({ service: "server-ai", event: "artifact-storage-unavailable" }));
+  }
+  if (controlAuth.store?.pool) {
+    try {
+      serverAiScanStore = new PostgresAttachmentScanStore({ pool: controlAuth.store.pool, attachmentStorage: serverAiAttachmentStorage });
+      await serverAiScanStore.ready();
+    } catch {
+      serverAiScanStore = null;
+      console.warn(JSON.stringify({ service: "server-ai", event: "attachment-scans-unavailable" }));
+    }
+  }
+}
+const serverAiProjectCatalogs = new Map();
+async function refreshServerAiProjectCatalogs() {
+  await Promise.all([...serverAiProjectCatalogs.values()].map(catalog => catalog.refresh({ force: true })));
+}
+const serverAiProjectRegistry = createProjectRegistry({
+  stateFile: process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json",
+  // Project metadata is machine-scoped.  Do not make locally discovered roots
+  // visible merely because a caller supplied another syntactically-valid ID.
+  getProjects: ({ machineId } = {}) => serverAiProjectCatalogs.get(machineId)?.snapshot({ machineId }) || [],
+});
+const serverAiServices = new Map();
+const serverAiManager = createMachineAiManager({ stateFile: process.env.PROJECT_STATE_FILE, machines: serverAiMachines.map(machine => {
+  if (!machine.configured) return machine;
+  try {
+  const web = createWebTools({ searxngUrl: machine.searxngUrl || "http://searxng:8080" });
+  const gpu = () => readGpuSnapshot(machine.gpuSnapshotFile);
+  const auxiliary = null;
+  const conversationRetrieval = auxiliary
+    ? createRetrievalPipeline({
+      embeddings: auxiliary, reranker: auxiliary,
+      vectorStore: createPostgresVectorStore({ pool: controlAuth.store.pool }),
+      logger: {
+        info: (event, fields = {}) => console.info(JSON.stringify({ service: "server-ai", machineId: machine.id, event, ...fields })),
+        warn: (event, fields = {}) => console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event, ...fields })),
+      },
+    })
+    : null;
+  const projectReaders = machine.local === true && machine.projectReadersConfigured === true ? createProjectReaders({ tokenFile: machine.projectReadersTokenFile, sourceUrl: machine.projectSourceReaderUrl, queryUrl: machine.projectQueryReaderUrl }) : null;
+  const projectContext = async () => { const state = readState(); return buildCachedContext({ state, projects: discoverProjects(state) }); };
+  const projectCatalog = createMachineProjectCatalog({ machineId: machine.id, local: machine.local === true, reader: projectReaders, getDiscoveredProjects: async () => discoverProjects(readState()), getHiddenProjectIds: async () => Object.entries(readState().projects).filter(([, metadata]) => metadata?.deletedAt).map(([id]) => id) });
+  serverAiProjectCatalogs.set(machine.id, projectCatalog);
+  const canonicalProjectId = value => projectCatalog.resolveApplicationProjectId(String(value || ''), { machineId: machine.id });
+  const getProjectDatabases = async projectId => { const context = await projectContext(); return (context.databases || []).filter(row => canonicalProjectId(row?.projectId) === projectId).map(row => ({ id: row?.id, dialect: row?.engine === 'postgres' ? 'postgresql' : row?.engine === 'mariadb' ? 'mariadb' : '' })).filter(row => /^[a-z0-9][a-z0-9-]{0,95}$/.test(row.id || '') && row.dialect); };
+  const authorizeMachineProject = ({ projectId, subject, role, machineId }) => {
+    if (machineId !== machine.id) throw new Error('Autorizzazione progetto non disponibile.');
+    return serverAiProjectRegistry.resolve({ projectId, subject, role, machineId: machine.id });
+  };
+  const authorizeMachineProjectLive = async ({ signal, ...scope }) => {
+    await projectCatalog.refresh({ signal });
+    return authorizeMachineProject(scope);
+  };
+  let service;
+  const projectIndex = auxiliary && projectReaders
+    ? createProjectIndexPipeline({
+      reader: projectReaders,
+      embeddings: auxiliary,
+      reranker: auxiliary,
+      authorizeProject: authorizeMachineProject,
+      getProjectDatabases,
+      // `loadavg()` is host-wide on Linux. Compare it to host CPU capacity,
+      // never the container's cgroup-constrained Node parallelism.
+      shouldPause: () => shouldPauseProjectIndex({
+        busy: service?.busy === true,
+        queued: service?.queue?.length || 0,
+        oneMinuteLoad: loadavg()[0],
+        hostCpuCount: cpus().length,
+      }),
+      store: createProjectVectorStore({ pool: controlAuth.store.pool }),
+    })
+    : null;
+  const retrieval = conversationRetrieval ? {
+    resume() { conversationRetrieval.resume?.(); projectIndex?.resume?.(); },
+    async shutdown() { projectIndex?.stop?.(); await conversationRetrieval.shutdown?.(); },
+    diagnostics() { return { ...(conversationRetrieval.diagnostics?.() || {}), projectIndex: Boolean(projectIndex) }; },
+    enqueueConversationMessage: (...args) => conversationRetrieval.enqueueConversationMessage?.(...args),
+    enqueueBackfill: (...args) => conversationRetrieval.enqueueBackfill?.(...args),
+    markConversationDeleted: (...args) => conversationRetrieval.markConversationDeleted?.(...args),
+    enqueueProjectIndex: (...args) => projectIndex?.enqueue?.(...args) || { queued: false },
+    async retrieve(scope) {
+      if (scope.projectId) {
+        try { authorizeMachineProject(scope); }
+        catch { return { status: "denied", chunks: [], context: null, citations: [], projectMetadata: { fallbackReason: "project_access_revoked" } }; }
+      }
+      const memory = await conversationRetrieval.retrieve(scope);
+      if (!scope.projectId || !projectIndex) return memory;
+      const project = await projectIndex.retrieve(scope);
+      if (project.denied) return { status: "denied", chunks: [], context: null, citations: [], projectMetadata: project.metadata || null };
+      return { ...memory, context: composeRetrievalContext({ historicalMemory: memory.context, freshProjectEvidence: project.context }), citations: (project.citations || []).slice(0, 24), projectMetadata: project.metadata || null };
+    },
+  } : null;
+const registry = createToolRegistry({
+  infrastructureAdmin: machine.local ? createInfrastructureAdmin({ authorize: createInfrastructureSessionAuthorizer(controlAuth) }) : null,
+  removePortalApplication: machine.local ? createPortalApplicationRemoval({
+    authorize: createInfrastructureSessionAuthorizer(controlAuth),
+    getContext: projectContext,
+    applyDelete: applyProjectListRemoval,
+    invalidate: async () => {
+      await invalidateControlContextCache();
+      await projectCatalog.refresh({ force: true });
+    },
+    verify: async projectId => {
+      const context = await projectContext();
+      return !context.projects.some(project => project.slug === projectId)
+        && !projectCatalog.snapshot({ machineId: machine.id }).some(project => project.id === projectId || project.applicationIds.includes(projectId))
+        && projectCatalog.diagnostics().available === true;
+    },
+    machineId: machine.id,
+  }) : null,
+  web,
+  observerUrl: machine.observerUrl || "http://server-ai-observer:8090",
+  observerTokenFile: machine.observerTokenFile,
+  projectReaders,
+  reranker: auxiliary,
+  getMachineProjects: ({ subject, role, machineId, signal }) => {
+    if (machineId !== machine.id) throw new Error('Elenco progetti non disponibile.');
+    // Refresh only the fixed, authenticated reader catalog; labels and aliases
+    // are merged from server-owned discovery by the catalog module.
+    return projectCatalog.refresh({ signal }).then(() => serverAiProjectRegistry.list({ subject, role, machineId }));
+  },
+  authorizeProject: authorizeMachineProjectLive,
+  getProjectKnowledge: async ({ projectId, subject, role, machineId, query, signal }) => {
+    if (machineId !== machine.id || !projectIndex) return { context: null, citations: [], degraded: true };
+    // Indexing remains lazy and per-project. A first semantic request queues a
+    // bounded scan but never turns a machine-wide chat into a filesystem scan.
+    projectIndex.enqueue({ ownerId: subject, subject, role, machineId, projectId, signal });
+    return projectIndex.retrieve({ ownerId: subject, subject, role, machineId, projectId, query, signal });
+  },
+  getProjectContainers: async projectId => { const context = await projectContext(); return (context.resources?.containersByProject || []).filter(row => canonicalProjectId(row?.projectId) === projectId || canonicalProjectId(row?.applicationId) === projectId).map(row => ({ service: String(row.name || row.service || row.container || '') })).filter(row => /^[a-z0-9][a-z0-9_.-]{0,127}$/i.test(row.service)); },
+  getProjectDatabases,
+  getContext: async () => { if (!machine.local) return { resources: { source: "machine-adapter-unavailable" }, projects: [], applications: [] }; const context = await projectContext(); return { ...context, applications: (context.applications || []).map(item => ({ ...item, projectId: canonicalProjectId(item?.projectId) || item?.projectId })) }; },
+  getHostMetrics: async (name) => {
+    if (!machine.local) return { available: false, message: "Adattatore metriche macchina non configurato." };
+    const queries = name === "getSystemUptime" ? { uptimeSeconds: "time() - node_boot_time_seconds" }
+      : { oneMinute: "node_load1", fiveMinutes: "node_load5", fifteenMinutes: "node_load15" };
+    const values = Object.fromEntries(await Promise.all(Object.entries(queries).map(async ([key, query]) => [key, firstPrometheusValue(await prometheusQuery(query))])));
+    return { source: "prometheus-node-exporter", capturedAt: new Date().toISOString(), ...values };
+  },
+  getGpuStatus: async () => {
+    const status = await service.status();
+    const snapshot = gpu();
+    return { ...snapshot, online: status.online, loaded: status.loaded, hardwareCountersAvailable: snapshot.available };
+  },
+});
+  service = createAIService({
+  scanStore: serverAiScanStore,
+  contextLength: machine.contextLength,
+  registry,
+  logger: Object.fromEntries(["info", "warn", "error"].map(level => [level, event => console[level](JSON.stringify({ service: "server-ai", machineId: machine.id, requestId: requestIdentity.getStore()?.requestId, ...event }))])),
+  retrieval,
+});
+  serverAiServices.set(machine.id, service);
+  return { ...machine, service, web, gpu, retrieval, projectReaders, projectCatalog, projectIndex };
+  } catch {
+    console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event: "machine-adapter-unavailable" }));
+    return { ...machine, configured: false };
+  }
+}), audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
+
+let serverAiConversationStore = null;
+let serverAiConversationsReady = false;
+try {
+  if (controlAuth.store?.pool) {
+    serverAiConversationStore = createPostgresConversationStore({ pool: controlAuth.store.pool, attachmentStorage: serverAiAttachmentStorage, artifactStorage: serverAiArtifactStorage });
+  } else if (process.env.NODE_ENV === "test" && process.env.CONTROL_CENTER_AUTH_STORE === "memory") {
+    serverAiConversationStore = createMemoryConversationStore({ attachmentStorage: serverAiAttachmentStorage, artifactStorage: serverAiArtifactStorage });
+  }
+  if (serverAiConversationStore) {
+    await serverAiConversationStore.ready();
+    await serverAiConversationStore.recoverOnStartup({ machineIds: serverAiManager.list().map(machine => machine.id) });
+    await serverAiConversationStore.recoverQueuedOnStartup?.({ machineIds: serverAiManager.list().map(machine => machine.id) });
+    serverAiConversationsReady = true;
+  }
+} catch {
+  console.warn(JSON.stringify({ service: "server-ai", event: "conversation-store-unavailable" }));
+}
+const handleServerAiConversation = createConversationHttp({
+  store: serverAiConversationStore, manager: serverAiManager, readPayload, json,
+  authorizeContinuation: createContinuationAuthorizer(controlAuth),
+  attachmentStorage: serverAiAttachmentStorage,
+  artifactStorage: serverAiArtifactStorage,
+  scanStore: serverAiScanStore,
+  isReady: () => serverAiConversationsReady,
+  getRetrieval: machineId => serverAiManager.retrieval(machineId),
+  getProjectReaders: machineId => serverAiManager.projectReaders?.(machineId) || null,
+  projectRegistry: serverAiProjectRegistry,
+  refreshProjectCatalog: ({ machineId }) => serverAiManager.projectCatalog?.(machineId)?.refresh?.() || Promise.resolve([]),
+});
+// Resume only durable, server-owned attachment requests. Reuse the existing
+// machine reconcile cadence; an empty queue never triggers a model call.
+const serverAiContinuationReconciles = new Map();
+let serverAiContinuationsClosing = false;
+async function reconcileServerAiAttachmentContinuations(onlyMachineId = null) {
+  if (serverAiContinuationsClosing || !serverAiConversationsReady || !serverAiScanStore?.listPendingContinuationScopes) return;
+  for (const { id: machineId } of serverAiManager.list()) {
+    if (onlyMachineId && onlyMachineId !== machineId) continue;
+    if (!serverAiServices.has(machineId) || serverAiContinuationReconciles.has(machineId)) continue;
+    const work = (async () => {
+      const scopes = await serverAiScanStore.listPendingContinuationScopes({ machineId });
+      if (!Array.isArray(scopes) || !scopes.length || serverAiContinuationsClosing) return;
+      const status = await serverAiManager.status(machineId);
+      if (!status || !["active", "degraded"].includes(status.state) || serverAiContinuationsClosing) return;
+      for (const scope of scopes.slice(0, 32)) {
+        if (serverAiContinuationsClosing) break;
+        if (scope?.machineId !== machineId || typeof scope.ownerId !== "string" || !scope.ownerId
+          || !/^[0-9a-f-]{36}$/.test(scope.conversationId || "") || !["owner", "admin", "viewer"].includes(scope.role)) continue;
+        await handleServerAiConversation.processAttachmentContinuations(scope);
+      }
+    })().catch(() => {
+      console.warn(JSON.stringify({ service: "server-ai", machineId, event: "attachment-continuation-retry" }));
+    }).finally(() => serverAiContinuationReconciles.delete(machineId));
+    serverAiContinuationReconciles.set(machineId, work);
+    await work;
+  }
+}
+for (const [machineId, service] of serverAiServices) {
+  service.onAttachmentScanTerminal = () => {
+    if (!serverAiContinuationsClosing) setTimeout(() => { void reconcileServerAiAttachmentContinuations(machineId); }, 25).unref();
+  };
+}
+async function reconcileServerAiRuntime() {
+  if (serverAiContinuationsClosing) return;
+  await serverAiManager.reconcileDisabled();
+  await reconcileServerAiAttachmentContinuations();
+}
+let serverAiDatabaseHealthAt = 0;
+let serverAiDatabaseHealthPending = null;
+async function serverAiDatabaseHealthy() {
+  if (!serverAiConversationStore) return false;
+  if (Date.now() - serverAiDatabaseHealthAt < 5000) return serverAiConversationsReady;
+  if (serverAiDatabaseHealthPending) return serverAiDatabaseHealthPending;
+  serverAiDatabaseHealthPending = (async () => {
+    try { await serverAiConversationStore.ready(); serverAiConversationsReady = true; }
+    catch { serverAiConversationsReady = false; }
+    serverAiDatabaseHealthAt = Date.now();
+    serverAiDatabaseHealthPending = null;
+    return serverAiConversationsReady;
+  })();
+  return serverAiDatabaseHealthPending;
+}
 
 const docs = {
   "Overview": [
@@ -447,10 +742,14 @@ const server = createServer(async (req, res) => {
 
     await requestIdentity.run({
       subject: session.identity.subject,
+      sessionTokenHash: session.sessionTokenHash,
       role: session.role,
       requestId: rid(),
       operation: requestOperation,
     }, async () => {
+      if (requestOperation.operationId?.startsWith("ai.")) {
+        return handleApi(req, res, url, null, requestOperation);
+      }
       if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
         const decision = authorizeDatabaseAdminForwardTarget(req.headers, { expectedHost: controlCenterHost });
         if (!decision.ok) {
@@ -480,6 +779,10 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/project-command") {
       await handleProjectCommand(req, res, context);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/actions/project-remove-from-list") {
+      await handleProjectListRemoval(req, res, context);
       return;
     }
 
@@ -614,7 +917,10 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, bindHost, () => {
   console.log(`control-center listening on ${bindHost}:${port} with ${controlAuth.mode} authentication`);
+  void reconcileServerAiRuntime();
 });
+const serverAiReconcileTimer = setInterval(() => { void reconcileServerAiRuntime(); }, 30_000);
+serverAiReconcileTimer.unref();
 
 async function handleDirectFirstConfiguration(req, res, url) {
   firstConfigurationHeaders(res);
@@ -657,16 +963,59 @@ function rawRequestPathname(requestTarget) {
 }
 
 async function shutdown() {
+  serverAiContinuationsClosing = true;
+  clearInterval(serverAiReconcileTimer);
   statusEventBroker.close();
-  server.close(async () => {
-    await Promise.all([controlAuth.close(), firstConfiguration.close(), redisOperations.close()]);
-    process.exit(0);
-  });
   setTimeout(() => process.exit(1), 10_000).unref();
+  const closed = new Promise(resolve => server.close(resolve));
+  await serverAiManager.shutdown();
+  await serverAiAttachmentStorage?.close?.();
+  await closed;
+  await Promise.all([controlAuth.close(), firstConfiguration.close(), redisOperations.close()]);
+  process.exit(0);
 }
 
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
+
+function serverAiAdminDiagnostics(status) {
+  const entries = [];
+  const add = (label, value) => { if (value !== undefined && value !== null && String(value).trim()) entries.push({ label, value: String(value).slice(0, 160) }); };
+  add("Provider AI", status.provider === "openai" ? "OpenAI Responses API" : "Non disponibile");
+  add("Modello", status.model?.model || "Non disponibile");
+  const metrics = status.latestMetrics;
+  if (metrics && typeof metrics === "object") {
+    if (Number.isFinite(Number(metrics.ttftMs))) add("TTFT", `${Math.round(Number(metrics.ttftMs))} ms`);
+    if (Number.isFinite(Number(metrics.tokensPerSecond))) add("Token/s", Number(metrics.tokensPerSecond).toFixed(1));
+  }
+  add("Ricerca web", status.search?.online ? "Disponibile" : "Non disponibile");
+  add("Coda", Number.isInteger(status.queue) ? String(status.queue) : "Non disponibile");
+  if (status.retrieval && typeof status.retrieval === "object") {
+    add("Indicizzazione memoria", Number.isInteger(status.retrieval.pending) && status.retrieval.pending > 0 ? `In attesa: ${status.retrieval.pending}` : "Aggiornata");
+    if (status.retrieval.backfillPending === true) add("Storico memoria", "Indicizzazione limitata in corso");
+    if (Number.isInteger(status.retrieval.capacityDeferred) && status.retrieval.capacityDeferred > 0) add("Memoria", "Limite locale raggiunto");
+    if (Number.isInteger(status.retrieval.degraded) && status.retrieval.degraded > 0) add("Ricerca semantica", "Fallback locale attivo");
+  }
+  if (status.auxiliary?.configured === true) {
+    for (const service of Array.isArray(status.auxiliary.services) ? status.auxiliary.services : []) {
+      const label = service.service === "server-ai-embedding" ? "Embedding" : service.service === "server-ai-reranker" ? "Reranker" : null;
+      if (!label) continue;
+      add(label, service.available ? (service.deviceVerified === true ? `${service.device} verificato` : "Disponibile, dispositivo non verificato") : "Non disponibile");
+    }
+  }
+  return { allowed: true, entries: entries.slice(0, 12) };
+}
+
+function publicServerAiStatus(status) {
+  const { latestMetrics, loaded, gpu, retrieval, auxiliary, ...rest } = status;
+  return {
+    ...rest,
+    models: Array.isArray(status.models) ? status.models.map(model => ({ mode: model.mode, model: model.model, available: model.available === true })) : [],
+    loaded: Array.isArray(loaded) ? loaded.map(model => ({ model: model.model })) : [],
+    gpu: gpu ? { available: gpu.available === true, stale: gpu.stale === true } : { available: false, stale: false },
+    ...(auxiliary?.configured === true ? { auxiliary: { available: auxiliary.available === true } } : {}),
+  };
+}
 
 async function handleApi(req, res, url, context, operation) {
   if (!operation?.classified || operation.control !== true) {
@@ -675,6 +1024,59 @@ async function handleApi(req, res, url, context, operation) {
   }
   const method = operation.method;
   const parts = operation.canonicalPath.split("/").filter(Boolean);
+  if (operation.operationId.startsWith("ai.") && req.controlCenterPayloadMalformed) {
+    return json(res, { error: "INVALID_REQUEST", message: "Il corpo JSON della richiesta non è valido." }, 400);
+  }
+  if (method === "GET" && operation.operationId === "ai.machines") return json(res, { machines: serverAiManager.list() });
+  if (method === "GET" && operation.operationId === "ai.attachment-formats") {
+    if (!serverAiManager.list().some(machine => machine.id === operation.parameters.machineId)) return json(res, { error: "AI_MACHINE_NOT_FOUND", message: "Macchina non trovata." }, 404);
+    if (!serverAiAttachmentStorage) return json(res, { error: "ATTACHMENT_STORAGE_UNAVAILABLE", message: "Archivio allegati non disponibile." }, 503);
+    return json(res, { supported: attachmentCapabilities() });
+  }
+  if (method === "GET" && operation.operationId === "ai.status") {
+    try {
+      const status = await serverAiManager.status(operation.parameters.machineId);
+      const databaseAvailable = await serverAiDatabaseHealthy();
+      const identity = requestIdentity.getStore();
+      const admin = identity?.role === "admin";
+      const safeStatus = admin ? status : publicServerAiStatus(status);
+      return json(res, {
+        ...safeStatus,
+        ...(!databaseAvailable && ["active", "degraded"].includes(status.state) ? { state: "error", missing: [...(status.missing || []), "Archivio conversazioni non disponibile."] } : {}),
+        conversationStore: { available: databaseAvailable },
+        canConfigure: ["owner", "admin"].includes(identity?.role),
+        ...(admin ? { adminDiagnostics: serverAiAdminDiagnostics(status) } : {}),
+      });
+    }
+    catch (error) { return json(res, { error: "AI_MACHINE_UNAVAILABLE", message: error instanceof MachineAiError ? error.message : "Stato macchina non disponibile." }, error.status || 503); }
+  }
+  if (operation.operationId === "ai.projects") {
+    const identity = requestIdentity.getStore();
+    try { await serverAiManager.projectCatalog?.(operation.parameters.machineId)?.refresh?.(); return json(res, { projects: serverAiProjectRegistry.list({ subject: identity?.subject, role: identity?.role, machineId: operation.parameters.machineId }) }); }
+    catch (error) { return json(res, { error: "PROJECTS_UNAVAILABLE", message: "Progetti AI non disponibili." }, error.status || 503); }
+  }
+  if (operation.operationId.startsWith("ai.conversations.")) {
+    const identity = requestIdentity.getStore();
+    try { await serverAiDatabaseHealthy(); return await handleServerAiConversation(req, res, url, operation, identity); }
+    catch (error) {
+      if (res.headersSent || res.writableEnded || res.destroyed) { if (!res.writableEnded) res.end(); return; }
+      const expected = error instanceof ConversationHttpError || error instanceof ConversationStoreError || error instanceof MachineAiError;
+      return json(res, { error: expected ? error.code || "CONVERSATION_UNAVAILABLE" : "CONVERSATIONS_UNAVAILABLE", message: expected ? error.message : "Archivio conversazioni non disponibile." }, expected ? error.status || 503 : 503);
+    }
+  }
+  if (method === "POST" && operation.operationId === "ai.enable") {
+    const payload = await readPayload(req);
+    if (Object.keys(payload).some(key => key !== "_csrf")) return json(res, { error: "INVALID_REQUEST", message: "L’attivazione non accetta parametri macchina o container." }, 400);
+    if (!await serverAiDatabaseHealthy()) return json(res, { error: "CONVERSATIONS_UNAVAILABLE", message: "Archivio conversazioni non disponibile." }, 503);
+    try { return json(res, await serverAiManager.enable(operation.parameters.machineId), 202); }
+    catch (error) { return json(res, { error: "AI_ENABLE_REJECTED", message: error instanceof MachineAiError ? error.message : "Attivazione non disponibile." }, error.status || 503); }
+  }
+  if (method === "POST" && operation.operationId === "ai.disable") {
+    const payload = await readPayload(req);
+    if (Object.keys(payload).some(key => key !== "_csrf")) return json(res, { error: "INVALID_REQUEST", message: "La disattivazione non accetta parametri macchina o container." }, 400);
+    try { return json(res, serverAiManager.disable(operation.parameters.machineId), 202); }
+    catch (error) { return json(res, { error: "AI_DISABLE_REJECTED", message: error instanceof MachineAiError ? error.message : "Arresto non disponibile." }, error.status || 503); }
+  }
   const payload = method === "POST" ? await readPayload(req) : {};
 
   try {
@@ -747,6 +1149,11 @@ async function handleApi(req, res, url, context, operation) {
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "delete", "apply")) {
       return json(res, applyProjectDelete(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "list", "remove")) {
+      const operation = applyProjectListRemoval(parts[2], payload, context);
+      await refreshServerAiProjectCatalogs();
+      return json(res, operation, 202);
     }
 
     if (method === "GET" && route(parts, "control", "applications")) return json(res, { applications: context.applications });
@@ -1023,6 +1430,22 @@ async function handleProjectCommand(req, res, context) {
     json(res, operation, 202);
     return;
   }
+  redirect(res, "/?section=projects");
+}
+
+async function handleProjectListRemoval(req, res, context) {
+  const payload = await readPayload(req);
+  const id = String(payload.id || "");
+  let operation;
+  try {
+    operation = applyProjectListRemoval(id, payload, context);
+  } catch (error) {
+    if (error instanceof ValidationError) return json(res, { error: "validation_failed", message: error.message }, 422);
+    if (error instanceof RejectedOperationError) return json(res, { error: "operation_rejected", message: error.message }, 409);
+    throw error;
+  }
+  await refreshServerAiProjectCatalogs();
+  if (wantsJson(req)) return json(res, operation, 202);
   redirect(res, "/?section=projects");
 }
 
@@ -1609,6 +2032,30 @@ async function handleSettingsCommand(req, res, context) {
   redirect(res, "/?section=settings#settings-local");
 }
 
+function readRustFsRecoveryEvidence() {
+  const file = "/var/www/project-state/rustfs-recovery/latest.json";
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8"));
+    if (value?.schema !== "platform.rustfs-operator-backup/v1" || value.backend !== "rustfs" || value.format !== "rustfs-volume/v1") return null;
+    const verifiedAt = typeof value.verifiedAt === "string" && !Number.isNaN(Date.parse(value.verifiedAt)) ? value.verifiedAt : null;
+    return {
+      schema: value.schema,
+      backend: "rustfs",
+      status: value.status === "passed" ? "passed" : "unverified",
+      format: value.format,
+      signedBrokerCompatible: value.signedBrokerCompatible === true,
+      restoreRoute: value.restoreRoute === "root-operator-rustfs-v1" ? value.restoreRoute : "operator-assisted",
+      encryptedRoundtripVerified: value.decryptRoundtripVerified === true,
+      isolatedBootVerified: value.restoreBootVerified === true,
+      s3InventoryRestoreVerified: value.s3SemanticRestoreVerified === true,
+      verifiedAt,
+      evidencePath: "rustfs-recovery/latest.json",
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function buildContext({ projects, state }) {
   const storedApplications = readApplicationsState();
   const storedDomains = readDomainsState();
@@ -1694,13 +2141,18 @@ async function buildContext({ projects, state }) {
     .filter((operation) => operation && operation.status !== "completed")
     .map((operation) => parseDatabaseDeleteOperation(operation))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  const rustfsRecovery = readRustFsRecoveryEvidence();
   const storageProvider = {
-    id: "minio",
-    name: "MinIO",
-    status: "configured",
-    service: "minio",
-    liveAdapter: "MinioAdapter",
-    productionEvidence: false,
+    id: "rustfs",
+    name: "RustFS",
+    status: "active",
+    service: "rustfs",
+    gatewayService: "gf-minio-gateway",
+    gatewayProtocol: "S3 with MinIO-compatible aliases",
+    legacyService: { name: "gf-minio", status: "stopped-intentionally", volumePreserved: true },
+    liveAdapter: "S3CompatibleAdapter",
+    recoveryEvidence: rustfsRecovery,
+    productionEvidence: rustfsRecovery?.status === "passed",
   };
   const storageBuckets = Object.values(readStorageBucketsState())
     .filter((bucket) => bucket && !bucket.deletedAt)
@@ -4488,6 +4940,34 @@ function backupFamilySpecs() {
   ];
 }
 
+function readFtpsOffsiteSummary(nowMs = Date.now()) {
+  const root = "/var/www/project-state/host-recovery";
+  const load = (name) => {
+    try {
+      const file = path.join(root, name);
+      const metadata = lstatSync(file);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 131072) return null;
+      const parsed = JSON.parse(readFileSync(file, "utf8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  const destination = load("offsite-destination.json");
+  if (destination?.backend !== "ftps-encrypted-bundles") return null;
+  const proof = load("ftps-proof.json") || {};
+  const backupAt = Date.parse(String(proof.backupAt || ""));
+  const verified = proof.schema === "platform.ftps-recovery-point/v2"
+    && proof.status === "passed"
+    && /^[a-f0-9]{64}$/.test(String(proof.manifestDigest || ""))
+    && typeof proof.manifestId === "string" && proof.manifestId.length > 0
+    && Number.isSafeInteger(proof.artifactCount) && proof.artifactCount > 0
+    && ["tlsVerified", "actualDownloadVerified", "decryptVerified", "manifestHmacVerified", "everyArtifactShaAndHmacVerified"].every((field) => proof[field] === true)
+    && Number.isFinite(backupAt) && backupAt <= nowMs + 300000 && nowMs - backupAt <= 14 * 86400000;
+  return { verified, backupAt: Number.isFinite(backupAt) ? proof.backupAt : "", manifestId: verified ? proof.manifestId : "", retainedPointCount: verified ? proof.retainedPointCount : 0,
+    reportPath: "host-recovery/ftps-proof.json" };
+}
+
 function buildBackupInventory(records = []) {
   const files = safeReadBackupFiles("");
   const jobs = readBackupJobs();
@@ -4500,6 +4980,7 @@ function buildBackupInventory(records = []) {
   const offsitePayload = offsiteRestoreReport?.payload || {};
   const schedulerPassed = String(schedulerPayload.status || "").toLowerCase() === "passed";
   const offsitePassed = String(offsitePayload.status || "").toLowerCase() === "success";
+  const ftps = readFtpsOffsiteSummary();
   const localFamiliesPassed = families.length > 0 && families.every((family) => family.status === "success");
   const rootSummary = backupRootSummary(files);
   const scheduler = {
@@ -4525,7 +5006,7 @@ function buildBackupInventory(records = []) {
     familyCount: Array.isArray(drPayload.rpoEvidence?.backupFamilies) ? drPayload.rpoEvidence.backupFamilies.length : 0,
     fullRestoreReport: drPayload.rtoEvidence?.latestFullRestoreReport || "",
   };
-  const offsite = {
+  const legacyOffsite = {
     status: offsitePassed ? "success" : offsiteRestoreReport ? "needs-work" : "missing",
     label: offsitePassed ? "Provato" : offsiteRestoreReport ? "Da verificare" : "Nessuna prova",
     configured: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" || Boolean(offsitePayload.restic?.repositoryConfigured),
@@ -4537,11 +5018,26 @@ function buildBackupInventory(records = []) {
     snapshotTime: offsitePayload.snapshot?.time || "",
     snapshotCountForTag: Number(offsitePayload.snapshotCountForTag || 0),
   };
+  const offsite = ftps ? {
+    status: ftps.verified ? "success" : "needs-work",
+    label: ftps.verified ? "Ripristino dei file FTPS verificato" : "Prova FTPS da verificare",
+    configured: true,
+    reportPath: ftps.reportPath,
+    ageLabel: ftps.backupAt ? relativeTimeLabel(ftps.backupAt) : "",
+    repositoryType: "ftps-multipart-v2",
+    repositoryOffsite: ftps.verified,
+    snapshotId: ftps.manifestId,
+    snapshotTime: ftps.backupAt,
+    snapshotCountForTag: Number(ftps.retainedPointCount || 0),
+    actualDownloadVerified: ftps.verified,
+    proofScope: "download-decrypt-artifact-integrity",
+    rustfsRestoreVerified: null,
+  } : legacyOffsite;
   return sanitizeEvent({
     mode: environment,
     manualBackup: "plan-only-from-control-center",
     restoreDrill: "available-through-infra-ops",
-    offsite: offsite.status === "success" ? "verified-off-site" : offsite.configured ? "configured" : "not-configured",
+    offsite: ftps?.verified || offsite.status === "success" ? "verified-off-site" : offsite.configured ? "configured" : "not-configured",
     rpoRto: dr.reportPath ? "reported-by-dr-evidence" : "missing-dr-evidence",
     root: rootSummary,
     families,
@@ -5689,7 +6185,7 @@ function renderControlCenter(context, params) {
   const activeProject = section === "projects" && params.has("project") ? currentProject : null;
   const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
-  const hidePageHead = Boolean(activeProject);
+  const hidePageHead = Boolean(activeProject) || section === "server-ai";
   const pageHint = operationPageHint(section, context);
   const pageLabel = hidePageHead ? `aria-label="${escapeHtml(title)}"` : 'aria-labelledby="control-page-title"';
   const pageHead = hidePageHead ? "" : `<div class="ops-page-head">
@@ -5831,6 +6327,7 @@ function statusNavChildren(context, params = new URLSearchParams(), currentSecti
 function operationsPortalSections() {
   return [
     { id: "projects", label: "Applicazioni", icon: "projects" },
+    { id: "server-ai", label: "Server AI", icon: "terminal" },
     { id: "secrets", label: "Secret", icon: "shield" },
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
@@ -5839,6 +6336,7 @@ function operationsPortalSections() {
 
 function operationPageHint(section, context) {
   const hints = {
+    "server-ai": "GPT-6 Luna tramite OpenAI API, strumenti del server in sola lettura e fonti web controllate.",
     projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
     secrets: "Vault cifrato e inventario centralizzato dei secret.",
     files: "Inventario file applicazione in sola lettura.",
@@ -5848,6 +6346,7 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
+  if (section === "server-ai") return renderServerAi();
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
@@ -6481,6 +6980,7 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
   const databaseList = renderProjectDetailDatabaseList(context, project, databases, params);
   const resourcePanel = renderProjectDetailResources(summary, project);
   const backupPanel = renderProjectDetailBackups(context, project, params);
+  const removeConfirm = `REMOVE-FROM-LIST:${project.slug}`;
   return `<section class="ops-section ops-projects-redesign ops-project-detail-screen" id="project-${escapeHtml(project.slug)}">
     <div class="ops-project-detail-hero">
       <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
@@ -6496,6 +6996,11 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
         <small>Runtime</small>
         <strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong>
       </span>
+      <form method="post" action="/actions/project-remove-from-list" data-passkey-submit data-passkey-success-url="/?section=projects">
+        <input type="hidden" name="id" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="confirm" value="${escapeHtml(removeConfirm)}">
+        <button class="ops-button danger compact" type="submit" aria-label="Rimuovi ${escapeHtml(project.name)} dalla lista Applicazioni">${controlIcon("trash")} Rimuovi dalla lista</button>
+      </form>
     </div>
 
     <div class="ops-project-detail-focus">
@@ -9762,6 +10267,21 @@ function applyProjectDelete(id, payload, context) {
   writeState(state);
   appendAudit({ action: "project.delete.apply", target: project.slug, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: "Project soft deleted from local Control Center inventory; project files and databases were not deleted." });
   return operationPlan("project.delete.local", context.environment, false, ["validate strong confirmation", "soft delete local inventory entry", "disable local routing", "preserve filesystem and databases", "write audit event"], { projectId: project.slug, filesystemTouched: false, databaseTouched: false });
+}
+
+function applyProjectListRemoval(id, payload, context) {
+  const project = findById(context.projects, id, "Project");
+  const expected = `REMOVE-FROM-LIST:${project.slug}`;
+  if (payload.confirm !== expected) throw new RejectedOperationError(`Project list removal requires confirm=${expected}.`);
+  const state = readState();
+  state.projects[project.slug] = {
+    ...(state.projects[project.slug] || {}),
+    deletedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeState(state);
+  appendAudit({ action: "project.list.remove", target: project.slug, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Application entry removed from the Control Center list; hosting, source files, databases and containers were not changed." });
+  return operationPlan("project.list.remove", context.environment, false, ["validate exact project and confirmation", "hide Control Center inventory entry", "preserve hosting and data", "write audit event"], { projectId: project.slug, filesystemTouched: false, databaseTouched: false, dockerTouched: false });
 }
 
 function planApplicationCreate(payload, context) {
@@ -13089,7 +13609,7 @@ function storageBucketRecord({
   return sanitizeEvent({
     id: sanitizeIdentifier(id || bucketId(fallbackProject, cleanName)),
     projectId: cleanProjectId,
-    provider: "minio",
+    provider: "rustfs",
     name: cleanName,
     environment: "local",
     quotaBytes: parseQuotaBytes(quotaBytes || 0),

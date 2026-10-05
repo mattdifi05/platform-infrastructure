@@ -1,0 +1,24 @@
+[Unit]
+Description=Verify and copy complete platform backup into additive encrypted local repository
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-local-dedup.py
+TimeoutStartSec=3600
+UMask=0077
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/platform_infrastructure/v1-fresh-runtime/state/host-recovery /var/lib/platform-local-dedup /home/platform_infrastructure/v1-fresh-runtime/local-private-backup/repository-local /home/platform_infrastructure/v1-fresh-runtime/critical
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+MemoryMax=512M
+TasksMax=32
+StandardOutput=journal
