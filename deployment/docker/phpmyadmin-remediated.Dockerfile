@@ -5,7 +5,8 @@ FROM runtime AS dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends git unzip && rm -rf /var/lib/apt/lists/*
 COPY --from=platform/php-apache:remediation-php8511 /usr/local/bin/composer /tmp/composer
 WORKDIR /var/www/html
-RUN COMPOSER_ALLOW_SUPERUSER=1 php /tmp/composer update --no-dev --no-interaction --no-plugins --no-scripts --prefer-dist --no-progress --with-all-dependencies \
+COPY deployment/phpmyadmin/composer.json deployment/phpmyadmin/composer.lock ./
+RUN COMPOSER_ALLOW_SUPERUSER=1 php /tmp/composer install --no-dev --no-interaction --no-plugins --no-scripts --prefer-dist --no-progress \
  && php /tmp/composer check-platform-reqs --no-dev \
  && php /tmp/composer audit --no-dev --format=json \
  && rm /tmp/composer
