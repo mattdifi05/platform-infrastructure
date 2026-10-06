@@ -122,4 +122,7 @@ class RuntimeRestoreTests(unittest.TestCase):
    r.prepare_database_directory(source,destination)
    ownership.assert_called_once_with(destination,source.stat().st_uid,source.stat().st_gid)
   self.assertEqual(destination.stat().st_mode&0o7777,0o1777)
+ def test_database_readiness_waits_for_final_engine_not_temporary_init_server(self):
+  with patch.object(r.b,'run',side_effect=[b'bash\n',b'mariadbd\n']),patch.object(r,'maria_sql',return_value='1') as sql,patch.object(r.time,'sleep'):
+   r.wait_database('isolated-maria','mariadb');sql.assert_called_once_with('isolated-maria','SELECT 1',True)
 if __name__=='__main__':unittest.main()

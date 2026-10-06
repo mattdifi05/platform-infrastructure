@@ -118,6 +118,10 @@ def pipe_file(command,file):
 def wait_database(name,engine):
  for _ in range(90):
   try:
+   # Entry points expose a temporary SQL server while initializing system tables.
+   # Only the final engine as PID1 is ready to accept the captured system schemas.
+   process=b.run(['docker','exec',name,'cat','/proc/1/comm']).decode().strip()
+   if process!=('postgres' if engine=='postgres' else 'mariadbd'):time.sleep(1);continue
    (pg_sql if engine=='postgres' else lambda c,q:maria_sql(c,q,True))(name,'SELECT 1');return
   except Exception:time.sleep(1)
  raise RuntimeError('Isolated database engine did not become ready')
