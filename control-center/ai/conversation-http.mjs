@@ -641,7 +641,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
         // before the browser receives 202 and survives navigation/reload.
         let turn;
         try { turn = requireFound(await (internalAttachmentContinuation
-          ? store.beginAttachmentContinuation?.({ ...scope, userMessageId: payload.continuation.userMessageId, requestId: payload.continuation.requestId, requestedMode: resolution.requestedMode, scanId: payload.continuation.scanIds[0] })
+          ? store.beginAttachmentContinuation?.({ ...scope, userMessageId: payload.continuation.userMessageId, requestId: payload.continuation.requestId, requestedMode: resolution.requestedMode, resolvedMode: resolution.resolvedMode, scanId: payload.continuation.scanIds[0] })
           : store.beginTurn({ ...scope, message: sendMessage, attachmentIds, requestId: payload.requestId, ...resolution }))); }
         catch (error) {
           if (error?.code === "GENERATION_ACTIVE") return json(res, { error: "GENERATION_ACTIVE", message: "La conversazione è già in generazione.", conversationId, generationStatus: "active" }, 409);

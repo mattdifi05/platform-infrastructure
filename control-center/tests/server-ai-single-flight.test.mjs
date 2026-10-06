@@ -12,7 +12,7 @@ async function until(predicate) {
   for (let attempt = 0; attempt < 50; attempt += 1) { if (await predicate()) return; await settle(); }
   assert.fail('background operation did not settle');
 }
-async function fixture() {
+async function fixture(options = {}) {
   const store = createMemoryConversationStore({ nodeEnvironment: 'test' });
   const conversation = await store.create({ ownerId, machineId });
   const scope = { ownerId, machineId, conversationId: conversation.id };
@@ -30,13 +30,13 @@ async function fixture() {
     },
   };
   const makeHandler = () => createConversationHttp({ store, manager, readPayload: async req => req.payload,
-    json: (res, body, status = 200) => ({ status, body }) });
+    json: (res, body, status = 200) => ({ status, body }), ...options });
   const handle = makeHandler();
   const request = (operation, payload = {}, handler = handle) => handler({ payload }, { setHeader() {} }, new URL('http://fixture.invalid'),
     { operationId: `ai.conversations.${operation}`, method: operation === 'read' ? 'GET' : 'POST', parameters: { machineId, conversationId: conversation.id } }, { subject: ownerId, role: 'owner' });
   const send = (payload, handler) => request('send', { message: 'Controlla il server.', requestedMode: 'auto', requestId: randomUUID(), ...payload }, handler);
   const complete = async index => { await until(() => Boolean(calls[index]?.finish)); calls[index].finish(); await until(async () => !(await store.get(scope)).messages.some(m => ['pending','streaming'].includes(m.generationStatus))); };
-  return { store, scope, calls, manager, request, send, complete, makeHandler };
+  return { store, scope, calls, manager, request, send, complete, makeHandler, handle };
 }
 
 test('competing tabs admit one direct turn, return busy 409, and accept the next send after completion', async () => {
@@ -109,6 +109,33 @@ test('AUTO routes fast/deep internally and only deep persists public analysis su
     assert.equal(assistant.toolMetadata.requestedMode, 'auto');
     assert.equal(Boolean(assistant.toolMetadata.analysisSummary), mode === 'deep');
   }
+});
+
+test('attachment AUTO continuation keeps routed DEEP in pending, streaming and terminal records', async () => {
+  let markers = [];
+  const scanStore = { listContinuations: async () => markers, setContinuationState: async ({ state }) => { markers[0].state = state; } };
+  const f = await fixture({ scanStore, authorizeContinuation: async () => true });
+  await f.send({ message: 'Controlla il server.' }); await f.complete(0);
+  const original = (await f.store.get(f.scope)).messages[0];
+  markers = [{ role: 'owner', requestId: original.id, userMessageId: original.id, scanId: randomUUID(), state: 'pending', status: 'completed' }];
+  const begin = f.store.beginAttachmentContinuation.bind(f.store); let pending;
+  f.store.beginAttachmentContinuation = async args => { const turn = await begin(args); pending = turn.assistant; return turn; };
+  await f.handle.processAttachmentContinuations({ ...f.scope, role: 'owner' });
+  await until(() => Boolean(f.calls[1]?.finish));
+  assert.equal(pending.generationStatus, 'pending'); assert.equal(pending.resolvedMode, 'deep');
+  assert.equal(pending.toolMetadata.resolvedMode, 'deep');
+  const streaming = (await f.store.get(f.scope)).messages.at(-1);
+  assert.equal(streaming.generationStatus, 'streaming'); assert.equal(streaming.resolvedMode, 'deep');
+  assert.equal(streaming.toolMetadata.resolvedMode, 'deep');
+  assert.equal(f.calls[1].options.trustedRequest.requestedMode, 'auto');
+  assert.equal(f.calls[1].options.trustedRequest.resolvedMode, 'deep');
+  await f.complete(1);
+  const completed = (await f.store.get(f.scope)).messages.at(-1);
+  assert.equal(completed.generationStatus, 'completed'); assert.equal(completed.resolvedMode, 'deep');
+  assert.equal(completed.toolMetadata.resolvedMode, 'deep');
+  const read = await f.request('read');
+  assert.equal(read.body.messages.at(-1).toolMetadata.autoContinuation, undefined);
+  assert.equal(read.body.messages.filter(message => message.role === 'user').length, 1);
 });
 
 function transport() {

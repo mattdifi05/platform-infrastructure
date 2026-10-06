@@ -1519,7 +1519,7 @@ export class PostgresConversationStore {
   // the original user turn has already completed.  This creates only the
   // assistant half of a turn: the original user message remains the sole
   // visible request, and the durable marker makes retries/restarts idempotent.
-  async beginAttachmentContinuation({ ownerId, subject, machineId, conversationId, userMessageId, requestId, requestedMode = "auto", scanId } = {}) {
+  async beginAttachmentContinuation({ ownerId, subject, machineId, conversationId, userMessageId, requestId, requestedMode = "auto", resolvedMode = null, scanId } = {}) {
     const owner = ownerFrom(ownerId, subject);
     const machine = normalizeMachineId(machineId);
     const conversation = normalizeConversationId(conversationId);
@@ -1527,7 +1527,7 @@ export class PostgresConversationStore {
     const request = normalizeRequestId(requestId);
     const scan = normalizeConversationId(scanId);
     const requested = normalizeMode(requestedMode);
-    const resolved = requested === "auto" ? "fast" : requested;
+    const resolved = resolvedMode == null ? (requested === "auto" ? "fast" : requested) : normalizeResolvedMode(resolvedMode);
     return this.withTransaction(async client => {
       const current = ensureResult(await client.query(`select id,summary from server_ai.conversations where id=$1 and owner_id=$2 and machine_id=$3 and deleted_at is null for update`, [conversation, owner, machine]));
       if (!current.rows[0]) return null;
@@ -1536,13 +1536,13 @@ export class PostgresConversationStore {
       const active = ensureResult(await client.query(`select id from server_ai.messages where conversation_id=$1 and role='assistant' and generation_status in ('pending','streaming') limit 1 for update`, [conversation]));
       if (active.rows[0]) return { blocked: true };
       if (existing && ["aborted", "failed"].includes(existing.generation_status)) {
-        const reclaimed = ensureResult(await client.query(`update server_ai.messages set content='',generation_status='pending',updated_at=now() where id=$1 and conversation_id=$2 and role='assistant' and generation_status in ('aborted','failed') returning id,conversation_id,role,content,created_at,updated_at,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata,turn_id`, [existing.id, conversation]));
+        const reclaimed = ensureResult(await client.query(`update server_ai.messages set content='',generation_status='pending',resolved_mode=$3,requested_mode=$4,tool_metadata=tool_metadata || jsonb_build_object('resolvedMode',$3::text,'requestedMode',$4::text),updated_at=now() where id=$1 and conversation_id=$2 and role='assistant' and generation_status in ('aborted','failed') returning id,conversation_id,role,content,created_at,updated_at,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata,turn_id`, [existing.id, conversation, resolved, requested]));
         if (reclaimed.rows[0]) return { turnId: reclaimed.rows[0].turn_id, user: null, assistant: rowMessage(reclaimed.rows[0]), reclaimed: true };
       }
       const original = ensureResult(await client.query(`select id from server_ai.messages where id=$1 and conversation_id=$2 and role='user' and generation_status='completed'`, [user, conversation])).rows[0];
       if (!original) return null;
       const turn = randomUUID(); const assistant = randomUUID();
-      const metadata = JSON.stringify({ autoContinuation: { version: 1, requestId: request, scanId: scan, userMessageId: user } });
+      const metadata = JSON.stringify({ requestedMode: requested, resolvedMode: resolved, autoContinuation: { version: 1, requestId: request, scanId: scan, userMessageId: user } });
       const result = ensureResult(await client.query(`insert into server_ai.messages
         (id,conversation_id,turn_id,role,content,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata)
         values ($1,$2,$3,'assistant','',$4,$5,$6,'pending','[]'::jsonb,$7::jsonb)
@@ -2021,15 +2021,16 @@ class MemoryConversationStore {
   async beginAttachmentContinuation(args = {}) {
     const conversation = this.own(args, args.conversationId); if (!conversation) return null;
     const userId = normalizeConversationId(args.userMessageId); const requestId = normalizeRequestId(args.requestId); const scanId = normalizeConversationId(args.scanId);
+    const requestedMode = normalizeMode(args.requestedMode || "auto"); const resolvedMode = args.resolvedMode == null ? (requestedMode === "auto" ? "fast" : requestedMode) : normalizeResolvedMode(args.resolvedMode);
     const messages = this.messages.get(conversation.id) || [];
     const existing = messages.find(item => item.role === "assistant" && item.toolMetadata?.autoContinuation?.requestId === requestId);
     if (existing && ["pending", "streaming", "completed"].includes(existing.generationStatus)) return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), idempotent: true };
     if (messages.some(item => item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus))) return { blocked: true };
-    if (existing && ["aborted", "failed"].includes(existing.generationStatus)) { existing.content = ""; existing.generationStatus = "pending"; existing.updatedAt = new Date().toISOString(); return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), reclaimed: true }; }
+    if (existing && ["aborted", "failed"].includes(existing.generationStatus)) { existing.content = ""; existing.generationStatus = "pending"; existing.requestedMode = requestedMode; existing.resolvedMode = resolvedMode; existing.toolMetadata = { ...existing.toolMetadata, requestedMode, resolvedMode }; existing.updatedAt = new Date().toISOString(); return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), reclaimed: true }; }
     const original = messages.find(item => item.id === userId && item.role === "user" && item.generationStatus === "completed");
     if (!original) return null;
-    const requestedMode = normalizeMode(args.requestedMode || "auto"); const resolvedMode = requestedMode === "auto" ? "fast" : requestedMode; const now = new Date().toISOString(); const turnId = randomUUID();
-    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: { autoContinuation: { version: 1, requestId, scanId, userMessageId: userId } }, ordinal: ++this.ordinal, turnId };
+    const now = new Date().toISOString(); const turnId = randomUUID();
+    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: { requestedMode, resolvedMode, autoContinuation: { version: 1, requestId, scanId, userMessageId: userId } }, ordinal: ++this.ordinal, turnId };
     messages.push(assistant); this.messages.set(conversation.id, messages); conversation.updatedAt = now;
     return { turnId, user: null, assistant: structuredClone(assistant), idempotent: false };
   }
