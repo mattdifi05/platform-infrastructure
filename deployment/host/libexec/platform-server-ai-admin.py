@@ -113,6 +113,8 @@ def clean(value):
   value=re.sub(r'([a-z][a-z0-9+.-]*://)[^/@\s]+:[^/@\s]+@',r'\1[redacted]@',value)
   return value[:16000]
  return value
+def redacted_log_lines(raw):
+ return '\n'.join('[sensitive log line redacted]' if re.search(r'password|secret|token|authorization|cookie|credential|private.?key|api.?key|sk-',line,re.I) else clean(line) for line in raw.splitlines())
 def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 @contextlib.contextmanager
 def db():
@@ -388,10 +390,14 @@ def read(topic,target,subject):
   if PORTABLE and shutil.which('docker'):result['dockerVolumes']=command(['docker','volume','ls','--format','{{.Name}}']).splitlines()[:150]
   return result
  if topic=='logs':
+  if PORTABLE and target in CONTAINERS:
+   identity=docker(target)['Id']
+   raw=command(['docker','logs','--timestamps','--since','30m','--tail','80',identity],timeout=5)
+   return {'container':target,'redactedDockerLogs':redacted_log_lines(raw)}
   if PORTABLE:discovered_unit(target)
   elif target not in SERVICES and target not in JOBS.values() and target not in ['platform-server-ai-egress.service','platform-server-ai-admin.service']:raise Rejected('Logs require one reviewed infrastructure unit')
   raw=command(['journalctl','--unit='+target,'--since=-30min','--lines=80','--no-pager','--output=short-iso'],timeout=5)
-  return {'unit':target,'redactedJournal':'\n'.join('[sensitive log line redacted]' if re.search(r'password|secret|token|authorization|cookie|credential|private.?key|api.?key|sk-',line,re.I) else clean(line) for line in raw.splitlines())}
+  return {'unit':target,'redactedJournal':redacted_log_lines(raw)}
  if topic=='resources':
   return {'cpuCounters':pathlib.Path('/proc/stat').read_text()[:12000],'diskCounters':pathlib.Path('/proc/diskstats').read_text()[:12000],'pressure':{n:(pathlib.Path('/proc/pressure')/n).read_text() for n in ['cpu','io','memory']},'inodes':command(['df','-Pi'])}
  if topic=='backups':

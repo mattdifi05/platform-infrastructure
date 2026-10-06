@@ -68,6 +68,28 @@ class InfrastructureScopeTests(unittest.TestCase):
   self.assertNotIn('abc123',a.clean('https://example.com/x?code=abc123'))
   public={'id':'a'*64,'imageId':'sha256:'+'b'*64,'profileDigest':'c'*64,'manifestDigest':'d'*64}
   self.assertEqual(a.clean({'nested':public,'unknown':'e'*64,'id':'A'*64,'apiKey':'f'*64}),{'nested':public,'unknown':'[redacted]','id':'[redacted]'})
+ def test_logs_use_pinned_container_id_or_installed_unit_with_bounded_redaction(self):
+  a=self.a;a.CONTAINERS=frozenset({'enterprise-control-center'})
+  calls=[];inspected=[]
+  def run(argv,**kwargs):
+   calls.append((argv,kwargs))
+   return 'ready\nAuthorization: Bearer test-secret\ntrace='+'A'*64+'\n'
+  def installed(name):
+   if name!='ssh.service':raise a.Rejected('Unit is not installed on this host')
+   return name
+  with patch.object(a,'portable_catalog',return_value=(['logs'],[],[],[],{})),patch.object(a,'docker',side_effect=lambda name:inspected.append(name) or {'Id':'b'*64}),patch.object(a,'discovered_unit',side_effect=installed),patch.object(a,'command',side_effect=run):
+   container=a.read('logs','enterprise-control-center','owner')
+   self.assertEqual(inspected,['enterprise-control-center'])
+   self.assertEqual(calls[-1],(['docker','logs','--timestamps','--since','30m','--tail','80','b'*64],{'timeout':5}))
+   self.assertIn('ready',container['redactedDockerLogs'])
+   self.assertNotIn('test-secret',container['redactedDockerLogs'])
+   self.assertNotIn('A'*64,container['redactedDockerLogs'])
+   count=len(calls)
+   with self.assertRaises(a.Rejected):a.read('logs','php-app','owner')
+   self.assertEqual(len(calls),count)
+   journal=a.read('logs','ssh.service','owner')
+   self.assertEqual(calls[-1],(['journalctl','--unit=ssh.service','--since=-30min','--lines=80','--no-pager','--output=short-iso'],{'timeout':5}))
+   self.assertNotIn('test-secret',journal['redactedJournal'])
  def test_typed_config_patch_rejects_unsafe_calendar_and_ssh_values(self):
   a=self.a
   with patch.object(a,'portable_catalog',return_value=([],['config_patch'],[],[],{})):
