@@ -96,7 +96,6 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       CONTROL_CENTER_BACKUP_ROOT: backupsDir,
-      CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: path.join(root, "synthetic-vps-catalog"),
       CONTROL_CENTER_REPORTS_ROOT: reportsDir,
       PROJECTS_ROOT: projectsDir,
       ...isolatedStateEnv(stateDir),
@@ -224,10 +223,14 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     const html = await legacyPage.text();
     assert.match(html, /<h1 id="control-page-title">Applicazioni<\/h1>/, `${pathname} falls back to Applications`);
     assert.doesNotMatch(html, /data-cloudflare-dns|data-vps-restore/, `${pathname} does not render removed page tools`);
+    assert.doesNotMatch(html, /data-ai-portal-nav-toggle/, `${pathname} does not render the Server AI mobile menu toggle`);
   }
   const serverAiPage = await request(baseUrl, "GET", "/?section=server-ai", identities.owner);
   assert.equal(serverAiPage.status, 200);
-  assert.match(await serverAiPage.text(), /data-vps-restore/, "configured VPS catalog exposes restore tool inside Server AI");
+  const serverAiHtml = await serverAiPage.text();
+  assert.doesNotMatch(serverAiHtml, /data-ai-restore-dialog|data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
+  assert.match(serverAiHtml, /data-ai-portal-nav-toggle[^>]*aria-controls="platform-portal-navigation"[^>]*aria-expanded="false"/);
+  assert.equal((serverAiHtml.match(/id="platform-portal-navigation"/g) || []).length, 1, "Server AI has one addressable operations nav");
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {

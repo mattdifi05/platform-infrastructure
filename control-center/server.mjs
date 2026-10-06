@@ -6235,7 +6235,8 @@ function readBackupJobs() {
 async function renderCachedControlCenter(context, params) {
   const section = params.get("section") || "projects";
   if (section === "secrets" || !context?.cacheIdentity) return renderControlCenter(context, params);
-  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
+  const assetVersions = `${controlCenterStylesheetLinks()}\0${controlCenterScriptTags()}`;
+  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}\0${assetVersions}`)}`;
   const cached = await redisOperations.cacheGetJson(key);
   if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
   const rendered = renderControlCenter(context, params);
@@ -6253,6 +6254,7 @@ function renderControlCenter(context, params) {
   const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
   const hidePageHead = Boolean(activeProject) || section === "server-ai";
+  const serverAiNavToggle = section === "server-ai" ? `<button type="button" class="server-ai-portal-nav-toggle" data-ai-portal-nav-toggle aria-label="Apri menu principale" aria-controls="platform-portal-navigation" aria-expanded="false"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>` : "";
   const pageHint = operationPageHint(section, context);
   const pageLabel = hidePageHead ? `aria-label="${escapeHtml(title)}"` : 'aria-labelledby="control-page-title"';
   const pageHead = hidePageHead ? "" : `<div class="ops-page-head">
@@ -6287,6 +6289,7 @@ ${controlCenterScriptTags()}
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
       <a class="ops-brand" href="/?section=projects" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
+      ${serverAiNavToggle}
       ${renderOperationsNav(sections, section, context, activeProject, params)}
       ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Logout" title="Logout">${controlIcon("logout")}</button></form>` : ""}
     </aside>
@@ -6302,7 +6305,7 @@ ${controlCenterScriptTags()}
 
 function renderOperationsNav(sections, section, context, activeProject, params = new URLSearchParams()) {
   const visibleSections = sections.filter((item) => !item.hidden);
-  return `<nav class="ops-nav" aria-label="Sezioni portal">
+  return `<nav id="platform-portal-navigation" class="ops-nav" aria-label="Sezioni portal">
     <span class="ops-nav-pill" aria-hidden="true"></span>
     ${visibleSections.map((item) => renderOperationsNavGroup(item, section, context, activeProject, params)).join("")}
   </nav>`;

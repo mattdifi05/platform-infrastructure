@@ -21,6 +21,16 @@ function node() {
   };
 }
 
+test("manual restore dialog is rendered only when a configured catalog is passed", () => {
+  const withoutRestore = renderServerAi();
+  assert.doesNotMatch(withoutRestore, /data-ai-restore-dialog|data-vps-restore/);
+
+  const restoreMarkup = '<section class="ops-card" data-vps-restore><p data-restore-status></p></section>';
+  const withRestore = renderServerAi({ manualRestore: restoreMarkup });
+  assert.match(withRestore, /<dialog[^>]*data-ai-restore-dialog/);
+  assert.ok(withRestore.includes(restoreMarkup), "configured restore controls are embedded in the dialog");
+});
+
 test("a rejected enable remains visible in the real gate while the chat is hidden on mobile", async () => {
   const markup = renderServerAi();
   const gateStart = markup.indexOf('data-ai-gate aria-live="polite"');
