@@ -43,6 +43,8 @@ class InfrastructureScopeTests(unittest.TestCase):
    with self.assertRaises(a.Rejected):a.read('config','authority-private','owner')
  def test_package_inventory_page_is_bounded_and_lookup_exact(self):
   a=self.a
+  with patch.object(a,'command',return_value='chrony\t1.0\tinstalled\nremoved\t2.0\tconfig-files\nbroken\t3.0\thalf-installed\n'):
+   self.assertEqual(a.package_rows(),[['chrony','1.0']])
   with patch.object(a,'portable_catalog',return_value=(['packages'],[],[],[],{})),patch.object(a,'package_rows',return_value=[[f'pkg-{n}','1.0'] for n in range(120)]):
    first=a.read('packages','','owner');second=a.read('packages','page:1','owner')
    self.assertEqual((len(first['installed']),first['total']), (50,120))
@@ -53,6 +55,8 @@ class InfrastructureScopeTests(unittest.TestCase):
   a=self.a
   self.assertNotIn('A'*64,a.clean('trace='+'A'*64))
   self.assertNotIn('abc123',a.clean('https://example.com/x?code=abc123'))
+  public={'id':'a'*64,'imageId':'sha256:'+'b'*64,'profileDigest':'c'*64,'manifestDigest':'d'*64}
+  self.assertEqual(a.clean({'nested':public,'unknown':'e'*64,'id':'A'*64,'apiKey':'f'*64}),{'nested':public,'unknown':'[redacted]','id':'[redacted]'})
  def test_typed_config_patch_rejects_unsafe_calendar_and_ssh_values(self):
   a=self.a
   with patch.object(a,'portable_catalog',return_value=([],['config_patch'],[],[],{})):

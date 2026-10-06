@@ -101,7 +101,7 @@ def portable_catalog():
 def exact(value,keys,required=None):
  if not isinstance(value,dict) or set(value)-set(keys) or set(keys if required is None else required)-set(value):raise Rejected('Invalid fields')
 def clean(value):
- if isinstance(value,dict):return {str(k):clean(v) for k,v in list(value.items())[:100] if not re.search(r'password|secret|token|authorization|cookie|private.?key|credential|api.?key|access.?key|dsn',str(k),re.I)}
+ if isinstance(value,dict):return {str(k):(v if k in {'id','imageId','profileDigest','manifestDigest'} and isinstance(v,str) and re.fullmatch(r'(?:[a-f0-9]{64}|sha256:[a-f0-9]{64}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})',v) else clean(v)) for k,v in list(value.items())[:100] if not re.search(r'password|secret|token|authorization|cookie|private.?key|credential|api.?key|access.?key|dsn',str(k),re.I)}
  if isinstance(value,list):return [clean(v) for v in value[:150]]
  if isinstance(value,str):
   value=re.sub(r'-----BEGIN[^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?-----END[^-]+-----','[redacted]',value,flags=re.S)
@@ -194,7 +194,8 @@ def metadata_file(filename):
   return {'available':True,'ownerUid':s.st_uid,'mode':oct(stat.S_IMODE(s.st_mode)),'bytes':s.st_size}
  except OSError:return {'available':False}
 def package_rows():
- return sorted((line.split('\t',1) for line in command(['dpkg-query','-W','-f=${binary:Package}\t${Version}\n']).splitlines() if '\t' in line),key=lambda row:row[0])
+ rows=(line.split('\t') for line in command(['dpkg-query','-W','-f=${binary:Package}\t${Version}\t${db:Status-Status}\n']).splitlines())
+ return sorted((row[:2] for row in rows if len(row)==3 and row[2]=='installed'),key=lambda row:row[0])
 def official_apt_candidate(package,allow_vendor=False):
  if not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,100}(?::[a-z0-9-]+)?',package):raise Rejected('Invalid exact package name')
  if package in command(['apt-mark','showhold']).splitlines():raise Rejected('Held package cannot be changed')
