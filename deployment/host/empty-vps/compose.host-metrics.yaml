@@ -1,0 +1,59 @@
+# Optional empty-VPS host metrics. Load after the normal empty-VPS overlays only
+# after prepare-host-metrics-rootfs.sh has checked the empty same-filesystem bind.
+# The raw-host-metrics-disabled definition in compose.yaml remains disabled by
+# default; this overlay replaces its unsafe host-root/PID/collector settings.
+services:
+  node-exporter:
+    profiles: !reset []
+    pid: !reset null
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    command: !override
+      - --path.procfs=/proc-host
+      - --path.rootfs=/host
+      - --collector.disable-defaults
+      - --collector.cpu
+      - --collector.meminfo
+      - --collector.filesystem
+      - --collector.filesystem.mount-points-include=^/$
+      - --web.listen-address=:9100
+    # This tiny private tmpfs holds only the three bind targets. Docker's
+    # ordinary read-only container /sys supplies CPU topology; no host /sys
+    # path is bound into this service.
+    tmpfs:
+      - /proc-host:rw,noexec,nosuid,nodev,size=16k,mode=0755
+    volumes: !override
+      - type: bind
+        source: /proc/stat
+        target: /proc-host/stat
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/meminfo
+        target: /proc-host/meminfo
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/1/mountinfo
+        target: /proc-host/1/mountinfo
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /var/lib/platform-host-metrics/rootfs
+        target: /host
+        read_only: true
+        bind: {create_host_path: false}
+    networks: !override
+      - platform_observability
+    ports: !reset []
+
+  prometheus:
+    volumes: !override
+      - enterprise_prometheus_data:/prometheus
+      - ./deployment/host/empty-vps/prometheus.host-metrics.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
