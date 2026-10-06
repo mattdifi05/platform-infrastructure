@@ -10,7 +10,7 @@ REPO=pathlib.Path('/srv/platform-infrastructure/first-install')
 KEY=CONFIG/'encryption-key'
 SIGNING=CONFIG/'manifest-key'
 PROFILE=CONFIG/'profile.json'
-ALLOW_PROJECTS={'platform_infra_vps','platform_server_ai'}
+ALLOW_PROJECTS={'platform_infra_vps','platform_server_ai','scriptastudents_vps'}
 HOST='platform-server-public'
 MAX_BYTES=70_000_000_000
 
@@ -21,9 +21,25 @@ BASE_CONTAINER_NAMES=frozenset('/'+name for name in (
  'gf-searxng','gf-server-ai-controller','gf-server-ai-observer'))
 NODE_EXPORTER_BINDS={'/proc/stat':'/proc-host/stat','/proc/meminfo':'/proc-host/meminfo','/proc/1/mountinfo':'/proc-host/1/mountinfo','/var/lib/platform-host-metrics/rootfs':'/host'}
 
-def reviewed_membership(rows):
- names={r['Name'] for r in rows}
- if len(names)!=len(rows) or names not in (BASE_CONTAINER_NAMES,BASE_CONTAINER_NAMES|{'/enterprise-node-exporter'}):raise RuntimeError('Runtime differs from reviewed empty-VPS membership')
+SCRIPTA_NAMES=frozenset('/'+name for name in ('node-scriptastudents','students-beta-redis','scriptastudents-ingress','scripta-postgres'))
+SCRIPTA_ROOT='/srv/platform-infrastructure/scripta-students'
+
+def reviewed_membership(rows,scripta=None):
+ names={r['Name'] for r in rows};extra=frozenset()
+ if scripta is not None:
+  if not isinstance(scripta,dict) or scripta.get('schema')!='scripta-reviewed-runtime/v1' or scripta.get('project')!='scriptastudents_vps':raise RuntimeError('Invalid reviewed application extension')
+  expected=scripta.get('containers')
+  if not isinstance(expected,list) or len(expected)!=4 or {r.get('name') for r in expected}!=SCRIPTA_NAMES:raise RuntimeError('Application membership is not the exact reviewed set')
+  if not re.fullmatch('[a-f0-9]{64}',scripta.get('previousProfileSha256','')):raise RuntimeError('Missing preceding profile identity')
+  by_name={r['Name']:r for r in rows}
+  for item in expected:
+   actual=by_name.get(item['name']);labels=actual['Config'].get('Labels') or {} if actual else {}
+   if not actual or {'name':actual['Name'],'id':actual['Id'],'image':actual['Image'],'mounts':actual['Mounts'],'labels':labels}!=item:raise RuntimeError('Application Docker identity differs from reviewed receipt')
+   if labels.get('com.docker.compose.project')!='scriptastudents_vps':raise RuntimeError('Application project identity differs')
+  if scripta.get('persistentRoots')!=[SCRIPTA_ROOT+'/data/legacy',SCRIPTA_ROOT+'/data/redis'] or scripta.get('postgresData')!=SCRIPTA_ROOT+'/data/postgres':raise RuntimeError('Application persistent boundary differs')
+  extra=SCRIPTA_NAMES
+ core=names-extra
+ if len(names)!=len(rows) or core not in (BASE_CONTAINER_NAMES,BASE_CONTAINER_NAMES|{'/enterprise-node-exporter'}):raise RuntimeError('Runtime differs from reviewed core plus finite application membership')
  if '/enterprise-node-exporter' not in names:return
  node=next(r for r in rows if r['Name']=='/enterprise-node-exporter');labels=node['Config'].get('Labels') or {}
  if labels.get('com.docker.compose.project')!='platform_infra_vps' or labels.get('com.docker.compose.service')!='node-exporter':raise RuntimeError('Unexpected metrics service identity')
@@ -99,7 +115,7 @@ def inspect(enrolled=None):
 def pins(rows):return [{'name':r['Name'],'id':r['Id'],'image':r['Image'],'mounts':r['Mounts']} for r in rows]
 def profile():
  private(CONFIG,True);private(PROFILE);private(KEY);private(SIGNING)
- p=json.loads(PROFILE.read_text());rows=inspect(p.get('pins',[]));reviewed_membership(rows)
+ p=json.loads(PROFILE.read_text());rows=inspect(p.get('pins',[]));reviewed_membership(rows,p.get('scriptaRuntime'))
  if p.get('hostname')!=HOST or p.get('machineId')!=sha('/etc/machine-id') or p.get('pins')!=pins(rows):raise RuntimeError('Actual host/container identity differs from enrolled profile')
  if p.get('generation')!=1 or p.get('previousAdmissionSha256')!='0'*64:raise RuntimeError('Unexpected VPS genesis profile')
  # Fresh authority signature uses OpenSSL Ed25519, as the native admission does.
@@ -141,6 +157,67 @@ def database_container(rows,volume):
  matches=[r['Name'].lstrip('/') for r in rows if any(m['Type']=='volume' and m.get('Name')==volume for m in r['Mounts'])]
  if len(matches)!=1:raise RuntimeError('Database volume must have one enrolled owner')
  return matches[0]
+
+def wait_scripta_sql():
+ # docker pause has stopped the only application writer. Drain queries which
+ # reached PostgreSQL before that pause before fencing the matching Redis state.
+ deadline=time.monotonic()+5;attempts=0
+ while time.monotonic()<deadline:
+  attempts+=1
+  try:
+   active=run(['docker','exec','scripta-postgres','psql','-U','postgres','-Atc',"SELECT count(*) FROM pg_stat_activity WHERE application_name='scriptastudents' AND state='active'"],timeout=min(1,deadline-time.monotonic())).decode('ascii').strip()
+  except (subprocess.TimeoutExpired,OSError,UnicodeError):raise RuntimeError('Application SQL quiescence could not be verified') from None
+  if not re.fullmatch('0|[1-9][0-9]*',active):raise RuntimeError('Application SQL quiescence returned an invalid count')
+  if active=='0':return attempts
+  time.sleep(min(.1,max(0,deadline-time.monotonic())))
+ raise RuntimeError('Application SQL did not quiesce within the bounded pause')
+
+def scripta_redis_durability(ident,operation):
+ if not re.fullmatch('[a-f0-9]{64}',ident) or not re.fullmatch('vps-[0-9]{8}t[0-9]{6}z-[a-f0-9]{12}',operation):raise RuntimeError('Invalid application durability fence identity')
+ # NX prevents touching a colliding key; DEL in the same tiny script leaves no
+ # user-visible key, even on command failure. TTL bounds an interrupted SET.
+ barrier='platform-backup-barrier:'+operation
+ script="if redis.call('SET',KEYS[1],'1','NX','PX',10000) then return redis.call('DEL',KEYS[1]) else return 0 end"
+ # redis-cli renders INFO raw even with --json; returning it through EVAL
+ # preserves one JSON string and the same authenticated connection.
+ info="return redis.call('INFO','persistence')"
+ commands=('EVAL '+json.dumps(script)+' 1 '+barrier+'\nWAITAOF 1 0 2000\nEVAL '+json.dumps(info)+' 0\n').encode()
+ # One redis-cli process is one authenticated connection: WAITAOF must observe
+ # our own preceding write. Never pass a plaintext password through host argv.
+ shell='set -eu; set +x; export REDISCLI_AUTH="$(cat /run/secrets/redis-password)"; test -n "$REDISCLI_AUTH"; exec redis-cli --json -2 --show-pushes no --tls --cacert /run/tls/ca.crt -h students-beta-redis --sni students-beta-redis -p 6379'
+ try:
+  reply=subprocess.run(['docker','exec','-i',ident,'sh','-c',shell],input=commands,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
+ except (subprocess.TimeoutExpired,OSError):raise RuntimeError('Application Redis durability fence timed out or was unavailable') from None
+ # Raw output can contain Redis errors or credentials. Never propagate it.
+ if reply.returncode or len(reply.stdout)>65536:raise RuntimeError('Application Redis durability fence failed')
+ try:
+  lines=reply.stdout.decode('utf-8').splitlines()
+  if len(lines)!=3:raise ValueError()
+  deleted,ack,persistence=[json.loads(line) for line in lines]
+  if type(deleted) is not int or deleted!=1 or not isinstance(ack,list) or len(ack)!=2 or any(type(x) is not int for x in ack) or ack!=[1,0] or not isinstance(persistence,str):raise ValueError()
+  fields={}
+  for line in persistence.splitlines():
+   if not line or line.startswith('#'):continue
+   key,separator,value=line.partition(':')
+   if not separator or key in fields:raise ValueError()
+   fields[key]=value
+  if fields.get('aof_enabled')!='1':raise ValueError()
+  receipt={}
+  for key in ('aof_buffer_length','aof_pending_bio_fsync'):
+   if key in fields:
+    if fields[key]!='0':raise ValueError()
+    receipt[key]=0
+  if 'aof_last_write_status' in fields and fields['aof_last_write_status']!='ok':raise ValueError()
+ except (UnicodeError,ValueError,TypeError):raise RuntimeError('Application Redis did not acknowledge a clean local AOF fence') from None
+ return {'schema':'scripta-redis-durability/v1','operation':operation,'containerId':ident,'method':'WAITAOF','localAcknowledgements':ack[0],'replicaAcknowledgements':ack[1],'barrierDeleted':True,'persistence':receipt,'verifiedAt':now()}
+
+def prepare_scripta_redis_pause(rows,paused,row,operation,runtime):
+ writer=next((r for r in rows if r['Name']=='/node-scriptastudents'),None)
+ if not writer or not writer['State'].get('Running') or writer['Id'] not in paused or row['Name']!='/students-beta-redis':raise RuntimeError('Application writer must be paused before its Redis durability fence')
+ attempts=wait_scripta_sql()
+ receipt=scripta_redis_durability(row['Id'],operation)
+ receipt.update(writerContainerId=writer['Id'],sqlQuiescenceAttempts=attempts)
+ save(runtime/'scripta-redis-durability.json',receipt)
 
 def capture():
  settle_restore_journal()
@@ -198,6 +275,7 @@ def capture():
   save(runtime/'database-file-metadata.json',file_metadata)
   if p.get('pauseAuthorized') is not True:raise RuntimeError('Consistent filesystem capture requires explicit infrastructure pause authorization')
   pause_names={'gf-rustfs','enterprise-nats','enterprise-redis','enterprise-grafana','enterprise-prometheus','enterprise-loki','enterprise-alertmanager'}
+  if p.get('scriptaRuntime'):pause_names.update({'node-scriptastudents','students-beta-redis'})
   # Journal lets ExecStopPost recover only containers paused by this operation.
   save(WORK/'paused.json',{'containers':[],'operation':job})
   try:
@@ -206,9 +284,32 @@ def capture():
    for r in rows:
     if r['Name'].lstrip('/') not in pause_names or not r['State'].get('Running'):continue
     if r['State'].get('Paused'):raise RuntimeError('Container already paused by another operation')
+    if p.get('scriptaRuntime') and r['Name']=='/students-beta-redis':prepare_scripta_redis_pause(rows,paused,r,job,runtime)
     paused.append(r['Id']);save(WORK/'paused.json',{'containers':paused,'operation':job})
     run(['docker','pause',r['Id']],timeout=30)
    run(['sync'])
+   if p.get('scriptaRuntime'):
+    app_pg='scripta-postgres'
+    # The sole application writer is paused. Let already-submitted SQL settle
+    # before comparing the dump against live count/ownership semantics.
+    for attempt in range(50):
+     active=run(['docker','exec',app_pg,'psql','-U','postgres','-Atc',"SELECT count(*) FROM pg_stat_activity WHERE application_name='scriptastudents' AND state='active'"]).decode().strip()
+     if active=='0':break
+     time.sleep(.1)
+    else:raise RuntimeError('Application SQL did not quiesce within the bounded pause')
+    run(['docker','exec',app_pg,'pg_dumpall','-U','postgres'],timeout=25,output=(runtime/'scripta-postgres-all.sql').open('wb'))
+    with (runtime/'scripta-postgres-all.sql').open('rb') as stream:
+     stream.seek(max(0,(runtime/'scripta-postgres-all.sql').stat().st_size-8192))
+     if b'PostgreSQL database cluster dump complete' not in stream.read():raise RuntimeError('Application PostgreSQL export lacks completion trailer')
+    save(runtime/'scripta-database-semantics.json',recovery.postgres_semantic_inventory(app_pg))
+    app_paths={};app_metadata={}
+    for setting,name in [('hba_file','pg_hba.conf'),('ident_file','pg_ident.conf'),('config_file','postgresql.conf'),('data_directory','postgresql.auto.conf')]:
+     source=run(['docker','exec',app_pg,'psql','-U','postgres','-Atc','SHOW '+setting]).decode().strip()
+     if not source.startswith('/') or '\n' in source or '..' in pathlib.PurePosixPath(source).parts:raise RuntimeError('Unexpected application PostgreSQL config path')
+     if setting=='data_directory':source+='/postgresql.auto.conf'
+     app_paths[name]=source;app_metadata[name]=capture_file_metadata(app_pg,source)
+     run(['docker','cp',app_pg+':'+source,str(runtime/('scripta-'+name))])
+    save(runtime/'scripta-postgres-live-config-paths.json',app_paths);save(runtime/'scripta-postgres-file-metadata.json',app_metadata)
    for name,source in sorted(volumes.items()):
     if not re.fullmatch('[a-zA-Z0-9_-]+',name) or not source.startswith('/var/lib/docker/volumes/') or not source.endswith('/_data'):raise RuntimeError('Unexpected persistent volume boundary')
     target=art/(name+'.tar')
@@ -217,6 +318,17 @@ def capture():
      with tarfile.open(target,'w:') as t:t.add(logical,arcname='logical/'+logical.name)
     else:archive(source,target,'data')
     add(target,'volume-'+name.replace('_','-'))
+   if p.get('scriptaRuntime'):
+    # The Redis/legacy bind snapshot is captured while its actual writers pause.
+    target=art/'scriptastudents-persistent.tar'
+    with tarfile.open(target,'w:',dereference=False) as t:
+     def checked_app(info):
+      if not(info.isfile() or info.isdir() or info.issym() or info.islnk()):raise RuntimeError('Unsupported application state object')
+      return info
+     for source in p['scriptaRuntime']['persistentRoots']:
+      if pathlib.Path(source).is_symlink() or not pathlib.Path(source).is_dir():raise RuntimeError('Application state root is not a regular directory')
+      t.add(source,arcname='host'+source,filter=checked_app)
+    add(target,'scriptastudents-persistent')
    signal.alarm(0)
    for ident in reversed(paused):run(['docker','unpause',ident],timeout=30)
    paused.clear();(WORK/'paused.json').unlink(missing_ok=True)
@@ -231,6 +343,7 @@ def capture():
     def filter_host(info):
      if any('.platform-restore-' in part for part in pathlib.PurePosixPath(info.name).parts):return None
      if info.name.startswith('host/var/lib/platform-server-ai-admin/operations.sqlite'):return None
+     if p.get('scriptaRuntime') and any(info.name=='host'+root or info.name.startswith('host'+root+'/') for root in [p['scriptaRuntime']['postgresData'],*p['scriptaRuntime']['persistentRoots']]):return None
      if not(info.isfile() or info.isdir() or info.issym() or info.islnk()):return None
      return info
     for source in p['captureRoots']:t.add(source,arcname='host/'+source.lstrip('/'),filter=filter_host)
@@ -296,6 +409,7 @@ def verify_bundle(bundle):
 def enrolled_resources(p):
  names=sorted({m['Name'] for r in p['pins'] for m in r['mounts'] if m['Type']=='volume'})
  ids=['volume-'+n.replace('_','-') for n in names]+['host-config','runtime-images']
+ if p.get('scriptaRuntime'):ids+=['scriptastudents-persistent']
  return [{'id':'platform-state:'+i,'externalId':i,'kind':'platform-state','projectId':'platform','name':i} for i in ids]
 
 def publish_catalog(verified_points=None):

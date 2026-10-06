@@ -273,3 +273,56 @@ binds for `/proc/stat`, `/proc/meminfo`, `/proc/1/mountinfo`, and the empty
 regenerable; they are not captured or traversed. Recreate the empty metadata directory
 with the metrics deployment procedure for cold recovery. No procfs/sysfs/runtime
 capture root is accepted, and no host root or Docker socket mount is admitted here.
+
+## Finite Scripta Students runtime extension
+
+The native capture and production-restore source now preserves the reviewed
+`scriptaRuntime` extension across future installations. It admits only the exact
+four application names under Compose project `scriptastudents_vps`:
+`node-scriptastudents`, `scripta-postgres`, `students-beta-redis`, and
+`scriptastudents-ingress`. Their real IDs, immutable image identities, labels and
+mounts come from the operator-reviewed signed profile; no runtime ID, credential,
+authority key or provider receipt is embedded in these helpers. Core membership,
+the thirteen named volumes, generation/predecessor and management/replay boundaries
+remain unchanged. Without that signed extension the original core-only scope
+continues to work and arbitrary extra application containers are refused.
+
+Capture pauses only the application writer and Redis under the existing bounded
+pause. It first drains submitted Scripta SQL, verifies a real local Redis AOF
+`WAITAOF` acknowledgement through one authenticated TLS connection, and records
+that receipt before freezing Redis. Mutable application binds receive their own
+consistent artifact; live PostgreSQL data directories are not copied in the later
+unpaused host archive. The dedicated application cluster uses its native logical
+dump, count/role/membership/ownership/ACL semantics and numeric config metadata.
+
+Restoration is same-host, with the exact captured image/mount topology. The
+dedicated PostgreSQL stage uses `network=none`, no published ports, the official
+entrypoint and native logical import/semantic comparison. `ssl=off` applies only
+inside that isolated staging engine; production TLS and private configuration
+remain preserved. Existing same-host authority and operation gates, protected
+journals, rollback paths and explicit production-restore confirmation are not
+relaxed. Source installation does not itself create an admission or prove capture,
+offsite download, isolated boot qualification or a production restore.
+
+The coordinator's separate qualification procedure also validates Docker 29 OCI
+index/manifest/config/layer identity chains and legacy image archives, rejects
+missing native or ambiguous unknown/attestation blobs, and records explicitly
+foreign uncaptured variants as a same-host limitation. A missing unknown/unknown
+attestation is excluded only when valid Docker annotations reference exactly one
+explicitly foreign sibling manifest in the same hash-verified parent and both
+blobs are absent. Duplicate/native/unknown/missing-subject references and any
+present-but-corrupt blob fail; omitted foreign attestations have a separate
+counter and receive no trust or cross-platform restore claim. It checks private staging capacity
+before decryption. Neither capture nor qualification fetches unreviewed image
+blobs, replaces existing keys or relabels old core-only points as containing
+Scripta. A Scripta point adds exactly one persistent resource (16 instead of 15);
+retained preceding points remain visible but cannot restore the current extended
+runtime.
+
+Local regressions cover exact finite membership, pin drift, unchanged resource
+scope, authenticated Redis durability and pause ordering, application PostgreSQL
+staging and protected management bind boundaries. These are synthetic tests;
+coordinator evidence remains required for actual host/backup completion claims.
+Use Python 3.12 or newer, as the existing restore boundary requires tarfile's
+safe `data` extraction filter. The legacy Python 3.9 bundled with macOS cannot
+execute that boundary and must not be worked around by removing the filter.

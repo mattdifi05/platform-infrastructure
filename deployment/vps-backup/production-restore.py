@@ -19,7 +19,7 @@ PRESERVE_EXACT={'/etc/machine-id','/srv/platform-infrastructure','/srv/platform-
 def within(value,root):return value==root or value.startswith(root+'/')
 def bind_scope(source):
  if source in PRESERVE_EXACT or any(within(source,x) for x in PRESERVE_PREFIXES):return False
- return within(source,'/srv/platform-infrastructure/first-install') or source in ('/etc/platform-infrastructure/server-ai/searxng','/etc/platform-infrastructure/server-ai/settings.yml')
+ return within(source,'/srv/platform-infrastructure/first-install') or within(source,b.SCRIPTA_ROOT) or source in ('/etc/platform-infrastructure/server-ai/searxng','/etc/platform-infrastructure/server-ai/settings.yml')
 
 def selected_bind_roots(rows):
  sources=sorted({m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='bind' and bind_scope(m['Source'])},key=lambda x:(len(x),x))
@@ -78,7 +78,7 @@ def compatible(snapshot,current,profile):
  if not isinstance(approvals,list) or len(approvals)>4 or any(not isinstance(edge,dict) or set(edge)!={'sourceImage','currentImage'} or any(not isinstance(value,str) or not re.fullmatch(r'sha256:[a-f0-9]{64}',value) for value in edge.values()) for edge in approvals):raise RuntimeError('Invalid signed Control Center image compatibility')
  image_pairs={(edge['sourceImage'],edge['currentImage']) for edge in approvals}
  old={r['Name']:r for r in snapshot};now={r['Name']:r for r in current}
- b.reviewed_membership(current)
+ b.reviewed_membership(current,profile.get('scriptaRuntime'))
  expected={pin['name'] for pin in profile['pins']}
  if set(old)!=set(now) or set(now)!=expected or len(old)!=len(snapshot) or len(now)!=len(current):raise RuntimeError('Restore runtime membership differs from signed profile')
  for name,r in old.items():
@@ -118,6 +118,53 @@ def semantic_inventory(pg,maria,isolated=False):
   tables=maria_sql(maria,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+db.replace("'","''")+"' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",isolated).splitlines()
   result['mariadb']['databases'][db]={t:maria_sql(maria,'SELECT count(*) FROM '+identifier(db,'mariadb')+'.'+identifier(t,'mariadb'),isolated) for t in tables}
  return result
+
+def postgres_semantic_inventory(pg):
+ result={'databases':{},'roles':pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY rolname),'[]') FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls FROM pg_roles WHERE rolname !~ '^pg_') r")}
+ result['membership']=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY role,member),'[]') FROM (SELECT roleid::regrole::text AS role,member::regrole::text AS member,admin_option FROM pg_auth_members) r")
+ result['databaseGrants']=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY datname),'[]') FROM (SELECT datname,pg_get_userbyid(datdba) AS owner,datacl::text FROM pg_database WHERE datallowconn AND NOT datistemplate) r")
+ for db in json.loads(pg_sql(pg,"SELECT coalesce(json_agg(datname ORDER BY datname),'[]') FROM pg_database WHERE datallowconn AND NOT datistemplate")):
+  tables=json.loads(pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY schemaname,tablename),'[]') FROM (SELECT schemaname,tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) r",db))
+  result['databases'][db]={r['schemaname']+'.'+r['tablename']:pg_sql(pg,'SELECT count(*) FROM '+identifier(r['schemaname'],'postgres')+'.'+identifier(r['tablename'],'postgres'),db) for r in tables}
+  result.setdefault('tableGrants',{})[db]=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY schema,name),'[]') FROM (SELECT n.nspname AS schema,c.relname AS name,pg_get_userbyid(c.relowner) AS owner,c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND c.relkind IN ('r','p','S','v','m')) r",db)
+ return result
+
+def stage_scripta_postgres(directory,runtime,rows,profile,operation,journal):
+ row=next(r for r in rows if r['Name']=='/scripta-postgres')
+ target=profile['scriptaRuntime']['postgresData'];mount=next(m for m in row['Mounts'] if m['Type']=='bind' and m['Source']==target and m['Destination']=='/var/lib/postgresql' and m['RW'])
+ stage=directory/'scripta-postgres-data';prepare_database_directory(target,stage)
+ name='platform-restore-scripta-postgres-'+operation[-12:]
+ planned={'name':name,'image':row['Image'],'source':str(stage),'destination':mount['Destination'],'id':None}
+ journal['stagingContainers'].append(planned);b.save(JOURNAL,journal)
+ args=['docker','create','--label','platform.vps.restore.operation='+operation,'--name',name,'--network','none','--restart','no','--no-healthcheck','--mount','type=bind,src='+str(stage)+',dst='+mount['Destination'],'--entrypoint','/usr/local/bin/docker-entrypoint.sh','-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_USER=postgres']
+ args += [part for e in row['Config']['Env'] if e.startswith('PGDATA=') for part in ['-e',e]]
+ args += [row['Image'],'postgres','-c','listen_addresses=','-c','ssl=off']
+ try:
+  ident=b.run(args).decode().strip()
+  if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged application PostgreSQL identity')
+  planned['id']=ident;b.save(JOURNAL,journal);b.run(['docker','start',name]);wait_database(name,'postgres')
+  filtered=directory/'scripta-postgres-restore.sql';skipped=0
+  with (runtime/'scripta-postgres-all.sql').open('rb') as src,filtered.open('xb') as dst:
+   for line in src:
+    if line.rstrip() in (b'CREATE ROLE postgres;',b'CREATE ROLE "postgres";'):skipped+=1;continue
+    dst.write(line)
+  if skipped!=1:raise RuntimeError('Unexpected application PostgreSQL bootstrap role declaration')
+  pipe_file(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'],filtered)
+  expected=json.loads((runtime/'scripta-database-semantics.json').read_text());actual=postgres_semantic_inventory(name)
+  if actual.get('databaseGrants')!=expected.get('databaseGrants'):
+   restore_database_acl(name,expected,actual);actual=postgres_semantic_inventory(name)
+   if database_acl_tuples(name,json.loads(actual['databaseGrants']))==database_acl_tuples(name,json.loads(expected['databaseGrants'])):actual['databaseGrants']=expected['databaseGrants']
+  if actual!=expected:raise RuntimeError('Isolated application PostgreSQL semantics differ from captured state')
+  b.run(['docker','stop','--time','60',name],timeout=90)
+  mapping=json.loads((runtime/'scripta-postgres-live-config-paths.json').read_text());metadata=json.loads((runtime/'scripta-postgres-file-metadata.json').read_text())
+  for file,path in mapping.items():
+   if not within(path,mount['Destination']):continue
+   dest=stage/pathlib.PurePosixPath(path).relative_to(mount['Destination']);dest.parent.mkdir(parents=True,exist_ok=True)
+   if file not in metadata:raise RuntimeError('Missing application PostgreSQL configuration ownership')
+   shutil.copyfile(runtime/('scripta-'+file),dest);restore_file_metadata(dest,metadata[file])
+  return stage
+ finally:
+  if planned['id']:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=90)
 
 def sql_text(value):
  return "convert_from(decode('"+base64.b64encode(value.encode()).decode()+"','base64'),'UTF8')"
@@ -313,6 +360,7 @@ def health(rows,timeout=180):
 def boot(rows):
  active=[r for r in rows if r['State'].get('Running')]
  first=[b.database_container(rows,v) for v in DB_VOLUMES]
+ if any(r['Name']=='/scripta-postgres' for r in rows):first+=['scripta-postgres']
  if any(name not in {r['Name'].lstrip('/') for r in active} for name in first):raise RuntimeError('Database must be running before recovery')
  for name in first:b.run(['docker','start',name])
  for r in active:
@@ -368,11 +416,15 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    metadata=json.loads(b.run(['docker','volume','inspect',*sorted(volume_sources)]))
    if len(volume_sources)!=13 or any(v['Driver']!='local' or v.get('Options') for v in metadata):raise RuntimeError('Only enrolled local persistent volumes can switch')
    dbstages=stage_databases(scratch,runtime,snapshot,volume_sources,operation,journal)
+   scripta_stage=stage_scripta_postgres(scratch,runtime,snapshot,p,operation,journal) if p.get('scriptaRuntime') else None
    for name,target in sorted(volume_sources.items()):
     source=dbstages.get(name) or extract_subset(scratch/(name+'.tar'),scratch/('unpack-'+name),'data')
     items.append({'target':target,'source':str(source)})
    for target in selected_bind_roots(rows):
-    source=extract_subset(scratch/'host-config.tar',scratch/('bind-'+str(len(items))),'host'+target)
+    if p.get('scriptaRuntime') and target==p['scriptaRuntime']['postgresData']:source=scripta_stage
+    else:
+     artifact='scriptastudents-persistent.tar' if p.get('scriptaRuntime') and target in p['scriptaRuntime']['persistentRoots'] else 'host-config.tar'
+     source=extract_subset(scratch/artifact,scratch/('bind-'+str(len(items))),'host'+target)
     items.append({'target':target,'source':str(source)})
    proof={'manifestId':manifest_id,'manifestDigest':digest,'ciphertextSource':download_proof['ciphertextSource'],'freshDownloadVerified':download_proof['actualDownloadVerified'],'previousReceiptDownloadVerified':download_proof['previousReceiptDownloadVerified'],'databaseSemanticsVerified':True,'productionModified':False,'scope':'enrolled-runtime-data-and-bind-configs','preserved':'OS-network-SSH-management-authority-and-current-queue','verifiedAt':b.now()}
    if qualify_only:
@@ -406,6 +458,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    journal.update(status='stopping',productionStopped=True,selectedRunningContainers=[r['Id'] for r in desired_rows if r['State'].get('Running')],paths=items);b.save(JOURNAL,journal)
    # All clients stop before databases; cloudflared/SSH/network host plane remains up.
    dbnames={b.database_container(rows,v) for v in DB_VOLUMES}
+   if p.get('scriptaRuntime'):dbnames.add('scripta-postgres')
    for r in sorted(rows,key=lambda r:r['Name'].lstrip('/') in dbnames):
     if not r['State'].get('Running'):continue
     stopped=True;b.run(['docker','stop','--time','60',r['Id']],timeout=90)
@@ -438,9 +491,9 @@ def cleanup_staging(journal,rows):
   if {row['Id'] for row in stages}!=set(ids) or len(stages)!=len(ids):raise RuntimeError('Incomplete staged identity lookup')
   for row in stages:
    name=row['Name'].lstrip('/');planned=expected.get(name)
-   if not planned or name not in {'platform-restore-'+engine+'-'+operation[-12:] for engine in DB_VOLUMES.values()}:raise RuntimeError('Unexpected staged container name')
+   if not planned or name not in {'platform-restore-'+engine+'-'+operation[-12:] for engine in DB_VOLUMES.values()}|{'platform-restore-scripta-postgres-'+operation[-12:]}:raise RuntimeError('Unexpected staged container name')
    mounts=row['Mounts'];source=pathlib.Path(planned['source'])
-   if source.parent!=scratch or source.name not in DB_VOLUMES or planned.get('id') not in (None,row['Id']) or row['Image']!=planned['image'] or row['HostConfig']['NetworkMode']!='none' or row['Config'].get('Labels',{}).get('platform.vps.restore.operation')!=operation:raise RuntimeError('Staging identity differs from journal')
+   if source.parent!=scratch or source.name not in set(DB_VOLUMES)|{'scripta-postgres-data'} or planned.get('id') not in (None,row['Id']) or row['Image']!=planned['image'] or row['HostConfig']['NetworkMode']!='none' or row['Config'].get('Labels',{}).get('platform.vps.restore.operation')!=operation:raise RuntimeError('Staging identity differs from journal')
    if not any(m['Type']=='bind' and m['Source']==str(source) and m['Destination']==planned['destination'] for m in mounts) or any(m['Type']=='bind' and m['Source']!=str(source) for m in mounts):raise RuntimeError('Unexpected staged container mount')
   b.run(['docker','rm','-f',*ids])
  allowed={m['Source'] for row in rows for m in row['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows))
