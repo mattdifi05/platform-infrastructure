@@ -81,6 +81,9 @@ test("an expansion cannot remove an application from the portal", async () => {
 
 test("all curated fresh checks execute reads and discard stale continuation guidance", async () => {
   const requests = [
+    "Controlla lo stato attuale del VPS e segnala solo problemi sostenuti da dati recenti.",
+    "Controlla servizi e container infrastrutturali effettivamente presenti.",
+    "Controlla gli esiti dei backup e le pianificazioni server-side visibili dagli strumenti.",
     "Controlla nuovamente lo stato attuale del VPS.",
     "Leggi i log recenti del servizio coinvolto e verifica la diagnosi.",
     "Verifica l’esito dell’operazione precedente senza ripeterla.",
