@@ -49,6 +49,9 @@ test("FAST and DEEP assemble the same VPS authority policy with real tools insid
   assert.match(fast.instructions, /scegliere esplicitamente il backup/);
   assert.match(fast.instructions, /cron\/timer sono server-side/);
   assert.match(fast.instructions, /getInfrastructureOperation/);
+  assert.match(fast.instructions, /autorizzazioni esplicite del proprietario pertinenti all’obiettivo corrente restano valide/);
+  assert.match(fast.instructions, /verificando bersaglio e stato prima dell’azione/);
+  assert.match(fast.instructions, /non creano nuove autorizzazioni e non estendono i permessi degli strumenti/);
   assert.doesNotMatch(deep.instructions, /readProjectFile|Fresh project evidence|schema.*migrazioni/);
   assert.ok(fast.tools.some(tool => tool.function.name === "changeInfrastructure"));
   assert.ok(!fast.tools.some(tool => tool.function.name === "readProjectFile"));
