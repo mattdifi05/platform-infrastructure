@@ -211,7 +211,7 @@ export function renderServerAi() {
       </aside>
       <div class="server-ai-main">
         <div class="server-ai-chat-head"><button type="button" class="server-ai-drawer-open" data-ai-open-conversations aria-label="Apri conversazioni" aria-controls="server-ai-conversations" aria-expanded="false">${aiIcon('sidebar')}</button><strong data-ai-conversation-title>Nuova chat</strong></div>
-        <section class="server-ai-gate" data-ai-gate aria-live="polite"><span class="server-ai-gate-mark" aria-hidden="true">${aiIcon('power')}</span><div><h2 data-ai-gate-title>Verifica Server AI…</h2><p data-ai-gate-message>Recupero dello stato della macchina.</p></div><ul data-ai-missing hidden></ul><div class="server-ai-gate-actions"><button type="button" data-ai-enable hidden>Attiva Server AI</button></div></section>
+        <section class="server-ai-gate" data-ai-gate aria-live="polite"><span class="server-ai-gate-mark" aria-hidden="true">${aiIcon('power')}</span><div><h2 data-ai-gate-title>Verifica Server AI…</h2><p data-ai-gate-message>Recupero dello stato della macchina.</p><p class="server-ai-action-error" data-ai-action-error role="alert" hidden></p></div><ul data-ai-missing hidden></ul><div class="server-ai-gate-actions"><button type="button" data-ai-enable hidden>Attiva Server AI</button></div></section>
         <div class="server-ai-chat-area" data-ai-chat-area hidden>
             <button type="button" class="server-ai-load-older" data-ai-load-older hidden>Messaggi precedenti</button>
           <div class="server-ai-chat" data-ai-transcript role="log" aria-label="Conversazione" aria-live="polite" aria-relevant="additions text" tabindex="0">

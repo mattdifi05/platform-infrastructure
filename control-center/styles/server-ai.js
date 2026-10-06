@@ -143,8 +143,15 @@
     } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
   }
 
-  function showMachineActionError(instance, message) {
+  function renderMachineActionError(instance) {
+    instance.actionErrorNode.textContent = String(instance.actionError || "").slice(0, 320);
+    instance.actionErrorNode.hidden = !instance.actionError;
+  }
+
+  function showMachineActionError(instance, message, action) {
     instance.actionError = message;
+    instance.actionErrorAction = action || "";
+    renderMachineActionError(instance);
     setState(instance, message, true);
   }
 
@@ -384,6 +391,7 @@
     instance.gateTitle.textContent = stateTitle(instance.machineState);
     var gateMessage = String(status && status.label || (instance.machineState === "disabled" ? "Attiva Server AI quando questa macchina è pronta." : "Verifica lo stato della macchina."));
     if (!instance.canConfigure) gateMessage += " L’attivazione è riservata ai ruoli owner o admin.";
+    if (instance.pendingAction) gateMessage = instance.pendingAction === "enable" ? "Invio della richiesta di attivazione…" : "Invio della richiesta di disattivazione…";
     instance.gateMessage.textContent = gateMessage.slice(0, 320);
     var missing = missingRequirements(status);
     instance.missing.replaceChildren();
@@ -398,6 +406,7 @@
     instance.disable.disabled = !canDisable;
     instance.chatArea.hidden = !instance.historyAvailable && instance.machineState !== "active" && instance.machineState !== "degraded";
     instance.gate.hidden = instance.machineState === "active";
+    renderMachineActionError(instance);
     instance.root.classList.toggle("server-ai-transient", transient);
     refreshModeAvailability(instance);
     refreshQuickReplyAvailability(instance);
@@ -1898,6 +1907,12 @@
       var status = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(String(status.message || status.error || "Stato non disponibile."));
       if (active !== instance || machineId !== instance.selectedMachineId) return null;
+      var actualState = machineState(status);
+      if ((instance.actionErrorAction === "enable" && status.enabled === true && (actualState === "active" || actualState === "degraded")) ||
+          (instance.actionErrorAction === "disable" && status.enabled === false && actualState === "disabled")) {
+        instance.actionError = "";
+        instance.actionErrorAction = "";
+      }
       instance.lastMachineStatus = status;
       renderMachine(instance, status || {});
       instance.models = Array.isArray(status.models) ? status.models : null;
@@ -1957,6 +1972,9 @@
     abortConversationRequests(instance);
     instance.conversationId = "";
     instance.actionError = "";
+    instance.actionErrorAction = "";
+    instance.pendingAction = "";
+    renderMachineActionError(instance);
     instance.queueBusy = false;
     instance.queueItems = [];
     instance.queueErrors = [];
@@ -2032,22 +2050,25 @@
   }
 
   async function requestMachineAction(instance, action) {
-    if (!instance.selectedMachineId) { showMachineActionError(instance, "Seleziona una macchina prima di continuare."); return; }
+    if (!instance.selectedMachineId) { showMachineActionError(instance, "Seleziona una macchina prima di continuare.", action); return; }
     if (instance.actionBusy) return;
-    if (!instance.canConfigure) { showMachineActionError(instance, "L’attivazione è riservata ai ruoli owner o admin."); return; }
-    if (action === "enable" && instance.machineState !== "disabled") { showMachineActionError(instance, "La macchina deve essere nello stato disattivato prima di poterla attivare."); return; }
-    if (action === "enable" && !instance.missing.hidden) { showMachineActionError(instance, "Completa i prerequisiti elencati prima di attivare Server AI."); return; }
-    if (action === "disable" && !instance.enabled) { showMachineActionError(instance, "La macchina risulta già disattivata."); return; }
+    if (!instance.canConfigure) { showMachineActionError(instance, "L’attivazione è riservata ai ruoli owner o admin.", action); return; }
+    if (action === "enable" && instance.machineState !== "disabled") { showMachineActionError(instance, "La macchina deve essere nello stato disattivato prima di poterla attivare.", action); return; }
+    if (action === "enable" && !instance.missing.hidden) { showMachineActionError(instance, "Completa i prerequisiti elencati prima di attivare Server AI.", action); return; }
+    if (action === "disable" && !instance.enabled) { showMachineActionError(instance, "La macchina risulta già disattivata.", action); return; }
+    var actionMachineId = instance.selectedMachineId;
     instance.actionError = "";
+    instance.actionErrorAction = "";
+    renderMachineActionError(instance);
     setState(instance, "");
     instance.actionBusy = true;
+    instance.pendingAction = action;
     if (action === "disable") {
       if (instance.controller) instance.controller.abort();
       instance.controller = null;
       setBusy(instance, false);
     }
-    renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: action === "enable" ? "starting" : "stopping", enabled: instance.enabled, canConfigure: instance.canConfigure, label: action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina." });
-    instance.transientUntil = Date.now() + 60_000;
+    renderMachine(instance, instance.lastMachineStatus || { machineLabel: instance.selectedMachineLabel, state: instance.machineState, enabled: instance.enabled, canConfigure: instance.canConfigure });
     var actionError = "";
     try {
       var headers = new Headers({ Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "platform-control-center" });
@@ -2055,22 +2076,35 @@
       if (csrf) headers.set("X-CSRF-Token", csrf);
       var response = await fetch(endpoint(instance, "/" + action), { method: "POST", credentials: "same-origin", headers: headers, body: "{}" });
       var payload = await response.json().catch(function () { return {}; });
+      if (actionMachineId !== instance.selectedMachineId) return;
       if (response.status !== 202) {
         actionError = String(payload.message || payload.error || "Operazione non avviata.");
         if (payload.reauthUrl) actionError += " Effettua di nuovo l’accesso con passkey.";
         instance.actionError = actionError;
+        instance.actionErrorAction = action;
       }
-      if (!actionError) setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
+      if (!actionError) {
+        instance.pendingAction = "";
+        instance.transientUntil = Date.now() + 60_000;
+        renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: action === "enable" ? "starting" : "stopping", enabled: instance.enabled, canConfigure: instance.canConfigure, label: action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina." });
+        setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
+      }
     } catch (error) {
+      if (actionMachineId !== instance.selectedMachineId) return;
       actionError = error && error.message ? error.message : "Operazione non avviata.";
       instance.actionError = actionError;
+      instance.actionErrorAction = action;
     } finally {
+      instance.pendingAction = "";
       instance.actionBusy = false;
       if (instance.root.isConnected) await refreshStatus(instance);
       // The status refresh clears its own transient state. Restore a failed
       // action afterwards so auth, CSRF, and server-side rejection details
       // remain visible instead of making the button appear to do nothing.
-      if (actionError && instance.root.isConnected) setState(instance, actionError, true);
+      if (actionError && instance.root.isConnected && actionMachineId === instance.selectedMachineId) {
+        renderMachineActionError(instance);
+        setState(instance, actionError, true);
+      }
     }
   }
 
@@ -2115,11 +2149,11 @@
     var root = document.querySelector("[data-server-ai]");
     if (!root) return;
     active = {
-      root: root, mode: "auto", models: null, machines: [], conversations: [], queueItems: [], queueBusy: false, conversationId: "", nextBefore: null, nextConversationCursor: null, contextEpoch: 0, selectedMachineId: "", selectedMachineLabel: "", machineState: "unavailable", generationAvailable: false, historyAvailable: false, lastMachineStatus: null, transientUntil: 0, busy: false, actionBusy: false, enabled: false, canConfigure: false, controller: null, statusController: null, machineController: new AbortController(), conversationListController: null, conversationDetailController: null, conversationCreateController: null, generationPollController: null, attachmentUploadController: null, attachmentUpload: null, pollTimer: null, generationPollTimer: null, activeAssistantId: null, cancelBusy: false, nextDelivery: null, attachmentCapabilities: null, pendingAttachments: [], attachmentUploading: false, autoScroll: true, programmaticScroll: false, pointerScrolling: false, userScrollUntil: 0, scrollFrame: null, scrollResetFrame: null, pointerEndHandler: null, pointerMoveHandler: null, drawerOpener: null, resizeHandler: null,
+      root: root, mode: "auto", models: null, machines: [], conversations: [], queueItems: [], queueBusy: false, conversationId: "", nextBefore: null, nextConversationCursor: null, contextEpoch: 0, selectedMachineId: "", selectedMachineLabel: "", machineState: "unavailable", generationAvailable: false, historyAvailable: false, lastMachineStatus: null, transientUntil: 0, busy: false, actionBusy: false, actionError: "", actionErrorAction: "", pendingAction: "", enabled: false, canConfigure: false, controller: null, statusController: null, machineController: new AbortController(), conversationListController: null, conversationDetailController: null, conversationCreateController: null, attachmentUploadController: null, attachmentUpload: null, pollTimer: null, generationPollTimer: null, activeAssistantId: null, cancelBusy: false, nextDelivery: null, attachmentCapabilities: null, pendingAttachments: [], attachmentUploading: false, autoScroll: true, programmaticScroll: false, pointerScrolling: false, userScrollUntil: 0, scrollFrame: null, scrollResetFrame: null, pointerEndHandler: null, pointerMoveHandler: null, drawerOpener: null, resizeHandler: null,
       transcript: root.querySelector("[data-ai-transcript]"), prompt: root.querySelector("[data-ai-prompt]"), send: root.querySelector("[data-ai-send]"), sendImmediate: root.querySelector("[data-ai-send-immediate]"), stop: root.querySelector("[data-ai-stop]"), jumpBottom: root.querySelector("[data-ai-jump-bottom]"), queue: root.querySelector("[data-ai-queue]"),
       state: root.querySelector("[data-ai-state]"), health: root.querySelector("[data-ai-health]"), attachments: root.querySelector("[data-ai-attachments]"), attach: root.querySelector("[data-ai-attach]"), attachmentInput: root.querySelector("[data-ai-attachment-input]"),
       machineLabel: root.querySelector("[data-ai-machine-label]"), machineName: root.querySelector("[data-ai-machine-name]"), machinePicker: root.querySelector("[data-ai-machine-picker]"), machineSelect: root.querySelector("[data-ai-machine-select]"),
-      gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
+      gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), actionErrorNode: root.querySelector("[data-ai-action-error]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
     };
     var instance = active;
     initializeModeControl(instance);

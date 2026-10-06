@@ -226,6 +226,7 @@ button.server-ai-drawer-close, button.server-ai-drawer-open { display: none; }
 .server-ai-gate-mark { margin-bottom: 4px; }
 .server-ai-gate h2 { font-size: 24px; font-weight: 590; letter-spacing: -.035em; }
 .server-ai-gate p { color: var(--ai-muted); font-size: 14px; line-height: 1.65; margin-top: 12px; }
+.server-ai-gate .server-ai-action-error { background: #fff2f0; border: 1px solid #ebaca8; border-radius: 8px; color: #a12b22; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; padding: 10px 12px; }
 .server-ai-gate ul { background: var(--ai-soft); border-radius: 8px; color: #657089; font-size: 12px; line-height: 1.8; margin: 0; padding: 14px 20px 14px 30px; text-align: left; }
 .server-ai-transient .server-ai-gate-mark { animation: server-ai-pulse 1.4s ease infinite; }
 .server-ai[data-ai-machine-state="degraded"] .server-ai-gate { align-items: flex-start; background: #fffbf2; border: 1px solid #f2e7c9; border-radius: 8px; flex: 0; gap: 0; margin: 0 28px 5px; max-width: none; padding: 10px 14px; text-align: left; }
