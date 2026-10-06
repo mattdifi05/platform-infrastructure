@@ -9,7 +9,7 @@ const definition = name => ({ type: "function", function: { name, description: n
 async function run(message, { attemptedTool = null } = {}) {
   const calls = [], rounds = [], events = [];
   const service = createAIService({ registry: {
-    definitions: () => ["readInfrastructure", "changeInfrastructure", "getInfrastructureOperation"].map(definition),
+    definitions: () => ["readInfrastructure", "changeInfrastructure", "removePortalApplication", "getInfrastructureOperation"].map(definition),
     execute: async name => { calls.push(name); return { status: "completed" }; },
   } });
   service.accepting = true;
@@ -67,6 +67,13 @@ test("a new explicit operation still receives the mutation tool", async () => {
 
 test("a provider mutation call during a summary is rejected before registry execution", async () => {
   const result = await run("Riassumi", { attemptedTool: "changeInfrastructure" });
+  assert.deepEqual(result.calls, []);
+  assert.equal(result.events.at(-1).type, "failed");
+  assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED");
+});
+
+test("an expansion cannot remove an application from the portal", async () => {
+  const result = await run("Approfondisci", { attemptedTool: "removePortalApplication" });
   assert.deepEqual(result.calls, []);
   assert.equal(result.events.at(-1).type, "failed");
   assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED");
