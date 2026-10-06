@@ -12,7 +12,7 @@ def main():
  (b.WORK/'queue').mkdir(mode=0o700);os.chown(b.WORK/'queue',1000,1000)
  (b.WORK/'operations').mkdir(mode=0o700)
  rows=b.inspect()
- if len(rows)!=21:raise RuntimeError('Expected reviewed 21 infrastructure containers')
+ b.reviewed_membership(rows)
  vols={m['Name'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}
  if len(vols)!=13:raise RuntimeError('Expected reviewed 13 persistent volumes')
  for p in (b.KEY,b.SIGNING):

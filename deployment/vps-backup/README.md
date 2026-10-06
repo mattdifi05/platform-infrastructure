@@ -189,7 +189,7 @@ The encrypted OS capsule is for separately operated offline Hostinger recovery;
 this operation does not restore a complete VM or change images automatically.
 The portal's users/passkeys and application data return to the selected point.
 Successful recovery adopts the selected point’s running/stopped service states;
-rollback restores the pre-operation service states. All 21 enrolled identities remain
+rollback restores the pre-operation service states. All signed enrolled identities remain
 covered even when only 19 are running. Capture reports both counts explicitly.
 
 Before downtime, the selected remote receipt, ciphertext, manifest and every
@@ -253,3 +253,15 @@ contains the shared FTP quota policy. Existing signed profiles require an explic
 root-approved update and a new complete point to include this directory; changing
 the enrollment template does not retroactively complete an earlier backup.
 Manual runtime restoration preserves the current FTP policy and management plane.
+
+
+The reviewed base membership remains exactly 21 named infrastructure services. The
+only optional addition is `enterprise-node-exporter` (22 total), explicitly enrolled
+and signed after deployment. Restore compares both snapshot and actual membership
+to the signed profile; it cannot apply a 21-service point to a 22-service profile.
+The persistent scope remains 13 volumes. The metrics service permits only read-only
+binds for `/proc/stat`, `/proc/meminfo`, `/proc/1/mountinfo`, and the empty
+`/var/lib/platform-host-metrics/rootfs` metadata directory. Inventory labels these
+regenerable; they are not captured or traversed. Recreate the empty metadata directory
+with the metrics deployment procedure for cold recovery. No procfs/sysfs/runtime
+capture root is accepted, and no host root or Docker socket mount is admitted here.

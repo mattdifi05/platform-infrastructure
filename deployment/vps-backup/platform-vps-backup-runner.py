@@ -14,6 +14,22 @@ ALLOW_PROJECTS={'platform_infra_vps','platform_server_ai'}
 HOST='platform-server-public'
 MAX_BYTES=70_000_000_000
 
+BASE_CONTAINER_NAMES=frozenset('/'+name for name in (
+ 'enterprise-postgres','enterprise-redis','enterprise-control-center','enterprise-traefik','enterprise-waf','platform-waf-loopback-proxy',
+ 'mariadb','enterprise-nats','enterprise-keycloak','enterprise-project-router','gf-rustfs','gf-minio-gateway',
+ 'enterprise-platform-alert-dispatcher','enterprise-alertmanager','enterprise-prometheus','enterprise-grafana','enterprise-loki','enterprise-promtail',
+ 'gf-searxng','gf-server-ai-controller','gf-server-ai-observer'))
+NODE_EXPORTER_BINDS={'/proc/stat':'/proc-host/stat','/proc/meminfo':'/proc-host/meminfo','/proc/1/mountinfo':'/proc-host/1/mountinfo','/var/lib/platform-host-metrics/rootfs':'/host'}
+
+def reviewed_membership(rows):
+ names={r['Name'] for r in rows}
+ if len(names)!=len(rows) or names not in (BASE_CONTAINER_NAMES,BASE_CONTAINER_NAMES|{'/enterprise-node-exporter'}):raise RuntimeError('Runtime differs from reviewed empty-VPS membership')
+ if '/enterprise-node-exporter' not in names:return
+ node=next(r for r in rows if r['Name']=='/enterprise-node-exporter');labels=node['Config'].get('Labels') or {}
+ if labels.get('com.docker.compose.project')!='platform_infra_vps' or labels.get('com.docker.compose.service')!='node-exporter':raise RuntimeError('Unexpected metrics service identity')
+ mounts=node['Mounts'];binds=[m for m in mounts if m['Type']=='bind']
+ if len(binds)!=4 or {m['Source']:m['Destination'] for m in binds}!=NODE_EXPORTER_BINDS or any(m.get('RW') is not False for m in binds) or any(m['Type'] not in ('bind','tmpfs') for m in mounts):raise RuntimeError('Metrics mounts differ from reviewed regenerable scope')
+
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 def canonical(v):return json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 def sha(p):
@@ -83,7 +99,7 @@ def inspect(enrolled=None):
 def pins(rows):return [{'name':r['Name'],'id':r['Id'],'image':r['Image'],'mounts':r['Mounts']} for r in rows]
 def profile():
  private(CONFIG,True);private(PROFILE);private(KEY);private(SIGNING)
- p=json.loads(PROFILE.read_text());rows=inspect(p.get('pins',[]))
+ p=json.loads(PROFILE.read_text());rows=inspect(p.get('pins',[]));reviewed_membership(rows)
  if p.get('hostname')!=HOST or p.get('machineId')!=sha('/etc/machine-id') or p.get('pins')!=pins(rows):raise RuntimeError('Actual host/container identity differs from enrolled profile')
  if p.get('generation')!=1 or p.get('previousAdmissionSha256')!='0'*64:raise RuntimeError('Unexpected VPS genesis profile')
  # Fresh authority signature uses OpenSSL Ed25519, as the native admission does.
@@ -145,6 +161,7 @@ def capture():
  try:
   # Profile contains explicit bounded roots; never infer personal/home paths.
   for root in p['captureRoots']:
+   if any(root==x or root.startswith(x+'/') for x in ('/proc','/sys','/dev','/run','/var/run','/var/lib/platform-host-metrics')):raise RuntimeError('Kernel/runtime metadata cannot be a persistent capture root')
    if not pathlib.Path(root).exists():raise RuntimeError('Required enrolled recovery root missing')
   runtime=tmp/'runtime';runtime.mkdir(mode=0o700)
   save(runtime/'containers.json',rows) # Encrypted only: includes runtime secret values.

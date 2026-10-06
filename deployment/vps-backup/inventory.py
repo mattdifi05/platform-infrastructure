@@ -18,7 +18,7 @@ def main():
    if m['Type']=='volume':volumes[m['Name']]={'name':m['Name'],'path':m['Source'],'capture':'consistent-snapshot-required'}
    elif m['Type']=='bind':
     source=m['Source']
-    ephemeral=source.startswith('/run/') or source in ('/var/run/docker.sock','/etc/localtime','/etc/timezone')
+    ephemeral=source.startswith('/run/') or source in ('/var/run/docker.sock','/etc/localtime','/etc/timezone','/proc/stat','/proc/meminfo','/proc/1/mountinfo','/var/lib/platform-host-metrics/rootfs')
     binds[source]={'path':source,'capture':'recreate-runtime' if ephemeral else 'encrypted-host-capsule-required'}
    else:raise RuntimeError('Unclassified mount type')
   containers.append({'name':c['Name'].lstrip('/'),'containerId':c['Id'],'imageId':c['Image'],'imageReference':c['Config']['Image'],'project':labels['com.docker.compose.project'],'service':labels.get('com.docker.compose.service'),'mounts':mounts})

@@ -71,7 +71,9 @@ def restore_file_metadata(destination,metadata):
 
 def compatible(snapshot,current,profile):
  old={r['Name']:r for r in snapshot};now={r['Name']:r for r in current}
- if set(old)!=set(now) or len(old)!=21:raise RuntimeError('Restore runtime membership differs')
+ b.reviewed_membership(current)
+ expected={pin['name'] for pin in profile['pins']}
+ if set(old)!=set(now) or set(now)!=expected or len(old)!=len(snapshot) or len(now)!=len(current):raise RuntimeError('Restore runtime membership differs from signed profile')
  for name,r in old.items():
   if r['Image']!=now[name]['Image'] or r['Mounts']!=now[name]['Mounts']:raise RuntimeError('Restore requires the same enrolled images and mount topology')
   if any(r['Config'].get(k)!=now[name]['Config'].get(k) for k in ('Cmd','Entrypoint','User')):raise RuntimeError('Restore container configuration differs from selected point')

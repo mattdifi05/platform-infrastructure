@@ -149,4 +149,11 @@ class RuntimeRestoreTests(unittest.TestCase):
   self.assertEqual(len(summary),2);self.assertTrue(summary[0]['jsonFormattingOnly'])
   self.assertEqual(summary[1]['category'],'grants.global_priv');self.assertEqual(summary[1]['expectedRecordCount'],1)
   for value in ['private-canary','old-value','new-value']:self.assertNotIn(value,encoded)
+ def test_reviewed_membership_only_adds_the_exact_readonly_metrics_service(self):
+  base=[{'Name':name,'Config':{},'Mounts':[]} for name in r.b.BASE_CONTAINER_NAMES];r.b.reviewed_membership(base)
+  node={'Name':'/enterprise-node-exporter','Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps','com.docker.compose.service':'node-exporter'}},'Mounts':[{'Type':'bind','Source':source,'Destination':target,'RW':False} for source,target in r.b.NODE_EXPORTER_BINDS.items()]}
+  r.b.reviewed_membership([*base,node])
+  with self.assertRaisesRegex(RuntimeError,'membership'):r.b.reviewed_membership([*base,{'Name':'/unreviewed'}])
+  node['Mounts'][0]['RW']=True
+  with self.assertRaisesRegex(RuntimeError,'Metrics mounts'):r.b.reviewed_membership([*base,node])
 if __name__=='__main__':unittest.main()
