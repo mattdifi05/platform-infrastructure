@@ -142,4 +142,11 @@ class RuntimeRestoreTests(unittest.TestCase):
   creates=[c for c in commands if c[1]=='create' and 'sha256:mariadb' in c]
   self.assertEqual(len(creates),2);self.assertNotIn('--skip-grant-tables',creates[0]);self.assertIn('--skip-grant-tables',creates[1])
   self.assertEqual(creates[0][creates[0].index('--mount')+1],creates[1][creates[1].index('--mount')+1])
+ def test_semantic_diagnostic_contains_categories_counts_and_never_values(self):
+  old={'postgres':{'roles':'[{"role":"private-canary"}]'},'mariadb':{'grants':{'global_priv':'private-canary\told-value'}}}
+  new={'postgres':{'roles':'[ {"role":"private-canary"} ]'},'mariadb':{'grants':{'global_priv':'private-canary\tnew-value'}}}
+  summary=r.semantic_difference_summary(old,new);encoded=json.dumps(summary)
+  self.assertEqual(len(summary),2);self.assertTrue(summary[0]['jsonFormattingOnly'])
+  self.assertEqual(summary[1]['category'],'grants.global_priv');self.assertEqual(summary[1]['expectedRecordCount'],1)
+  for value in ['private-canary','old-value','new-value']:self.assertNotIn(value,encoded)
 if __name__=='__main__':unittest.main()

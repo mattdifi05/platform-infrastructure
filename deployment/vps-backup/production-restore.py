@@ -103,6 +103,31 @@ def semantic_inventory(pg,maria,isolated=False):
   result['mariadb']['databases'][db]={t:maria_sql(maria,'SELECT count(*) FROM '+identifier(db,'mariadb')+'.'+identifier(t,'mariadb'),isolated) for t in tables}
  return result
 
+def semantic_difference_summary(expected,actual):
+ # Diagnostic categories/counts only. This never weakens the equality gate.
+ differences=[]
+ for engine,categories in {'postgres':('roles','membership','databaseGrants','databases','tableGrants'),'mariadb':('accounts','grants','databases')}.items():
+  for category in categories:
+   before=expected.get(engine,{}).get(category);after=actual.get(engine,{}).get(category)
+   if before==after:continue
+   entries=[(category,before,after)]
+   if engine=='mariadb' and category=='grants' and isinstance(before,dict) and isinstance(after,dict):
+    entries=[('grants.'+name,before.get(name),after.get(name)) for name in ('global_priv','db','tables_priv','columns_priv','procs_priv','roles_mapping') if before.get(name)!=after.get(name)]
+   for label,old,new in entries:
+    item={'engine':engine,'category':label,'expectedType':type(old).__name__,'actualType':type(new).__name__}
+    for side,value in [('expected',old),('actual',new)]:
+     if isinstance(value,(dict,list)):item[side+'ItemCount']=len(value)
+     elif isinstance(value,str):item[side+'RecordCount']=len(value.splitlines())
+    if isinstance(old,dict) and isinstance(new,dict):
+     item['changedEntryCount']=sum(old.get(k)!=new.get(k) for k in old.keys()|new.keys())
+     item['sameKeySet']=set(old)==set(new)
+    if isinstance(old,str) and isinstance(new,str):
+     item['recordOrderOnly']=sorted(old.splitlines())==sorted(new.splitlines())
+     try:item['jsonFormattingOnly']=json.loads(old)==json.loads(new)
+     except (ValueError,TypeError):pass
+    differences.append(item)
+ return differences
+
 def pipe_file(command,file):
  with file.open('rb') as src:
   r=subprocess.run(command,stdin=src,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=3600)
@@ -174,7 +199,11 @@ def stage_databases(directory,runtime,rows,volumes,operation,journal):
     pipe_file(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'],filtered)
    else:pipe_file(['docker','exec','-i',name,'mariadb','-uroot'],runtime/'mariadb-all.sql')
   expected=json.loads((runtime/'database-semantics.json').read_text())
-  if semantic_inventory(names['postgres'],names['mariadb'],True)!=expected:raise RuntimeError('Restored database schema/row/role semantics differ from capture')
+  actual=semantic_inventory(names['postgres'],names['mariadb'],True)
+  if actual!=expected:
+   summary=semantic_difference_summary(expected,actual)
+   b.save(b.WORK/('semantic-differences-'+operation+'.json'),{'operation':operation,'manifestId':journal.get('manifestId'),'differences':summary,'productionModified':False})
+   raise RuntimeError('Restored database semantics differ: '+','.join(x['engine']+'.'+x['category'] for x in summary))
   for name in created:b.run(['docker','stop','--time','60',name],timeout=90)
   # Persist original database configuration and TLS files after clean shutdown.
   for volume,engine in DB_VOLUMES.items():
