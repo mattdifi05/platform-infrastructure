@@ -202,7 +202,8 @@ CC_CONFIG_FILES=$(docker inspect --format '{{index .Config.Labels "com.docker.co
 for overlay in \
   deployment/vps-backup/compose.control-center.yaml \
   deployment/cloudflare-dns/compose.control-center.yaml \
-  deployment/host/empty-vps/compose.first-enrollment.yaml; do
+  deployment/host/empty-vps/compose.first-enrollment.yaml \
+  deployment/host/empty-vps/compose.host-metrics.yaml; do
   case ",$CC_CONFIG_FILES," in
     *,"$ROOT/$overlay",*)
       [[ -f "$ROOT/$overlay" ]] || { echo "The active Control Center overlay is missing: $overlay" >&2; exit 1; }

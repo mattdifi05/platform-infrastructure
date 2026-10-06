@@ -66,14 +66,19 @@ if [[ -n "$AI_ACTIVE" ]]; then
   COMPOSE+=(-f compose.server-ai-control-center.yaml -f compose.server-ai-empty-host-control-center.yaml)
 fi
 CC_CONFIG_FILES=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' enterprise-control-center 2>/dev/null || true)
+HOST_METRICS_ACTIVE=0
 for overlay in \
   deployment/vps-backup/compose.control-center.yaml \
   deployment/cloudflare-dns/compose.control-center.yaml \
-  deployment/host/empty-vps/compose.first-enrollment.yaml; do
+  deployment/host/empty-vps/compose.first-enrollment.yaml \
+  deployment/host/empty-vps/compose.host-metrics.yaml; do
   case ",$CC_CONFIG_FILES," in
     *,"$ROOT/$overlay",*)
       [[ -f "$ROOT/$overlay" ]] || { echo "The active Control Center overlay is missing: $overlay" >&2; exit 1; }
       COMPOSE+=(-f "$overlay")
+      if [[ "$overlay" = deployment/host/empty-vps/compose.host-metrics.yaml ]]; then
+        HOST_METRICS_ACTIVE=1
+      fi
       ;;
   esac
 done
@@ -86,6 +91,9 @@ done
 runtime_services=(postgres redis control-center traefik waf waf-loopback-proxy
   mariadb nats keycloak project-router rustfs-backend rustfs-gateway
   platform-alert-dispatcher alertmanager prometheus grafana loki promtail)
+if (( HOST_METRICS_ACTIVE )); then
+  runtime_services+=(node-exporter)
+fi
 for attempt in {1..90}; do
   pending=0
   for service in "${runtime_services[@]}"; do
