@@ -71,3 +71,38 @@ types above. Delete opens a review of the original record. Apply stays disabled
 until the owner checks the confirmation box; changing form data invalidates the
 plan. After success the inventory is refreshed and the page reports the actual
 write/readback result. Reading the inventory alone never claims write success.
+
+## Deployment smoke: real DNS reads without an owner session
+
+After the reviewed source, protected FILEs and overlay are installed, run this
+inside the actual UID-1000 Control Center. It invokes the production consumer
+against the three real zone IDs. It prints only status and counts, never the
+credential, record values, comments or raw provider response. It performs only
+GETs. Do not fabricate an owner session or submit any DNS mutation for this test.
+
+```sh
+docker exec -i --user 1000:1000 enterprise-control-center node --input-type=module - <<'JS'
+import { readCloudflareDnsStatus } from '/app/providers/cloudflare-dns.mjs';
+const result = await readCloudflareDnsStatus();
+const expected = ['matthewdifilippo.com', 'scriptastudents.com', 'stexor.com'];
+const names = result?.zones?.map(zone => zone.name).sort();
+const ok = result?.status === 'verified-dns-read'
+  && JSON.stringify(names) === JSON.stringify(expected);
+console.log(JSON.stringify({
+  ok,
+  status: result?.status || 'not-configured',
+  zones: result?.zones?.map(({ name, recordCount }) => ({ name, recordCount })) || [],
+  writePermissionVerified: false,
+}));
+if (!ok) process.exitCode = 1;
+JS
+```
+
+Separately check container health and anonymous HTTP behavior (login or 401,
+never a successful protected DNS API response). After human passkey enrollment,
+the owner can open the page and use Refresh to qualify the authenticated UI read
+path. A successful direct consumer smoke does not prove owner login, HTTP/CSRF
+policy, browser interaction, DNS writes or Access/Tunnel behavior. The local test
+suite covers authorization and reviewed CRUD with simulated provider responses;
+those tests are not live mutation evidence. Record the real smoke result only
+once the command has actually succeeded on the deployed image.

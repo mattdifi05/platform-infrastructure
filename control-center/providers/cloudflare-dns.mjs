@@ -27,7 +27,8 @@ export function parseCloudflareDnsZones(text) {
   return zones;
 }
 
-// Only this fixed DNS-list endpoint is reachable; no account, Access, tunnel or write API.
+// Inventory uses only the fixed DNS-list endpoint. Reviewed mutations below use
+// scoped DNS-record endpoints; neither path can call account, Access or tunnel APIs.
 export async function listCloudflareDns(zones, token, fetchImpl = fetch) {
   zones = parseCloudflareDnsZones(JSON.stringify({ zones }));
   const result = [];
