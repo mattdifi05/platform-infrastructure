@@ -236,7 +236,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
  b.save(JOURNAL,journal) # Durable intent precedes decrypt, filesystem staging and Docker create.
  try:
   scratch.mkdir(mode=0o700);b.fsync_directory(scratch.parent)
-  with f.downloaded_restore(manifest_id,digest,scratch/'download') as (plain,point,_):
+  with f.downloaded_restore(manifest_id,digest,scratch/'download',prefer_local=qualify_only) as (plain,point,download_proof):
    manifest=unpack_bundle(plain,scratch)
    if sorted(manifest['resources'],key=lambda r:r['id'])!=sorted(b.enrolled_resources(p),key=lambda r:r['id']):raise RuntimeError('Restore resource set differs from enrolled scope')
    runtime=extract_subset(scratch/'host-config.tar',scratch/'capsule','runtime')
@@ -251,7 +251,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    for target in selected_bind_roots(rows):
     source=extract_subset(scratch/'host-config.tar',scratch/('bind-'+str(len(items))),'host'+target)
     items.append({'target':target,'source':str(source)})
-   proof={'manifestId':manifest_id,'manifestDigest':digest,'databaseSemanticsVerified':True,'productionModified':False,'scope':'enrolled-runtime-data-and-bind-configs','preserved':'OS-network-SSH-management-authority-and-current-queue','verifiedAt':b.now()}
+   proof={'manifestId':manifest_id,'manifestDigest':digest,'ciphertextSource':download_proof['ciphertextSource'],'freshDownloadVerified':download_proof['actualDownloadVerified'],'previousReceiptDownloadVerified':download_proof['previousReceiptDownloadVerified'],'databaseSemanticsVerified':True,'productionModified':False,'scope':'enrolled-runtime-data-and-bind-configs','preserved':'OS-network-SSH-management-authority-and-current-queue','verifiedAt':b.now()}
    if qualify_only:
     b.save(b.WORK/('semantic-'+manifest_id+'.json'),proof);return proof
    # Sibling staging permits atomic same-filesystem rename and retains originals.

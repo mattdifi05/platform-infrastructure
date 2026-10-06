@@ -150,7 +150,7 @@ def sync():
    time.sleep(60)
 
 @contextlib.contextmanager
-def downloaded_restore(manifest_id,expected_digest=None,scratch=None):
+def downloaded_restore(manifest_id,expected_digest=None,scratch=None,prefer_local=False):
  # Read-only isolated restore, selected immutable manifest from authenticated portal queue.
  if not re.fullmatch('manifest-vps-[a-z0-9-]+',manifest_id):raise RuntimeError('Exact VPS manifest selection required')
  profile,_=b.profile()
@@ -164,20 +164,26 @@ def downloaded_restore(manifest_id,expected_digest=None,scratch=None):
    if len(matches)!=1:raise RuntimeError('Selected authenticated VPS restore point unavailable')
    point=matches[0];cipher=tmp/'restore.tar.gpg'
    if shutil.disk_usage(b.WORK).free<point['encryptedBytes']*3+1024**3:raise RuntimeError('Insufficient isolated restore reserve')
-   with cipher.open('wb') as dest:
-    for part in point['parts']:
-     h=hashlib.sha256();size=0
-     def receive(data):
-      nonlocal size
-      dest.write(data);h.update(data);size+=len(data)
-     f.retrbinary('RETR '+part['name'],receive,blocksize=1024*1024)
-     if h.hexdigest()!=part['sha256'] or size!=part['bytes']:raise RuntimeError('Downloaded restore part differs')
+   cached=b.WORK/'points'/point['bundle'];reused=prefer_local and cached.exists()
+   if reused:
+    b.private(cached)
+    if b.sha(cached)!=point['encryptedSha256']:raise RuntimeError('Retained ciphertext differs from authenticated receipt')
+    shutil.copyfile(cached,cipher);os.chmod(cipher,0o600)
+   else:
+    with cipher.open('wb') as dest:
+     for part in point['parts']:
+      h=hashlib.sha256();size=0
+      def receive(data):
+       nonlocal size
+       dest.write(data);h.update(data);size+=len(data)
+      f.retrbinary('RETR '+part['name'],receive,blocksize=1024*1024)
+      if h.hexdigest()!=part['sha256'] or size!=part['bytes']:raise RuntimeError('Downloaded restore part differs')
    if b.sha(cipher)!=point['encryptedSha256']:raise RuntimeError('Restore ciphertext differs')
    plain=tmp/'restore.tar';b.gpg(['--decrypt','--output',str(plain),str(cipher)]);b.verify_bundle(plain)
    import tarfile
    with tarfile.open(plain,'r:') as archive:manifest=json.load(archive.extractfile('manifest.json'))
    if manifest.get('id')!=manifest_id or manifest.get('signature',{}).get('digest')!=point['manifestDigest'] or (expected_digest and point['manifestDigest']!=expected_digest):raise RuntimeError('Downloaded manifest identity differs from selected point')
-   proof={'status':'passed','manifestId':manifest_id,'manifestDigest':point['manifestDigest'],'receiptSha256':hashlib.sha256(b.canonical(sign(point))).hexdigest(),'actualDownloadVerified':True,'decryptVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False,'isolatedScratchRemoved':True,'verifiedAt':b.now()}
+   proof={'status':'passed','manifestId':manifest_id,'manifestDigest':point['manifestDigest'],'receiptSha256':hashlib.sha256(b.canonical(sign(point))).hexdigest(),'actualDownloadVerified':not reused,'previousReceiptDownloadVerified':point['actualDownloadVerified'],'ciphertextSource':'retained-verified-local' if reused else 'fresh-ftps-download','decryptVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False,'isolatedScratchRemoved':True,'verifiedAt':b.now()}
    f.close()
    yield plain,point,proof
   finally:f.close();shutil.rmtree(tmp)
