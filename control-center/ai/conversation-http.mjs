@@ -1,4 +1,3 @@
-import { createQueueAuthority } from "./queue-authority.mjs";
 import { EventEmitter } from "node:events";
 import { resolveServerAiMode } from "./mode-router.mjs";
 import { normalizeAnalysisSummary } from "./analysis-summary.mjs";
@@ -8,7 +7,7 @@ import { ATTACHMENT_CAPABILITIES, readAndNormalizeAttachment } from "./attachmen
 import { createChatArtifactTools } from "./artifact-tools.mjs";
 import { shouldReloadHistoricalAttachmentContext } from "./quick-reply.mjs";
 
-const MODES = new Set(["auto", "fast", "deep"]);
+const MODES = new Set(["auto"]);
 const TERMINAL = new Set(["completed", "aborted", "failed"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -87,7 +86,6 @@ function strictPayload(payload, keys) {
 
 export function createConversationHttp({ store, manager, readPayload, json, isReady = () => true, retrieval = null, getRetrieval = null, getProjectReaders = null, projectRegistry = null, refreshProjectCatalog = null, readAttachment = readAndNormalizeAttachment, attachmentCapabilities = ATTACHMENT_CAPABILITIES, attachmentStorage = null, artifactStorage = null, scanStore = null, startScan = null, stopScan = null, resumeScan = null, authorizeContinuation = null }) {
   const backgroundGenerations = new Map();
-  const queueSchedulers = new Map();
   const continuationSchedulers = new Map();
   const terminalScanStatuses = new Set(["completed", "failed", "aborted"]);
   const hasPendingContinuation = async ({ ownerId, machineId, conversationId, role = null } = {}) => {
@@ -139,13 +137,6 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
       // the service time to persist every scan requested by the same turn.
       const key = `${ownerId}\u0000${machineId}\u0000${conversationId}\u0000${group.requestId}`;
       if (continuationSchedulers.has(key)) continue;
-      // A user queued turn has precedence over the server-owned follow-up.
-      // The next queue completion/read will retry this durable intent.
-      if (typeof store.listQueue === "function") {
-        let queue;
-        try { queue = await store.listQueue(scope); } catch { continue; }
-        if (Array.isArray(queue) && queue.some(item => ["queued", "running"].includes(item?.status))) continue;
-      }
       if (typeof store.getAttachmentContinuation === "function") {
         let existing = null;
         try { existing = await store.getAttachmentContinuation({ ...scope, requestId: group.requestId }); } catch { continue; }
@@ -159,7 +150,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
       const task = (async () => {
         try {
           const transport = detachedTransport();
-          const accepted = await handleConversation({ __serverAiContinuation: true, __serverAiPayload: { message: null, requestedMode: group.requestedMode || "auto", continuation: { ...group, scanIds: group.scans.map(scan => scan.scanId) } } }, transport.res, new URL("http://server-ai.invalid/"), { operationId: "ai.conversations.send", method: "POST", parameters: { machineId, conversationId } }, { subject: ownerId, role });
+          const accepted = await handleConversation({ __serverAiContinuation: true, __serverAiPayload: { message: null, requestedMode: "auto", continuation: { ...group, scanIds: group.scans.map(scan => scan.scanId) } } }, transport.res, new URL("http://server-ai.invalid/"), { operationId: "ai.conversations.send", method: "POST", parameters: { machineId, conversationId } }, { subject: ownerId, role });
           if (accepted?.generationStatus === "pending" && typeof scanStore?.setContinuationState === "function") await scanStore.setContinuationState({ ...scope, requestId: group.requestId, state: "running" });
         } catch {
           // A disabled machine, a concurrent foreground turn, or a transient
@@ -172,45 +163,6 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
     return started;
   };
   let handleConversation;
-  const queueAuthority = createQueueAuthority();
-  const scheduleQueue = ({ identity, machineId, conversationId }) => {
-    const key = generationKey({ ownerId: identity.subject, machineId, conversationId });
-    if (queueSchedulers.has(key) || backgroundGenerations.has(key)) return;
-    let claimed = false;
-    const task = (async () => {
-      try {
-      const status = await manager.status(machineId);
-      if (!status || !["active", "degraded"].includes(status.state)) return;
-      const item = await store.claimQueued?.({ ownerId: identity.subject, machineId, conversationId });
-      if (!item) return;
-      claimed = true;
-      const originIdentity = queueAuthority.claim({ ...identity, machineId, conversationId }, item.id);
-      const transport = detachedTransport();
-      try {
-        await handleConversation(
-          { __serverAiQueueInternal: true, __serverAiPayload: { message: item.message, requestedMode: item.requestedMode, attachmentIds: item.attachmentIds, queueId: item.id } },
-          transport.res, new URL("http://server-ai.invalid/"),
-          { operationId: "ai.conversations.send", method: "POST", parameters: { machineId, conversationId } }, originIdentity,
-        );
-      } catch (error) {
-        try { await store.completeQueued?.({ ownerId: identity.subject, machineId, conversationId, queueId: item.id, status: "failed", errorCode: typeof error?.code === "string" ? error.code : "QUEUE_START_FAILED" }); } catch {}
-        queueSchedulers.delete(key);
-        scheduleQueue({ identity, machineId, conversationId });
-      }
-      } catch {
-        // Keep durable queued work intact: a transient status/store failure is
-        // retried by the next authenticated detail read or lifecycle completion.
-      }
-    })().finally(() => {
-      if (queueSchedulers.get(key) === task) {
-        queueSchedulers.delete(key);
-        // Only a claimed item can have synchronously completed while this
-        // scheduler was still registered. Do not poll an empty durable queue.
-        if (claimed) queueMicrotask(() => scheduleQueue({ identity, machineId, conversationId }));
-      }
-    });
-    queueSchedulers.set(key, task);
-  };
   const uploadOperations = new Map();
   const serializeUpload = async (scope, uploadId, work) => {
     const key = `${scope.ownerId}\u0000${scope.machineId}\u0000${scope.conversationId}\u0000${uploadId}`;
@@ -285,9 +237,9 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
     };
     const isAttachmentUpload = operation.operationId === "ai.conversations.attachments.create";
     const isUploadChunk = operation.operationId === "ai.conversations.uploads.chunk";
-    const internalQueueExecution = req?.__serverAiQueueInternal === true;
+    if (req?.__serverAiQueueInternal === true) throw new ConversationHttpError("Accodamento chat non disponibile.", 409, "CHAT_QUEUE_DISABLED");
     const internalAttachmentContinuation = req?.__serverAiContinuation === true;
-    const payload = internalQueueExecution || internalAttachmentContinuation ? req.__serverAiPayload : (["POST", "PATCH", "DELETE"].includes(operation.method) && !isAttachmentUpload && !isUploadChunk ? await readPayload(req) : {});
+    const payload = internalAttachmentContinuation ? req.__serverAiPayload : (["POST", "PATCH", "DELETE"].includes(operation.method) && !isAttachmentUpload && !isUploadChunk ? await readPayload(req) : {});
     const requireAttachmentUploadReady = async () => {
       const status = await manager.status(machineId);
       if (!status || !["active", "degraded"].includes(status.state)) throw new ConversationHttpError("Server AI non è pronto per gli allegati.", 503, "AI_NOT_READY");
@@ -353,15 +305,14 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
         }
         const detail = requireFound(await store.get({ ...scope, before, limit: 100 }));
         await requireConversationProjects(conversationId, detail.conversation?.projectId);
-        if (Array.isArray(detail.queue) && detail.queue.some(item => item?.status === "queued")) scheduleQueue({ identity, machineId, conversationId });
         const continuationPending = await hasPendingContinuation({ ownerId: identity.subject, machineId, conversationId, role: identity.role });
         void processAttachmentContinuations({ ownerId: identity.subject, machineId, conversationId, role: identity.role });
         // The duplicate guard is persisted in assistant tool metadata for
         // restart recovery, but it is an implementation detail.  Do not let
         // a conversation read turn that marker into a client-visible ID.
         const messages = Array.isArray(detail.messages) ? detail.messages.map(message => {
-          if (!message?.toolMetadata || typeof message.toolMetadata !== "object" || !Object.hasOwn(message.toolMetadata, "autoContinuation")) return message;
-          const { autoContinuation: _private, ...toolMetadata } = message.toolMetadata;
+          if (!message?.toolMetadata || typeof message.toolMetadata !== "object" || !Object.hasOwn(message.toolMetadata, "autoContinuation") && !Object.hasOwn(message.toolMetadata, "clientRequest")) return message;
+          const { autoContinuation: _private, clientRequest: _request, ...toolMetadata } = message.toolMetadata;
           return { ...message, toolMetadata };
         }) : detail.messages;
         return json(res, { ...detail, messages, scans: await listScans(), continuationPending });
@@ -629,11 +580,11 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
         const local = backgroundGenerations.get(key);
         local?.abort(new ConversationHttpError("La generazione è stata interrotta.", 499, "AI_ABORTED"));
         const stopped = await manager.cancelChat?.(machineId, key);
-        if (!local && !stopped) throw new ConversationHttpError("Nessuna generazione attiva per questa conversazione.", 409, "GENERATION_NOT_ACTIVE");
-        return json(res, { conversationId, status: "stopping" }, 202);
+        return json(res, { conversationId, status: local || stopped ? "stopping" : "stopped" }, local || stopped ? 202 : 200);
       }
       case "ai.conversations.send": {
-        if (!internalQueueExecution && !internalAttachmentContinuation) strictPayload(payload, ["message", "requestedMode", "attachmentIds", "delivery", "requestId"]);
+        if (!internalAttachmentContinuation) strictPayload(payload, ["message", "requestedMode", "attachmentIds", "delivery", "requestId"]);
+        if (!internalAttachmentContinuation && !UUID.test(String(payload.requestId || ""))) throw new ConversationHttpError("Identificativo richiesta non valido.", 400, "REQUEST_ID_INVALID");
         let attachmentIds = payload.attachmentIds === undefined ? [] : payload.attachmentIds;
         if (!Array.isArray(attachmentIds) || attachmentIds.length > 5 || attachmentIds.some(id => !UUID.test(id || "")) || new Set(attachmentIds).size !== attachmentIds.length) {
           throw new ConversationHttpError("Allegati non validi.");
@@ -649,7 +600,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
           if (attachmentIds.length > 5 || new Set(attachmentIds).size !== attachmentIds.length) throw new ConversationHttpError("Allegati originali non validi.", 409, "ATTACHMENTS_UNAVAILABLE");
         }
         if (!sendMessage || Buffer.byteLength(sendMessage) > 16 * 1024
-          || payload.requestedMode !== undefined && !MODES.has(payload.requestedMode)) {
+          || !internalAttachmentContinuation && payload.requestedMode !== undefined && !MODES.has(payload.requestedMode)) {
           throw new ConversationHttpError("Messaggio o modalità non validi.");
         }
         // The canonical quick replies continue the latest assistant answer.
@@ -657,27 +608,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
         // the model away from that answer; a newly attached file remains an
         // explicit request and keeps the normal attachment path.
         const assistantContinuation = !shouldReloadHistoricalAttachmentContext(sendMessage, attachmentIds, internalAttachmentContinuation);
-        const queueId = internalQueueExecution ? String(payload.queueId || "") : null;
-        if (internalQueueExecution && !UUID.test(queueId)) throw new ConversationHttpError("Coda conversazione non valida.", 400, "QUEUE_INVALID");
-        const delivery = payload.delivery === undefined ? null : payload.delivery;
-        if (!internalQueueExecution && delivery !== null && delivery !== "queue" && delivery !== "immediate") throw new ConversationHttpError("Consegna messaggio non valida.");
-        const explicitPublicWeb = isExplicitPublicWebRequest(sendMessage);
-        if (!internalQueueExecution && delivery !== null) {
-          if (!UUID.test(String(payload.requestId || ""))) throw new ConversationHttpError("Identificativo richiesta non valido.", 400, "REQUEST_ID_INVALID");
-          if (explicitPublicWeb && attachmentIds.length) throw new ConversationHttpError("La ricerca sul web non può usare allegati privati.", 400, "ATTACHMENTS_PRIVATE");
-          await requireConversationProjects(conversationId);
-          const queueStatus = await manager.status(machineId);
-          if (!queueStatus || !["active", "degraded"].includes(queueStatus.state)) throw new ConversationHttpError("Server AI non è pronto per nuove richieste.", 503, "AI_NOT_READY");
-          const queued = requireFound(await store.enqueueQueue?.({ ...scope, requestId: payload.requestId, message: sendMessage, requestedMode: payload.requestedMode || "auto", attachmentIds, delivery }));
-          queueAuthority.remember({ ...identity, machineId, conversationId }, queued);
-          if (delivery === "immediate" && queued.created) {
-            const key = generationKey({ ownerId: identity.subject, machineId, conversationId });
-            backgroundGenerations.get(key)?.abort(new ConversationHttpError("La generazione è stata interrotta da un nuovo messaggio.", 499, "AI_ABORTED"));
-            await manager.cancelChat?.(machineId, key);
-          }
-          scheduleQueue({ identity, machineId, conversationId });
-          return json(res, { conversationId, queueItem: queued, generationStatus: queued.status }, 202);
-        }
+        if (payload.delivery !== undefined) throw new ConversationHttpError("Accodamento e risposta immediata non sono disponibili.", 409, "CHAT_QUEUE_DISABLED");
         const previous = requireFound(await store.buildContext({ ...scope, currentMessage: sendMessage }));
         await requireConversationProjects(conversationId, previous.projectId);
         const status = await manager.status(machineId);
@@ -694,7 +625,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
           ? previous.continuationAnchor || null : null;
         const safeHistory = publicWebScope ? [{ role: "user", content: publicWebMessage || "Ricerca online." }] : history;
         const routed = resolveServerAiMode({
-          requestedMode: payload.requestedMode || "auto",
+          requestedMode: "auto",
           message: publicWebMessage || sendMessage,
           projectId: publicWebScope ? null : previous.projectId || null,
           priorConversation: previous.priorConversation || {
@@ -702,18 +633,30 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
             hasSummary: Boolean(previous.summary),
           },
         });
-        // Continue an already deep server proposal unless the user explicitly
-        // chose FAST/DEEP. This is deterministic and grants no new capability.
-        const resolution = !publicWebScope && continuationAnchor?.resolvedMode === "deep" && routed.requestedMode === "auto"
-          ? Object.freeze({ ...routed, resolvedMode: "deep", signals: Object.freeze([...routed.signals, "affirmative_continuation"]) })
+        // AUTO keeps completed-scan synthesis and an already deep proposal in DEEP.
+        const resolution = internalAttachmentContinuation || !publicWebScope && continuationAnchor?.resolvedMode === "deep" && routed.requestedMode === "auto"
+          ? Object.freeze({ ...routed, resolvedMode: "deep", signals: Object.freeze([...routed.signals, internalAttachmentContinuation ? "attachment_continuation" : "affirmative_continuation"]) })
           : routed;
         // The durable pending assistant is the duplicate guard. It is created
         // before the browser receives 202 and survives navigation/reload.
-        const turn = requireFound(await (internalAttachmentContinuation
+        let turn;
+        try { turn = requireFound(await (internalAttachmentContinuation
           ? store.beginAttachmentContinuation?.({ ...scope, userMessageId: payload.continuation.userMessageId, requestId: payload.continuation.requestId, requestedMode: resolution.requestedMode, scanId: payload.continuation.scanIds[0] })
-          : store.beginTurn({ ...scope, message: sendMessage, attachmentIds, ...(queueId ? { queueId } : {}), ...resolution })));
+          : store.beginTurn({ ...scope, message: sendMessage, attachmentIds, requestId: payload.requestId, ...resolution }))); }
+        catch (error) {
+          if (error?.code === "GENERATION_ACTIVE") return json(res, { error: "GENERATION_ACTIVE", message: "La conversazione è già in generazione.", conversationId, generationStatus: "active" }, 409);
+          throw error;
+        }
         if (turn.blocked) throw new ConversationHttpError("La conversazione è già in generazione.", 409, "GENERATION_ACTIVE");
-        if (turn.idempotent) return { conversationId, assistantId: turn.assistant.id, generationStatus: turn.assistant.generationStatus };
+        if (turn.idempotent) {
+          const existing = { conversationId, assistantId: turn.assistant.id, generationStatus: turn.assistant.generationStatus, requestedMode: turn.assistant.requestedMode, resolvedMode: turn.assistant.resolvedMode, idempotent: true };
+          return internalAttachmentContinuation ? existing : json(res, existing, 202);
+        }
+        const key = generationKey({ ownerId: identity.subject, machineId, conversationId });
+        const backgroundAbort = new AbortController();
+        // Publish cancellation before any attachment/provider await. Stop must
+        // also cover the interval between durable admission and registration.
+        backgroundGenerations.set(key, backgroundAbort);
         // The store rechecks that these IDs are bound user attachments after
         // beginTurn. Never accept browser bytes or pending attachment IDs in
         // the model request; public-web turns remain completely isolated.
@@ -731,12 +674,11 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
           // No 202 has been written yet. Turn the durable duplicate guard into
           // a terminal failure so a transient storage failure cannot strand a
           // pending assistant or leave a browser-visible phantom generation.
+          if (backgroundGenerations.get(key) === backgroundAbort) backgroundGenerations.delete(key);
           try { await store.finishTurn({ ...scope, turnId: turn.turnId, content: "", generationStatus: "failed", resolvedMode: resolution.resolvedMode }); } catch {}
           if (error instanceof ConversationHttpError) throw error;
           throw new ConversationHttpError("Allegati non disponibili.", 503, "ATTACHMENTS_UNAVAILABLE");
         }
-        const key = generationKey({ ownerId: identity.subject, machineId, conversationId });
-        const backgroundAbort = new AbortController();
         let registered = true;
         try {
           if (typeof manager.registerChat === "function") registered = await manager.registerChat(machineId, key, backgroundAbort);
@@ -744,13 +686,15 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
           registered = false;
         }
         if (!registered) {
+          if (backgroundGenerations.get(key) === backgroundAbort) backgroundGenerations.delete(key);
           requireFound(await store.finishTurn({ ...scope, turnId: turn.turnId, content: "", generationStatus: "failed", resolvedMode: resolution.resolvedMode }));
           throw new ConversationHttpError("La generazione non può essere registrata su questa macchina.", 503, "AI_NOT_READY");
         }
-        backgroundGenerations.set(key, backgroundAbort);
+        const modeMetadata = { requestedMode: "auto", resolvedMode: resolution.resolvedMode };
         let terminal = false;
         let lastAnalysisSummary = "";
         const currentAnalysisSummary = (value) => {
+          if (resolution.resolvedMode !== "deep") return "";
           if (value && Object.hasOwn(value, "analysisSummary")) {
             if (value.analysisSummary === "") lastAnalysisSummary = "";
             else {
@@ -764,7 +708,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
           if (terminal) return;
           const analysisSummary = currentAnalysisSummary(value);
           if (type === "started") {
-            requireFound(await store.updateMessage({ ...scope, messageId: turn.assistant.id, generationStatus: "streaming", content: "", sources: [], toolMetadata: { state: value.state || "preparing", tools: [], summarySteps: [], ...(analysisSummary ? { analysisSummary } : {}) } }));
+            requireFound(await store.updateMessage({ ...scope, messageId: turn.assistant.id, generationStatus: "streaming", content: "", sources: [], toolMetadata: { ...modeMetadata, state: value.state || "preparing", tools: [], summarySteps: [], ...(analysisSummary ? { analysisSummary } : {}) } }));
             return;
           }
           if (type === "progress") {
@@ -773,6 +717,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
               content: typeof value.content === "string" ? value.content : "",
               sources: Array.isArray(value.sources) ? value.sources : [],
               toolMetadata: {
+                ...modeMetadata,
                 state: typeof value.state === "string" ? value.state : "responding",
                 tools: Array.isArray(value.tools) ? value.tools : [],
                 summarySteps: Array.isArray(value.summarySteps) ? value.summarySteps : [],
@@ -787,6 +732,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
             generationStatus: type, resolvedMode: resolution.resolvedMode,
             sources: Array.isArray(value.sources) ? value.sources : [],
             toolMetadata: {
+              ...modeMetadata,
               tools: Array.isArray(value.toolMetadata) ? value.toolMetadata : Array.isArray(value.tools) ? value.tools : [],
               summarySteps: Array.isArray(value.summarySteps) ? value.summarySteps : [],
               ...(analysisSummary ? { analysisSummary } : {}),
@@ -801,12 +747,8 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
             machineRetrieval.enqueueProjectIndex({ ownerId: identity.subject, subject: identity.subject, role: identity.role, machineId, projectId: previous.projectId });
           }
           terminal = true;
-          if (queueId) {
-            try { await store.completeQueued?.({ ...scope, queueId, status: completed.generationStatus === "completed" ? "completed" : "failed", turnId: turn.turnId, errorCode: completed.generationStatus === "completed" ? null : "GENERATION_ABORTED" }); } catch {}
-          }
           if (backgroundGenerations.get(key) === backgroundAbort) backgroundGenerations.delete(key);
           await manager.unregisterChat?.(machineId, key, backgroundAbort);
-          scheduleQueue({ identity, machineId, conversationId });
           const restartAbort = completed.generationStatus === "aborted" && backgroundAbort.signal.reason?.code === "AI_SHUTDOWN";
           if (internalAttachmentContinuation && !restartAbort && typeof scanStore?.setContinuationState === "function") {
             await scanStore.setContinuationState({ ...scope, requestId: payload.continuation.requestId, state: completed.generationStatus === "completed" ? "completed" : "failed" }).catch(() => {});
@@ -829,6 +771,7 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
             // Access may change while private retrieval is running. No source is
             // handed to the model until this server-side recheck succeeds.
             await requireConversationProjects(conversationId, previous.projectId);
+            if (backgroundAbort.signal.aborted) throw backgroundAbort.signal.reason;
             const transport = detachedTransport();
           await manager.chat(machineId, transport.req, transport.res, {
               subject: identity.subject, role: identity.role, machineId, generationKey: key, detached: true,
@@ -859,14 +802,9 @@ export function createConversationHttp({ store, manager, readPayload, json, isRe
             await manager.unregisterChat?.(machineId, key, backgroundAbort);
           }
         })();
-        // The queue scheduler has no HTTP client to acknowledge: returning the
-        // accepted result keeps its detached transport out of the production
-        // responder, whose writeHead contract belongs only to a real response.
-        // Once background work is registered, its lifecycle callback is the
-        // sole owner of the durable queue terminal state.
         if (!internalAttachmentContinuation) void processAttachmentContinuations({ ownerId: identity.subject, machineId, conversationId, role: identity.role });
-        const accepted = { conversationId, assistantId: turn.assistant.id, generationStatus: "pending" };
-        if (internalQueueExecution || internalAttachmentContinuation) return accepted;
+        const accepted = { conversationId, assistantId: turn.assistant.id, generationStatus: "pending", ...modeMetadata };
+        if (internalAttachmentContinuation) return accepted;
         // Start the detached work before attempting the HTTP response. A page
         // navigation, socket close, or response write failure must never turn a
         // durable pending assistant into an orphan.

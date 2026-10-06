@@ -66,8 +66,7 @@ const OPENAI_API_BASE = "https://api.openai.com/v1";
 const OPENAI_API_KEY_FILE = "/run/secrets/server_ai_openai_api_key";
 const ARTIFACT_FILE_TOOL = Object.freeze({ type: "function", function: { name: "createChatFile", description: "Crea un file privato e scaricabile in questa chat. Usalo solo quando l’utente chiede esplicitamente un file; non modifica progetti o servizi.", parameters: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 180 }, content: { type: "string", minLength: 1, maxLength: 16 * 1024 } }, required: ["name", "content"], additionalProperties: false } } });
 const ARTIFACT_ZIP_TOOL = Object.freeze({ type: "function", function: { name: "createChatZip", description: "Crea uno ZIP privato e scaricabile in questa chat, con massimo 32 file. Usalo solo quando l’utente chiede esplicitamente un archivio; non modifica progetti o servizi.", parameters: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 180 }, files: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 180 }, content: { type: "string", maxLength: 16 * 1024 }, attachmentId: { type: "string", maxLength: 64 }, artifactId: { type: "string", maxLength: 64 } }, required: ["name"], additionalProperties: false } } }, required: ["name", "files"], additionalProperties: false } } });
-const DEFAULT_MAX_QUEUE = 2;
-const QUEUE_WAIT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_QUEUE = 0;
 const FINAL_SUMMARY_CUE = "Il budget di contesto o di chiamate agli strumenti è esaurito. Non chiamare strumenti. Rispondi esclusivamente in italiano con la migliore sintesi concisa delle evidenze già presenti e dichiara i limiti. Un limite di budget non significa che i servizi non siano disponibili; gli strumenti non eseguiti non sono falliti.";
 const MAX_ANALYSIS_SUMMARY_CALLS = 3;
 const ANALYSIS_SUMMARY_TIMEOUT_MS = 20_000;
@@ -169,8 +168,8 @@ class ServerAIService {
       await rejectBeforeStream(req, res, payload, onLifecycle, new AIServiceError("Server AI non è ancora pronto.", "AI_NOT_READY", 503));
       return;
     }
-    if (this.activeEntry && this.queue.length >= this.maxQueue) {
-      await rejectBeforeStream(req, res, payload, onLifecycle, new AIServiceError("La coda di Server AI è piena.", "AI_QUEUE_FULL", 429));
+    if (this.activeEntry) {
+      await rejectBeforeStream(req, res, payload, onLifecycle, new AIServiceError("Server AI sta già generando una risposta.", "GENERATION_ACTIVE", 409));
       return;
     }
 
@@ -227,17 +226,7 @@ class ServerAIService {
       startEventStream(res);
       streamStarted = true;
       stopHeartbeat = startSseHeartbeat(res, requestAbort, this.heartbeatMs);
-      const slot = this.acquireSlot(entry);
-      if (entry.queued) {
-        await writeSseEvent(res, "status", {
-          state: "queued",
-          label: "In coda…",
-          requestedMode: payload.requestedMode,
-          resolvedMode: payload.resolvedMode,
-          position: this.queue.indexOf(entry) + 1,
-        }, requestAbort.signal);
-      }
-      await slot;
+      await this.acquireSlot(entry);
       if (!this.accepting) throw new AIServiceError("Server AI è stato disattivato.", "AI_DISABLED", 503);
       timeout = setTimeout(() => {
         abortWith(requestAbort, new AIServiceError("La generazione ha superato il tempo massimo.", "AI_TIMEOUT", 504));
@@ -365,11 +354,13 @@ class ServerAIService {
       let evidenceSummaryAttempted = false;
       const summaryEvidence = [];
       const publishAnalysisSummary = async text => {
+        if (payload.resolvedMode !== "deep") return;
         lifecycleAnalysisSummary = text;
-        await writeSseEvent(res, "analysis_summary", { text }, requestAbort.signal);
+        await writeSseEvent(res, "analysis_summary", { text, resolvedMode: payload.resolvedMode }, requestAbort.signal);
         await persistProgress(responseStateSent ? "responding" : "preparing", true);
       };
       const refreshAnalysisSummary = async ({ phase, finalAnswer = "" }) => {
+        if (payload.resolvedMode !== "deep") return;
         if (phase === "evidence") {
           if (evidenceSummaryAttempted) return;
           evidenceSummaryAttempted = true;
@@ -437,10 +428,11 @@ class ServerAIService {
           tools: roundTools,
           signal: requestAbort.signal,
           onThinking: async () => {
+            if (payload.resolvedMode !== "deep") return;
             runMetrics.thinkingObserved = true;
             if (!runMetrics.thinkingStatusSent) {
               runMetrics.thinkingStatusSent = true;
-              await writeSseEvent(res, "status", { state: "thinking", label: "Ragionamento…" }, requestAbort.signal);
+              await writeSseEvent(res, "status", { state: "thinking", label: "Ragionamento…", resolvedMode: payload.resolvedMode }, requestAbort.signal);
               await persistProgress("thinking", true);
             }
           },
@@ -517,6 +509,7 @@ class ServerAIService {
           const toolKind = toolCategory(toolName);
           if ((runMetrics.toolKinds[toolKind] || 0) >= config.toolKindLimits[toolKind]) { toolOutcome = "unavailable"; toolResult = { available: false, error: "tool_category_limit", message: "Limite per categoria strumento raggiunto." }; }
           else try {
+              throwIfAborted(requestAbort.signal);
               toolResult = toolName === "readChatAttachment" ? await readChatAttachment(payload.attachments, call.function.arguments, { signal: requestAbort.signal, allowDocumentDirectRead })
                 : toolName === "listChatArchive" ? await listChatArchive(payload.attachments, call.function.arguments, { signal: requestAbort.signal })
                 : toolName === "readChatArchiveEntry" ? await readChatArchiveEntry(payload.attachments, call.function.arguments, { signal: requestAbort.signal })
@@ -769,27 +762,7 @@ class ServerAIService {
       entry.acquired = true;
       return Promise.resolve();
     }
-    entry.queued = true;
-    return new Promise((resolve, reject) => {
-      const queueTimeout = setTimeout(() => {
-        abortWith(entry.requestAbort, new AIServiceError("Attesa in coda scaduta.", "AI_QUEUE_TIMEOUT", 429));
-      }, QUEUE_WAIT_TIMEOUT_MS);
-      queueTimeout.unref?.();
-      const onAbort = () => {
-        const index = this.queue.indexOf(entry);
-        if (index >= 0) this.queue.splice(index, 1);
-        entry.cleanup?.();
-        reject(abortReason(entry.requestAbort.signal));
-      };
-      entry.resolve = resolve;
-      entry.reject = reject;
-      entry.cleanup = () => {
-        clearTimeout(queueTimeout);
-        entry.requestAbort.signal.removeEventListener("abort", onAbort);
-      };
-      this.queue.push(entry);
-      entry.requestAbort.signal.addEventListener("abort", onAbort, { once: true });
-    });
+    return Promise.reject(new AIServiceError("Server AI sta già generando una risposta.", "GENERATION_ACTIVE", 409));
   }
 
   releaseSlot(entry) {
