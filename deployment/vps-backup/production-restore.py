@@ -112,7 +112,8 @@ def pipe_file(command,file):
   code=diagnostic.group(1).decode() if diagnostic and diagnostic.group(1) else 'unknown'
   state=diagnostic.group(2).decode() if diagnostic and diagnostic.group(2) else 'unknown'
   line=diagnostic.group(3).decode() if diagnostic and diagnostic.group(3) else 'unknown'
-  raise RuntimeError('Native database restore failed: '+engine+' code='+code+' state='+state+' line='+line)
+  hints=[label for label,needle in [('not-running',b'not running'),('exec-failed',b'OCI runtime exec failed'),('unknown-command',b'Unknown command'),('permission-denied',b'Permission denied'),('access-denied',b'Access denied'),('connection-lost',b'Lost connection'),('server-gone',b'Server has gone away'),('syntax-error',b'syntax'),('unknown-option',b'unknown variable')] if needle.lower() in r.stderr.lower()]
+  raise RuntimeError('Native database restore failed: '+engine+' rc='+str(r.returncode)+' code='+code+' state='+state+' line='+line+' classes='+','.join(hints))
 
 def wait_database(name,engine):
  for _ in range(90):
