@@ -241,7 +241,6 @@ export function renderServerAi({ manualRestore = "" } = {}) {
                 <div class="server-ai-attachments" data-ai-attachments hidden aria-live="polite"></div>
                 <div class="server-ai-composer-actions">
                 <button type="button" data-ai-attach aria-label="Allega file o immagine" title="Allega file o immagine">${aiIcon('attach')}</button><input data-ai-attachment-input type="file" hidden multiple>
-                <span class="server-ai-auto" aria-label="Modalità automatica">Auto</span>
                 <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
               </div>
             </form>

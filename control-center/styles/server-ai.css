@@ -492,5 +492,4 @@ button.server-ai-drawer-open { display: inline-flex; border: 0; border-radius: 8
 }
 
 /* AUTO routes internally; one send slot becomes Stop for the active turn. */
-.server-ai-auto { background: #f7f8fb; border: 1px solid var(--ai-border); border-radius: 8px; color: #606b82; display: inline-flex; align-items: center; font-size: 12px; line-height: 1; min-height: 36px; padding: 10px 14px; }
 .server-ai-composer-actions [data-ai-stop] { margin-left: auto; }
