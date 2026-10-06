@@ -130,14 +130,17 @@ export class AppPasskeyAuth {
     this.mode = "app-passkey";
   }
 
-  assertRequest(req, { mutation = false } = {}) {
+  assertRequest(req, { mutation = false, firstEnrollment = firstEnrollmentPage(req) } = {}) {
     const host = appPasskeyRequestHost(this.config, req);
     if (!host || !safeEqualText(host, this.config.publicHost)) {
       throw new AuthRequestError("The exact Control Center host is required.", 421);
     }
     const clientAddress = resolveClientAddress(this.config, req);
-    if (!clientAddress || !cidrListContains(this.config.allowedCidrs, clientAddress)) {
-      throw new AuthRequestError("Passkey authentication is available only from the management LAN.", 403);
+    if (!clientAddress) {
+      throw new AuthRequestError("The Control Center client address could not be verified.", 403);
+    }
+    if (firstEnrollment && !cidrListContains(this.config.allowedCidrs, clientAddress)) {
+      throw new AuthRequestError("First passkey registration is available only from an approved client address.", 403);
     }
     if (mutation) {
       if (!safeEqualText(String(req?.headers?.origin || ""), this.config.publicOrigin)) {
@@ -154,7 +157,7 @@ export class AppPasskeyAuth {
   }
 
   async beginPasskeyRegistration(req) {
-    const request = this.assertRequest(req, { mutation: true });
+    const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
     const existing = await this.store.listPasskeys(this.config.adminSubject);
     if (existing.length > 0) {
       throw new AuthRequestError("A Control Center passkey is already registered. Authenticate to manage it.", 409);
@@ -188,7 +191,7 @@ export class AppPasskeyAuth {
   }
 
   async completePasskeyRegistration(req, payload) {
-    const request = this.assertRequest(req, { mutation: true });
+    const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
     const challenge = boundedChallenge(payload?.challenge);
     const credential = normalizeCredential(payload?.credential || payload, "registration");
     const consumed = await this.store.consumeWebAuthnChallenge({
@@ -920,6 +923,11 @@ function resolveClientAddress(config, req) {
     current = forwarded[index];
   }
   return current;
+}
+
+function firstEnrollmentPage(req) {
+  const pathname = String(req?.url || "").split("?", 1)[0];
+  return pathname === "/first-configuration" || pathname === "/first-configuration/";
 }
 
 function cidrListContains(cidrs, address) {

@@ -133,6 +133,7 @@ test("first configuration accepts one exact IPv6 client through trusted proxies 
   }) });
   try {
     const req = request({ address: "172.23.0.2", mutation: false });
+    req.url = "/first-configuration";
     req.headers["x-forwarded-for"] = `2001:db8::bad, ${client}, 127.0.0.1, 172.30.250.1, 172.30.250.2`;
     assert.equal(auth.assertRequest(req).clientAddress, client);
 
@@ -217,7 +218,26 @@ test("one passkey completes direct first configuration and duplicate credentials
     const loginOptions = await auth.beginLogin(request());
     assert.equal(loginOptions.rpId, HOST);
     assert.equal((await auth.authenticate(request({ host: "auth.platform-infrastructure.com", mutation: false }))).status, 421);
-    assert.equal((await auth.authenticate(request({ address: "203.0.113.10", mutation: false }))).status, 403);
+    const changedAddress = request({ address: "203.0.113.10" });
+    assert.equal((await auth.authenticate(changedAddress)).status, 401);
+    changedAddress.headers["x-forwarded-for"] = "192.168.1.24";
+    assert.equal(auth.assertRequest(changedAddress).clientAddress, "203.0.113.10");
+    assert.equal((await auth.beginLogin(changedAddress)).rpId, HOST);
+    const session = await auth.createSessionResult();
+    changedAddress.headers.cookie = session.cookies.map((cookie) => cookie.split(";", 1)[0]).join("; ");
+    const authenticated = await auth.authenticate(changedAddress);
+    assert.equal(authenticated.ok, true);
+    const changedAddressMutation = Readable.from([]);
+    changedAddressMutation.method = "POST";
+    changedAddressMutation.socket = changedAddress.socket;
+    changedAddressMutation.headers = { ...changedAddress.headers };
+    const mutationUrl = new URL(`${ORIGIN}/actions/backup-command`);
+    assert.equal((await auth.validateMutation(changedAddressMutation, mutationUrl, authenticated)).error, "csrf_token_rejected");
+    changedAddressMutation.headers["x-csrf-token"] = authenticated.identity.csrfToken;
+    assert.equal((await auth.validateMutation(changedAddressMutation, mutationUrl, authenticated)).ok, true);
+    const wrongOrigin = request({ address: "203.0.113.10", origin: "https://evil.example" });
+    await assert.rejects(auth.beginLogin(wrongOrigin), (error) => error instanceof AuthRequestError && error.status === 403);
+    await assert.rejects(auth.beginPasskeyRegistration(changedAddress), (error) => error instanceof AuthRequestError && error.status === 403);
     await assert.rejects(
       auth.completeLogin(request(), {
         challenge: loginOptions.challenge,
