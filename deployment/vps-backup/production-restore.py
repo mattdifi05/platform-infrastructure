@@ -106,7 +106,13 @@ def semantic_inventory(pg,maria,isolated=False):
 def pipe_file(command,file):
  with file.open('rb') as src:
   r=subprocess.run(command,stdin=src,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=3600)
- if r.returncode:raise RuntimeError('Native database restore failed')
+ if r.returncode:
+  diagnostic=re.search(rb'ERROR(?:\s+(\d{3,5}))?(?:\s+\(([A-Z0-9]{5})\))?(?:\s+at line\s+(\d+))?',r.stderr)
+  engine='postgres' if 'psql' in command else 'mariadb'
+  code=diagnostic.group(1).decode() if diagnostic and diagnostic.group(1) else 'unknown'
+  state=diagnostic.group(2).decode() if diagnostic and diagnostic.group(2) else 'unknown'
+  line=diagnostic.group(3).decode() if diagnostic and diagnostic.group(3) else 'unknown'
+  raise RuntimeError('Native database restore failed: '+engine+' code='+code+' state='+state+' line='+line)
 
 def wait_database(name,engine):
  for _ in range(90):
