@@ -98,8 +98,9 @@ if (!ok) process.exitCode = 1;
 JS
 ```
 
-Separately check container health and anonymous HTTP behavior (login or 401,
-never a successful protected DNS API response). After human passkey enrollment,
+Separately check container health and anonymous HTTP behavior (login, 401/403,
+or 423 while first enrollment is incomplete; never a successful protected DNS
+API response). After human passkey enrollment,
 the owner can open the page and use Refresh to qualify the authenticated UI read
 path. A successful direct consumer smoke does not prove owner login, HTTP/CSRF
 policy, browser interaction, DNS writes or Access/Tunnel behavior. The local test
