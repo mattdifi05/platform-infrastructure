@@ -115,13 +115,20 @@ def wait_database(name,engine):
   except Exception:time.sleep(1)
  raise RuntimeError('Isolated database engine did not become ready')
 
+def prepare_database_directory(source,destination):
+ original=pathlib.Path(source).lstat()
+ if not stat.S_ISDIR(original.st_mode):raise RuntimeError('Enrolled database volume is not a directory')
+ destination.mkdir(mode=0o700)
+ os.chown(destination,original.st_uid,original.st_gid)
+ os.chmod(destination,stat.S_IMODE(original.st_mode))
+
 def stage_databases(directory,runtime,rows,volumes,operation,journal):
  names={};stages={};created=[]
  try:
   for volume,engine in DB_VOLUMES.items():
    row=next(r for r in rows if any(m.get('Name')==volume for m in r['Mounts']))
    mount=next(m for m in row['Mounts'] if m.get('Name')==volume)
-   stage=directory/volume;stage.mkdir(mode=0o700);stages[volume]=stage
+   stage=directory/volume;prepare_database_directory(volumes[volume],stage);stages[volume]=stage
    name='platform-restore-'+engine+'-'+operation[-12:];names[engine]=name
    planned={'name':name,'image':row['Image'],'source':str(stage),'destination':mount['Destination'],'id':None}
    journal['stagingContainers'].append(planned);b.save(JOURNAL,journal)

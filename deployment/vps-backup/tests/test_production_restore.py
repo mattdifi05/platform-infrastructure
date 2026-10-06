@@ -116,4 +116,10 @@ class RuntimeRestoreTests(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,'Staging identity'):r.cleanup_staging(journal,[])
    self.assertEqual(run.call_count,2)
   self.assertTrue(scratch.exists())
+ def test_database_stage_preserves_volume_directory_permissions_for_native_entrypoint(self):
+  source=self.root/'enrolled-volume';source.mkdir();source.chmod(0o1777);destination=self.root/'stage'
+  with patch.object(r.os,'chown') as ownership:
+   r.prepare_database_directory(source,destination)
+   ownership.assert_called_once_with(destination,source.stat().st_uid,source.stat().st_gid)
+  self.assertEqual(destination.stat().st_mode&0o7777,0o1777)
 if __name__=='__main__':unittest.main()
