@@ -49,7 +49,31 @@ export class MachineAiError extends Error {
   constructor(message,status=409){super(message);this.status=status;}
 }
 
-export function createMachineAiManager({machines,stateFile,audit=()=>{},pollMs=1000,activationTimeoutMs=5*60*1000}) {
+export function normalizeMachineHostResources(snapshot) {
+  const available = snapshot?.available === true;
+  const unavailable = { available: false, message: "Metriche host non disponibili." };
+  const cpuPercent = snapshot?.cpu?.usedPercent;
+  const cores = snapshot?.cpu?.cores;
+  const cpu = available && snapshot?.cpu?.available === true && Number.isFinite(cpuPercent) && cpuPercent >= 0 && cpuPercent <= 100
+    ? { available: true, usedPercent: cpuPercent, cores: Number.isFinite(cores) && cores > 0 ? cores : null }
+    : unavailable;
+  const memoryTotal = snapshot?.memory?.totalBytes;
+  const memoryAvailable = snapshot?.memory?.availableBytes;
+  const memory = available && snapshot?.memory?.available === true && Number.isFinite(memoryTotal) && memoryTotal > 0
+    && Number.isFinite(memoryAvailable) && memoryAvailable >= 0 && memoryAvailable <= memoryTotal
+    ? { available: true, totalBytes: memoryTotal, availableBytes: memoryAvailable, usedBytes: memoryTotal - memoryAvailable, usedPercent: ((memoryTotal - memoryAvailable) / memoryTotal) * 100 }
+    : unavailable;
+  const diskTotal = snapshot?.disk?.totalBytes;
+  const diskAvailable = snapshot?.disk?.availableBytes;
+  const disk = available && snapshot?.disk?.available === true && Number.isFinite(diskTotal) && diskTotal > 0
+    && Number.isFinite(diskAvailable) && diskAvailable >= 0 && diskAvailable <= diskTotal
+    ? { available: true, totalBytes: diskTotal, availableBytes: diskAvailable, usedBytes: diskTotal - diskAvailable, usedPercent: ((diskTotal - diskAvailable) / diskTotal) * 100 }
+    : unavailable;
+  const capturedAt = typeof snapshot?.capturedAt === "string" && Number.isFinite(Date.parse(snapshot.capturedAt)) ? snapshot.capturedAt : null;
+  return { source: "prometheus-node-exporter", capturedAt, cpu, memory, disk };
+}
+
+export function createMachineAiManager({machines,stateFile,audit=()=>{},getHostResources=async()=>({available:false}),pollMs=1000,activationTimeoutMs=5*60*1000}) {
   const registry=new Map(machines.map(machine=>[machine.id,{...machine,operation:null,cache:null,lastFailure:null}]));
   if(registry.size!==machines.length)throw new Error('Duplicate machine identity.');
   const settings=createMachineAiSettings({stateFile});
@@ -89,8 +113,10 @@ export function createMachineAiManager({machines,stateFile,audit=()=>{},pollMs=1
   }
   async function status(id,{fresh=false}={}){
     const machine=get(id);const result=base(machine);
+    try { result.hostResources=normalizeMachineHostResources(machine.local===true?await getHostResources(machine):null); }
+    catch { result.hostResources=normalizeMachineHostResources(null); }
     if(machine.operation)return {...result,state:machine.operation.kind,busy:true,label:machine.operation.kind==='starting'?'Avvio di Server AI…':'Arresto di Server AI…'};
-    if(!fresh&&machine.cache&&Date.now()-machine.cache.at<2000)return machine.cache.value;
+    if(!fresh&&machine.cache&&Date.now()-machine.cache.at<2000)return {...machine.cache.value,hostResources:result.hostResources};
     const {gpu,runtime,missing}=await prerequisites(machine);result.gpu=gpu;result.missing=missing;
     if(!result.enabled){
       if(runtime&&!runtime.allStopped&&!machine.lastFailure){beginDisable(machine);return {...result,state:'stopping',busy:true,label:'Arresto di Server AI…'};}

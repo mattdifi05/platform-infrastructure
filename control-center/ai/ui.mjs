@@ -200,6 +200,12 @@ export function renderServerAi() {
       </div>
       <div class="server-ai-toolbar-actions"><details class="server-ai-admin-diagnostics" data-ai-admin-diagnostics hidden><summary title="Diagnostica amministratore">Diagnostica</summary><dl data-ai-admin-diagnostics-list></dl></details><div class="server-ai-gate-actions"><button type="button" data-ai-disable hidden title="Disattiva Server AI">${aiIcon('power')}<span>Disattiva</span></button></div></div>
     </header>
+    <section class="server-ai-host-metrics" data-ai-host-metrics aria-label="Risorse del VPS" aria-live="polite">
+      <article><h2>CPU</h2><strong data-ai-host-cpu>Non disponibile</strong><span data-ai-host-cpu-detail>Metriche host non disponibili.</span></article>
+      <article><h2>Memoria</h2><strong data-ai-host-memory>Non disponibile</strong><span data-ai-host-memory-detail>Metriche host non disponibili.</span></article>
+      <article><h2>Disco</h2><strong data-ai-host-disk>Non disponibile</strong><span data-ai-host-disk-detail>Metriche host non disponibili.</span></article>
+      <p data-ai-host-captured></p>
+    </section>
     <section class="server-ai-workspace" data-ai-workspace>
       <button class="server-ai-drawer-backdrop" type="button" data-ai-close-conversations aria-label="Chiudi conversazioni" tabindex="-1"></button>
       <aside class="server-ai-conversations" id="server-ai-conversations" data-ai-conversation-drawer aria-label="Conversazioni">

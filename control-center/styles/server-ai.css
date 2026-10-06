@@ -41,6 +41,12 @@
 .server-ai-health.bad > span { background: var(--cc-danger); }
 .server-ai-health.degraded > span { background: var(--cc-amber); }
 .server-ai-toolbar-actions { align-items: center; display: flex; gap: 10px; }
+.server-ai-host-metrics { align-items: stretch; border-bottom: 1px solid var(--ai-border); display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 12px 28px; }
+.server-ai-host-metrics article { background: #fbfbfd; border: 1px solid var(--ai-border); border-radius: 9px; display: grid; gap: 3px; min-width: 0; padding: 10px 13px; }
+.server-ai-host-metrics h2 { color: var(--ai-muted); font-size: 10px; font-weight: 650; letter-spacing: .06em; margin: 0; text-transform: uppercase; }
+.server-ai-host-metrics strong { font-size: 16px; font-weight: 650; }
+.server-ai-host-metrics article span { color: var(--ai-muted); font-size: 11px; overflow-wrap: anywhere; }
+.server-ai-host-metrics > p { color: var(--ai-muted); font-size: 10px; grid-column: 1 / -1; margin: -7px 2px 0; text-align: right; }
 .server-ai-admin-diagnostics { position: relative; }
 .server-ai-admin-diagnostics > summary { color: var(--ai-muted); cursor: pointer; font-size: 12px; list-style: none; padding: 7px 4px; }
 .server-ai-admin-diagnostics > summary::-webkit-details-marker { display: none; }
@@ -260,6 +266,10 @@ button.server-ai-drawer-close, button.server-ai-drawer-open { display: none; }
   .server-ai-toolbar { flex-basis: 70px; gap: 12px; padding: 12px 18px; }
   .server-ai-brand h1 { font-size: 21px; }
   .server-ai-brand > span { font-size: 11px; }
+  .server-ai-host-metrics { gap: 7px; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 9px 14px; }
+  .server-ai-host-metrics article { padding: 8px; }
+  .server-ai-host-metrics strong { font-size: 13px; }
+  .server-ai-host-metrics article span { font-size: 9px; }
   .server-ai-machine { align-items: flex-end; flex-direction: column; gap: 3px; }
   .server-ai-machine strong { font-size: 11px; }
   .server-ai-machine [data-ai-machine-label] { max-width: 155px; }

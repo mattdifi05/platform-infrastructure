@@ -411,7 +411,7 @@ const registry = createToolRegistry({
     console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event: "machine-adapter-unavailable" }));
     return { ...machine, configured: false };
   }
-}), audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
+}), getHostResources: machine => machine.local === true ? readPrometheusResourceSnapshot() : null, audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
 
 let serverAiConversationStore = null;
 let serverAiConversationsReady = false;
@@ -9702,6 +9702,7 @@ async function readPrometheusResourceSnapshot() {
   attachPrometheusContainerLimit(platformContainers, results.platformContainerPidsLimit, "pidsLimit");
   const containers = platformContainers;
   const snapshot = sanitizeEvent({
+    capturedAt: new Date().toISOString(),
     available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
     cpu: {
       available: results.cpuPercent.length > 0 || results.cpuCores.length > 0,

@@ -371,6 +371,31 @@
     instance.adminDiagnostics.hidden = instance.adminDiagnosticsList.children.length === 0;
   }
 
+  function formatHostBytes(value) {
+    var bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "Non disponibile";
+    var units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    var unit = 0;
+    while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; }
+    return bytes.toLocaleString("it-IT", { maximumFractionDigits: 1 }) + " " + units[unit];
+  }
+
+  function renderHostMetrics(instance, status) {
+    var metrics = status && status.hostResources || {};
+    var cpu = metrics.cpu && metrics.cpu.available === true ? metrics.cpu : null;
+    var memory = metrics.memory && metrics.memory.available === true ? metrics.memory : null;
+    var disk = metrics.disk && metrics.disk.available === true ? metrics.disk : null;
+    if (!instance.hostMetricNodes) return;
+    instance.hostMetricNodes.cpu.textContent = cpu ? Number(cpu.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
+    instance.hostMetricNodes.cpuDetail.textContent = cpu ? (Number.isFinite(cpu.cores) && cpu.cores > 0 ? cpu.cores.toLocaleString("it-IT") + " core" : "Utilizzo CPU host") : "Metriche host non disponibili.";
+    instance.hostMetricNodes.memory.textContent = memory ? Number(memory.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
+    instance.hostMetricNodes.memoryDetail.textContent = memory ? formatHostBytes(memory.usedBytes) + " usati · " + formatHostBytes(memory.totalBytes) + " totali" : "Metriche host non disponibili.";
+    instance.hostMetricNodes.disk.textContent = disk ? Number(disk.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
+    instance.hostMetricNodes.diskDetail.textContent = disk ? formatHostBytes(disk.usedBytes) + " usati · " + formatHostBytes(disk.totalBytes) + " totali" : "Metriche host non disponibili.";
+    var capturedAt = metrics.capturedAt && Number.isFinite(Date.parse(metrics.capturedAt)) ? new Date(metrics.capturedAt) : null;
+    instance.hostMetricNodes.captured.textContent = capturedAt ? "Aggiornato " + capturedAt.toLocaleTimeString("it-IT") : "";
+  }
+
   function renderMachine(instance, status) {
     instance.machineState = machineState(status);
     instance.enabled = status && status.enabled === true;
@@ -379,6 +404,7 @@
     instance.historyAvailable = Boolean(status && status.historyAvailable === true);
     instance.root.setAttribute("data-ai-machine-state", instance.machineState);
     renderAdminDiagnostics(instance, status);
+    renderHostMetrics(instance, status);
     instance.machineLabel.textContent = String(status && status.machineLabel || instance.selectedMachineLabel || "Macchina selezionata").slice(0, 160);
     var healthLabel = String(status && status.label || stateTitle(instance.machineState)).slice(0, 180);
     var healthStrong = instance.health.querySelector("strong");
@@ -2154,6 +2180,7 @@
       state: root.querySelector("[data-ai-state]"), health: root.querySelector("[data-ai-health]"), attachments: root.querySelector("[data-ai-attachments]"), attach: root.querySelector("[data-ai-attach]"), attachmentInput: root.querySelector("[data-ai-attachment-input]"),
       machineLabel: root.querySelector("[data-ai-machine-label]"), machineName: root.querySelector("[data-ai-machine-name]"), machinePicker: root.querySelector("[data-ai-machine-picker]"), machineSelect: root.querySelector("[data-ai-machine-select]"),
       gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), actionErrorNode: root.querySelector("[data-ai-action-error]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
+      hostMetricNodes: { cpu: root.querySelector("[data-ai-host-cpu]"), cpuDetail: root.querySelector("[data-ai-host-cpu-detail]"), memory: root.querySelector("[data-ai-host-memory]"), memoryDetail: root.querySelector("[data-ai-host-memory-detail]"), disk: root.querySelector("[data-ai-host-disk]"), diskDetail: root.querySelector("[data-ai-host-disk-detail]"), captured: root.querySelector("[data-ai-host-captured]") },
     };
     var instance = active;
     initializeModeControl(instance);
