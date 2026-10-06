@@ -124,6 +124,25 @@ test("database admin ForwardAuth accepts the exact public host only from a trust
   }
 });
 
+test("first configuration accepts one exact IPv6 client through trusted proxies without trusting a spoofed address", async () => {
+  const client = "2001:db8:56f5:b90c:8c01:7ee3:a3c9:2a";
+  const auth = await createControlCenterAuth({ env: env({
+    CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: `${client}/128`,
+    CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS:
+      "172.23.0.2/32,172.22.0.2/32,172.30.250.2/32,172.30.250.1/32,127.0.0.0/8",
+  }) });
+  try {
+    const req = request({ address: "172.23.0.2", mutation: false });
+    req.headers["x-forwarded-for"] = `2001:db8::bad, ${client}, 127.0.0.1, 172.30.250.1, 172.30.250.2`;
+    assert.equal(auth.assertRequest(req).clientAddress, client);
+
+    req.headers["x-forwarded-for"] = "2001:db8::bad, 127.0.0.1, 172.30.250.1, 172.30.250.2";
+    assert.throws(() => auth.assertRequest(req), (error) => error instanceof AuthRequestError && error.status === 403);
+  } finally {
+    await auth.close();
+  }
+});
+
 test("registration and login options are generated for the exact portal origin", async () => {
   const auth = await createControlCenterAuth({ env: env() });
   try {

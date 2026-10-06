@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Typed infrastructure operations. No shell, project path, SQL or secret API."""
-import concurrent.futures,contextlib,datetime,hashlib,hmac,http.server,ipaddress,json,os,pathlib,re,secrets,socket,socketserver,sqlite3,ssl,subprocess,tempfile,threading,time,uuid
+import concurrent.futures,contextlib,datetime,hashlib,hmac,http.server,ipaddress,json,os,pathlib,re,secrets,socket,socketserver,sqlite3,ssl,stat,shutil,subprocess,tempfile,threading,time,uuid
 
 STATE=pathlib.Path('/var/lib/platform-server-ai-admin')
 SOCKET='/run/platform-server-ai-admin/admin.sock'
@@ -8,7 +8,7 @@ TOKEN='/etc/platform-infrastructure/server-ai/infrastructure-token'
 ZONE=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/dns/db.platform-infrastructure.com')
 BACKUP=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/local-private-backup')
 RUNTIME=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/state')
-MACHINE=hashlib.sha256(pathlib.Path('/etc/machine-id').read_bytes()).hexdigest()
+MACHINE=hashlib.sha256(pathlib.Path('/etc/machine-id').read_bytes()).hexdigest() if pathlib.Path('/etc/machine-id').exists() else None
 CORE_CONTAINERS=frozenset('gf-postgres gf-mariadb gf-redis gf-keycloak gf-nats gf-grafana gf-prometheus gf-loki gf-alertmanager gf-node-exporter gf-local-dns gf-traefik gf-waf gf-project-router gf-phpmyadmin gf-phppgadmin gf-rustfs gf-minio-gateway gf-platform-alert-dispatcher gf-promtail gf-searxng gf-server-ai-observer gf-server-ai-project-source-reader gf-server-ai-project-query-reader'.split())
 HOSTING=frozenset('enterprise-worker-notifications enterprise-worker-jobs node-account node-ui php-matthewdifilippo php-anniversary php-workcalendar php-fiplatform php-stream students-beta-redis enterprise-web enterprise-backend node-scriptastudents officina-dibella-web carrozzeria-tasso-web scripta-local-doh'.split())
 CONTAINERS=CORE_CONTAINERS|HOSTING
@@ -23,6 +23,76 @@ LOCK=threading.Lock()
 EXECUTOR=concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 class Rejected(Exception): pass
+PORTABLE=False
+HOST_CONFIG_PATH='/etc/platform-infrastructure/server-ai/admin-host.json'
+VPS_CONTAINERS=(CORE_CONTAINERS-frozenset(['gf-server-ai-project-source-reader','gf-server-ai-project-query-reader']))|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler gf-server-ai-controller'.split())
+VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-promtail enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
+VPS_SERVICES=SERVICES|frozenset(['docker.service','ssh.service','auditd.service','apparmor.service','ufw.service'])
+HOME_JOBS=dict(JOBS)
+def protected_json(filename,limit=262144):
+ p=pathlib.Path(filename)
+ if not p.is_absolute() or str(p)!=filename or '..' in p.parts:raise Rejected('Configuration path is not canonical')
+ for parent in [p.parent,*p.parents]:
+  info=parent.lstat()
+  if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise Rejected('Configuration parent is not protected')
+ fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+ try:
+  info=os.fstat(fd)
+  if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022 or info.st_nlink!=1 or not 0<info.st_size<=limit:raise Rejected('Configuration file is not protected')
+  with os.fdopen(fd,'rb',closefd=False) as source:return json.load(source)
+ finally:os.close(fd)
+def bounded_runtime_path(value):
+ if value is None:return None
+ if not isinstance(value,str) or not re.fullmatch(r'/(?:var/lib/platform-infrastructure|srv/platform-infrastructure|home/platform_infrastructure/v1-fresh-runtime)/[A-Za-z0-9_./-]+',value) or '..' in value.split('/') or '.' in value.split('/') or '//' in value or value.endswith('/'):raise Rejected('Runtime path outside bounded infrastructure roots')
+ p=pathlib.Path(value)
+ if p.resolve()!=p or not p.is_dir():raise Rejected('Runtime directory is absent or redirected')
+ for ancestor in [p,*p.parents]:
+  info=ancestor.lstat()
+  if info.st_uid!=0 or info.st_mode&0o022:raise Rejected('Runtime directory is not root protected')
+ return p
+def validate_host_config(value,machine_id):
+ exact(value,['version','machineId','containers','services','jobs','inventoryFile','backupRoot','runtimeRoot'])
+ if type(value['version']) is not int or value['version']!=1 or not re.fullmatch(r'[a-f0-9]{64}',str(machine_id)) or value['machineId']!=machine_id:raise Rejected('Host configuration identity mismatch')
+ for key,allowed in [('containers',VPS_CONTAINERS),('services',VPS_SERVICES)]:
+  rows=value[key]
+  if not isinstance(rows,list) or any(not isinstance(row,str) for row in rows) or len(rows)!=len(set(rows)) or not set(rows)<=allowed:raise Rejected('Host configuration includes unreviewed '+key)
+ if not isinstance(value['jobs'],dict) or any(k not in HOME_JOBS or not isinstance(v,str) or HOME_JOBS[k]!=v for k,v in value['jobs'].items()):raise Rejected('Host configuration includes unreviewed jobs')
+ if value['inventoryFile']!='/etc/platform-infrastructure/server-ai/infrastructure-inventory.json':raise Rejected('Inventory path outside fixed infrastructure boundary')
+ backup=bounded_runtime_path(value['backupRoot']);runtime=bounded_runtime_path(value['runtimeRoot'])
+ if any(k in value['jobs'] for k in ['backup','rustfs_recovery','host_recovery','local_recovery']) and (backup is None or runtime is None):raise Rejected('Backup jobs require actual host backup state roots')
+ return {**value,'backupRoot':backup,'runtimeRoot':runtime}
+def configure_host(filename):
+ global PORTABLE,CONTAINERS,SERVICES,JOBS,INVENTORY,BACKUP,RUNTIME,ZONE
+ if filename!=HOST_CONFIG_PATH:raise Rejected('Host configuration path must be the fixed protected path')
+ config=validate_host_config(protected_json(filename),MACHINE)
+ pins=protected_json(config['inventoryFile'])
+ if not isinstance(pins,dict) or set(pins)!=set(config['containers']):raise Rejected('Inventory differs from enrolled host containers')
+ PORTABLE=True;CONTAINERS=frozenset(config['containers']);SERVICES=frozenset(config['services']);JOBS=config['jobs'];INVENTORY=pathlib.Path(config['inventoryFile']);BACKUP=config['backupRoot'];RUNTIME=config['runtimeRoot'];ZONE=None
+def loaded_unit(name):
+ try:return 'LoadState=loaded' in service_status(name)
+ except Rejected:return False
+def portable_catalog():
+ services=sorted(n for n in SERVICES if loaded_unit(n));jobs={k:v for k,v in JOBS.items() if loaded_unit(v)}
+ containers=[]
+ if shutil.which('docker'):
+  try:containers=sorted(CONTAINERS & set(command(['docker','ps','--all','--format','{{.Names}}']).splitlines()))
+  except Rejected:pass
+ topics=['capabilities','os','storage','resources','audit','operation','dns'];ops=[]
+ if shutil.which('dpkg-query'):topics.append('packages')
+ if shutil.which('apt-get'):ops+=['package_refresh','package_upgrade']
+ if shutil.which('systemctl'):topics+=['services','logs']
+ if services:ops+=['service_start','service_restart']
+ if containers:topics+=['containers','databases'];ops+=['container_start','container_restart','container_resources']
+ if set(containers)&{'gf-postgres','enterprise-postgres'}:ops.append('database_reload')
+ if all(shutil.which(x) for x in ['ip','ss']):topics.append('network')
+ if shutil.which('iptables-save'):topics.append('firewall')
+ if shutil.which('fail2ban-client') and 'fail2ban.service' in services:
+  try:command(['fail2ban-client','status','sshd']);ops+=['firewall_ban','firewall_unban']
+  except Rejected:pass
+ if jobs:ops.append('maintenance_run')
+ if RUNTIME is not None and 'backup' in jobs:topics.append('backups')
+ if shutil.which('logrotate') and pathlib.Path('/etc/logrotate.conf').is_file():ops.append('log_rotate')
+ return topics,ops,containers,services,jobs
 def exact(value,keys,required=None):
  if not isinstance(value,dict) or set(value)-set(keys) or set(keys if required is None else required)-set(value):raise Rejected('Invalid fields')
 def clean(value):
@@ -72,7 +142,7 @@ def docker(name):
  if value['Name']!='/'+name:raise Rejected('Container identity changed')
  info=INVENTORY.stat()
  if info.st_uid!=0 or info.st_mode&0o022 or INVENTORY.is_symlink():raise Rejected('Invalid reviewed inventory ownership')
- pins=json.loads(INVENTORY.read_bytes())
+ pins=protected_json(str(INVENTORY)) if PORTABLE else json.loads(INVENTORY.read_bytes())
  actual={k:value[k] for k in ['Id','Image','Mounts']};actual['Labels']=value['Config'].get('Labels') or {}
  if pins.get(name)!=actual:raise Rejected('Runtime identity/mounts/labels changed; operator must review inventory again')
  return value
@@ -87,7 +157,13 @@ def container_summary(c):
 def service_status(name):
  return command(['systemctl','show',name,'--no-pager','--property=Id,LoadState,ActiveState,SubState,Result,UnitFileState,MemoryCurrent,CPUUsageNSec,InvocationID,ExecMainStatus,ExecMainStartTimestampMonotonic']).strip()
 def capabilities():
- return {'source':'live-host-typed-infrastructure-bridge','machineId':MACHINE,'readTopics':list(TOPICS),'writeOperations':list(OPERATIONS),'containers':sorted(CONTAINERS),'services':sorted(SERVICES),'packages':sorted(PACKAGES),'maintenanceTargets':JOBS,'dnsZone':'platform-infrastructure.com','limits':{'writes':'owner + fresh active session + explicit trusted user turn','projectCodeAndData':'no source/data read/write API; reviewed hosting containers allow lifecycle and resource budgets only','database':'engine health/resources/lifecycle and PostgreSQL configuration reload only; no SQL or database content','firewall':'existing reviewed policy reapply and public-IP fail2ban sshd bans only','tls':'verified local certificate inspection and existing TLS metrics; no disabling TLS or exposing private keys','resources':'runtime limits persisted in bridge audit/desired limits; not an application compose/source edit','unsupported':'arbitrary shell/files/SQL, project edits, image/volume/database deletion, restore over live data, arbitrary network/routing changes, new package repositories, trust-key changes; require separate operator workflow'}}
+ topics,operations,containers,services,jobs=portable_catalog() if PORTABLE else (list(TOPICS),list(OPERATIONS),sorted(CONTAINERS),sorted(SERVICES),JOBS)
+ packages=sorted(PACKAGES)
+ if PORTABLE:
+  packages=[]
+  if 'packages' in topics:
+   packages=sorted(PACKAGES & set(line.split('\t')[0].split(':')[0] for line in command(['dpkg-query','-W','-f=${binary:Package}\t${db:Status-Status}\n']).splitlines() if line.endswith('\tinstalled')))
+ return {'source':'live-host-typed-infrastructure-bridge','machineId':MACHINE,'readTopics':topics,'writeOperations':operations,'containers':containers,'services':services,'packages':packages,'maintenanceTargets':jobs,'dnsZone':None if PORTABLE else 'platform-infrastructure.com','limits':{'writes':'owner + fresh active session + explicit trusted user turn','projectCodeAndData':'no project containers or source/data APIs' if PORTABLE else 'no source/data read/write API; reviewed hosting containers allow lifecycle and resource budgets only','database':'engine health/resources/lifecycle and PostgreSQL configuration reload only; no SQL or database content','firewall':'existing reviewed policy reapply and public-IP fail2ban sshd bans only','tls':'verified local certificate inspection and existing TLS metrics; no disabling TLS or exposing private keys','resources':'runtime limits persisted in bridge audit/desired limits; not an application compose/source edit','unsupported':'arbitrary shell/files/SQL, project edits, image/volume/database deletion, restore over live data, arbitrary network/routing changes, new package repositories, trust-key changes; require separate operator workflow'}}
 def portal_tls_context():
     # Explicit dedicated trust store: never add ambient system roots here.
     ca=pathlib.Path('/etc/platform-infrastructure/tls/portal-new-root.pem')
@@ -102,7 +178,7 @@ def portal_tls_context():
     return context
 
 def read(topic,target,subject):
- if topic not in TOPICS:raise Rejected('Unknown read topic')
+ if topic not in (portable_catalog()[0] if PORTABLE else TOPICS):raise Rejected('Read topic unavailable on this host')
  if not isinstance(target,str) or len(target)>160 or any(c in target for c in '\r\n\0/\\'):raise Rejected('Invalid target')
  if topic=='capabilities':return capabilities()
  if topic=='os':return {'kernel':os.uname().release,'uptimeSeconds':float(pathlib.Path('/proc/uptime').read_text().split()[0]),'load':list(os.getloadavg()),'memory':{k:int(v.split()[0])*1024 for k,v in (line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ['MemTotal','MemAvailable','SwapTotal','SwapFree']},'release':{k:v.strip('"') for k,v in (line.split('=',1) for line in pathlib.Path('/etc/os-release').read_text().splitlines() if '=' in line) if k in ['NAME','VERSION','VERSION_ID']}}
@@ -110,17 +186,20 @@ def read(topic,target,subject):
   if target and target not in PACKAGES:raise Rejected('Package outside managed upgrade allowlist')
   return {'installed':'\n'.join(line for line in command(['dpkg-query','-W','-f=${binary:Package}\t${Version}\n']).splitlines() if line.split('\t')[0].split(':')[0] in ([target] if target else PACKAGES)),'upgradePolicy':'installed packages only; signed configured distro repositories; no removal'}
  if topic=='services':
-  if target and target not in SERVICES and target not in JOBS.values() and target!='platform-server-ai-egress.service':raise Rejected('Service outside reviewed infrastructure inventory')
+  if target and target not in SERVICES and target not in JOBS.values() and (PORTABLE or target!='platform-server-ai-egress.service'):raise Rejected('Service outside reviewed infrastructure inventory')
   return {'services':{n:service_status(n) for n in ([target] if target else sorted(SERVICES))}}
  if topic in ['containers','databases']:
-  names=[target] if target else (['gf-postgres','gf-mariadb','gf-redis'] if topic=='databases' else sorted(CONTAINERS));result=[]
+  names=[target] if target else ([n for n in (['gf-postgres','gf-mariadb','gf-redis','enterprise-postgres','enterprise-redis','mariadb'] if PORTABLE else ['gf-postgres','gf-mariadb','gf-redis']) if not PORTABLE or n in CONTAINERS] if topic=='databases' else sorted(CONTAINERS));result=[]
   for name in names:
    try:result.append(container_summary(docker(name)))
    except Rejected as e:result.append({'name':name,'available':False,'reason':str(e)})
   return {'containers':result,'databaseContentsRead':False}
  if topic=='network':return {'addresses':json.loads(command(['ip','-j','address'])), 'routes':json.loads(command(['ip','-j','route'])),'listeners':command(['ss','-lntup'])}
- if topic=='firewall':return {'iptables':command(['iptables-save']),'fail2banSshd':command(['fail2ban-client','status','sshd'])}
- if topic=='dns':return {'zone':'platform-infrastructure.com','records':safe_zone().decode(),'resolver':pathlib.Path('/etc/resolv.conf').read_text()}
+ if topic=='firewall':
+  result={'iptables':command(['iptables-save'])}
+  if not PORTABLE or 'firewall_ban' in portable_catalog()[1]:result['fail2banSshd']=command(['fail2ban-client','status','sshd'])
+  return result
+ if topic=='dns':return {'zone':None if PORTABLE else 'platform-infrastructure.com','records':None if PORTABLE else safe_zone().decode(),'resolver':pathlib.Path('/etc/resolv.conf').read_text()}
  if topic=='tls':
   host=target or 'portal.platform-infrastructure.com'
   if not re.fullmatch(r'[a-z0-9-]+\.platform-infrastructure\.com',host):raise Rejected('TLS target outside configured infrastructure zone')
@@ -131,7 +210,7 @@ def read(topic,target,subject):
   except ssl.SSLCertVerificationError as error:return {'hostname':host,'verified':False,'error':'CERTIFICATE_VALIDATION_FAILED','verificationError':str(error),'trustStore':'dedicated Portal root'}
  if topic=='storage':return {'filesystems':command(['df','-PT','-B1']),'inodes':command(['df','-Pi']),'blockDevices':json.loads(command(['lsblk','-J','-o','NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS']))}
  if topic=='logs':
-  if target not in SERVICES and target not in JOBS.values() and target not in ['platform-server-ai-egress.service','platform-server-ai-admin.service']:raise Rejected('Logs require one reviewed infrastructure unit')
+  if target not in SERVICES and target not in JOBS.values() and target not in (['platform-server-ai-admin.service'] if PORTABLE else ['platform-server-ai-egress.service','platform-server-ai-admin.service']):raise Rejected('Logs require one reviewed infrastructure unit')
   raw=command(['journalctl','--unit='+target,'--since=-30min','--lines=80','--no-pager','--output=short-iso'],timeout=5)
   return {'unit':target,'redactedJournal':'\n'.join('[sensitive log line redacted]' if re.search(r'password|secret|token|authorization|cookie|credential|private.?key|sk-',line,re.I) else clean(line) for line in raw.splitlines())}
  if topic=='resources':
@@ -186,7 +265,7 @@ def safe_zone():
  if b'$ORIGIN platform-infrastructure.com.' not in data:raise Rejected('DNS zone boundary mismatch')
  return data
 def validate_change(op,args):
- if op not in OPERATIONS:raise Rejected('Unsupported infrastructure operation; no shell/project/SQL fallback')
+ if op not in (portable_catalog()[1] if PORTABLE else OPERATIONS):raise Rejected('Unsupported infrastructure operation; no shell/project/SQL fallback')
  exact(args,['target','memoryMiB','cpus','pids','address'],['target']);target=args['target']
  if not isinstance(target,str) or len(target)>160 or not target or any(c in target for c in '\r\n\0/\\'):raise Rejected('Invalid infrastructure target')
  allowed={'target'}
@@ -199,7 +278,7 @@ def validate_change(op,args):
  if op=='dns_record_set':allowed.add('address')
  if set(args)-allowed:raise Rejected('Fields do not belong to this operation')
  if op.startswith('container_') and target not in CONTAINERS:raise Rejected('Container is outside the reviewed runtime inventory')
- if op.startswith('service_') and target not in SERVICES:raise Rejected('Service outside reviewed infrastructure allowlist')
+ if op.startswith('service_') and target not in (portable_catalog()[3] if PORTABLE else SERVICES):raise Rejected('Service outside reviewed infrastructure allowlist')
  if op=='package_upgrade' and target not in PACKAGES:raise Rejected('Package outside managed installed-package allowlist')
  if op=='package_refresh' and target!='apt':raise Rejected('Only configured signed APT repositories are supported')
  if op.startswith('dns_record_'):
@@ -215,13 +294,14 @@ def validate_change(op,args):
   except ValueError:raise Rejected('Invalid firewall address')
   if not ip.is_global or ip.is_multicast:raise Rejected('Management/private networks cannot be banned by this tool')
  if op=='firewall_reapply' and target!='server-ai-egress':raise Rejected('Only the reviewed egress policy may be reapplied')
- if op=='database_reload' and target!='gf-postgres':raise Rejected('Only PostgreSQL existing configuration reload is supported; no arbitrary SQL/config write')
- if op=='maintenance_run' and target not in JOBS:raise Rejected('Unknown reviewed maintenance job')
+ if op=='database_reload' and target not in ({'gf-postgres','enterprise-postgres'}&CONTAINERS if PORTABLE else {'gf-postgres'}):raise Rejected('Only PostgreSQL existing configuration reload is supported; no arbitrary SQL/config write')
+ if op=='maintenance_run' and target not in (portable_catalog()[4] if PORTABLE else JOBS):raise Rejected('Unknown reviewed maintenance job')
  if op=='log_rotate' and target!='system':raise Rejected('Only normal configured log rotation is supported')
  return args
 def mutate(op,args):
+ if PORTABLE:validate_change(op,args)
  target=args['target']
- if (BACKUP/'broker-state/active-operation.json').exists() and not (op=='maintenance_run' and target in ['dns','tls','backup_metrics']):raise Rejected('A backup operation is active; defer infrastructure changes')
+ if BACKUP is not None and (BACKUP/'broker-state/active-operation.json').exists() and not (op=='maintenance_run' and target in ['dns','tls','backup_metrics']):raise Rejected('A backup operation is active; defer infrastructure changes')
  if op.startswith('container_'):
   inspected=docker(target);before=container_summary(inspected)
   if op=='container_resources':
@@ -355,6 +435,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
   self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(output)));self.end_headers();self.wfile.write(output)
 class Server(socketserver.ThreadingMixIn,socketserver.UnixStreamServer):daemon_threads=True
 def main():
+ configured=os.environ.get('SERVER_AI_ADMIN_CONFIG')
+ if configured:configure_host(configured)
+ if MACHINE is None:raise RuntimeError('Host machine identity is unavailable')
  initialize()
  with db() as c:c.execute("update jobs set status='interrupted',result=? where status in ('queued','running')",(json.dumps({'error':'Host bridge restarted; inspect actual state before retry'}),))
  key=pathlib.Path(TOKEN).read_bytes()

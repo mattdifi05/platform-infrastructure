@@ -1,0 +1,135 @@
+--- a/deployment/host/libexec/platform-ftps-backup.py
++++ b/deployment/host/libexec/platform-ftps-backup.py
+@@ -66,7 +66,7 @@
+      f.delete(partial)
+     return f
+    points(f,{k:v for k,v in listing.items() if k not in objects and k!=partial})
+-   if sum(listing.values())-listing.get(partial,0)+len(receipt)>CAP:raise RuntimeError('Receipt publication would exceed hard cap')
++   if sum(listing.values())-listing.get(partial,0)+len(receipt)>_SHARED_QUOTA_BUDGET:raise RuntimeError('Receipt publication would exceed hard cap')
+    upload_bytes(f,partial,receipt)
+    if verify(get_json(f,partial))!=proof:raise RuntimeError('Uploaded receipt differs')
+    f.rename(partial,name)
+@@ -270,7 +270,7 @@
+  receipt_bytes=len(supplement_receipt_bytes(reserved))
+  additional=sum(size for name,size in objects.items() if name not in listing)
+  if receipt not in listing:additional+=receipt_bytes
+- if sum(listing.values())+additional>CAP:raise RuntimeError('Completeness reservation exceeds shared capacity')
++ if sum(listing.values())+additional>_SHARED_QUOTA_BUDGET:raise RuntimeError('Completeness reservation exceeds shared capacity')
+  return {'additionalBytes':additional,'projectedBytes':sum(listing.values())+additional,'existingPointsPreserved':True}
+ 
+ def download_supplement(f,item,destination):
+@@ -369,7 +369,7 @@
+    confirmed=points(f,clean)
+    existing=point_supplements(f,clean,confirmed).get(parent['bundle'],[])
+    validate_supplement_set([*existing,payload])
+-   if sum(listing.values())-listing.get(partial,0)+len(data)>CAP:raise RuntimeError('Supplement receipt exceeds shared capacity')
++   if sum(listing.values())-listing.get(partial,0)+len(data)>_SHARED_QUOTA_BUDGET:raise RuntimeError('Supplement receipt exceeds shared capacity')
+    guard();upload_bytes(f,partial,data)
+    if verify_supplement(get_json(f,partial,SUPPLEMENT_RECEIPT_LIMIT),parent)!=payload:raise RuntimeError('Supplement staged receipt differs')
+    guard();f.rename(partial,name)
+@@ -433,7 +433,7 @@
+    if any('.supplement-' in n and '.supplement-full-' not in n and n.startswith(bundle+'.') and n not in extras for n in listing):raise RuntimeError('Conflicting parent supplement')
+    reserved={**payload,'verifiedAt':'9999-12-31T23:59:59.999999+00:00'}
+    receipt_reservation=len(supplement_receipt_bytes(reserved))
+-   if sum(listing.values())+max(0,payload['encryptedBytes']-listing.get(payload['ciphertext'],0))+receipt_reservation>CAP:raise RuntimeError('Supplement complete point reservation exceeds capacity')
++   if sum(listing.values())+max(0,payload['encryptedBytes']-listing.get(payload['ciphertext'],0))+receipt_reservation>_SHARED_QUOTA_BUDGET:raise RuntimeError('Supplement complete point reservation exceeds capacity')
+    f=upload_resilient(f,cipher,payload['ciphertext'],payload['encryptedBytes'],reserve_bytes=receipt_reservation)
+    downloaded=tmp/'downloaded.gpg';f=download_resilient(f,payload['ciphertext'],downloaded,payload['encryptedBytes'])
+    if sha(downloaded)!=payload['encryptedSha256']:raise RuntimeError('Actual supplement download SHA differs')
+@@ -449,7 +449,7 @@
+    result=restore_supplement_archive(restored_tar,restored,payload)
+    if payload['verifiedAt'] is None:payload['verifiedAt']=now();pending['payload']=payload;save(ledger,pending)
+    f.close();f=publish_supplement_receipt(payload,parent);listing=inventory(f);confirmed=points(f,listing)
+-   assert sum(listing.values())<=CAP
++   assert sum(listing.values())<=_SHARED_QUOTA_BUDGET
+    cache_retention_index(confirmed);result.update(parentManifestId=parent['manifestId'],remoteBytes=sum(listing.values()),receipt=sign_supplement(payload),originalPointUnchanged=True)
+    save(WORK/'supplement-proof.json',result);save(STATE/'ftps-supplement-proof.json',result,True);ledger.unlink();completed=True;print(json.dumps(result))
+   finally:
+@@ -486,7 +486,7 @@
+   if candidate in listing:f.delete(candidate)
+  file.unlink()
+ def assert_capacity(listing,size):
+- if size<0 or any(v<0 for v in listing.values()) or sum(listing.values())+size+131072>CAP:raise RuntimeError('70,000,000,000-byte FTPS hard cap would be exceeded; existing verified points preserved')
++ if size<0 or any(v<0 for v in listing.values()) or sum(listing.values())+size+131072>_SHARED_QUOTA_BUDGET:raise RuntimeError('70,000,000,000-byte FTPS hard cap would be exceeded; existing verified points preserved')
+ def expired_points(confirmed,epoch):
+  return [p for index,p in enumerate(confirmed) if index>=MAX_POINTS or epoch-datetime.datetime.fromisoformat(p['backupAt']).timestamp()>=MAX_AGE]
+ def reconcile_retention(f):
+@@ -542,10 +542,10 @@
+  selected=expired_points(confirmed,epoch);selected_names={p['bundle'] for p in selected}
+  after=sum(listing.values())-sum(sum(group_objects(f,listing,p)[0].values()) for p in selected)
+  for p in reversed(confirmed[1:]):
+-  if after+reservation<=CAP:break
++  if after+reservation<=_SHARED_QUOTA_BUDGET:break
+   if p['bundle'] not in selected_names:
+    selected.append(p);selected_names.add(p['bundle']);after-=sum(group_objects(f,listing,p)[0].values())
+- if after+reservation>CAP:raise RuntimeError('FTPS capacity cannot fit the new point while preserving the newest verified point')
++ if after+reservation>_SHARED_QUOTA_BUDGET:raise RuntimeError('FTPS capacity cannot fit the new point while preserving the newest verified point')
+  removed=delete_points(f,selected);listing=inventory(f);remaining=points(f,listing);cache_retention_index(remaining)
+  return listing,remaining,removed
+ def ensure_source_fresh(backup_at,epoch):
+@@ -563,7 +563,7 @@
+   try:
+    listing=inventory(f);offset=listing.get(partial,0)
+    if not 0<=offset<=size:raise RuntimeError('Partial upload exceeds exact ciphertext size')
+-   if sum(listing.values())+(size-offset)+reserve_bytes>CAP:raise RuntimeError('Resumed upload would exceed hard cap')
++   if sum(listing.values())+(size-offset)+reserve_bytes>_SHARED_QUOTA_BUDGET:raise RuntimeError('Resumed upload would exceed hard cap')
+    if offset<size:
+     with encrypted.open('rb') as stream:
+      stream.seek(offset);f.storbinary(('APPE ' if offset else 'STOR ')+partial,stream,blocksize=1024*1024)
+@@ -661,7 +661,7 @@
+    upload_bytes(f,bundle+'.receipt.json.partial',receipt)
+    f.rename(partial,bundle);f.rename(bundle+'.receipt.json.partial',bundle+'.receipt.json');published=True
+    current=inventory(f)
+-   if sum(current.values())>CAP:raise RuntimeError('FTPS hard cap verification failed')
++   if sum(current.values())>_SHARED_QUOTA_BUDGET:raise RuntimeError('FTPS hard cap verification failed')
+    confirmed=points(f,current)
+    if not any(p==proof for p in confirmed):raise RuntimeError('Published FTPS receipt differs')
+    final,remaining,deleted=retain(f);deleted=predeleted+deleted
+@@ -758,7 +758,7 @@
+     filtered={k:v for k,v in listing.items() if k not in part_objects and k!=receipt_name+'.partial'};points(f,filtered)
+     if any(listing.get(k,0)>size for k,size in part_objects.items()):raise RuntimeError('Remote part exceeds authenticated size')
+     remaining=sum(size-listing.get(k,0) for k,size in part_objects.items())
+-    if sum(listing.values())+remaining+131072>CAP:raise RuntimeError('Multipart total would exceed hard cap')
++    if sum(listing.values())+remaining+131072>_SHARED_QUOTA_BUDGET:raise RuntimeError('Multipart total would exceed hard cap')
+     save(STATE/'ftps-last-attempt.json',{'status':'running','startedAt':pending['startedAt'],'manifestId':source['manifestId'],'format':'multipart-v2','partCount':len(pending['parts'])},True)
+     if resume_downloaded:
+      if any(listing.get(k)!=v for k,v in part_objects.items()):raise RuntimeError('Prior download recovery requires every complete remote part')
+@@ -795,7 +795,7 @@
+     if len(receipt)>131072:raise RuntimeError('Multipart receipt exceeds bound')
+     f.close();f=publish_receipt(proof)
+    current=inventory(f)
+-   if sum(current.values())>CAP or not any(p==proof for p in points(f,current)):raise RuntimeError('Published multipart point or cap differs')
++   if sum(current.values())>_SHARED_QUOTA_BUDGET or not any(p==proof for p in points(f,current)):raise RuntimeError('Published multipart point or cap differs')
+    final,remaining,deleted=retain(f);proof.update(remoteBytes=sum(final.values()),retainedPointCount=len(remaining),deletedExpiredManifestIds=predeleted+deleted,reusedVerifiedReceipt=reused_verified_receipt,resumedPriorDownloadedCiphertext=resume_downloaded)
+    save(WORK/'latest-proof.json',proof);save(STATE/'ftps-proof.json',proof,True);save(STATE/'ftps-last-attempt.json',{'status':'passed','finishedAt':now()},True)
+    ledger.unlink();(WORK/'upload-preserved.json').unlink(missing_ok=True);completed=True;print(json.dumps(proof))
+@@ -997,6 +997,29 @@
+   module=importlib.util.module_from_spec(module_spec);sys.modules[name]=module;module_spec.loader.exec_module(module)
+  return sys.modules['platform_completeness_publisher'].publish(sys.modules[__name__],bundle)
+ 
++# Preserve CAP as the home format/owner limit; quota is a separate writer budget.
++_SHARED_QUOTA_ACTIVE=False
++_SHARED_QUOTA_BUDGET=CAP
++def shared_quota_mutation(action):
++ import functools
++ @functools.wraps(action)
++ def wrapped(*args,**kwargs):
++  global _SHARED_QUOTA_BUDGET,_SHARED_QUOTA_ACTIVE
++  if _SHARED_QUOTA_ACTIVE:return action(*args,**kwargs)
++  module_path=pathlib.Path('/usr/local/libexec/platform_ftps_shared_quota.py')
++  info=module_path.lstat()
++  if module_path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022 or info.st_nlink!=1 or sha(module_path)!='bbfb7263e0f3fb8bd329bb1d33fc01a3e28e2bcb5952715bfeeba3d1f9b5e493':
++   raise RuntimeError('Shared quota helper code binding differs')
++  quota_spec=importlib.util.spec_from_file_location('ftps_shared_quota',module_path)
++  quota=importlib.util.module_from_spec(quota_spec);quota_spec.loader.exec_module(quota)
++  with quota.writer_budget(CONFIG,FOLDER) as available:
++   _SHARED_QUOTA_BUDGET=available;_SHARED_QUOTA_ACTIVE=True
++   try:return action(*args,**kwargs)
++   finally:_SHARED_QUOTA_BUDGET=CAP;_SHARED_QUOTA_ACTIVE=False
++ return wrapped
++for _mutation in ('main','main_v1','retention_only','publish_helper_supplement','publish_completeness','publish_source_overlay','publish_source_overlay_g17','publish_source_overlay_g18','publish_supplement_receipt'):
++ globals()[_mutation]=shared_quota_mutation(globals()[_mutation])
++
+ if __name__=='__main__':
+  if sys.argv[1:]==['--native-select-latest']:
+   print(json.dumps(native_select_latest()));raise SystemExit(0)

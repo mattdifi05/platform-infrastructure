@@ -138,17 +138,21 @@ function exactKeys(value, expected, label) {
 
 export function validateRegistry(value) {
   exactKeys(value, ["version", "machineId", "services"], "controller registry");
-  if (value.version !== 1) throw fail("controller registry version is unsupported");
+  if (![1, 2].includes(value.version)) throw fail("controller registry version is unsupported");
   if (!MACHINE_ID.test(String(value.machineId))) throw fail("controller registry machineId is invalid");
-  if (!Array.isArray(value.services) || value.services.length !== SERVICES.length) {
+  const catalog = value.version === 2 ? SERVICES.slice(0, 2) : SERVICES;
+  if (!Array.isArray(value.services) || value.services.length !== catalog.length) {
     throw fail("controller registry services are invalid");
   }
   const seen = new Set();
   value.services.forEach((record, index) => {
-    const expected = SERVICES[index];
+    const expected = catalog[index];
     const policy = SERVICE_POLICIES[expected.service];
     const auxiliary = policy.role !== undefined;
-    exactKeys(record, auxiliary
+    const portable = value.version === 2;
+    exactKeys(record, portable
+      ? ["name", "service", "imageId", "configHash", "mountSources"]
+      : auxiliary
       ? ["name", "service", "imageId", "configHash", "device", "deviceProofSha256"]
       : policy.platformSource
         ? ["name", "service", "imageId", "configHash", "platformSourcePath"]
@@ -165,6 +169,18 @@ export function validateRegistry(value) {
     if (policy.platformSource && (typeof record.platformSourcePath !== "string"
       || !PLATFORM_SOURCE_PATH.test(record.platformSourcePath))) {
       throw fail("controller registry platform source binding is invalid");
+    }
+    if (portable) {
+      const targets = policy.mounts.map(mount => mount.target);
+      exactKeys(record.mountSources, targets, "controller registry mount sources");
+      for (const source of Object.values(record.mountSources)) {
+        if (typeof source !== "string" || !/^\/[A-Za-z0-9_./-]+$/.test(source)
+          || source.length > 512 || source.includes("//") || source.split("/").some(part => part === "." || part === "..")
+          || source === "/" || source.endsWith("/")) throw fail("controller registry mount source is invalid");
+      }
+      if (record.service === "server-ai-observer" && record.mountSources["/run/platform-docker-observer"] !== "/run/platform-docker-observer") {
+        throw fail("controller registry observer socket source is invalid");
+      }
     }
     seen.add(record.name);
   });
@@ -276,9 +292,10 @@ function exactRuntimePolicy(info, expected) {
   const host = info?.HostConfig;
   const networks = info?.NetworkSettings?.Networks;
   if (!host || !networks || typeof networks !== "object" || Array.isArray(networks)) return false;
-  const mounts = Array.isArray(info.Mounts) ? info.Mounts.map(projectMount).sort((left, right) => left.target.localeCompare(right.target)) : [];
+  const portable = expected.mountSources !== undefined;
+  const mounts = Array.isArray(info.Mounts) ? info.Mounts.map(mount => ({ ...projectMount(mount), ...(portable ? { source: String(mount.Source ?? "") } : {}) })).sort((left, right) => left.target.localeCompare(right.target)) : [];
   const expectedMounts = [
-    ...policy.mounts,
+    ...policy.mounts.map(mount => portable ? { ...mount, source: expected.mountSources[mount.target] } : mount),
     ...(policy.platformSource ? [{ target: "/platform", type: "bind", readOnly: true, source: expected.platformSourcePath }] : []),
   ].sort((left, right) => left.target.localeCompare(right.target));
   const deviceRequests = Array.isArray(host.DeviceRequests) ? host.DeviceRequests.map(projectDeviceRequest) : [];
@@ -325,7 +342,7 @@ function exactRuntimePolicy(info, expected) {
     && canonicalJson([...(host.CapDrop || [])].sort()) === canonicalJson(["ALL"])
     && canonicalJson([...(host.CapAdd || [])].sort()) === canonicalJson([])
     && canonicalJson([...(host.SecurityOpt || [])].sort()) === canonicalJson(["no-new-privileges:true"])
-    && canonicalJson(host.Tmpfs || {}) === canonicalJson(policy.tmpfs)
+    && canonicalJson(host.Tmpfs || {}) === canonicalJson(portable && expected.service === "server-ai-observer" ? { "/tmp": "size=16m,uid=1000,gid=1000,mode=0700" } : policy.tmpfs)
     && canonicalJson(devices) === canonicalJson(expectedDevices)
     && canonicalJson(deviceRequests) === canonicalJson(policy.deviceRequests)
     && canonicalJson(Object.keys(networks).sort()) === canonicalJson([...policy.networks].sort())
@@ -416,8 +433,8 @@ function createDockerApi(socketPath = DOCKER_SOCKET) {
 async function inspectAll({ docker, registry, machineId, deadline }) {
   const values = [];
   const missing = [];
-  for (let index = 0; index < SERVICES.length; index += 1) {
-    const expected = { ...SERVICES[index], ...registry.services[index] };
+  for (const record of registry.services) {
+    const expected = { ...record };
     let info = null;
     try { info = await docker.inspectContainer(expected.name, remaining(deadline)); }
     catch (error) { if (error?.statusCode === 404 || /404/.test(String(error?.message))) missing.push(expected.name); }

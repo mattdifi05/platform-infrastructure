@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import pg from "pg";
 import {
   generateAuthenticationOptions,
@@ -903,9 +903,6 @@ function parseCidr(value) {
   if (!Number.isInteger(prefix) || prefix < 0 || prefix > maximum) {
     throw new AuthConfigurationError(`Invalid CIDR: ${value}`);
   }
-  if (family === 6 && !(address === "::1" && prefix === 128)) {
-    throw new AuthConfigurationError("Only the ::1/128 IPv6 management CIDR is supported.");
-  }
   return { address, family, prefix };
 }
 
@@ -932,7 +929,11 @@ function cidrListContains(cidrs, address) {
 function cidrContains(cidr, rawAddress) {
   const address = normalizeIp(rawAddress);
   if (cidr.family !== isIP(address)) return false;
-  if (cidr.family === 6) return address === cidr.address;
+  if (cidr.family === 6) {
+    const block = new BlockList();
+    block.addSubnet(cidr.address, cidr.prefix, "ipv6");
+    return block.check(address, "ipv6");
+  }
   const mask = cidr.prefix === 0 ? 0 : (0xffffffff << (32 - cidr.prefix)) >>> 0;
   return (ipv4Number(address) & mask) === (ipv4Number(cidr.address) & mask);
 }

@@ -1,0 +1,33 @@
+[Unit]
+Description=Typed VPS Server AI infrastructure administration bridge
+After=network-online.target docker.service ufw.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/platform-infrastructure/server-ai/admin-host.env
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-server-ai-admin.py
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=platform-server-ai-admin
+RuntimeDirectoryMode=0750
+StateDirectory=platform-server-ai-admin
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+MemoryMax=512M
+TasksMax=256
+# Do not kill an in-flight package transaction during an ordinary service stop.
+TimeoutStopSec=infinity
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

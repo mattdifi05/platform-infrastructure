@@ -43,6 +43,7 @@ import {
   parseBackupManifestDocument,
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
+import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 import {
   BackupQueueAdmissionError,
   applyBackupQueueFileOwnership,
@@ -4941,6 +4942,13 @@ function backupFamilySpecs() {
 }
 
 function readFtpsOffsiteSummary(nowMs = Date.now()) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    const point = native.manifests[0];
+    const time = Date.parse(point?.createdAt || "");
+    const verified = Boolean(point) && Number.isFinite(time) && time <= nowMs + 300000 && nowMs - time <= 14 * 86400000;
+    return { verified, backupAt: point?.createdAt || "", manifestId: verified ? point.id : "", retainedPointCount: native.manifests.length, reportPath: "" };
+  }
   const root = "/var/www/project-state/host-recovery";
   const load = (name) => {
     try {
@@ -5157,6 +5165,8 @@ function applicationBackupResources(context, projectOrId, mode = "all") {
 }
 
 function readBackupManifests() {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) return native.manifests;
   const root = path.resolve(backupRoot);
   const directory = path.join(root, "manifests");
   if (!existsSync(directory)) return [];
@@ -5570,6 +5580,11 @@ function uniqueBackupResources(resources) {
 }
 
 function platformBackupResources(context, requestedScope) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    if (!native.enabled || !native.queueActive || requestedScope !== "all" || context.projects.length) throw new ValidationError("Il backup VPS richiede il catalogo infrastruttura completo e attivato.");
+    return native.resources;
+  }
   const resources = [];
   if (requestedScope === "all" || requestedScope === "applications") {
     for (const project of context.projects) resources.push(...applicationBackupResources(context, project, "source"));
@@ -5645,6 +5660,8 @@ function resolveBackupRunRequest(payload, context) {
 }
 
 function resolveBackupRestoreRequest(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native && (!native.enabled || !native.queueActive)) throw new ValidationError("Ripristino VPS non ancora attivato.");
   const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
   if (requestedScope === "application" || requestedScope.startsWith("app-")) {
     const projectId = requestedScope.startsWith("app-")

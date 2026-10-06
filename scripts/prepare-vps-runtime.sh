@@ -22,6 +22,22 @@ assert_daemon() {
   }
 }
 
+# These first-install actions are limited to the explicit empty VPS. Dispatch
+# them through this existing host-only entrypoint, preserving its canonical
+# Docker daemon binding before the operation-specific empty-host guards run.
+case "${1:-}" in
+  --apply-empty-vps|--resume-empty-vps)
+    [ "$#" -eq 1 ] || exit 64
+    assert_daemon
+    exec bash "$ROOT_DIR/deployment/host/empty-vps/empty-vps-first-install.sh" "$1"
+    ;;
+  --apply-empty-core)
+    [ "$#" -eq 1 ] || exit 64
+    assert_daemon
+    exec bash "$ROOT_DIR/deployment/host/empty-vps/complete-empty-vps-core.sh" "$1"
+    ;;
+esac
+
 for directory in \
   "$ROOT_DIR/backups" \
   "$ROOT_DIR/reports" \
