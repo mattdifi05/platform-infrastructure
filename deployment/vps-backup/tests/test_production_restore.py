@@ -125,4 +125,21 @@ class RuntimeRestoreTests(unittest.TestCase):
  def test_database_readiness_waits_for_final_engine_not_temporary_init_server(self):
   with patch.object(r.b,'run',side_effect=[b'bash\n',b'mariadbd\n']),patch.object(r,'maria_sql',return_value='1') as sql,patch.object(r.time,'sleep'):
    r.wait_database('isolated-maria','mariadb');sql.assert_called_once_with('isolated-maria','SELECT 1',True)
+ def test_maria_initializes_before_grant_disabled_import_on_same_private_directory(self):
+  runtime=self.root/'runtime';runtime.mkdir();stage=self.root/'stage';stage.mkdir();sources={};rows=[]
+  for volume,engine in r.DB_VOLUMES.items():
+   source=self.root/volume;source.mkdir();sources[volume]=str(source)
+   rows.append({'Name':'/'+engine,'Image':'sha256:'+engine,'Config':{'Env':[]},'Mounts':[{'Name':volume,'Destination':'/data'}]})
+  (runtime/'postgres-all.sql').write_text('CREATE ROLE postgres;\n');(runtime/'mariadb-all.sql').write_text('-- fixture\n')
+  for file,data in [('database-semantics.json',{}),('postgres-live-config-paths.json',{}),('mariadb-live-tls-paths.json',{}),('database-file-metadata.json',{'postgres':{},'mariadb':{}})]:
+   (runtime/file).write_text(json.dumps(data))
+  commands=[]
+  def run(args,**kwargs):
+   commands.append(args)
+   return ('a'*64+'\n').encode() if args[1]=='create' else b''
+  with patch.object(r.b,'run',side_effect=run),patch.object(r,'wait_database'),patch.object(r,'pipe_file'),patch.object(r,'semantic_inventory',return_value={}),patch.object(r.subprocess,'run'):
+   r.stage_databases(stage,runtime,rows,sources,'restore-example-123456',{'stagingContainers':[]})
+  creates=[c for c in commands if c[1]=='create' and 'sha256:mariadb' in c]
+  self.assertEqual(len(creates),2);self.assertNotIn('--skip-grant-tables',creates[0]);self.assertIn('--skip-grant-tables',creates[1])
+  self.assertEqual(creates[0][creates[0].index('--mount')+1],creates[1][creates[1].index('--mount')+1])
 if __name__=='__main__':unittest.main()

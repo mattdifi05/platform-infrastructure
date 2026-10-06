@@ -148,11 +148,20 @@ def stage_databases(directory,runtime,rows,volumes,operation,journal):
     args+=['-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_USER=postgres']
     args += [part for e in row['Config']['Env'] if e.startswith('PGDATA=') for part in ['-e',e]]
     args += [row['Image'],'postgres','-c','listen_addresses=']
-   else:args+=['-e','MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1',row['Image'],'mariadbd','--skip-networking','--skip-grant-tables']
+   else:args+=['-e','MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1',row['Image'],'mariadbd','--skip-networking']
    ident=b.run(args).decode().strip()
    if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged container identity')
    planned['id']=ident;created.append(name);b.save(JOURNAL,journal)
    b.run(['docker','start',name]);wait_database(name,engine)
+   if engine=='mariadb':
+    # Maria's entrypoint must initialize its system accounts with grants enabled.
+    # Reuse only this isolated initialized directory for system-grant import.
+    b.run(['docker','stop','--time','60',name],timeout=90);b.run(['docker','rm',name])
+    planned['id']=None;b.save(JOURNAL,journal)
+    ident=b.run([*args,'--skip-grant-tables']).decode().strip()
+    if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged container identity')
+    planned['id']=ident;b.save(JOURNAL,journal)
+    b.run(['docker','start',name]);wait_database(name,engine)
    if engine=='postgres':
     # pg_dumpall recreates the bootstrap role; this one existing identical role
     # is retained while its subsequent ALTER ROLE/password/grants are restored.
