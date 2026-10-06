@@ -1,66 +1,50 @@
-# Home quota-only forward admission (review procedure, not executed)
+# Home quota-only forward admission — completed 2026-10-06
 
-Root readback confirmed the installed public helper SHA256 is
-`f59cb77d990de2ce8e709e5fa47a9fce9508e7aac6ee217ef64ff34584068586`, exactly the patch
-base. Active native admission schema is v2, generation 18, and
-`payload.resources.operator.helperSha256` matches that value. No exact hardcoded
-current-digest pins were found. Operator/helper wrappers consume the admission pin
-dynamically. This evidence was supplied by the coordinating root agent after its
-privileged read-only execution of `home-pin-inventory.py`.
+The home server accepted native v2 backup admission **generation 19** for the
+shared FTPS writer quota. This was a helper-only forward transition; home backup
+payloads, retention, object-store identity, activation evidence, render, release,
+capabilities, replay records and operation state were preserved. The actual signed
+generation-18 document and broker state agreed on canonical predecessor SHA256
+`4315367bad4be2ca11c4d98a10eff48ad5f1654ff3b335668dd61d888561ddee`.
+The signed generation-19 document's canonical SHA256 is
+`5d76cff3ddd11e4078a1b0065a0872098fd59f5dd26918ba9e399569ecd68c42`.
+The broker's native `loadLocalPrivateTrust()` verified the real render,
+capability and signing bindings, then native `admitGeneration()` advanced the
+active state to generation 19. No active broker operation existed before or after.
 
-The next admission must be **forward generation 19**, with predecessor the canonical
-hash of the actual signed generation-18 document. Never edit the active document's
-hash field, never reset broker replay/operation state, never import a VPS authority
-into home, and never synthesize a new restore/activation receipt.
+The reviewed public payload diff from generation 18 contained exactly four
+fields: `generation` (18 to 19), `previousAdmissionSha256` (the real predecessor
+above), `issuedAt`, and `resources.operator.helperSha256`. The installed home
+helper moved from SHA256
+`f59cb77d990de2ce8e709e5fa47a9fce9508e7aac6ee217ef64ff34584068586`
+to `fc565c7f11e5ffcb8349f1d24538e5ab5a29dd43eb300d13a3fc1e1dc18938aa`.
+The installed shared-quota module SHA256 is
+`bbfb7263e0f3fb8bd329bb1d33fc01a3e28e2bcb5952715bfeeba3d1f9b5e493`.
+The VPS writer's installed module has the same digest. Both root-owned policies
+now set `bothWritersQualified=true`. The existing authority private key was
+consumed only by the established Ed25519 signer; it was not copied to either
+server or included in the review artifacts.
 
-Minimal native transaction for root review:
+During a bounded home operation lock, the schedule, manual queue and FTPS expiry
+timers were held with no active backup/restore operation. The dedicated
+`/platform-server-public-backups` FTPS folder was created alongside the existing
+`/server-platform-backups` folder, outside `public_html`. The existing
+`qualify-ftps-lock.py --root-authorized-mkd-test` verified TLS and both folders
+with two independent sessions: the second `MKD` was rejected, and the test
+removed only its own temporary lock. No backup object was uploaded or deleted.
+Read-only scoped inventory after qualification was 26,209,164,424 bytes home,
+0 bytes VPS, and 43,790,835,576 bytes free under the combined 70,000,000,000-byte
+limit. The home timers were restored to their original active states, preserving
+the home M/W/F schedule. VPS capture/upload gates and both VPS backup timers
+remain disabled; this admission is not a successful VPS backup or restore proof.
 
-1. Keep VPS capture/upload gates false. Keep home backup payloads and retention
-   untouched. Stage the patch and shared-quota module in a root-protected separate
-   directory. `git apply --check` against the verified base and compile the candidate.
-   Compute only public code digests, including the module digest pinned in candidate.
-2. With both writer schedules temporarily held and no active backup/restore operation,
-   preserve the exact current helper, public admission, active generation document,
-   permissions and service/timer enabled states in a root-protected rollback directory.
-   Do not copy authority private keys. Do not delete or reset journal/replay files.
-3. Create the empty dedicated VPS sibling folder only after root authorizes that
-   provider mutation. Run `qualify-ftps-lock.py --root-authorized-mkd-test` against
-   both existing server folders with two independent TLS sessions. It must reject
-   the second MKD and remove only the lock directory it created. Existing locks are
-   never removed by this test. Missing namespaces or uncertain outcomes block.
-4. Build native CLI resource input by copying the **public current** `offsite`,
-   `objectStore` and `operator` declarations, replacing only operator.helperSha256
-   with the candidate public helper digest. All original activationEvidence,
-   object-store/peer/image identities and other helper hashes remain genuine and
-   unchanged. No new global home recovery/capture is required by this code-only patch.
-5. Use the existing `scripts/local-private-backup-admission.mjs create` CLI with
-   `--nativeResources <protected-public-resource-json>`, generation 19, predecessor
-   hash of the real generation-18 document and the existing native file references
-   for render/capability/signing inputs. Existing authority private material may only
-   be consumed by that established native signer; do not open, print, hash, copy or
-   export it. Preserve all unrelated release/tree/render/source/resource bindings
-   from verified current facts. Require a field-by-field public payload review before
-   installation; changes beyond generation/predecessor/timestamps/new helper pin and
-   necessary native identifiers are a stop condition.
-6. Verify the candidate admission through the existing native `verify` command with
-   existing public authority and real current render/capability/signing file refs.
-   Do not activate a generic v1 document or reinitialize the broker. The broker's
-   existing `admitGeneration()` is the monotonic activation path and must preserve
-   every replay/request/operation record.
-7. Under the existing host operation exclusion, install the candidate module/helper
-   and the signed candidate admission as one controlled paused-writer transition.
-   Until complete, keep both schedules held. Root must use the established broker
-   admission consumption path; this preparation deliberately provides no raw state
-   editor and no new authority implementation.
-8. Before generation advancement, rollback can restore the preserved helper and
-   admission byte-for-byte. **After native generation 19 is admitted, do not roll back
-   the generation document to 18**: keep the active state/replay ledger and use a
-   forward generation 20 signed admission restoring the previous helper pin if needed.
-9. Enable `bothWritersQualified=true` only after both actual writers carry the shared
-   module and their code identities verify. Perform native read-only selection and
-   quota inventory, then resume the original home timer states. VPS activation still
-   requires independent root GO after human passkey setup.
-
-No signing, home installation, namespace creation, MKD test or schedule mutation
-has been performed by this preparation. The active protected signer invocation
-parameters must come from the existing home operator procedure, not guessed paths.
+`home-shared-quota.patch` remains the historical review/forward artifact against
+the **f59cb77d** canonical base. The canonical repository helper is deliberately
+unchanged so its default home bootstrap contract stays intact. **Do not reapply
+the patch to the already-installed fc565c7f helper or overwrite the admitted
+home helper with the canonical base.** A later helper change requires a newly
+reviewed, signed **forward generation 20** admission. After generation 19 was
+admitted, restoring generation 18's document or broker state is invalid; preserve
+the active replay and operation ledgers. The root-protected copy of the former
+public helper/admission/state is evidence for a possible forward repair, not an
+instruction to roll the active generation back.
