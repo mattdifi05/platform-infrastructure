@@ -207,5 +207,5 @@ class DatabaseAclReplayTests(unittest.TestCase):
  def test_effective_tuple_query_preserves_public_grantor_and_defaults(self):
   with patch.object(r,'pg_sql',return_value='[]') as query:r.database_acl_tuples('isolated',[{'datname':'db','owner':'owner','datacl':None}])
   sql=query.call_args.args[1]
-  for clause in ('aclexplode','acldefault','pg_get_userbyid(a.grantor)','a.grantee=0','a.is_grantable','JOIN pg_roles o ON o.rolname=d.owner'):self.assertIn(clause,sql)
+  for clause in ('aclexplode','acldefault','pg_get_userbyid(a.grantor)','a.grantee=0','a.is_grantable','JOIN pg_roles o ON o.rolname=d.owner','cardinality(coalesce','ELSE NULL::aclitem[] END'):self.assertIn(clause,sql)
 if __name__=='__main__':unittest.main()

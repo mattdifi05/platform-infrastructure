@@ -116,7 +116,7 @@ def sql_text(value):
 
 def database_acl_tuples(pg,rows):
  source="jsonb_to_recordset("+sql_text(json.dumps(rows))+"::jsonb) AS d(datname text,owner text,datacl text)"
- query="SELECT coalesce(json_agg(r ORDER BY datname,grantor,grantee,public,privilege_type,is_grantable),'[]') FROM (SELECT d.datname,pg_get_userbyid(a.grantor) AS grantor,CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee,(a.grantee=0) AS public,a.privilege_type,a.is_grantable FROM "+source+" JOIN pg_roles o ON o.rolname=d.owner CROSS JOIN LATERAL aclexplode(coalesce(d.datacl::aclitem[],acldefault('d',o.oid))) a) r"
+ query="SELECT coalesce(json_agg(r ORDER BY datname,grantor,grantee,public,privilege_type,is_grantable),'[]') FROM (SELECT d.datname,pg_get_userbyid(a.grantor) AS grantor,CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee,(a.grantee=0) AS public,a.privilege_type,a.is_grantable FROM "+source+" JOIN pg_roles o ON o.rolname=d.owner CROSS JOIN LATERAL aclexplode(CASE WHEN cardinality(coalesce(d.datacl::aclitem[],acldefault('d',o.oid)))>0 THEN coalesce(d.datacl::aclitem[],acldefault('d',o.oid)) ELSE NULL::aclitem[] END) a) r"
  return json.loads(pg_sql(pg,query))
 
 def replay_database_acl(tuples,ready,apply):
