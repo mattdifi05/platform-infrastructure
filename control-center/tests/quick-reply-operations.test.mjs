@@ -6,11 +6,11 @@ import { createAIService } from "../ai/service.mjs";
 const definition = name => ({ type: "function", function: { name, description: name,
   parameters: { type: "object", properties: {}, additionalProperties: false } } });
 
-async function run(message, { attemptedTool = null } = {}) {
+async function run(message, { attemptedTool = null, toolError = null } = {}) {
   const calls = [], rounds = [], events = [];
   const service = createAIService({ registry: {
     definitions: () => ["readInfrastructure", "changeInfrastructure", "removePortalApplication", "getInfrastructureOperation", "createChatFile", "createChatZip", "analyzeChatAttachment"].map(definition),
-    execute: async name => { calls.push(name); return { status: "completed" }; },
+    execute: async name => { calls.push(name); if (toolError) throw toolError; return { status: "completed" }; },
   } });
   service.accepting = true;
   service.ensureProviderReady = async () => {};
@@ -112,4 +112,19 @@ test("fresh-check mutations are rejected even after an explicitly authorized his
     assert.equal(result.events.at(-1).type, "failed", attemptedTool);
     assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED", attemptedTool);
   }
+});
+
+test("infrastructure connection failures expose only a safe diagnostic without claiming mutation outcome", async () => {
+  for (const attemptedTool of ["readInfrastructure", "changeInfrastructure", "getInfrastructureOperation"]) {
+    for (const code of ["ENOENT", "EACCES", "ECONNREFUSED"]) {
+      const result = await run("Aggiorna le metriche TLS interne del server.", { attemptedTool,
+        toolError: Object.assign(new Error("private socket /private/credential.sock secret-detail"), { code }) });
+      const output = JSON.parse(result.rounds[1].input.find(item => item.type === "function_call_output").output);
+      assert.deepEqual(output, { available: false, error: "INFRASTRUCTURE_CONNECTION_UNAVAILABLE", message: "Collegamento agli strumenti del server non disponibile. Non è possibile verificare lo stato o l’esito delle operazioni." });
+    }
+  }
+  const result = await run("Aggiorna le metriche TLS interne del server.", { attemptedTool: "changeInfrastructure",
+    toolError: Object.assign(new Error("Riautenticati con la passkey."), { code: "INFRASTRUCTURE_REAUTH_REQUIRED" }) });
+  const output = JSON.parse(result.rounds[1].input.find(item => item.type === "function_call_output").output);
+  assert.deepEqual(output, { available: false, error: "INFRASTRUCTURE_REAUTH_REQUIRED", message: "Riautenticati con la passkey.", mutationPerformed: false });
 });

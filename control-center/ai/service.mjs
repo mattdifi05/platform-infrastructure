@@ -1797,6 +1797,7 @@ function appendFinalSummaryCue(messages, config) {
 
 function unavailableToolResult(name, error) {
   if (["readInfrastructure","changeInfrastructure","getInfrastructureOperation"].includes(name) && ["INFRASTRUCTURE_REAUTH_REQUIRED","INFRASTRUCTURE_SESSION_REQUIRED","INFRASTRUCTURE_AUTHORIZATION_REQUIRED"].includes(error?.code)) return { available:false, error:error.code, message:String(error.message).slice(0,500), mutationPerformed:false };
+  if (["readInfrastructure","changeInfrastructure","getInfrastructureOperation"].includes(name) && ["ENOENT","EACCES","ECONNREFUSED"].includes(error?.code)) return { available:false, error:"INFRASTRUCTURE_CONNECTION_UNAVAILABLE", message:"Collegamento agli strumenti del server non disponibile. Non è possibile verificare lo stato o l’esito delle operazioni." };
   if (name === "removePortalApplication") {
     const safe = publicPortalRemovalError(error);
     if (safe) return safe;
