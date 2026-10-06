@@ -96,6 +96,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       CONTROL_CENTER_BACKUP_ROOT: backupsDir,
+      CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: path.join(root, "synthetic-vps-catalog"),
       CONTROL_CENTER_REPORTS_ROOT: reportsDir,
       PROJECTS_ROOT: projectsDir,
       ...isolatedStateEnv(stateDir),
@@ -170,7 +171,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       assert.equal((await response.json()).error, "endpoint_capability_denied", pathname);
     }
   }
-  for (const pathname of ["/?section=secrets", "/?section=cloudflare", "/index.html?section=cloudflare"]) {
+  for (const pathname of ["/?section=secrets"]) {
     assert.equal((await request(baseUrl, "GET", pathname)).status, 401, `anonymous UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.viewer)).status, 403, `viewer UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.admin)).status, 403, `admin UI ${pathname}`);
@@ -217,9 +218,16 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   restoreStateAfterDenied();
 
   assert.equal((await request(baseUrl, "GET", "/?section=vault", identities.owner)).status, 200, "fresh owner reaches Vault UI");
-  const dnsPage = await request(baseUrl, "GET", "/?section=cloudflare", identities.owner);
-  assert.equal(dnsPage.status, 200);
-  assert.match(await dnsPage.text(), /data-cloudflare-dns/);
+  for (const pathname of ["/?section=cloudflare", "/index.html?section=cloudflare", "/?section=vps-backups"]) {
+    const legacyPage = await request(baseUrl, "GET", pathname, identities.owner301);
+    assert.equal(legacyPage.status, 200, `${pathname} follows standard Applications access`);
+    const html = await legacyPage.text();
+    assert.match(html, /<h1 id="control-page-title">Applicazioni<\/h1>/, `${pathname} falls back to Applications`);
+    assert.doesNotMatch(html, /data-cloudflare-dns|data-vps-restore/, `${pathname} does not render removed page tools`);
+  }
+  const serverAiPage = await request(baseUrl, "GET", "/?section=server-ai", identities.owner);
+  assert.equal(serverAiPage.status, 200);
+  assert.match(await serverAiPage.text(), /data-vps-restore/, "configured VPS catalog exposes restore tool inside Server AI");
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {
