@@ -60,6 +60,10 @@ builds the repository's qualified PostgreSQL 18.6 and MariaDB 13.0.2 images,
 installs the application-owned `control_auth` schema, and creates a dedicated
 PostgreSQL login for Control Center. It prints no credentials. Store the ignored
 `secrets/` directory in an operator-controlled backup after a successful start.
+The database and RustFS gateway images are local Compose builds tagged
+`platform/*:local`, tied to the checked-in Dockerfiles and pinned upstream
+base images. Those mutable local tags are scoped to this host installation;
+they are not published registry digests or portable release artifacts.
 
 The WAF stays on an internal Docker network. A separate unprivileged Nginx
 proxy binds only `127.0.0.1:8080` on the host and forwards to WAF. Its

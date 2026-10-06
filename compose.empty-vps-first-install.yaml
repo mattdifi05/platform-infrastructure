@@ -97,7 +97,7 @@ services:
       retries: 10
 
   rustfs-gateway:
-    image: platform/rustfs-gateway:first-install
+    image: platform/rustfs-gateway:local
     build:
       context: .
       dockerfile: deployment/docker/s3-gateway.Dockerfile

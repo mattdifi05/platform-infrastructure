@@ -210,11 +210,11 @@ esac
 if ! docker image inspect platform/runtime-helpers:go1.27.1 >/dev/null 2>&1; then
   docker build --quiet -f deployment/docker/runtime-helpers.Dockerfile -t platform/runtime-helpers:go1.27.1 . >/dev/null
 fi
-if ! docker image inspect platform/postgres:18.6-remediated >/dev/null 2>&1; then
-  docker build --quiet -f deployment/docker/postgres-remediated.Dockerfile -t platform/postgres:18.6-remediated . >/dev/null
+if ! docker image inspect platform/postgres:local >/dev/null 2>&1; then
+  docker build --quiet -f deployment/docker/postgres-remediated.Dockerfile -t platform/postgres:local . >/dev/null
 fi
-if ! docker image inspect platform/mariadb:13.0.2-remediated >/dev/null 2>&1; then
-  docker build --quiet -f deployment/docker/mariadb-remediated.Dockerfile -t platform/mariadb:13.0.2-remediated . >/dev/null
+if ! docker image inspect platform/mariadb:local >/dev/null 2>&1; then
+  docker build --quiet -f deployment/docker/mariadb-remediated.Dockerfile -t platform/mariadb:local . >/dev/null
 fi
 "${COMPOSE[@]}" up -d --build postgres broker-auth-bootstrap redis
 for attempt in {1..60}; do
