@@ -9,6 +9,7 @@ import {
 } from "../auth/route-capabilities.mjs";
 
 const SENSITIVE_MUTATIONS = Object.freeze([
+  { id: "vps-production-restore", method: "POST", path: "/control/backups/production-restore", operationId: "backup.production-restore" },
   { id: "cloudflare-dns-owner", method: "POST", path: "/control/cloudflare/dns/change", operationId: "cloudflare.dns.change" },
   { id: "CAN-016", method: "POST", path: "/control/vault/secrets/example/reveal", operationId: "vault.secret.reveal" },
   { id: "CAN-017", method: "POST", path: "/control/vault/secrets", operationId: "vault.secret.store" },
@@ -101,7 +102,7 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
   const dispatcher = source.slice(start, end);
   // New adapters dispatch only by the authorized operation, without a duplicate
   // legacy pathname branch. Each still needs exactly one direct case below.
-  const directOnly = new Set(["cloudflare.dns.change"]);
+  const directOnly = new Set(["cloudflare.dns.change", "backup.vps.catalog", "backup.production-restore"]);
   for (const id of directOnly) assert.equal([...dispatcher.matchAll(new RegExp(`case "${id}":`, "g"))].length, 1);
 
   for (const method of ["GET", "POST"]) {

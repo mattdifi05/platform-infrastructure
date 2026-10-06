@@ -1,6 +1,8 @@
 # Fresh VPS backup preparation
 
-Status: **installed but not activated; no backup generated and no remote objects changed**.
+Status: **capture and production recovery gates remain closed pending qualification**.
+The dedicated remote namespace and shared writer quota admission are prepared; see
+`HOME-FORWARD-QUOTA.md`. Namespace preparation is not a verified recovery point.
 The runner implements capture and authenticated encrypted verification. The signed
 root profile currently denies capture and offsite publication. Timer is not enabled.
 AI admin continues to announce zero backup jobs. Human first-owner/passkey setup must precede
@@ -10,7 +12,7 @@ the first full server backup.
 
 VPS owns `/platform-server-public-backups`; home keeps `/server-platform-backups`.
 Only these two folders count toward 70,000,000,000 bytes. Other account folders are
-neither listed nor included. VPS retention is maximum 14 days / six complete points,
+neither listed nor included. VPS retention is maximum 14 days / two complete points,
 subject to available combined space. Preserve the newest verified VPS point until a
 replacement has been uploaded, downloaded, decrypted and authenticated. Never prune
 home points from VPS or vice versa. If retention and newest-point preservation
@@ -154,8 +156,9 @@ exact resource equality with the signed fresh VPS profile, rejects applications 
 caller-supplied commands, binds a root-owned request journal before execution and
 refuses replay. Backup runs the same capture+verified FTPS path; restore-drill
 selects one exact immutable VPS manifest and verifies it in isolated scratch.
-Production overwrite restore is **not** implemented by this adapter. Do not label
-an archive-integrity drill as a full server boot recovery.
+The separately gated `restore-production` operation implements same-host runtime
+recovery as described below. It remains disabled until native semantic recovery
+of a real selected point has passed and root explicitly authorizes activation.
 
 The queue timer and periodic backup timer stay disabled until root activation.
 Catalog output records actual timer states; manual requests are rejected while the
@@ -164,4 +167,55 @@ catalog and existing typed queue mounts, not Docker or arbitrary host file acces
 Applying that overlay recreates Control Center and requires refreshing both AI and
 backup pins from the actual new container before enabling the native worker.
 
-The VPS schedule is staggered to M/W/F 04:05 Europe/Rome, one hour after home. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
+The VPS schedule is weekly Friday 06:05 Europe/Rome, provisionally staggered from home. Align it with the first actual Hostinger weekly recovery point when its timing is known. Hostinger frequency alone does not establish an existing recovery point. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
+
+
+## Manual production runtime recovery (activation gate closed)
+
+The Backup VPS page exposes an owner:fresh GET catalog and owner:fresh, CSRF-protected
+POST plan/apply operation. The owner reviews an immutable manifest and current
+signed profile digest, types the selected manifest ID, acknowledges downtime and
+confirms. AI and legacy queue producers cannot submit `restore-production`.
+An accepted queue request is not a completed restore. The root consumer binds its
+request journal before executing and refuses replay. `productionRestoreAuthorized`
+defaults to false independently of capture/offsite activation.
+
+The scope is **same host, same enrolled images and mount topology**: thirteen named
+persistent volumes, native PostgreSQL/MariaDB logical exports with roles/grants,
+and enrolled runtime bind configurations under the deployment directory. Broad
+host-context mounts are excluded. SSH, network, OS, Cloudflare/first-enrollment
+credentials, AI authority/tokens, backup authority and current queue are preserved.
+The encrypted OS capsule is for separately operated offline Hostinger recovery;
+this operation does not restore a complete VM or change images automatically.
+The portal's users/passkeys and application data return to the selected point.
+Previously disabled containers remain disabled; all 21 enrolled identities remain
+covered even when only 19 are running. Capture reports both counts explicitly.
+
+Before downtime, the selected remote receipt, ciphertext, manifest and every
+artifact are authenticated using existing native FILE-based keys. Bounded archive
+extraction rejects traversal and escaping links, preserving numeric UID/GID and
+permissions. PostgreSQL and MariaDB restore into isolated, networkless temporary
+containers using the enrolled image IDs; strict import and captured schema, row
+count, role and grant comparisons must pass. No database restart or live overwrite
+occurs during this qualification. Use Python 3.12+ (provided on the target Ubuntu)
+for the standard tar extraction data filter. The existing `restore-drill` queue
+operation performs this same staging/semantic qualification without a live switch.
+Actual engine qualification remains pending the first genuine encrypted point;
+source unit tests are not evidence that a production restore has run.
+
+After staging, the root consumer rechecks the profile, stops clients before the
+DB engines, and switches same-filesystem paths while retaining original siblings.
+It restarts databases before the originally running services and checks health.
+Failure triggers rollback to retained originals; a process interruption requires
+explicit root reconciliation, never blind retry. The protected journal is
+`/var/lib/platform-vps-backup/production-restore.json`. For an interrupted operation,
+root may invoke the installed `production-restore.py --recover-rollback`; it checks
+profile signature, container pins and exact enrolled paths before switching back.
+A completed journal is deliberately not accepted by this recovery command.
+
+After any production attempt, root must inspect the outcome and retained original
+paths, reconcile the queue's unknown/failed state if needed, and explicitly archive
+the journal and remove only that operation's retained/staged siblings after review.
+No automatic cleanup deletes the last rollback copy. The next operation refuses
+an existing journal. Neither the UI nor timers trigger a production restore
+automatically. Gates remain closed until review and the real isolated-engine test.

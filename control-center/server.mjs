@@ -721,7 +721,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && ["secrets", "cloudflare"].includes(url.searchParams.get("section"))) {
+    if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && ["secrets", "cloudflare", "vps-backups"].includes(url.searchParams.get("section"))) {
       const secretAuthorization = controlAuth.authorize(
         { ...req, controlCenterOperation: { capability: "owner:fresh" } },
         url,
@@ -1088,6 +1088,8 @@ async function handleApi(req, res, url, context, operation) {
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
       case "overview.read": return json(res, context.overview);
+      case "backup.vps.catalog": return json(res, { catalog: readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT) });
+      case "backup.production-restore": return json(res, planVpsProductionRestore(payload, context), payload.apply === true ? 202 : 200);
       case "cloudflare.dns.change": {
         try {
           const result = await cloudflareDnsChange(payload);
@@ -6152,7 +6154,28 @@ function queueRestoreDrill(payload, context) {
   return { ...operation, backup, job, selectedManifestId: selected?.manifest?.id || selected?.name || "" };
 }
 
-function createBackupJob({ operation, scope, sourceManifestPath = "", resources, context }) {
+function planVpsProductionRestore(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const selected = native?.manifests.find(manifest => manifest.id === payload.manifestId);
+  if (!selected || !native.restoreProfileDigest) throw new ValidationError("Seleziona un punto VPS verificato e immutabile.");
+  const confirmation = `RESTORE-RUNTIME:${selected.id}:${selected.signature.digest}:${native.restoreProfileDigest}`;
+  const details = {
+    manifestId: selected.id, createdAt: selected.createdAt, manifestDigest: selected.signature.digest,
+    profileDigest: native.restoreProfileDigest, confirmationRequired: confirmation,
+    scope: "Database, 13 volumi persistenti e configurazioni runtime montate; stesso host e stesse immagini.",
+    preserves: "SSH, rete, sistema operativo, credenziali di gestione, authority e coda corrente.",
+    downtimeRequired: true, originalStateRetainedForRollback: true,
+    ownerAccessReturnsToBackupState: true,
+    enabled: native.enabled && native.queueActive && native.productionRestoreEnabled,
+  };
+  if (payload.apply !== true) return { dryRun: true, details };
+  if (!details.enabled || payload.confirm !== confirmation || payload.reviewedManifestId !== selected.id) throw new ValidationError("Ripristino non attivato o conferma del punto non valida.");
+  const job = createBackupJob({ operation: "restore-production", scope: { kind: "platform", id: "platform" }, sourceManifestPath: selected.path, sourceManifestDigest: selected.signature.digest, restoreProfileDigest: native.restoreProfileDigest, resources: selected.resources, context });
+  appendAudit({ action: "backup.restore-production.queue", target: selected.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Manual owner-reviewed runtime recovery queued; SSH, OS and management authority excluded." });
+  return { dryRun: false, job, details };
+}
+
+function createBackupJob({ operation, scope, sourceManifestPath = "", sourceManifestDigest = "", restoreProfileDigest = "", resources, context }) {
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
   const principal = String(identity?.subject || "").trim();
@@ -6171,6 +6194,8 @@ function createBackupJob({ operation, scope, sourceManifestPath = "", resources,
     environment: context.environment,
     createdAt: now,
     sourceManifestPath,
+    sourceManifestDigest,
+    restoreProfileDigest,
   });
   return admitBackupJob({
     jobsDir: backupJobsDir,
@@ -6209,7 +6234,7 @@ function readBackupJobs() {
 
 async function renderCachedControlCenter(context, params) {
   const section = params.get("section") || "projects";
-  if (["secrets", "cloudflare"].includes(section) || !context?.cacheIdentity) return renderControlCenter(context, params);
+  if (["secrets", "cloudflare", "vps-backups"].includes(section) || !context?.cacheIdentity) return renderControlCenter(context, params);
   const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
   const cached = await redisOperations.cacheGetJson(key);
   if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
@@ -6372,6 +6397,7 @@ function operationsPortalSections() {
     { id: "server-ai", label: "Server AI", icon: "terminal" },
     { id: "secrets", label: "Secret", icon: "shield" },
     ...(process.env.CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE ? [{ id: "cloudflare", label: "Cloudflare DNS", icon: "shield" }] : []),
+    ...(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT ? [{ id: "vps-backups", label: "Backup VPS", icon: "file" }] : []),
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
   ];
@@ -6389,6 +6415,7 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
+  if (section === "vps-backups") return renderVpsProductionRestore();
   if (section === "cloudflare") return renderCloudflareDns();
   if (section === "server-ai") return renderServerAi();
   if (section === "projects") return renderOpsProjects(context, params);
@@ -6423,6 +6450,22 @@ function renderCloudflareDns() {
       <button type="button" class="ops-button primary compact" data-dns-apply disabled>Applica e verifica</button>
     </section>
     <p>Accesso limitato ai tre domini autorizzati. Account, Access, tunnel e WAF non sono gestiti da questa pagina.</p>
+  </section>`;
+}
+
+function renderVpsProductionRestore() {
+  return `<section class="ops-card" data-vps-restore>
+    <h2>Ripristino manuale dei dati runtime</h2>
+    <p>Ripristina database, volumi persistenti e configurazioni runtime sullo stesso server. SSH, rete, sistema operativo e credenziali di gestione restano correnti.</p>
+    <p>Il portale e i servizi saranno temporaneamente indisponibili. Dati e passkey torneranno allo stato del punto scelto; conserva una passkey valida a quella data.</p>
+    <p data-restore-status role="status" aria-live="polite">Caricamento punti verificati…</p>
+    <label>Punto di ripristino <select data-restore-point></select></label>
+    <button type="button" class="ops-button secondary compact" data-restore-plan>Prepara piano</button>
+    <section data-restore-review hidden><pre data-restore-details></pre>
+      <label>Riscrivi l’identificativo del punto <input data-restore-typed autocomplete="off"></label>
+      <label><input type="checkbox" data-restore-confirm> Confermo sovrascrittura dei dati runtime e interruzione temporanea dei servizi.</label>
+      <button type="button" class="ops-button primary compact" data-restore-apply disabled>Ripristina il punto selezionato</button>
+    </section>
   </section>`;
 }
 

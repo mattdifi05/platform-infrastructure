@@ -67,6 +67,8 @@ const CONTROL_ROUTES = Object.freeze([
   admin("applications.lifecycle", "control", "applications", parameter("applicationId"), parameter("action")),
 
   viewer("domains.list", "control", "domains"),
+  ownerFresh("GET", "backup.vps.catalog", "control", "backups", "vps"),
+  ownerFresh("POST", "backup.production-restore", "control", "backups", "production-restore"),
   ownerFresh("POST", "cloudflare.dns.change", "control", "cloudflare", "dns", "change"),
   admin("domains.create", "control", "domains"),
   viewer("network.read", "control", "network"),

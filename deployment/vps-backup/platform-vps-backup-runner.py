@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Root-native VPS capture, encrypted verification and separately gated FTPS sync.
-No home paths, authority, project source, or production restore is accepted here.
+Home authority and project source remain outside this fresh-host capture scope.
 """
 import base64,datetime,signal,fcntl,hashlib,hmac,importlib.util,json,os,pathlib,re,shutil,sqlite3,stat,subprocess,sys,tarfile,tempfile,time,uuid
 HERE=pathlib.Path(__file__).resolve().parent
@@ -38,17 +38,24 @@ def run(args,timeout=300,output=None):
  if r.returncode:raise RuntimeError('Native command failed: '+pathlib.Path(args[0]).name+' exit '+str(r.returncode))
  return r.stdout
 
-def inspect():
- ids=run(['docker','ps','-q']).decode().split()
- if not ids or len(ids)>64:raise RuntimeError('Unexpected active container count')
+def inspect(enrolled=None):
+ active=run(['docker','ps','-q','--no-trunc']).decode().split()
+ if enrolled is not None:
+  ids=[v.get('id','') for v in enrolled]
+  if not ids or len(ids)>64 or len(ids)!=len(set(ids)) or any(not re.fullmatch(r'[a-f0-9]{64}',v) for v in ids):raise RuntimeError('Invalid enrolled container identities')
+  if set(active)-set(ids):raise RuntimeError('Unexpected running container blocks capture')
+ else:ids=active
+ if not ids:raise RuntimeError('No enrolled containers')
  rows=json.loads(run(['docker','inspect',*ids]))
- if any((r['Config'].get('Labels') or {}).get('com.docker.compose.project') not in ALLOW_PROJECTS for r in rows):raise RuntimeError('Unclassified running container blocks capture')
+ if len(rows)!=len(ids) or {r['Id'] for r in rows}!=set(ids):raise RuntimeError('Missing enrolled container')
+ if any((r['Config'].get('Labels') or {}).get('com.docker.compose.project') not in ALLOW_PROJECTS for r in rows):raise RuntimeError('Unclassified container blocks capture')
  return sorted(rows,key=lambda r:r['Name'])
+
 
 def pins(rows):return [{'name':r['Name'],'id':r['Id'],'image':r['Image'],'mounts':r['Mounts']} for r in rows]
 def profile():
  private(CONFIG,True);private(PROFILE);private(KEY);private(SIGNING)
- p=json.loads(PROFILE.read_text());rows=inspect()
+ p=json.loads(PROFILE.read_text());rows=inspect(p.get('pins',[]))
  if p.get('hostname')!=HOST or p.get('machineId')!=sha('/etc/machine-id') or p.get('pins')!=pins(rows):raise RuntimeError('Actual host/container identity differs from enrolled profile')
  if p.get('generation')!=1 or p.get('previousAdmissionSha256')!='0'*64:raise RuntimeError('Unexpected VPS genesis profile')
  # Fresh authority signature uses OpenSSL Ed25519, as the native admission does.
@@ -86,9 +93,15 @@ def artifact_record(path,identity):
  path.with_name(path.name+'.sha256').write_text(digest+'  '+path.name+'\n')
  return {'id':'artifact-'+identity,'resourceId':'platform-state:'+identity,'path':'artifacts/'+path.name,'sha256':sha(path),'sizeBytes':path.stat().st_size,'signatureKeyId':'vps-genesis-1'}
 
+def database_container(rows,volume):
+ matches=[r['Name'].lstrip('/') for r in rows if any(m['Type']=='volume' and m.get('Name')==volume for m in r['Mounts'])]
+ if len(matches)!=1:raise RuntimeError('Database volume must have one enrolled owner')
+ return matches[0]
+
 def capture():
  if (WORK/'paused.json').exists():raise RuntimeError('Prior pause journal must be reconciled before a new capture')
  p,rows=profile()
+ pg=database_container(rows,'enterprise_postgres_data');maria=database_container(rows,'enterprise_mariadb_data')
  # Fail before exporting secrets or pausing writers when a running image was removed.
  for image in sorted({r['Image'] for r in rows}):run(['docker','image','inspect',image])
  if p.get('captureAuthorized') is not True:raise RuntimeError('Local capture is not authorized in enrolled profile')
@@ -110,28 +123,30 @@ def capture():
   run(['docker','volume','inspect',*sorted(volumes)],output=(runtime/'volumes.json').open('wb'))
   run(['dpkg-query','-W','-f=${binary:Package}\t${Version}\n'],output=(runtime/'packages.tsv').open('wb'))
   # Logical exports supplement crash-consistent volume recovery.
-  run(['docker','exec','enterprise-postgres','pg_dumpall','-U','postgres'],timeout=900,output=(runtime/'postgres-all.sql').open('wb'))
-  run(['docker','exec','enterprise-mariadb','sh','-c','MYSQL_PWD="$(cat /run/secrets/mariadb_root_password)" exec mariadb-dump -uroot --all-databases --single-transaction --routines --events --triggers'],timeout=900,output=(runtime/'mariadb-all.sql').open('wb'))
+  run(['docker','exec',pg,'pg_dumpall','-U','postgres'],timeout=900,output=(runtime/'postgres-all.sql').open('wb'))
+  run(['docker','exec',maria,'sh','-c','MYSQL_PWD="$(cat /run/secrets/mariadb_root_password)" exec mariadb-dump -uroot --all-databases --single-transaction --routines --events --triggers'],timeout=900,output=(runtime/'mariadb-all.sql').open('wb'))
   for file,marker in [(runtime/'postgres-all.sql',b'PostgreSQL database cluster dump complete'),(runtime/'mariadb-all.sql',b'Dump completed')]:
    with file.open('rb') as stream:
     stream.seek(max(0,file.stat().st_size-8192));tail=stream.read()
    if marker not in tail:raise RuntimeError('Native online database export lacks completion trailer')
+  recovery_spec=importlib.util.spec_from_file_location('vps_recovery',HERE/'production-restore.py');recovery=importlib.util.module_from_spec(recovery_spec);recovery_spec.loader.exec_module(recovery)
+  save(runtime/'database-semantics.json',recovery.semantic_inventory(pg,maria))
   # Preserve live DB configuration/TLS as well as logical contents. Values stay encrypted.
   pgpaths={}
   for setting,name in [('hba_file','pg_hba.conf'),('ident_file','pg_ident.conf'),('config_file','postgresql.conf'),('data_directory','postgresql.auto.conf')]:
-   source=run(['docker','exec','enterprise-postgres','psql','-U','postgres','-Atc','SHOW '+setting]).decode().strip()
+   source=run(['docker','exec',pg,'psql','-U','postgres','-Atc','SHOW '+setting]).decode().strip()
    if not source.startswith('/') or '\n' in source or '..' in pathlib.PurePosixPath(source).parts:raise RuntimeError('Unexpected live PostgreSQL config path')
    if setting=='data_directory':source+='/postgresql.auto.conf'
    pgpaths[name]=source
-   run(['docker','cp','enterprise-postgres:'+source,str(runtime/name)])
+   run(['docker','cp',pg+':'+source,str(runtime/name)])
   save(runtime/'postgres-live-config-paths.json',pgpaths)
-  tls=run(['docker','exec','enterprise-mariadb','sh','-c',"MYSQL_PWD=\"$(cat /run/secrets/mariadb_root_password)\" exec mariadb -uroot -N -B -e \"SHOW VARIABLES WHERE Variable_name IN ('ssl_ca','ssl_cert','ssl_key')\""]).decode().splitlines()
+  tls=run(['docker','exec',maria,'sh','-c',"MYSQL_PWD=\"$(cat /run/secrets/mariadb_root_password)\" exec mariadb -uroot -N -B -e \"SHOW VARIABLES WHERE Variable_name IN ('ssl_ca','ssl_cert','ssl_key')\""]).decode().splitlines()
   tls_paths={}
   for line in tls:
    variable,source=line.split('\t',1)
    if not source:continue
    if variable not in ('ssl_ca','ssl_cert','ssl_key') or not source.startswith(('/var/lib/mysql/','/etc/','/run/')) or '..' in pathlib.PurePosixPath(source).parts:raise RuntimeError('Unexpected live MariaDB TLS path')
-   run(['docker','cp','enterprise-mariadb:'+source,str(runtime/('mariadb-'+variable))]);tls_paths[variable]=source
+   run(['docker','cp',maria+':'+source,str(runtime/('mariadb-'+variable))]);tls_paths[variable]=source
   save(runtime/'mariadb-live-tls-paths.json',tls_paths)
   if p.get('pauseAuthorized') is not True:raise RuntimeError('Consistent filesystem capture requires explicit infrastructure pause authorization')
   pause_names={'gf-rustfs','enterprise-nats','enterprise-redis','enterprise-grafana','enterprise-prometheus','enterprise-loki','enterprise-alertmanager'}
@@ -141,7 +156,7 @@ def capture():
    def expired(*_):raise TimeoutError('Non-database writer snapshot exceeded 30 seconds')
    signal.signal(signal.SIGALRM,expired);signal.alarm(30)
    for r in rows:
-    if r['Name'].lstrip('/') not in pause_names:continue
+    if r['Name'].lstrip('/') not in pause_names or not r['State'].get('Running'):continue
     if r['State'].get('Paused'):raise RuntimeError('Container already paused by another operation')
     paused.append(r['Id']);save(WORK/'paused.json',{'containers':paused,'operation':job})
     run(['docker','pause',r['Id']],timeout=30)
@@ -196,7 +211,7 @@ def capture():
   restored=tmp/'roundtrip.tar';gpg(['--decrypt','--output',str(restored),str(dest)])
   if sha(restored)!=sha(plain):raise RuntimeError('Encrypted archive restore differs')
   verify_bundle(restored)
-  proof={'status':'passed','host':HOST,'createdAt':now(),**manifest_meta,'bundle':dest.name,'encryptedBytes':dest.stat().st_size,'encryptedSha256':sha(dest),'plaintextSha256':sha(plain),'imageCount':len(images),'containerCount':len(rows),'volumeCount':len(volumes),'artifactCount':len(records),'encryptedRoundtripVerified':True,'allArtifactHashesVerified':True,'semanticBootRestoreVerified':False,'offsiteVerified':False,'productionRestorePerformed':False,'databaseRecovery':'native-online-logical-dumps','dbRestartedOrPaused':False}
+  proof={'status':'passed','host':HOST,'createdAt':now(),**manifest_meta,'bundle':dest.name,'encryptedBytes':dest.stat().st_size,'encryptedSha256':sha(dest),'plaintextSha256':sha(plain),'imageCount':len(images),'containerCount':len(rows),'runningContainerCount':sum(bool(r['State'].get('Running')) for r in rows),'volumeCount':len(volumes),'artifactCount':len(records),'encryptedRoundtripVerified':True,'allArtifactHashesVerified':True,'semanticBootRestoreVerified':False,'offsiteVerified':False,'productionRestorePerformed':False,'databaseRecovery':'native-online-logical-dumps','dbRestartedOrPaused':False}
   (WORK/'manifests').mkdir(mode=0o700,exist_ok=True)
   save(WORK/'manifests'/(manifest_meta['manifestId']+'.json'),json.loads(manifest.read_text()))
   save(dest.with_suffix(dest.suffix+'.local.json'),proof);save(WORK/'latest-local.json',proof)
@@ -246,7 +261,7 @@ def publish_catalog(verified_points=None):
    retained.append({'manifest':manifest,'offsiteVerified':True,'verifiedAt':point['verifiedAt']})
  schedule_active=subprocess.run(['systemctl','is-active','--quiet','platform-vps-backup.timer']).returncode==0
  queue_active=subprocess.run(['systemctl','is-active','--quiet','platform-vps-backup-queue.timer']).returncode==0
- body={'scheduleActive':schedule_active,'queueActive':queue_active,'schema':'platform.vps-backup-catalog/v1','host':HOST,'enabled':p.get('captureAuthorized') is True and p.get('offsiteAuthorized') is True,'resources':enrolled_resources(p),'points':retained,'updatedAt':now()}
+ body={'productionRestoreEnabled':p.get('productionRestoreAuthorized') is True,'restoreProfileDigest':sha(PROFILE),'scheduleActive':schedule_active,'queueActive':queue_active,'schema':'platform.vps-backup-catalog/v1','host':HOST,'enabled':p.get('captureAuthorized') is True and p.get('offsiteAuthorized') is True,'resources':enrolled_resources(p),'points':retained,'updatedAt':now()}
  save(current,body);os.chown(current,0,1000);os.chmod(current,0o640)
  # No artifact bytes or credentials are exposed through the panel metadata mount.
 

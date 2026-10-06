@@ -46,7 +46,7 @@
   function isSensitivePortalUrl(url) {
     return Boolean(url && (
       url.pathname === "/auth/login"
-      || ((url.pathname === "/" || url.pathname === "/index.html") && ["secrets", "cloudflare"].includes(url.searchParams.get("section")))
+      || ((url.pathname === "/" || url.pathname === "/index.html") && ["secrets", "cloudflare", "vps-backups"].includes(url.searchParams.get("section")))
     ));
   }
 
@@ -491,6 +491,7 @@
     restoreSidebarScrollTop(previousSidebarScrollTop);
     startStatusTabs();
     startCloudflareDns();
+    startVpsRestore();
     startFileManagers();
     fitSingleLineText();
     scrollAfterRender(target);
@@ -1664,6 +1665,56 @@
     next.focus({ preventScroll: true });
   }
 
+  function startVpsRestore() {
+    var root = document.querySelector('[data-vps-restore]');
+    if (!root || root.dataset.ready) return;
+    root.dataset.ready = 'true';
+    var status = root.querySelector('[data-restore-status]');
+    var select = root.querySelector('[data-restore-point]');
+    var review = root.querySelector('[data-restore-review]');
+    var typed = root.querySelector('[data-restore-typed]');
+    var confirmed = root.querySelector('[data-restore-confirm]');
+    var apply = root.querySelector('[data-restore-apply]');
+    var plan = null, busy = false;
+    async function api(payload) {
+      var headers = new Headers({ Accept: 'application/json' });
+      if (payload) { headers.set('Content-Type', 'application/json'); addMutationHeaders(headers, 'POST'); }
+      var response = await fetch(payload ? '/control/backups/production-restore' : '/control/backups/vps', { method: payload ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store', headers: headers, ...(payload ? { body: JSON.stringify(payload) } : {}) });
+      var value = await response.json();
+      if (redirectForReauthentication(response, value)) throw Error('Conferma la passkey prima del ripristino.');
+      if (!response.ok) throw Error('Punto non disponibile o ripristino non attivato. Aggiorna il piano prima di riprovare.');
+      return value;
+    }
+    function invalidate() { plan = null; review.hidden = true; confirmed.checked = false; typed.value = ''; apply.disabled = true; }
+    select.addEventListener('change', invalidate);
+    function enable() { apply.disabled = busy || !plan || !plan.enabled || !confirmed.checked || typed.value !== plan.manifestId; }
+    typed.addEventListener('input', enable); confirmed.addEventListener('change', enable);
+    root.querySelector('[data-restore-plan]').addEventListener('click', async function () {
+      if (busy || !select.value) return; busy = true; invalidate();
+      try {
+        plan = (await api({ manifestId: select.value })).details;
+        root.querySelector('[data-restore-details]').textContent = JSON.stringify({ punto: plan.manifestId, data: plan.createdAt, ripristina: plan.scope, preserva: plan.preserves, downtime: plan.downtimeRequired, rollbackLocale: plan.originalStateRetainedForRollback }, null, 2);
+        review.hidden = false;
+        status.textContent = plan.enabled ? 'Piano pronto. Verifica punto, portata e disponibilità della passkey prima di confermare.' : 'Piano disponibile; attivazione operativa del ripristino ancora disabilitata.';
+      } catch (error) { status.textContent = error.message; } finally { busy = false; enable(); }
+    });
+    apply.addEventListener('click', async function () {
+      if (busy || !plan || !confirmed.checked || typed.value !== plan.manifestId) return;
+      busy = true; apply.disabled = true;
+      var selected = plan; invalidate();
+      try {
+        var result = await api({ manifestId: selected.manifestId, apply: true, reviewedManifestId: selected.manifestId, confirm: selected.confirmationRequired });
+        status.textContent = 'Ripristino accodato (' + result.job.id + '). Il risultato non è ancora verificato. Il portale può disconnettersi durante il ripristino.';
+      } catch (error) { status.textContent = error.message; } finally { busy = false; }
+    });
+    api().then(function (value) {
+      var catalog = value.catalog;
+      if (!catalog) throw Error('Catalogo VPS non configurato.');
+      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.textContent = point.createdAt + ' · ' + point.id; select.append(option); });
+      status.textContent = catalog.manifests.length ? catalog.manifests.length + ' punti remoti verificati. Scegli un punto per il piano manuale.' : 'Nessun backup remoto verificato: ripristino non disponibile.';
+    }).catch(function (error) { status.textContent = error.message; });
+  }
+
   function startCloudflareDns() {
     var root = document.querySelector('[data-cloudflare-dns]');
     if (!root || root.dataset.ready) return;
@@ -1775,6 +1826,7 @@
     positionOpsNavPill({ instant: true });
     startStatusTabs();
     startCloudflareDns();
+    startVpsRestore();
     startFileManagers();
     fitSingleLineText();
     storeCache(window.location.href, document.documentElement.outerHTML, "");

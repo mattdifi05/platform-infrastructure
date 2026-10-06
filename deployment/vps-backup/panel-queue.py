@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Consume the product's owner-authenticated queue within the VPS root profile.
-Only full enrolled infrastructure backup and immutable isolated restore are allowed.
+Only enrolled backups and immutable owner-admitted restore operations are allowed.
 """
 import fcntl,importlib.util,json,os,pathlib,re,subprocess,sys
 HERE=pathlib.Path(__file__).resolve().parent
@@ -43,13 +43,21 @@ def main():
    b.save(record,{'jobId':ident,'requestSha256':__import__('hashlib').sha256(b.canonical(job)).hexdigest(),'status':'running','startedAt':b.now(),'profileSha256':b.sha(b.PROFILE)})
    spec=importlib.util.spec_from_file_location('ftps',HERE/'ftps-sync.py');f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
    if job['operation']=='backup':b.capture();f.sync()
-   elif job['operation']=='restore-drill':
+   elif job['operation'] in ('restore-drill','restore-production'):
     reference=job.get('sourceManifestPath','')
     if not re.fullmatch('manifests/manifest-vps-[a-z0-9-]+\\.json',reference):raise RuntimeError('Restore requires immutable native VPS manifest')
-    f.restore_proof(pathlib.PurePosixPath(reference).stem)
+    manifest_id=pathlib.PurePosixPath(reference).stem
+    if job['operation']=='restore-production':
+     spec=importlib.util.spec_from_file_location('recovery',HERE/'production-restore.py');recovery=importlib.util.module_from_spec(spec);spec.loader.exec_module(recovery)
+     recovery.restore(manifest_id,job.get('sourceManifestDigest',''),job.get('restoreProfileDigest',''),ident)
+    else:
+     # Existing isolated operation now qualifies native database recovery too.
+     manifest=json.loads(b.private(b.WORK/reference).read_text())
+     spec=importlib.util.spec_from_file_location('recovery',HERE/'production-restore.py');recovery=importlib.util.module_from_spec(spec);spec.loader.exec_module(recovery)
+     recovery.restore(manifest_id,manifest['signature']['digest'],b.sha(b.PROFILE),ident,qualify_only=True)
    else:raise RuntimeError('Unsupported privileged queue operation')
    b.save(record,{**json.loads(record.read_text()),'jobId':ident,'status':'done','finishedAt':b.now(),'operation':job['operation']})
-   queue_command('finish','--jobId',ident,'--status','done','--summary','Native VPS encrypted backup or isolated immutable restore verified','--exitCode','0')
+   queue_command('finish','--jobId',ident,'--status','done','--summary','Native VPS operation completed; inspect exact operation scope and protected receipt','--exitCode','0')
   except Exception:
    b.save(record,{**(json.loads(record.read_text()) if record.exists() else {}),'jobId':ident,'status':'failed','finishedAt':b.now()})
    queue_command('finish','--jobId',ident,'--status','failed','--summary','Native VPS operation failed; protected root evidence retained','--exitCode','1')

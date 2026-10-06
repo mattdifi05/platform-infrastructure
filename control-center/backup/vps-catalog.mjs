@@ -16,5 +16,5 @@ export function readVpsBackupCatalog(root) {
   if(JSON.stringify([...m.resources].sort((a,b)=>a.id.localeCompare(b.id)))!==JSON.stringify([...resources].sort((a,b)=>a.id.localeCompare(b.id))))throw Error('Recovery point resource set differs from enrolled catalog');
   return {...m,path:`manifests/${m.id}.json`,encrypted:true,artifacts:m.artifacts.map(a=>({...a,name:path.basename(a.path),sizeLabel:`${a.sizeBytes} B`,modifiedAt:m.createdAt,mtimeMs:Date.parse(m.createdAt)}))};
  }).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
- return {resources,manifests,enabled:x.enabled===true,queueActive:x.queueActive===true,scheduleActive:x.scheduleActive===true};
+ return {resources,manifests,productionRestoreEnabled:x.productionRestoreEnabled===true,restoreProfileDigest:/^[a-f0-9]{64}$/.test(x.restoreProfileDigest||'')?x.restoreProfileDigest:'',restoreScope:'runtime-data-and-bind-configs',enabled:x.enabled===true,queueActive:x.queueActive===true,scheduleActive:x.scheduleActive===true};
 }

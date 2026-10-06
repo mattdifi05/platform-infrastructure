@@ -6723,3 +6723,6 @@ pre {
 [data-cloudflare-dns] .ops-table-wrap { overflow-x: auto; margin-top: 16px; }
 [data-cloudflare-dns] td { overflow-wrap: anywhere; }
 [data-cloudflare-dns] td button { margin: 3px; }
+[data-vps-restore] label { display: block; margin: 14px 0; }
+[data-vps-restore] select, [data-vps-restore] input:not([type="checkbox"]) { max-width: 100%; padding: 8px; }
+[data-vps-restore] pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: #f4f6f8; color: #17212d; }

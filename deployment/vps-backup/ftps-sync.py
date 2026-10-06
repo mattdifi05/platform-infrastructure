@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Native encrypted multipart FTPS publication for the dedicated VPS namespace."""
-import datetime,ftplib,hashlib,hmac,importlib.util,json,os,pathlib,re,ssl,sys,tempfile,time,shutil
+import contextlib,datetime,ftplib,hashlib,hmac,importlib.util,json,os,pathlib,re,ssl,sys,tempfile,time,shutil
 HERE=pathlib.Path(__file__).resolve().parent
 s=importlib.util.spec_from_file_location('vps_runner',HERE/'platform-vps-backup-runner.py');b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
 s=importlib.util.spec_from_file_location('shared_quota',HERE/'platform_ftps_shared_quota.py');q=importlib.util.module_from_spec(s);s.loader.exec_module(q)
@@ -109,7 +109,7 @@ def sync_once():
    if b.sha(restored)!=proof['encryptedSha256']:raise RuntimeError('Downloaded complete ciphertext differs')
    plain=tmp/'downloaded.tar';b.gpg(['--decrypt','--output',str(plain),str(restored)]);b.verify_bundle(plain)
    if b.sha(plain)!=proof['plaintextSha256']:raise RuntimeError('Downloaded plaintext differs')
-   point={'schema':'platform.ftps-recovery-point/v2','host':b.HOST,'status':'passed','verifiedAt':b.now(),'backupAt':proof['createdAt'],'manifestId':proof['manifestId'],'manifestDigest':proof['manifestDigest'],'bundle':bundle.name,'encryptedBytes':proof['encryptedBytes'],'encryptedSha256':proof['encryptedSha256'],'parts':parts,'maximumPartBytes':PART,'remoteFolder':FOLDER,'maximumRemoteBytes':q.LIMIT,'maximumPoints':6,'retentionDays':14,'artifactCount':proof['artifactCount'],'tlsVerified':True,'tlsName':'hstgr.io','endpoint':'92.113.28.106:21','outsidePublicHtml':True,'actualDownloadVerified':True,'decryptVerified':True,'manifestHmacVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False}
+   point={'schema':'platform.ftps-recovery-point/v2','host':b.HOST,'status':'passed','verifiedAt':b.now(),'backupAt':proof['createdAt'],'manifestId':proof['manifestId'],'manifestDigest':proof['manifestDigest'],'bundle':bundle.name,'encryptedBytes':proof['encryptedBytes'],'encryptedSha256':proof['encryptedSha256'],'parts':parts,'maximumPartBytes':PART,'remoteFolder':FOLDER,'maximumRemoteBytes':q.LIMIT,'maximumPoints':2,'retentionDays':14,'artifactCount':proof['artifactCount'],'tlsVerified':True,'tlsName':'hstgr.io','endpoint':'92.113.28.106:21','outsidePublicHtml':True,'actualDownloadVerified':True,'decryptVerified':True,'manifestHmacVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False}
    # Reconnect after potentially slow decrypt; remote exclusion lease still held.
    f.close();f=connect();name=bundle.name+'.receipt.json';write_json(f,name+'.partial',sign(point));f.rename(name+'.partial',name)
    if authenticate(read_json(f,name))!=point:raise RuntimeError('Published receipt differs')
@@ -119,7 +119,7 @@ def sync_once():
    cutoff=time.time()-14*86400
    for i,old in enumerate(existing):
     if old['bundle']==point['bundle']:continue
-    if i<6 and datetime.datetime.fromisoformat(old['backupAt']).timestamp()>=cutoff:continue
+    if i<2 and datetime.datetime.fromisoformat(old['backupAt']).timestamp()>=cutoff:continue
     for part in old['parts']:f.delete(part['name'])
     f.delete(old['bundle']+'.receipt.json')
    remaining_points=points(f,inventory(f))
@@ -133,7 +133,7 @@ def sync_once():
    local.sort(key=lambda pair:pair[0]['createdAt'],reverse=True)
    for index,(old,meta) in enumerate(local):
     if old['bundle']==point['bundle']:continue
-    if index<6 and datetime.datetime.fromisoformat(old['createdAt']).timestamp()>=cutoff:continue
+    if index<2 and datetime.datetime.fromisoformat(old['createdAt']).timestamp()>=cutoff:continue
     target=b.private(b.WORK/'points'/old['bundle'])
     if b.sha(target)!=old['encryptedSha256']:raise RuntimeError('Local retention ciphertext identity differs')
     target.unlink();meta.unlink()
@@ -149,7 +149,8 @@ def sync():
    if attempt==30:raise
    time.sleep(60)
 
-def restore_proof(manifest_id):
+@contextlib.contextmanager
+def downloaded_restore(manifest_id,expected_digest=None):
  # Read-only isolated restore, selected immutable manifest from authenticated portal queue.
  if not re.fullmatch('manifest-vps-[a-z0-9-]+',manifest_id):raise RuntimeError('Exact VPS manifest selection required')
  profile,_=b.profile()
@@ -172,10 +173,17 @@ def restore_proof(manifest_id):
      if h.hexdigest()!=part['sha256'] or size!=part['bytes']:raise RuntimeError('Downloaded restore part differs')
    if b.sha(cipher)!=point['encryptedSha256']:raise RuntimeError('Restore ciphertext differs')
    plain=tmp/'restore.tar';b.gpg(['--decrypt','--output',str(plain),str(cipher)]);b.verify_bundle(plain)
+   import tarfile
+   with tarfile.open(plain,'r:') as archive:manifest=json.load(archive.extractfile('manifest.json'))
+   if manifest.get('id')!=manifest_id or manifest.get('signature',{}).get('digest')!=point['manifestDigest'] or (expected_digest and point['manifestDigest']!=expected_digest):raise RuntimeError('Downloaded manifest identity differs from selected point')
    proof={'status':'passed','manifestId':manifest_id,'manifestDigest':point['manifestDigest'],'receiptSha256':hashlib.sha256(b.canonical(sign(point))).hexdigest(),'actualDownloadVerified':True,'decryptVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False,'isolatedScratchRemoved':True,'verifiedAt':b.now()}
-   # Publish after scratch removal, never assert a full engine restore from an archive check.
+   f.close()
+   yield plain,point,proof
   finally:f.close();shutil.rmtree(tmp)
-  b.save(b.WORK/'latest-restore.json',proof);print(json.dumps(proof))
+
+def restore_proof(manifest_id):
+ with downloaded_restore(manifest_id) as (_,_,proof):pass
+ b.save(b.WORK/'latest-restore.json',proof);print(json.dumps(proof))
 
 if __name__=='__main__':
  try:

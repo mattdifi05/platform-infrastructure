@@ -23,8 +23,8 @@ def main():
  roots=['/srv/platform-infrastructure','/etc/platform-infrastructure','/etc/cloudflared','/etc/systemd/system','/etc/docker','/etc/ufw','/etc/ssh','/etc/hostname','/etc/hosts','/etc/machine-id','/etc/fstab','/etc/netplan','/usr/local/libexec','/var/lib/platform-server-ai-admin','/var/lib/platform-vps-backup/queue','/var/lib/platform-vps-backup/operations']
  roots=[p for p in roots if pathlib.Path(p).exists()]
  if not all(x in roots for x in ('/srv/platform-infrastructure','/etc/platform-infrastructure','/etc/cloudflared')):raise RuntimeError('Required enrolled recovery roots absent')
- p={'hostname':b.HOST,'machineId':b.sha('/etc/machine-id'),'generation':1,'previousAdmissionSha256':'0'*64,'enrolledAt':b.now(),'pins':b.pins(rows),'volumeCount':len(vols),'captureRoots':roots,'captureAuthorized':False,'pauseAuthorized':True,'offsiteAuthorized':False,'databaseRecovery':'native-online-logical','recoveryKeysCustodied':False}
+ p={'hostname':b.HOST,'machineId':b.sha('/etc/machine-id'),'generation':1,'previousAdmissionSha256':'0'*64,'enrolledAt':b.now(),'pins':b.pins(rows),'volumeCount':len(vols),'captureRoots':roots,'productionRestoreAuthorized':False,'captureAuthorized':False,'pauseAuthorized':True,'offsiteAuthorized':False,'databaseRecovery':'native-online-logical','recoveryKeysCustodied':False}
  b.save(b.PROFILE,p)
  b.run(['openssl','pkeyutl','-sign','-inkey',str(b.CONFIG/'authority-private.pem'),'-rawin','-in',str(b.PROFILE),'-out',str(b.CONFIG/'profile.sig')])
- print(json.dumps({'enrolled':True,'containers':len(rows),'volumes':len(vols),'captureRoots':len(roots),'captureAuthorized':False,'offsiteAuthorized':False}))
+ print(json.dumps({'enrolled':True,'containers':len(rows),'volumes':len(vols),'captureRoots':len(roots),'productionRestoreAuthorized':False,'captureAuthorized':False,'offsiteAuthorized':False}))
 if __name__=='__main__':main()
