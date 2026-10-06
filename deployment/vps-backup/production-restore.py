@@ -2,6 +2,10 @@
 """Manual same-host runtime recovery. No OS/network/authority restoration.
 All selected artifacts authenticate before staging; native DB engines qualify the
 staged state before stopping production. A root journal retains rollback paths.
+The signed profile may approve up to four exact, directional Control Center image
+pairs in controlCenterImageCompatibility [{sourceImage,currentImage}]. These only
+admit reviewed data compatibility; current management images remain in place and
+an approval never constitutes a verified restore or bypasses other restore gates.
 """
 import base64,importlib.util,json,os,pathlib,re,shutil,signal,stat,subprocess,tarfile,tempfile,time
 HERE=pathlib.Path(__file__).resolve().parent
@@ -70,12 +74,16 @@ def restore_file_metadata(destination,metadata):
  os.chown(destination,metadata['uid'],metadata['gid']);os.chmod(destination,metadata['mode'])
 
 def compatible(snapshot,current,profile):
+ approvals=profile.get('controlCenterImageCompatibility',[])
+ if not isinstance(approvals,list) or len(approvals)>4 or any(not isinstance(edge,dict) or set(edge)!={'sourceImage','currentImage'} or any(not isinstance(value,str) or not re.fullmatch(r'sha256:[a-f0-9]{64}',value) for value in edge.values()) for edge in approvals):raise RuntimeError('Invalid signed Control Center image compatibility')
+ image_pairs={(edge['sourceImage'],edge['currentImage']) for edge in approvals}
  old={r['Name']:r for r in snapshot};now={r['Name']:r for r in current}
  b.reviewed_membership(current)
  expected={pin['name'] for pin in profile['pins']}
  if set(old)!=set(now) or set(now)!=expected or len(old)!=len(snapshot) or len(now)!=len(current):raise RuntimeError('Restore runtime membership differs from signed profile')
  for name,r in old.items():
-  if r['Image']!=now[name]['Image'] or r['Mounts']!=now[name]['Mounts']:raise RuntimeError('Restore requires the same enrolled images and mount topology')
+  approved_image=name=='/enterprise-control-center' and (r['Image'],now[name]['Image']) in image_pairs
+  if (r['Image']!=now[name]['Image'] and not approved_image) or r['Mounts']!=now[name]['Mounts']:raise RuntimeError('Restore requires matching or explicitly approved images and the same mount topology')
   if any(r['Config'].get(k)!=now[name]['Config'].get(k) for k in ('Cmd','Entrypoint','User')):raise RuntimeError('Restore container configuration differs from selected point')
   if persistent_env(r)!=persistent_env(now[name]):raise RuntimeError('Persistent runtime environment differs from selected point')
  if sorted({m['Name'] for r in snapshot for m in r['Mounts'] if m['Type']=='volume'})!=sorted({m['Name'] for r in current for m in r['Mounts'] if m['Type']=='volume'}):raise RuntimeError('Restore volume scope differs')

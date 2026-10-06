@@ -1,4 +1,4 @@
-import importlib.util,io,json,os,pathlib,shutil,tarfile,tempfile,unittest
+import copy,importlib.util,io,json,os,pathlib,shutil,tarfile,tempfile,unittest
 from unittest.mock import patch
 HERE=pathlib.Path(__file__).resolve().parents[1]
 s=importlib.util.spec_from_file_location('restore',HERE/'production-restore.py');r=importlib.util.module_from_spec(s);s.loader.exec_module(r)
@@ -80,6 +80,46 @@ class RuntimeRestoreTests(unittest.TestCase):
   self.assertEqual(r.persistent_env(base),r.persistent_env(changed))
   changed['Config']['Env'][0]='PGDATABASE=other';self.assertNotEqual(r.persistent_env(base),r.persistent_env(changed))
   changed['Name']='/other';self.assertIn('CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS=new',r.persistent_env(changed))
+ def image_compatibility_fixture(self):
+  source='sha256:'+'a'*64;current_image='sha256:'+'b'*64
+  rows=[{'Name':name,'Image':source,'Mounts':[],'Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps'},'Cmd':['run'],'Entrypoint':['entrypoint'],'User':'1000','Env':['PERSISTENT=original']}} for name in sorted(r.b.BASE_CONTAINER_NAMES)]
+  rows.append({'Name':'/enterprise-node-exporter','Image':source,'Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps','com.docker.compose.service':'node-exporter'}},'Mounts':[{'Type':'bind','Source':path,'Destination':target,'RW':False} for path,target in r.b.NODE_EXPORTER_BINDS.items()]})
+  snapshot=copy.deepcopy(rows)
+  next(row for row in rows if row['Name']=='/enterprise-control-center')['Image']=current_image
+  profile={'pins':[{'name':row['Name']} for row in rows],'controlCenterImageCompatibility':[{'sourceImage':source,'currentImage':current_image}]}
+  return snapshot,rows,profile
+ def test_exact_signed_cc_image_pair_admits_without_modifying_current_runtime(self):
+  snapshot,current,profile=self.image_compatibility_fixture();original=copy.deepcopy((snapshot,current,profile))
+  r.compatible(snapshot,current,profile)
+  self.assertEqual((snapshot,current,profile),original)
+  with self.assertRaises(RuntimeError):r.compatible(snapshot,current,{'pins':profile['pins']})
+  r.compatible(current,current,{'pins':profile['pins']})
+ def test_cc_image_approval_is_directional_exact_and_not_transitive_or_cross_container(self):
+  for case in ['other-destination','reverse','transitive','other-container']:
+   with self.subTest(case=case):
+    snapshot,current,profile=self.image_compatibility_fixture()
+    old_cc=next(row for row in snapshot if row['Name']=='/enterprise-control-center');new_cc=next(row for row in current if row['Name']=='/enterprise-control-center')
+    if case=='reverse':old_cc['Image'],new_cc['Image']=new_cc['Image'],old_cc['Image']
+    elif case=='other-container':
+     other=next(row for row in current if row['Name']!='/enterprise-control-center');other['Image']=new_cc['Image'];new_cc['Image']=old_cc['Image']
+    else:
+     destination='sha256:'+'c'*64
+     if case=='transitive':profile['controlCenterImageCompatibility'].append({'sourceImage':new_cc['Image'],'currentImage':destination})
+     new_cc['Image']=destination
+    with self.assertRaises(RuntimeError):r.compatible(snapshot,current,profile)
+ def test_cc_image_approval_preserves_mount_config_environment_and_membership_checks(self):
+  for field in ['Mounts','Cmd','Entrypoint','User','Env','membership']:
+   with self.subTest(field=field):
+    snapshot,current,profile=self.image_compatibility_fixture();cc=next(row for row in current if row['Name']=='/enterprise-control-center')
+    if field=='Mounts':cc['Mounts']=[{'Type':'volume','Name':'different-volume','Destination':'/data'}]
+    elif field=='membership':snapshot=[row for row in snapshot if row['Name']!='/enterprise-node-exporter']
+    else:cc['Config'][field]='other' if field=='User' else ['other']
+    with self.assertRaises(RuntimeError):r.compatible(snapshot,current,profile)
+ def test_cc_image_approval_schema_rejects_unbounded_or_nonexact_entries(self):
+  snapshot,current,profile=self.image_compatibility_fixture();edge=profile['controlCenterImageCompatibility'][0]
+  for invalid in [None,{},[edge]*5,[None],[{}],[{**edge,'container':'/other'}],[{**edge,'sourceImage':'latest'}],[{**edge,'currentImage':'sha256:'+'A'*64}],[{**edge,'currentImage':None}]]:
+   with self.subTest(invalid=invalid):
+    with self.assertRaisesRegex(RuntimeError,'Invalid signed Control Center'):r.compatible(snapshot,current,{**profile,'controlCenterImageCompatibility':invalid})
  def test_database_configuration_uses_captured_numeric_ownership_and_file_mode(self):
   file=self.root/'tls.key';file.write_text('fixture')
   with patch.object(r.os,'chown') as ownership:
