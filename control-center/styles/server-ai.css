@@ -417,7 +417,7 @@ button.server-ai-drawer-open { display: inline-flex; border: 0; border-radius: 8
 .server-ai-restore-dialog label { display: block; font-size: 13px; margin: 14px 0; }
 .server-ai-restore-dialog select, .server-ai-restore-dialog input:not([type=checkbox]) { border: 1px solid #cdd3df; border-radius: 8px; display: block; font: inherit; max-width: 100%; min-height: 44px; padding: 9px; width: 100%; margin-top: 8px; }
 .server-ai-restore-dialog pre { background: var(--ai-soft); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; padding: 12px; white-space: pre-wrap; }
-@media (min-width: 1181px) { .server-ai-history-collapsed { --ai-history-width: 0px; } .server-ai-history-collapsed .server-ai-conversations { display: none; } }
+@media (min-width: 1181px) { .server-ai.server-ai-history-collapsed { --ai-history-width: 0px; } .server-ai-history-collapsed .server-ai-conversations { display: none; } }
 @media (min-width: 1181px) and (max-width: 1380px) { .server-ai { --ai-history-width: 248px; } .server-ai-machine [data-ai-machine-label] { max-width: 145px; } .server-ai-toolbar { gap: 13px; } .server-ai-tools > summary { gap: 8px; padding-left: 12px; } .server-ai-empty h2 { font-size: 36px; } .server-ai-empty p { font-size: 16px; } }
 @media (max-width: 1180px) {
   .server-ai { grid-template-columns: minmax(0, 1fr); grid-template-rows: 80px minmax(0, 1fr); position: relative; }
