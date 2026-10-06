@@ -4,8 +4,9 @@ Status observed on 2026-10-06: encrypted capture and FTPS publication are enable
 and two remotely verified VPS recovery points are retained. The home shared-quota
 writer is qualified under its existing generation-19 authority. The VPS has an
 independent signed root profile and protected recovery-key custody on the Mac.
-Manual production recovery and its queue/timers remain disabled until the native
-PostgreSQL/MariaDB staging qualification preserves the captured database permissions.
+Manual production recovery uses an independent signed-profile gate. Activation
+requires native PostgreSQL/MariaDB staging qualification of captured data and
+permissions; the live catalog reports the current gate and queue/timer state.
 Owner passkey enrollment is complete. Server AI is active through the official
 OpenAI API; the empty VPS has 22 enrolled infrastructure containers and no hosted apps.
 
@@ -97,9 +98,10 @@ volumes. Do not label its existing catalog a complete VPS backup.
   contracts. Restore requires a fresh owner passkey session, CSRF, a reviewed
   manifest/profile binding and explicit typed confirmation of the selected point.
   Queue replay state and the management authority are preserved during recovery.
-- Capture and verified FTPS publication have run. The queue and weekly VPS timer
-  await native staging qualification of persisted database data and permissions;
-  the manual production restore gate is independently closed until that succeeds.
+- Capture and verified FTPS publication have run. Activating the queue, weekly VPS
+  timer and independent manual restore gate requires successful native staging
+  qualification of persisted database data, permissions and necessary configuration.
+  Read the live signed profile and catalog rather than inferring activation from source.
 
 The VPS timer is weekly Friday 06:05 Europe/Rome with Persistent=true. This is
 provisional while Hostinger has weekly backup enabled but no available point or
@@ -144,7 +146,7 @@ in protected temporary storage and never restores over production.
 Initial prequalification FTPS observation on 2026-10-06: certificate verified, home namespace 38
 files / 26,209,164,424 bytes, VPS namespace absent (550). That initial observation was not a backup. Shared quota, passkey enrollment and
 subsequent encrypted capture/upload/download verification are now complete; the
-remaining activation condition is native recovery qualification as described above.
+activation condition is native recovery qualification as described above.
 
 
 ## Existing owner-authenticated panel queue
