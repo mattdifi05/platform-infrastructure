@@ -18,6 +18,17 @@ class InfrastructureScopeTests(unittest.TestCase):
    self.assertEqual(a.writable_service('rsyslog.service','service_stop'),'rsyslog.service')
    for target in ['ssh.service','docker.service','platform-server-ai-admin.service','systemd-resolved.service','platform-vps-backup.service','php-app.service']:
     with self.subTest(target=target),self.assertRaises(a.Rejected):a.writable_service(target,'service_stop')
+ def test_real_cloudflared_unit_is_visible_and_restartable_but_cannot_be_stopped(self):
+  a=self.a
+  def status(name):
+   path='/etc/systemd/system/cloudflared.service' if name=='cloudflared.service' else ''
+   return f'Id={name}\nLoadState={"loaded" if path else "not-found"}\nFragmentPath={path}\nCanReload=no\nUnitFileState=enabled\n'
+  with patch.object(a,'service_status',side_effect=status),patch.object(a.pathlib.Path,'lstat',return_value=types.SimpleNamespace(st_mode=stat.S_IFREG|0o644,st_uid=0)):
+   self.assertEqual(a.cloudflared_unit()[:2],('cloudflared.service','/etc/systemd/system/cloudflared.service'))
+  with patch.object(a,'discovered_unit',return_value='cloudflared.service'),patch.object(a,'command',return_value=status('cloudflared.service')),patch.object(a.pathlib.Path,'stat',return_value=types.SimpleNamespace(st_mode=stat.S_IFREG|0o644,st_uid=0)),patch.object(a.pathlib.Path,'resolve',autospec=True,side_effect=lambda path:path):
+   self.assertEqual(a.writable_service('cloudflared.service','service_restart'),'cloudflared.service')
+   with self.assertRaises(a.Rejected):a.writable_service('cloudflared.service','service_stop')
+   with self.assertRaises(a.Rejected):a.writable_service('cloudflared.service','service_reload')
  def test_package_candidate_requires_official_origin_and_no_hold(self):
   a=self.a
   policy='chrony:\n  Installed: 1\n  Candidate: 2\n  Version table:\n     2 500\n        500 http://archive.ubuntu.com/ubuntu resolute/main amd64 Packages\n'

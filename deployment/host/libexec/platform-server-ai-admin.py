@@ -28,7 +28,7 @@ HOST_CONFIG_PATH='/etc/platform-infrastructure/server-ai/admin-host.json'
 VPS_CONTAINERS=(CORE_CONTAINERS-frozenset(['gf-server-ai-project-source-reader','gf-server-ai-project-query-reader']))|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler gf-server-ai-controller'.split())
 VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-promtail enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
 VPS_SERVICES=SERVICES|frozenset(['docker.service','ssh.service','auditd.service','apparmor.service','ufw.service'])
-LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','platform-cloudflared-vps.service','platform-server-ai-admin.service','platform-docker-observer-proxy.service'])
+LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','cloudflared.service','platform-cloudflared-vps.service','platform-server-ai-admin.service','platform-docker-observer-proxy.service'])
 HOME_JOBS=dict(JOBS)
 def protected_json(filename,limit=262144):
  p=pathlib.Path(filename)
@@ -164,6 +164,16 @@ def container_summary(c):
  return {'name':c['Name'].lstrip('/'),'id':c['Id'],'imageId':c['Image'],'running':s['Running'],'health':s.get('Health',{}).get('Status'),'restarts':c['RestartCount'],'memoryBytes':h['Memory'],'nanoCpus':h['NanoCpus'],'pidsLimit':h.get('PidsLimit'),'readOnlyRoot':h['ReadonlyRootfs'],'publishedPorts':h.get('PortBindings') or {},'capabilitiesDropped':h.get('CapDrop') or []}
 def service_status(name):
  return command(['systemctl','show',name,'--no-pager','--property=Id,LoadState,ActiveState,SubState,Result,UnitFileState,FragmentPath,CanReload,MemoryCurrent,CPUUsageNSec,InvocationID,ExecMainStatus,ExecMainStartTimestampMonotonic']).strip()
+CLOUDFLARED_UNITS=(('cloudflared.service','/etc/systemd/system/cloudflared.service'),('platform-cloudflared-vps.service','/etc/systemd/system/platform-cloudflared-vps.service'))
+def cloudflared_unit():
+ for name,path in CLOUDFLARED_UNITS:
+  status=service_status(name)
+  values=dict(line.split('=',1) for line in status.splitlines() if '=' in line)
+  if values.get('Id')==name and values.get('LoadState')=='loaded' and values.get('FragmentPath')==path:
+   try:info=pathlib.Path(path).lstat()
+   except OSError:continue
+   if stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022:return name,path,status
+ return None,None,None
 def discovered_unit(name,kind='service'):
  if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,120}\.'+kind,name):raise Rejected('Invalid unit name')
  names={line.split()[0] for line in command(['systemctl','list-unit-files','--type='+kind,'--no-legend','--no-pager']).splitlines() if line.split()}
@@ -179,7 +189,7 @@ def writable_service(name,operation):
  if not fragment.is_absolute():raise Rejected('Unit fragment is not an installed file')
  resolved=fragment.resolve()
  if not any(str(resolved).startswith(prefix) for prefix in ['/usr/lib/systemd/system/','/lib/systemd/system/']):
-  if not str(resolved).startswith('/etc/systemd/system/platform-'):raise Rejected('Only distro or reviewed platform infrastructure units may change')
+  if not str(resolved).startswith('/etc/systemd/system/platform-') and str(resolved)!='/etc/systemd/system/cloudflared.service':raise Rejected('Only distro or reviewed platform infrastructure units may change')
  info=resolved.stat()
  if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise Rejected('Unit fragment is not root protected')
  if operation in ['service_stop','service_disable'] and name in LOCKOUT_SERVICES:raise Rejected('Stop or disable would lock out server administration')
@@ -250,7 +260,9 @@ def selected_config(name):
  if name in ['vps-backup-timer','vps-backup-queue-timer']:
   unit='platform-'+name.replace('vps-backup-queue-timer','vps-backup-queue').replace('vps-backup-timer','vps-backup')+'.timer'
   return command(['systemctl','show',unit,'--no-pager','--property=Id,LoadState,ActiveState,UnitFileState,TimersCalendar,NextElapseUSecRealtime,LastTriggerUSec,Unit'])
- if name=='cloudflared':return service_status('platform-cloudflared-vps.service')
+ if name=='cloudflared':
+  unit,path,status=cloudflared_unit()
+  return {'unit':unit,'status':status,'available':bool(unit)}
  return {'contentExposed':False}
 def capabilities():
  topics,operations,containers,services,jobs=portable_catalog() if PORTABLE else (list(TOPICS),list(OPERATIONS),sorted(CONTAINERS),sorted(SERVICES),JOBS)
@@ -317,7 +329,8 @@ def read(topic,target,subject):
    if len(p)>=4:groups.append({'name':p[0],'gid':p[2],'members':p[3].split(',')[:30] if p[3] else []})
   return {'users':users[page*50:(page+1)*50],'groups':groups[page*50:(page+1)*50],'page':page,'pageSize':50,'userCount':len(users),'groupCount':len(groups),'sshd':selected_sshd(),'authorizedKeyMetadataOnly':True}
  if topic=='config':
-  paths={'sshd':'/etc/ssh/sshd_config','docker':'/etc/docker/daemon.json','cloudflared':'/etc/systemd/system/platform-cloudflared-vps.service','ufw':'/etc/default/ufw','vps-backup-timer':'/etc/systemd/system/platform-vps-backup.timer','vps-backup-queue-timer':'/etc/systemd/system/platform-vps-backup-queue.timer','server-ai-admin':'/etc/platform-infrastructure/server-ai/admin-host.json'}
+  cloud_unit,cloud_path,_=cloudflared_unit()
+  paths={'sshd':'/etc/ssh/sshd_config','docker':'/etc/docker/daemon.json','cloudflared':cloud_path or '/etc/systemd/system/platform-cloudflared-vps.service','ufw':'/etc/default/ufw','vps-backup-timer':'/etc/systemd/system/platform-vps-backup.timer','vps-backup-queue-timer':'/etc/systemd/system/platform-vps-backup-queue.timer','server-ai-admin':'/etc/platform-infrastructure/server-ai/admin-host.json'}
   if target and target not in paths:raise Rejected('Only reviewed configuration metadata is exposed')
   keys=[target] if target else list(paths)
   return {'files':{key:{**metadata_file(paths[key]),'selectedValues':selected_config(key)} for key in keys},'rawContentExposed':False}
@@ -346,7 +359,8 @@ def read(topic,target,subject):
    if zones.is_file():
     value=protected_json(str(zones))
     result['cloudflareZones']=[{'name':row.get('name'),'zoneId':row.get('id')} for row in value.get('zones',[])[:30] if isinstance(row,dict) and isinstance(row.get('name'),str)] if isinstance(value,dict) else []
-   result['cloudflaredService']=service_status('platform-cloudflared-vps.service')
+   unit,path,status=cloudflared_unit()
+   result['cloudflaredService']={'unit':unit,'status':status,'available':bool(unit)}
    result['cloudflaredRouteConfig']='Provider-managed; no local public route file enrolled'
    return result
   return {'zone':'platform-infrastructure.com','records':safe_zone().decode(),'resolver':pathlib.Path('/etc/resolv.conf').read_text()}
