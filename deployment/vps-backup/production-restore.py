@@ -105,6 +105,48 @@ def semantic_inventory(pg,maria,isolated=False):
   result['mariadb']['databases'][db]={t:maria_sql(maria,'SELECT count(*) FROM '+identifier(db,'mariadb')+'.'+identifier(t,'mariadb'),isolated) for t in tables}
  return result
 
+def sql_text(value):
+ return "convert_from(decode('"+base64.b64encode(value.encode()).decode()+"','base64'),'UTF8')"
+
+def database_acl_tuples(pg,rows):
+ source="jsonb_to_recordset("+sql_text(json.dumps(rows))+"::jsonb) AS d(datname text,owner text,datacl text)"
+ query="SELECT coalesce(json_agg(r ORDER BY datname,grantor,grantee,public,privilege_type,is_grantable),'[]') FROM (SELECT d.datname,pg_get_userbyid(a.grantor) AS grantor,CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee,(a.grantee=0) AS public,a.privilege_type,a.is_grantable FROM "+source+" JOIN pg_roles o ON o.rolname=d.owner CROSS JOIN LATERAL aclexplode(coalesce(d.datacl::aclitem[],acldefault('d',o.oid))) a) r"
+ return json.loads(pg_sql(pg,query))
+
+def replay_database_acl(tuples,ready,apply):
+ pending=list(tuples)
+ while pending:
+  remaining=[]
+  for grant in pending:
+   if grant['privilege_type'] not in ('CREATE','CONNECT','TEMPORARY') or type(grant['is_grantable']) is not bool or type(grant['public']) is not bool or (grant['public'] and (grant['is_grantable'] or grant['grantee'] is not None)):raise RuntimeError('Invalid authenticated database grant')
+   if not ready(grant):remaining.append(grant);continue
+   grantee='PUBLIC' if grant['public'] else identifier(grant['grantee'],'postgres')
+   apply('BEGIN; SET LOCAL ROLE '+identifier(grant['grantor'],'postgres')+'; GRANT '+grant['privilege_type']+' ON DATABASE '+identifier(grant['datname'],'postgres')+' TO '+grantee+(' WITH GRANT OPTION' if grant['is_grantable'] else '')+'; COMMIT;')
+  if len(remaining)==len(pending):raise RuntimeError('Unresolvable authenticated database grant chain')
+  pending=remaining
+
+def restore_database_acl(pg,expected,actual):
+ # Only called for the operation-owned, network-none staging engine after import.
+ before=json.loads(expected['databaseGrants']);current=json.loads(actual['databaseGrants'])
+ identities=lambda rows:sorted((x['datname'],x['owner']) for x in rows)
+ if identities(before)!=identities(current) or len({x['datname'] for x in before})!=len(before) or json.loads(expected['roles'])!=json.loads(actual['roles']) or json.loads(expected['membership'])!=json.loads(actual['membership']):raise RuntimeError('Database ACL identity or role semantics differ')
+ wanted=database_acl_tuples(pg,before);existing=database_acl_tuples(pg,current)
+ owners={x['datname']:x['owner'] for x in before}
+ for db in owners:
+  targets={(g['public'],g['grantee']) for g in existing if g['datname']==db}
+  for public,role in sorted(targets,key=str):
+   target='PUBLIC' if public else identifier(role,'postgres')
+   pg_sql(pg,'BEGIN; SET LOCAL ROLE '+identifier(owners[db],'postgres')+'; REVOKE ALL PRIVILEGES ON DATABASE '+identifier(db,'postgres')+' FROM '+target+' CASCADE; COMMIT;')
+ def current_rows():return json.loads(pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY datname),'[]') FROM (SELECT datname,pg_get_userbyid(datdba) AS owner,datacl::text FROM pg_database WHERE datallowconn AND NOT datistemplate) r"))
+ if database_acl_tuples(pg,current_rows()):raise RuntimeError('Database ACL reset incomplete')
+ def ready(g):
+  if g['grantor']==owners[g['datname']]:return True
+  return pg_sql(pg,'SELECT has_database_privilege('+sql_text(g['grantor'])+','+sql_text(g['datname'])+','+sql_text(g['privilege_type']+' WITH GRANT OPTION')+')')=='t'
+ replay_database_acl(wanted,ready,lambda sql:pg_sql(pg,sql))
+ restored=current_rows()
+ if identities(restored)!=identities(before) or database_acl_tuples(pg,restored)!=wanted:raise RuntimeError('Restored database effective ACL differs')
+ return json.dumps(restored)
+
 def database_grant_diagnostics(pg,expected,actual):
  before=json.loads(expected);after=json.loads(actual)
  old={r['datname']:r for r in before};new={r['datname']:r for r in after};shared=old.keys()&new.keys()
@@ -216,6 +258,12 @@ def stage_databases(directory,runtime,rows,volumes,operation,journal):
    else:pipe_file(['docker','exec','-i',name,'mariadb','-uroot'],runtime/'mariadb-all.sql')
   expected=json.loads((runtime/'database-semantics.json').read_text())
   actual=semantic_inventory(names['postgres'],names['mariadb'],True)
+  if actual.get('postgres',{}).get('databaseGrants')!=expected.get('postgres',{}).get('databaseGrants'):
+   restore_database_acl(names['postgres'],expected['postgres'],actual['postgres'])
+   actual=semantic_inventory(names['postgres'],names['mariadb'],True)
+   # Physical ACL array ordering/NULL defaults may differ; the native tuple
+   # guard above preserves every effective grant and database owner exactly.
+   if database_acl_tuples(names['postgres'],json.loads(actual['postgres']['databaseGrants']))==database_acl_tuples(names['postgres'],json.loads(expected['postgres']['databaseGrants'])):actual['postgres']['databaseGrants']=expected['postgres']['databaseGrants']
   if actual!=expected:
    grants=None
    if expected['postgres']['databaseGrants']!=actual['postgres']['databaseGrants']:grants=database_grant_diagnostics(names['postgres'],expected['postgres']['databaseGrants'],actual['postgres']['databaseGrants'])

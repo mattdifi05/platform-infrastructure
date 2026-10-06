@@ -163,4 +163,44 @@ class RuntimeRestoreTests(unittest.TestCase):
   self.assertEqual(details['ownerChangedCount'],0);self.assertEqual(details['dataclChangedCount'],1);self.assertTrue(details['effectiveACLsame'])
   self.assertTrue(any('aclexplode' in q and 'acldefault' in q and 'is_grantable' in q for q in queries))
   self.assertNotIn('private-owner',json.dumps(details));self.assertNotIn('private-db',json.dumps(details))
+class DatabaseAclReplayTests(unittest.TestCase):
+ def grant(self,**overrides):
+  return dict({'datname':'db"quote','grantor':'owner"quote','grantee':'reader"quote','public':False,'privilege_type':'CONNECT','is_grantable':False},**overrides)
+ def test_quotes_public_and_grant_options(self):
+  commands=[]
+  r.replay_database_acl([self.grant(is_grantable=True),self.grant(public=True,grantee=None),self.grant(grantee='PUBLIC')],lambda g:True,commands.append)
+  self.assertIn('SET LOCAL ROLE "owner""quote"',commands[0]);self.assertIn('DATABASE "db""quote"',commands[0]);self.assertIn('TO "reader""quote" WITH GRANT OPTION',commands[0])
+  self.assertIn(' TO PUBLIC;',commands[1]);self.assertIn(' TO "PUBLIC";',commands[2])
+ def test_dependency_replay_and_unresolvable_chain(self):
+  commands=[];ready_roles={'owner'}
+  grants=[self.grant(grantor='intermediate',grantee='leaf'),self.grant(grantor='owner',grantee='intermediate',is_grantable=True)]
+  def apply(sql):commands.append(sql);ready_roles.add('intermediate')
+  r.replay_database_acl(grants,lambda g:g['grantor'] in ready_roles,apply)
+  self.assertIn('ROLE "owner"',commands[0]);self.assertIn('ROLE "intermediate"',commands[1])
+  with self.assertRaisesRegex(RuntimeError,'Unresolvable'):r.replay_database_acl(grants,lambda g:False,lambda sql:self.fail('No SQL expected'))
+ def test_invalid_public_grant_option_is_rejected(self):
+  with self.assertRaisesRegex(RuntimeError,'Invalid authenticated'):r.replay_database_acl([self.grant(public=True,grantee=None,is_grantable=True)],lambda g:True,lambda sql:self.fail('No SQL expected'))
+ def test_role_or_owner_mismatch_prevents_any_mutation(self):
+  before={'databaseGrants':json.dumps([{'datname':'db','owner':'owner','datacl':None}]),'roles':'[]','membership':'[]'}
+  after={**before,'databaseGrants':json.dumps([{'datname':'db','owner':'different','datacl':None}])}
+  with patch.object(r,'pg_sql') as query:
+   with self.assertRaisesRegex(RuntimeError,'identity'):r.restore_database_acl('isolated',before,after)
+   query.assert_not_called()
+ def test_reset_and_final_exact_tuple_guard(self):
+  record=[{'datname':'db','owner':'owner','datacl':'{}'}]
+  state={'databaseGrants':json.dumps(record),'roles':'[]','membership':'[]'}
+  wanted=[self.grant(datname='db',grantor='owner',grantee='reader')];current=[self.grant(datname='db',grantor='owner',grantee=None,public=True)]
+  commands=[]
+  def query(pg,sql):commands.append(sql);return json.dumps(record) if sql.startswith('SELECT coalesce') else ''
+  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,[],wanted]):r.restore_database_acl('isolated',state,state)
+  self.assertTrue(any('REVOKE ALL PRIVILEGES ON DATABASE "db" FROM PUBLIC CASCADE' in sql for sql in commands))
+  self.assertTrue(any('GRANT CONNECT ON DATABASE "db" TO "reader"' in sql for sql in commands))
+  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,[],current]):
+   with self.assertRaisesRegex(RuntimeError,'effective ACL differs'):r.restore_database_acl('isolated',state,state)
+  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,current]):
+   with self.assertRaisesRegex(RuntimeError,'reset incomplete'):r.restore_database_acl('isolated',state,state)
+ def test_effective_tuple_query_preserves_public_grantor_and_defaults(self):
+  with patch.object(r,'pg_sql',return_value='[]') as query:r.database_acl_tuples('isolated',[{'datname':'db','owner':'owner','datacl':None}])
+  sql=query.call_args.args[1]
+  for clause in ('aclexplode','acldefault','pg_get_userbyid(a.grantor)','a.grantee=0','a.is_grantable','JOIN pg_roles o ON o.rolname=d.owner'):self.assertIn(clause,sql)
 if __name__=='__main__':unittest.main()
