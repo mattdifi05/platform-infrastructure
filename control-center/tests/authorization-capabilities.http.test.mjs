@@ -23,6 +23,8 @@ let publicOrigin = "";
 let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
+  ["POST", "/control/cloudflare/dns/change"],
+  ["GET", "/control/advanced/cloudflare"],
   ["GET", "/control/overview"],
   ["GET", "/control/advanced/backup-restore"],
   ["POST", "/control/vault/secrets/example/reveal"],

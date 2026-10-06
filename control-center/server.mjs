@@ -44,6 +44,7 @@ import {
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
+import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
   applyBackupQueueFileOwnership,
@@ -1086,7 +1087,30 @@ async function handleApi(req, res, url, context, operation) {
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
       case "overview.read": return json(res, context.overview);
-      case "advanced.section.read": return json(res, advancedControlSection(operation.parameters.sectionId, context));
+      case "cloudflare.dns.change": {
+        try {
+          const result = await cloudflareDnsChange(payload);
+          appendAudit({ action: `cloudflare.dns.${result.action}`, target: result.zone, environment: context.environment, risk: "high", result: result.dryRun ? "planned" : "success", dryRun: result.dryRun, summary: result.dryRun ? "DNS record change prepared for owner review." : "DNS record change applied and read back from the scoped provider." });
+          return json(res, result);
+        } catch {
+          return json(res, { error: "CLOUDFLARE_DNS_REJECTED", message: "DNS operation unavailable, invalid or changed since review. Read current DNS before retrying." }, 409);
+        }
+      }
+      case "advanced.section.read": {
+        const section = advancedControlSection(operation.parameters.sectionId, context);
+        if (operation.parameters.sectionId === "cloudflare") {
+          const dns = await readCloudflareDnsStatus();
+          if (dns) {
+            section.data.dnsIntegration = dns;
+            section.data.connectionStatus = dns.status;
+            section.data.apply = "POST /control/cloudflare/dns/change: fresh owner, CSRF, reviewed revision and explicit confirmation required";
+            section.data.verifyRemote = "DNS records read from the scoped Cloudflare API; account policies and write permission are not inferred";
+            section.data.accessPolicies = "not supported by DNS-only integration";
+            section.data.cacheRules = "not supported by DNS-only integration";
+          }
+        }
+        return json(res, section);
+      }
       case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
       case "vault.secret.store": return json(res, planVaultSecretCreate(payload, context), 202);
       case "vault.import-existing": return json(res, planVaultSecretImportExisting(payload, context), 202);

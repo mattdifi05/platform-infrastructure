@@ -9,6 +9,7 @@ import {
 } from "../auth/route-capabilities.mjs";
 
 const SENSITIVE_MUTATIONS = Object.freeze([
+  { id: "cloudflare-dns-owner", method: "POST", path: "/control/cloudflare/dns/change", operationId: "cloudflare.dns.change" },
   { id: "CAN-016", method: "POST", path: "/control/vault/secrets/example/reveal", operationId: "vault.secret.reveal" },
   { id: "CAN-017", method: "POST", path: "/control/vault/secrets", operationId: "vault.secret.store" },
   { id: "CAN-018", method: "POST", path: "/control/vault/import-existing", operationId: "vault.import-existing" },
@@ -98,12 +99,16 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
   const end = source.indexOf("async function handleToggleProject(", start);
   assert.ok(start >= 0 && end > start, "Control API dispatcher source must be discoverable");
   const dispatcher = source.slice(start, end);
+  // New adapters dispatch only by the authorized operation, without a duplicate
+  // legacy pathname branch. Each still needs exactly one direct case below.
+  const directOnly = new Set(["cloudflare.dns.change"]);
+  for (const id of directOnly) assert.equal([...dispatcher.matchAll(new RegExp(`case "${id}":`, "g"))].length, 1);
 
   for (const method of ["GET", "POST"]) {
     const branchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}"`, "g"))].length;
     const aiBranchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}" && operation\\.operationId (?:===|\\.startsWith\\()`, "g"))].length;
     assert.equal(
-      definitions.filter((definition) => definition.method === method && !definition.operationId.startsWith("ai.")).length,
+      definitions.filter((definition) => definition.method === method && !definition.operationId.startsWith("ai.") && !directOnly.has(definition.operationId)).length,
       branchCount - aiBranchCount,
       `${method} ordinary dispatcher branches and catalog entries must change together`,
     );
