@@ -166,6 +166,11 @@ class RuntimeRestoreTests(unittest.TestCase):
 class DatabaseAclReplayTests(unittest.TestCase):
  def grant(self,**overrides):
   return dict({'datname':'db"quote','grantor':'owner"quote','grantee':'reader"quote','public':False,'privilege_type':'CONNECT','is_grantable':False},**overrides)
+ def test_pg_error_exposes_only_phase_and_sqlstate(self):
+  result=type('Result',(),{'returncode':1,'stdout':b'','stderr':b'ERROR: 42601: private-identifier secret-data'})()
+  with patch.object(r.subprocess,'run',return_value=result):
+   with self.assertRaisesRegex(RuntimeError,'acl-expansion failed: exit 1 SQLSTATE 42601') as caught:r.pg_sql('isolated','SELECT aclexplode(NULL)')
+  self.assertNotIn('private-identifier',str(caught.exception));self.assertNotIn('secret-data',str(caught.exception))
  def test_quotes_public_and_grant_options(self):
   commands=[]
   r.replay_database_acl([self.grant(is_grantable=True),self.grant(public=True,grantee=None),self.grant(grantee='PUBLIC')],lambda g:True,commands.append)

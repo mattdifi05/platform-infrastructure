@@ -84,7 +84,13 @@ def compatible(snapshot,current,profile):
 # Commands never include credential values. Native clients consume protected
 # FILE references only; stdout is stored in encrypted capture or protected staging.
 def pg_sql(container,sql,database='postgres'):
- return b.run(['docker','exec',container,'psql','-X','-U','postgres','-d',database,'-At','-v','ON_ERROR_STOP=1','-c',sql]).decode().strip()
+ command=['docker','exec',container,'psql','-X','-U','postgres','-d',database,'-At','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose','-c',sql]
+ result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=300)
+ if result.returncode:
+  code=re.search(rb'ERROR:\s+([A-Z0-9]{5}):',result.stderr)
+  phase='acl-reset' if 'REVOKE ALL PRIVILEGES ON DATABASE' in sql else 'acl-grant' if '; GRANT ' in sql else 'acl-readiness' if 'has_database_privilege(' in sql else 'acl-expansion' if 'aclexplode(' in sql else 'semantic-read'
+  raise RuntimeError('PostgreSQL '+phase+' failed: exit '+str(result.returncode)+' SQLSTATE '+(code.group(1).decode() if code else 'unavailable'))
+ return result.stdout.decode().strip()
 def maria_sql(container,sql,isolated=False):
  if isolated:return b.run(['docker','exec',container,'mariadb','-uroot','-N','-B','-e',sql]).decode().strip()
  return b.run(['docker','exec',container,'sh','-c','MYSQL_PWD="$(cat /run/secrets/mariadb_root_password)" exec mariadb -uroot -N -B -e "$1"','sh',sql]).decode().strip()
