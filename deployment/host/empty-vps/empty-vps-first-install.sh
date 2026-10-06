@@ -246,6 +246,17 @@ done
   printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA control_auth TO control_center_auth;\n'
 } | "${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null
 
+# Initialize the additive Server AI schema before the Control Center starts.
+# Each reviewed migration owns its transaction; the login used by the
+# Control Center receives only Server AI runtime DML/sequence privileges.
+for migration in control-center/migrations/00[2-9]_server_ai_*.sql control-center/migrations/01[0-3]_server_ai_*.sql; do
+  [[ -f "$migration" ]] || { echo "Required Server AI migration is missing: $migration" >&2; exit 1; }
+  "${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    < "$migration" >/dev/null
+done
+"${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'GRANT USAGE ON SCHEMA server_ai TO control_center_auth; GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA server_ai TO control_center_auth; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA server_ai TO control_center_auth;' >/dev/null
+
 "${COMPOSE[@]}" up -d --build control-center traefik waf waf-loopback-proxy
 "${COMPOSE[@]}" ps
 echo 'Private first installation started on 127.0.0.1:8080 and 127.0.0.1:8443.'
