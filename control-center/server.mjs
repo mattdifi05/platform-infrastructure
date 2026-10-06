@@ -720,7 +720,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/" && url.searchParams.get("section") === "secrets") {
+    if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && ["secrets", "cloudflare"].includes(url.searchParams.get("section"))) {
       const secretAuthorization = controlAuth.authorize(
         { ...req, controlCenterOperation: { capability: "owner:fresh" } },
         url,
@@ -728,7 +728,7 @@ const server = createServer(async (req, res) => {
       );
       if (!secretAuthorization.ok) {
         if (secretAuthorization.reauthUrl && !wantsJson(req)) {
-          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent("/?section=secrets")}`);
+          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent(`/?section=${url.searchParams.get("section")}`)}`);
           return;
         }
         json(res, { error: secretAuthorization.error || "admin_authorization_required", message: secretAuthorization.message, ...(secretAuthorization.reauthUrl ? { reauthUrl: secretAuthorization.reauthUrl } : {}) }, secretAuthorization.status);
@@ -6208,7 +6208,7 @@ function readBackupJobs() {
 
 async function renderCachedControlCenter(context, params) {
   const section = params.get("section") || "projects";
-  if (section === "secrets" || !context?.cacheIdentity) return renderControlCenter(context, params);
+  if (["secrets", "cloudflare"].includes(section) || !context?.cacheIdentity) return renderControlCenter(context, params);
   const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
   const cached = await redisOperations.cacheGetJson(key);
   if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
@@ -6370,6 +6370,7 @@ function operationsPortalSections() {
     { id: "projects", label: "Applicazioni", icon: "projects" },
     { id: "server-ai", label: "Server AI", icon: "terminal" },
     { id: "secrets", label: "Secret", icon: "shield" },
+    ...(process.env.CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE ? [{ id: "cloudflare", label: "Cloudflare DNS", icon: "shield" }] : []),
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
   ];
@@ -6387,12 +6388,41 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
+  if (section === "cloudflare") return renderCloudflareDns();
   if (section === "server-ai") return renderServerAi();
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
   return renderOpsProjects(context, params);
+}
+
+function renderCloudflareDns() {
+  return `<section class="ops-card" data-cloudflare-dns>
+    <p data-dns-status role="status" aria-live="polite">Caricamento DNS autorizzati…</p>
+    <button type="button" class="ops-button secondary compact" data-dns-refresh>Aggiorna e verifica DNS</button>
+    <div class="ops-table-wrap"><table class="ops-table"><thead><tr><th>Dominio</th><th>Nome</th><th>Tipo</th><th>TTL</th><th>Proxy</th><th>Azioni</th></tr></thead><tbody data-dns-records></tbody></table></div>
+    <h2>Record DNS</h2>
+    <form data-dns-form autocomplete="off">
+      <label>Dominio <select name="zoneId" required></select></label>
+      <label>Tipo <select name="type"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option><option>MX</option></select></label>
+      <label>Nome completo <input name="name" required maxlength="253"></label>
+      <label>Valore <textarea name="content" required maxlength="4096" rows="2"></textarea></label>
+      <label>TTL (1 = automatico) <input name="ttl" type="number" value="300" min="1" max="86400" required></label>
+      <label>Priorità MX <input name="priority" type="number" min="0" max="65535" value="0"></label>
+      <label><input name="proxied" type="checkbox"> Proxy Cloudflare (solo A, AAAA, CNAME)</label>
+      <button type="submit" class="ops-button primary compact">Prepara piano</button>
+      <button type="button" class="ops-button secondary compact" data-dns-new>Nuovo record</button>
+    </form>
+    <section data-dns-review hidden>
+      <h2>Revisione della modifica</h2>
+      <p>Controlla originale e modifica proposta. Per MX, conferma che tutti i destinatari esistano sul nuovo provider.</p>
+      <pre data-dns-plan></pre>
+      <label><input type="checkbox" data-dns-confirm> Ho verificato il piano e confermo questa modifica.</label>
+      <button type="button" class="ops-button primary compact" data-dns-apply disabled>Applica e verifica</button>
+    </section>
+    <p>Accesso limitato ai tre domini autorizzati. Account, Access, tunnel e WAF non sono gestiti da questa pagina.</p>
+  </section>`;
 }
 
 function renderOpsRedis(context) {

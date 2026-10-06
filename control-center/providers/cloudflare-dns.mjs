@@ -84,7 +84,7 @@ export async function executeCloudflareDnsChange(payload, { zones, token, fetchI
   const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   zones = parseCloudflareDnsZones(JSON.stringify({ zones }));
   const zone = zones.find(z => z.id === payload.zoneId);
-  if (!zone || !['create', 'update', 'delete'].includes(payload.action)) throw Error('Invalid DNS operation scope');
+  if (!zone || !['inspect', 'create', 'update', 'delete'].includes(payload.action)) throw Error('Invalid DNS operation scope');
   const base = `https://api.cloudflare.com/client/v4/zones/${zone.id}/dns_records`;
   const request = async (suffix, method = 'GET', body) => {
     let response, value;
@@ -104,6 +104,7 @@ export async function executeCloudflareDnsChange(payload, { zones, token, fetchI
     if (!before || before.id !== payload.recordId || !inZone(before.name)) throw Error('DNS record outside enrolled zone');
     before = snapshot(before);
   }
+  if (payload.action === 'inspect') return { zone: zone.name, zoneId: zone.id, recordId: before.id, before, dryRun: true, providerTouched: false, action: 'inspect' };
   if (payload.action !== 'delete') {
     const r = payload.record;
     if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some(k => !['type', 'name', 'content', 'ttl', 'proxied', 'priority'].includes(k))) throw Error('Invalid DNS fields');

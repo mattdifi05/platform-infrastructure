@@ -58,3 +58,16 @@ and absence of expiration are set in Cloudflare, not inferred by the adapter.
 
 Cloudflare documents DNS Read or DNS Write as sufficient for this endpoint:
 https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/list/
+
+## Portal page
+
+When the optional FILE configuration is present, the existing sidebar includes
+Cloudflare DNS (`/?section=cloudflare`). The page requires a fresh owner session
+and is excluded from HTML caches. It loads the three scoped zone names and record
+metadata from the API. Edit reads the original through the same owner/CSRF guarded
+endpoint with `action:inspect`; DNS values appear only to that owner in the form
+and plan, never in audit text or AI context. The form supports the five record
+types above. Delete opens a review of the original record. Apply stays disabled
+until the owner checks the confirmation box; changing form data invalidates the
+plan. After success the inventory is refreshed and the page reports the actual
+write/readback result. Reading the inventory alone never claims write success.

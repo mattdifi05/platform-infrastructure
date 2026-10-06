@@ -101,3 +101,12 @@ test('unscoped IDs, NAS, DNS type/field errors and duplicate SPF cannot mutate',
   const remote = provider([{ ...input.record, id: 'a'.repeat(32), content: 'v=spf1 -all' }]);
   await assert.rejects(executeCloudflareDnsChange({ ...input, record: { ...input.record, content: 'v=spf1 include:example.com -all' } }, options(remote)), /conflict/);
 });
+
+test('record inspector returns the original without writes for GUI editing', async () => {
+  const before = { ...input.record, id: 'b'.repeat(32), priority: 5 };
+  const remote = provider([before]);
+  const value = await executeCloudflareDnsChange({ action: 'inspect', zoneId: input.zoneId, recordId: before.id }, options(remote));
+  assert.deepEqual(value.before, before);
+  assert.equal(value.providerTouched, false);
+  assert.ok(remote.calls.every(c => c.method === 'GET'));
+});

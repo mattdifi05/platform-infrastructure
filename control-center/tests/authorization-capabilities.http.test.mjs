@@ -82,6 +82,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_BIND_HOST: "127.0.0.1",
       CONTROL_CENTER_AUTH_MODE: "app-passkey",
       CONTROL_CENTER_AUTH_STORE: "memory",
+      CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE: "/nonexistent-test-only-cloudflare-config",
       CONTROL_CENTER_PUBLIC_ORIGIN: publicOrigin,
       CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1",
       CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled",
@@ -167,7 +168,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       assert.equal((await response.json()).error, "endpoint_capability_denied", pathname);
     }
   }
-  for (const pathname of ["/?section=secrets"]) {
+  for (const pathname of ["/?section=secrets", "/?section=cloudflare", "/index.html?section=cloudflare"]) {
     assert.equal((await request(baseUrl, "GET", pathname)).status, 401, `anonymous UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.viewer)).status, 403, `viewer UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.admin)).status, 403, `admin UI ${pathname}`);
@@ -214,6 +215,9 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   restoreStateAfterDenied();
 
   assert.equal((await request(baseUrl, "GET", "/?section=vault", identities.owner)).status, 200, "fresh owner reaches Vault UI");
+  const dnsPage = await request(baseUrl, "GET", "/?section=cloudflare", identities.owner);
+  assert.equal(dnsPage.status, 200);
+  assert.match(await dnsPage.text(), /data-cloudflare-dns/);
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {

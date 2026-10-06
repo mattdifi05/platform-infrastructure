@@ -6715,3 +6715,11 @@ pre {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+[data-cloudflare-dns] form { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 14px; margin: 20px 0; }
+[data-cloudflare-dns] form label { display: grid; gap: 6px; }
+[data-cloudflare-dns] input:not([type="checkbox"]), [data-cloudflare-dns] textarea, [data-cloudflare-dns] select { width: 100%; box-sizing: border-box; padding: 9px; border: 1px solid var(--cc-border, #d7dce2); border-radius: 7px; background: var(--cc-surface, #fff); color: inherit; }
+[data-cloudflare-dns] pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; padding: 14px; background: #f4f6f8; color: #17212d; border-radius: 8px; }
+[data-cloudflare-dns] .ops-table-wrap { overflow-x: auto; margin-top: 16px; }
+[data-cloudflare-dns] td { overflow-wrap: anywhere; }
+[data-cloudflare-dns] td button { margin: 3px; }

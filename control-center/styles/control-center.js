@@ -46,7 +46,7 @@
   function isSensitivePortalUrl(url) {
     return Boolean(url && (
       url.pathname === "/auth/login"
-      || ((url.pathname === "/" || url.pathname === "/index.html") && url.searchParams.get("section") === "secrets")
+      || ((url.pathname === "/" || url.pathname === "/index.html") && ["secrets", "cloudflare"].includes(url.searchParams.get("section")))
     ));
   }
 
@@ -94,6 +94,7 @@
 
   function storeCache(url, html, etag) {
     htmlCache.delete(url);
+    if (isSensitivePortalUrl(sameOriginUrl(url))) return;
     htmlCache.set(url, { etag: etag || "", html: String(html || ""), storedAt: Date.now() });
     while (htmlCache.size > cacheLimit) {
       htmlCache.delete(htmlCache.keys().next().value);
@@ -489,6 +490,7 @@
     restoreSidebarState({ instantOpsNav: true, opsNavExpandedState: previousOpsNavExpandedState });
     restoreSidebarScrollTop(previousSidebarScrollTop);
     startStatusTabs();
+    startCloudflareDns();
     startFileManagers();
     fitSingleLineText();
     scrollAfterRender(target);
@@ -1662,6 +1664,107 @@
     next.focus({ preventScroll: true });
   }
 
+  function startCloudflareDns() {
+    var root = document.querySelector('[data-cloudflare-dns]');
+    if (!root || root.dataset.ready) return;
+    root.dataset.ready = 'true';
+    var form = root.querySelector('[data-dns-form]');
+    var status = root.querySelector('[data-dns-status]');
+    var review = root.querySelector('[data-dns-review]');
+    var confirm = root.querySelector('[data-dns-confirm]');
+    var apply = root.querySelector('[data-dns-apply]');
+    var selected = null, planned = null, busy = false;
+    function invalidate() { planned = null; review.hidden = true; confirm.checked = false; apply.disabled = true; }
+    async function request(url, payload) {
+      var headers = new Headers({ Accept: 'application/json' });
+      var method = payload ? 'POST' : 'GET';
+      addMutationHeaders(headers, method);
+      if (payload) headers.set('Content-Type', 'application/json');
+      var response = await fetch(url, { method: method, headers: headers, credentials: 'same-origin', cache: 'no-store', ...(payload ? { body: JSON.stringify(payload) } : {}) });
+      var value = await response.json();
+      if (redirectForReauthentication(response, value)) throw Error('Conferma di nuovo la passkey.');
+      if (!response.ok) throw Error('Operazione non disponibile o piano non più valido. Aggiorna i DNS e riprepara il piano.');
+      return value;
+    }
+    function message(error) { status.textContent = error.message || 'Operazione non disponibile.'; }
+    function reset() {
+      invalidate(); selected = null; form.reset();
+      form.elements.zoneId.disabled = false; form.elements.type.disabled = false;
+    }
+    function showPlan(payload, plan) {
+      planned = { payload: payload, plan: plan }; confirm.checked = false; apply.disabled = true;
+      root.querySelector('[data-dns-plan]').textContent = JSON.stringify({ azione: plan.action, dominio: plan.zone, originale: plan.before, proposto: plan.desired }, null, 2);
+      review.hidden = false;
+      status.textContent = 'Piano pronto. Nessun record modificato: verifica i dettagli prima di confermare.';
+    }
+    async function change(payload) { return request('/control/cloudflare/dns/change', payload); }
+    function button(text, action) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'ops-button secondary compact'; b.textContent = text;
+      b.addEventListener('click', async function () {
+        if (busy) return; busy = true; invalidate();
+        try { await action(); } catch (e) { message(e); } finally { busy = false; }
+      }); return b;
+    }
+    async function refresh() {
+      invalidate();
+      var value = await request('/control/advanced/cloudflare');
+      var dns = value.data && value.data.dnsIntegration;
+      if (!dns || dns.status !== 'verified-dns-read') throw Error('Cloudflare DNS non disponibile. Il token deve essere configurato sul server.');
+      reset(); form.elements.zoneId.replaceChildren(); root.querySelector('[data-dns-records]').replaceChildren();
+      dns.zones.forEach(function (zone) {
+        var option = document.createElement('option'); option.value = zone.id; option.textContent = zone.name; form.elements.zoneId.append(option);
+        zone.records.forEach(function (record) {
+          var row = document.createElement('tr');
+          [zone.name, record.name, record.type, record.ttl, record.proxied ? 'Attivo' : 'DNS only'].forEach(function (value) { var cell = document.createElement('td'); cell.textContent = String(value); row.append(cell); });
+          var actions = document.createElement('td');
+          if (['A', 'AAAA', 'CNAME', 'TXT', 'MX'].includes(record.type)) {
+            actions.append(button('Modifica', async function () {
+              var item = await change({ action: 'inspect', zoneId: zone.id, recordId: record.id });
+              selected = { zoneId: zone.id, recordId: record.id };
+              ['type', 'name', 'content', 'ttl'].forEach(function (key) { form.elements[key].value = item.before[key]; });
+              form.elements.zoneId.value = zone.id; form.elements.zoneId.disabled = true; form.elements.type.disabled = true;
+              form.elements.priority.value = item.before.priority || 0; form.elements.proxied.checked = item.before.proxied === true;
+              status.textContent = 'Record attuale caricato. Modifica i campi e prepara il piano.'; form.elements.name.focus();
+            }));
+            actions.append(button('Elimina', async function () {
+              var payload = { action: 'delete', zoneId: zone.id, recordId: record.id };
+              showPlan(payload, await change(payload));
+            }));
+          }
+          row.append(actions); root.querySelector('[data-dns-records]').append(row);
+        });
+      });
+      status.textContent = 'Lettura DNS verificata per ' + dns.zones.map(function (z) { return z.name; }).join(', ') + '. Scrittura non verificata da questa lettura.';
+    }
+    form.addEventListener('input', invalidate);
+    form.addEventListener('change', invalidate);
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault(); event.stopPropagation(); if (busy) return; busy = true; invalidate();
+      try {
+        var type = form.elements.type.value;
+        var record = { type: type, name: form.elements.name.value.trim().toLowerCase(), content: form.elements.content.value, ttl: Number(form.elements.ttl.value), proxied: form.elements.proxied.checked };
+        if (type === 'MX') record.priority = Number(form.elements.priority.value);
+        var payload = { action: selected ? 'update' : 'create', zoneId: form.elements.zoneId.value, ...(selected ? { recordId: selected.recordId } : {}), record: record };
+        showPlan(payload, await change(payload));
+      } catch (e) { message(e); } finally { busy = false; }
+    });
+    confirm.addEventListener('change', function () { apply.disabled = !confirm.checked || !planned || busy; });
+    apply.addEventListener('click', async function () {
+      if (busy || !planned || !confirm.checked) return;
+      busy = true; apply.disabled = true;
+      var operation = planned; invalidate();
+      try {
+        var result = await change({ ...operation.payload, apply: true, expectedRevision: operation.plan.revision, confirm: operation.plan.confirmationRequired });
+        if (!result.verified) throw Error('Verifica della modifica non disponibile. Aggiorna i DNS.');
+        await refresh();
+        status.textContent = 'Modifica applicata e riletta dal provider. Elenco aggiornato; le altre operazioni non sono state eseguite.';
+      } catch (e) { message(e); } finally { busy = false; }
+    });
+    root.querySelector('[data-dns-new]').addEventListener('click', function () { if (!busy) reset(); });
+    root.querySelector('[data-dns-refresh]').addEventListener('click', async function () { if (busy) return; busy = true; try { await refresh(); } catch (e) { message(e); } finally { busy = false; } });
+    busy = true; refresh().catch(message).finally(function () { busy = false; });
+  }
+
   function init() {
     if (initialized) return;
     initialized = true;
@@ -1671,6 +1774,7 @@
     restoreSidebarState({ instantOpsNav: true });
     positionOpsNavPill({ instant: true });
     startStatusTabs();
+    startCloudflareDns();
     startFileManagers();
     fitSingleLineText();
     storeCache(window.location.href, document.documentElement.outerHTML, "");
