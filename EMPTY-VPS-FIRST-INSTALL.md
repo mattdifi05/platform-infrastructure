@@ -70,17 +70,27 @@ proxy binds only `127.0.0.1:8080` on the host and forwards to WAF. Its
 self-signed certificate only supports local WAF startup checks. With a
 Cloudflare Tunnel, route `portal.stexor.com` and `docs.stexor.com` to
 `http://127.0.0.1:8080`; the overlay disables the local HTTP redirect and the
-WAF forwards the HTTPS scheme from the Cloudflare edge. Require an owner-only
-Cloudflare Access policy before exposing the tunnel. Check the effective
+WAF forwards the HTTPS scheme from the Cloudflare edge. For the selected
+direct-login mode, the portal authenticates with its own passkey and session;
+Cloudflare Access is not a permanent login prerequisite. An owner-only Access
+application can protect the portal during first enrollment, but remove only
+that portal application's coverage after the real passkey is registered and
+verify that the portal Tunnel route no longer has "Protect with Access" / an
+`originRequest.access.required` JWT requirement. Leave the Tunnel, edge
+protections, and unrelated Access applications in place. Check the effective
 `X-Forwarded-For` chain, then set the allowed client CIDR and exact trusted
 Docker/Cloudflare proxy CIDRs so registration from the Mac passes without
 accepting a client-supplied address. The WebAuthn RP and browser origin must
-stay exactly `portal.stexor.com` and `https://portal.stexor.com`.
+stay exactly `portal.stexor.com` and `https://portal.stexor.com`. The client
+CIDR restricts first enrollment; later login still requires the registered
+passkey, exact host and origin, a valid session, and CSRF checks.
 
 For a new VPS, first confirm with the owner which Cloudflare account owns this
-infrastructure; require an account separate from any NAS or other project
-account. That account choice is an operator prerequisite, not a property
-established by this repository. Create the Tunnel in the selected account and
+infrastructure. The same Cloudflare account can also host NAS or other
+projects; keep this platform's Tunnel, route, and any temporary Access change
+scoped to `portal.stexor.com`, without changing those other applications.
+The account choice is an operator prerequisite, not a property established by
+this repository. Create the Tunnel in the selected account and
 write its new token only to `/etc/cloudflared/tunnel-token` on the VPS (root
 owned, mode `0600`; parent directory root owned, mode `0700`). Install
 `deployment/host/systemd/platform-cloudflared-vps.service` as a systemd unit
