@@ -105,8 +105,10 @@ volumes. Do not label its existing catalog a complete VPS backup.
 
 The VPS timer is weekly Friday 06:05 Europe/Rome with Persistent=true. This is
 provisional while Hostinger has weekly backup enabled but no available point or
-exposed weekday. The temporary thread follow-up aligns this timer midway between
-provider backups once the first provider timestamp exists. The home timer keeps its
+exposed weekday. The server-owned systemd timer remains the backup scheduler;
+when the first provider backup timestamp becomes available, choose a VPS timer
+slot about 3.5 days from the observed provider backup and verify the next fire
+time on the server. Until then, retain Friday 06:05. The home timer keeps its
 existing Monday/Wednesday/Friday schedule. The VPS timer runs capture followed by
 FTPS publication; its capture/offsite gates are enabled. ExecStopPost
 recovers only writer container IDs in the protected pause journal. Targeted local
@@ -166,14 +168,14 @@ The separately gated `restore-production` operation implements same-host runtime
 recovery as described below. It remains disabled until native semantic recovery
 of a real selected point has passed and root explicitly authorizes activation.
 
-The queue timer and periodic backup timer stay disabled until root activation.
-Catalog output records actual timer states; manual requests are rejected while the
-queue worker is inactive. `compose.control-center.yaml` supplies only the read-only
+The queue timer and periodic backup timer were enabled on 2026-10-06 after root
+activation. Catalog output records their actual states; manual requests are rejected
+while the queue worker is inactive. `compose.control-center.yaml` supplies only the read-only
 catalog and existing typed queue mounts, not Docker or arbitrary host file access.
 Applying that overlay recreates Control Center and requires refreshing both AI and
 backup pins from the actual new container before enabling the native worker.
 
-The VPS schedule is weekly Friday 06:05 Europe/Rome, provisionally staggered from home. Align it with the first actual Hostinger weekly recovery point when its timing is known. Hostinger frequency alone does not establish an existing recovery point. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
+The VPS schedule is weekly Friday 06:05 Europe/Rome, provisionally staggered from home. Align the server-owned systemd timer about halfway between provider backups only after an actual Hostinger weekly recovery timestamp is visible. Hostinger frequency alone does not establish an existing recovery point. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
 
 
 ## Manual production runtime recovery (activation gate closed)
