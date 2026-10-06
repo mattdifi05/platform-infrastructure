@@ -139,7 +139,7 @@
     }
     var ready = instance.machineState === "active" || instance.machineState === "degraded";
     if (ready) {
-      if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione OpenAI da verificare; la cronologia resta disponibile." : "Disponibile tramite OpenAI.");
+      if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione da verificare; la cronologia resta disponibile." : "Disponibile.");
     } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
   }
 
@@ -288,7 +288,7 @@
 
   function stateTitle(state) {
     if (state === "active") return "Server AI attivo";
-    if (state === "degraded") return "Chat GPT-6 Luna attiva";
+    if (state === "degraded") return "Chat attiva";
     if (state === "disabled") return "Server AI disattivato";
     if (state === "starting") return "Avvio di Server AI";
     if (state === "stopping") return "Arresto di Server AI";
@@ -880,7 +880,7 @@
     var labels = {
       queued: "In attesa della risposta",
       preparing: "Preparazione della risposta",
-      loading: "Connessione a GPT-6 Luna",
+      loading: "Connessione al servizio",
       thinking: "Analisi della richiesta",
       tools: "Consultazione degli strumenti",
       summarizing: "Sintesi della risposta",

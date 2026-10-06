@@ -1,5 +1,3 @@
-import { SERVER_AI_MODEL_LABEL } from "./model.mjs";
-
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -167,7 +165,7 @@ export function formatServerAiGpuStatus(gpu) {
 export function formatServerAiMachineState(status) {
   const state = String(status?.state || "unavailable").toLowerCase();
   if (state === "active") return "Server AI attivo";
-  if (state === "degraded") return "Chat GPT-6 Luna attiva";
+  if (state === "degraded") return "Chat attiva";
   if (state === "disabled") return "Server AI disattivato";
   if (state === "starting") return "Avvio di Server AI";
   if (state === "stopping") return "Arresto di Server AI";
@@ -206,7 +204,7 @@ export function renderServerAiEmpty() {
 export function renderServerAi({ manualRestore = "" } = {}) {
   return `<section class="server-ai" data-server-ai aria-labelledby="server-ai-title">
     <header class="server-ai-toolbar">
-      <div class="server-ai-brand"><h1 id="server-ai-title">Server AI</h1><span data-ai-model-label>${escapeHtml(SERVER_AI_MODEL_LABEL)}</span></div>
+      <div class="server-ai-brand"><h1 id="server-ai-title">Server AI</h1></div>
       <div class="server-ai-machine" aria-label="Macchina Server AI">
         <div data-ai-machine-name><strong data-ai-machine-label>Caricamento…</strong></div>
         <label class="server-ai-machine-picker" data-ai-machine-picker hidden><span class="sr-only">Macchina</span><select data-ai-machine-select aria-label="Macchina"></select></label>
@@ -244,7 +242,6 @@ export function renderServerAi({ manualRestore = "" } = {}) {
                 <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
               </div>
             </form>
-            <p class="server-ai-composer-note">GPT-6 Luna tramite OpenAI API</p>
           </div>
         </div>
       </div>
