@@ -238,11 +238,11 @@ export function renderServerAi({ manualRestore = "" } = {}) {
             <p class="server-ai-state" data-ai-state role="status" hidden></p>
             <form class="server-ai-composer" data-ai-form>
               <label class="sr-only" for="server-ai-prompt">Messaggio per Server AI</label><textarea id="server-ai-prompt" data-ai-prompt rows="1" maxlength="12000" placeholder="Scrivi una richiesta per il server…" autocomplete="off"></textarea>
-                <div class="server-ai-attachments" data-ai-attachments hidden aria-live="polite"></div><section class="server-ai-queue" data-ai-queue hidden aria-live="polite" aria-label="Richieste in coda"></section>
+                <div class="server-ai-attachments" data-ai-attachments hidden aria-live="polite"></div>
                 <div class="server-ai-composer-actions">
                 <button type="button" data-ai-attach aria-label="Allega file o immagine" title="Allega file o immagine">${aiIcon('attach')}</button><input data-ai-attachment-input type="file" hidden multiple>
-                <div class="server-ai-mode" role="radiogroup" aria-label="Intensità di ragionamento" data-ai-selected-mode="auto"><button type="button" class="active" data-ai-mode="auto" role="radio" aria-checked="true" tabindex="0" title="Automatico">Auto</button><button type="button" data-ai-mode="fast" role="radio" aria-checked="false" tabindex="-1" title="Rapido">Rapido</button><button type="button" data-ai-mode="deep" role="radio" aria-checked="false" tabindex="-1" title="Analisi approfondita">Approfondito</button></div>
-                <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="button" class="server-ai-send-immediate" data-ai-send-immediate hidden aria-label="Invia subito (interrompi la risposta corrente)" title="Invia subito (interrompi la risposta corrente)">${aiIcon('bolt')}</button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
+                <span class="server-ai-auto" aria-label="Modalità automatica">Auto</span>
+                <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
               </div>
             </form>
             <p class="server-ai-composer-note">GPT-6 Luna tramite OpenAI API</p>
