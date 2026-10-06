@@ -26,11 +26,20 @@ def private(p,directory=False):
  if p.is_symlink() or s.st_uid!=0 or s.st_mode&0o077 or (not stat.S_ISDIR(s.st_mode) if directory else not stat.S_ISREG(s.st_mode)):raise RuntimeError('Private backup input is not root protected')
  return p
 
+def fsync_directory(path):
+ fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(fd)
+ finally:os.close(fd)
+def durable_rename(source,destination):
+ source=pathlib.Path(source);destination=pathlib.Path(destination)
+ os.rename(source,destination);fsync_directory(destination.parent)
+ if source.parent!=destination.parent:fsync_directory(source.parent)
+
 def save(p,v):
  p=pathlib.Path(p);tmp=p.with_name('.'+p.name+'-'+uuid.uuid4().hex)
  fd=os.open(tmp,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
  with os.fdopen(fd,'wb') as f:f.write(canonical(v)+b'\n');f.flush();os.fsync(f.fileno())
- os.replace(tmp,p)
+ os.replace(tmp,p);fsync_directory(p.parent)
 
 def run(args,timeout=300,output=None):
  # Command output may contain secrets. Never include stdout/stderr in exceptions.
@@ -48,7 +57,7 @@ def settle_restore_journal(file=None):
  history=file.parent/'restore-journals';history.mkdir(mode=0o700,exist_ok=True);private(history,True)
  target=history/(operation+'.json')
  if target.exists() or target.is_symlink():raise RuntimeError('Terminal restore journal already archived; reconcile duplicate')
- os.rename(file,target) # Keep original rollback paths and root replay ledger intact.
+ durable_rename(file,target) # Keep original rollback paths and root replay ledger intact.
 
 def capture_file_metadata(container,source):
  raw=run(['docker','exec',container,'stat','-Lc','%u:%g:%a:%f',source]).decode().strip().split(':')

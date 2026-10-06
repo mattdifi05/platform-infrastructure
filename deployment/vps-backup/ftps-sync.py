@@ -150,13 +150,14 @@ def sync():
    time.sleep(60)
 
 @contextlib.contextmanager
-def downloaded_restore(manifest_id,expected_digest=None):
+def downloaded_restore(manifest_id,expected_digest=None,scratch=None):
  # Read-only isolated restore, selected immutable manifest from authenticated portal queue.
  if not re.fullmatch('manifest-vps-[a-z0-9-]+',manifest_id):raise RuntimeError('Exact VPS manifest selection required')
  profile,_=b.profile()
  if profile.get('offsiteAuthorized') is not True:raise RuntimeError('FTPS activation gate is not open')
  with q.writer_budget(CONFIG,FOLDER):
-  f=connect();tmp=pathlib.Path(tempfile.mkdtemp(prefix='restore-',dir=b.WORK))
+  f=connect();tmp=pathlib.Path(scratch) if scratch is not None else pathlib.Path(tempfile.mkdtemp(prefix='restore-',dir=b.WORK))
+  if scratch is not None:tmp.mkdir(mode=0o700)
   try:
    listing=inventory(f);ownership(f,listing)
    matches=[p for p in points(f,listing) if p['manifestId']==manifest_id]

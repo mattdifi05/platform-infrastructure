@@ -234,3 +234,15 @@ The strict container compatibility comparison excludes only Control Center's
 `CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE`. These current management-bootstrap
 settings stay in place. Database variables, all other environment entries, images,
 mounts, user, command and entrypoint must still match the selected point.
+
+
+The root journal is durable before decrypting or creating staging paths/containers.
+Each temporary database container carries the operation label and its planned name,
+image and bounded mount are recorded before create; the returned ID is recorded
+before start. Interrupted pre-stop recovery validates these fields and network
+`none`, removes only that operation's temporary containers/scratch/siblings, and
+checks the unchanged production state. It never switches production paths when
+`productionStopped=false`. Interrupted remote shared leases still require the
+existing explicit quota-lock reconciliation; this routine does not steal leases.
+Journal atomic replacements and data-path renames fsync their parent directories.
+Staged files are flushed on their filesystems before recording stop/switch intent.

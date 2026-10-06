@@ -115,7 +115,7 @@ def wait_database(name,engine):
   except Exception:time.sleep(1)
  raise RuntimeError('Isolated database engine did not become ready')
 
-def stage_databases(directory,runtime,rows,volumes,operation):
+def stage_databases(directory,runtime,rows,volumes,operation,journal):
  names={};stages={};created=[]
  try:
   for volume,engine in DB_VOLUMES.items():
@@ -123,13 +123,18 @@ def stage_databases(directory,runtime,rows,volumes,operation):
    mount=next(m for m in row['Mounts'] if m.get('Name')==volume)
    stage=directory/volume;stage.mkdir(mode=0o700);stages[volume]=stage
    name='platform-restore-'+engine+'-'+operation[-12:];names[engine]=name
-   args=['docker','create','--name',name,'--network','none','--restart','no','--no-healthcheck','--mount','type=bind,src='+str(stage)+',dst='+mount['Destination']]
+   planned={'name':name,'image':row['Image'],'source':str(stage),'destination':mount['Destination'],'id':None}
+   journal['stagingContainers'].append(planned);b.save(JOURNAL,journal)
+   args=['docker','create','--label','platform.vps.restore.operation='+operation,'--name',name,'--network','none','--restart','no','--no-healthcheck','--mount','type=bind,src='+str(stage)+',dst='+mount['Destination']]
    if engine=='postgres':
     args+=['-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_USER=postgres']
     args += [part for e in row['Config']['Env'] if e.startswith('PGDATA=') for part in ['-e',e]]
     args += [row['Image'],'postgres','-c','listen_addresses=']
    else:args+=['-e','MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1',row['Image'],'mariadbd','--skip-networking','--skip-grant-tables']
-   b.run(args);created.append(name);b.run(['docker','start',name]);wait_database(name,engine)
+   ident=b.run(args).decode().strip()
+   if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged container identity')
+   planned['id']=ident;created.append(name);b.save(JOURNAL,journal)
+   b.run(['docker','start',name]);wait_database(name,engine)
    if engine=='postgres':
     # pg_dumpall recreates the bootstrap role; this one existing identical role
     # is retained while its subsequent ALTER ROLE/password/grants are restored.
@@ -183,9 +188,9 @@ def switch_paths(items,journal):
   target=pathlib.Path(item['target']);staged=pathlib.Path(item['staged']);previous=pathlib.Path(item['previous'])
   if previous.exists() or previous.is_symlink():raise RuntimeError('Rollback path already exists')
   item['state']='switching';b.save(JOURNAL,journal)
-  os.rename(target,previous)
+  b.durable_rename(target,previous)
   os.chown(previous,0,0);os.chmod(previous,0o700 if previous.is_dir() else 0o600)
-  os.rename(staged,target)
+  b.durable_rename(staged,target)
   item['state']='switched';b.save(JOURNAL,journal)
 
 def rollback(journal):
@@ -195,10 +200,10 @@ def rollback(journal):
   if previous.exists():
    if target.exists() or target.is_symlink():
     if failed.exists() or failed.is_symlink():raise RuntimeError('Rollback requires manual path reconciliation')
-    os.rename(target,failed)
+    b.durable_rename(target,failed)
    metadata=item.get('previousMetadata')
    if metadata:restore_file_metadata(previous,metadata)
-   os.rename(previous,target)
+   b.durable_rename(previous,target)
   item['state']='rolled-back';b.save(JOURNAL,journal)
  journal['status']='rolled-back';journal['runtimeHealthVerified']=False;journal['finishedAt']=b.now();b.save(JOURNAL,journal)
 
@@ -212,9 +217,13 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
  if b.sha(b.PROFILE)!=profile_digest:raise RuntimeError('Restore profile changed after owner review')
  if not re.fullmatch('[a-z0-9][a-z0-9-]{15,127}',operation):raise RuntimeError('Invalid restore operation identity')
  spec=importlib.util.spec_from_file_location('ftps',HERE/'ftps-sync.py');f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
- with f.downloaded_restore(manifest_id,digest) as (plain,point,_):
-  scratch=pathlib.Path(tempfile.mkdtemp(prefix='production-stage-',dir=b.WORK));items=[];stopped=False;journal=None
-  try:
+ scratch=b.WORK/('production-stage-'+operation);items=[];stopped=False
+ if scratch.exists() or scratch.is_symlink():raise RuntimeError('Restore staging path already exists')
+ journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'preparing','productionStopped':False,'startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'paths':items,'scratch':str(scratch),'stagingContainers':[]}
+ b.save(JOURNAL,journal) # Durable intent precedes decrypt, filesystem staging and Docker create.
+ try:
+  scratch.mkdir(mode=0o700);b.fsync_directory(scratch.parent)
+  with f.downloaded_restore(manifest_id,digest,scratch/'download') as (plain,point,_):
    manifest=unpack_bundle(plain,scratch)
    if sorted(manifest['resources'],key=lambda r:r['id'])!=sorted(b.enrolled_resources(p),key=lambda r:r['id']):raise RuntimeError('Restore resource set differs from enrolled scope')
    runtime=extract_subset(scratch/'host-config.tar',scratch/'capsule','runtime')
@@ -222,7 +231,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    volume_sources={m['Name']:m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}
    metadata=json.loads(b.run(['docker','volume','inspect',*sorted(volume_sources)]))
    if len(volume_sources)!=13 or any(v['Driver']!='local' or v.get('Options') for v in metadata):raise RuntimeError('Only enrolled local persistent volumes can switch')
-   dbstages=stage_databases(scratch,runtime,snapshot,volume_sources,operation)
+   dbstages=stage_databases(scratch,runtime,snapshot,volume_sources,operation,journal)
    for name,target in sorted(volume_sources.items()):
     source=dbstages.get(name) or extract_subset(scratch/(name+'.tar'),scratch/('unpack-'+name),'data')
     items.append({'target':target,'source':str(source)})
@@ -241,6 +250,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
     if staged.exists() or staged.is_symlink() or previous.exists() or previous.is_symlink():raise RuntimeError('Restore sibling state already exists')
     original=target.stat()
     item.update(staged=str(staged),previous=str(previous),state='preparing',previousMetadata={'uid':original.st_uid,'gid':original.st_gid,'mode':stat.S_IMODE(original.st_mode)})
+    journal['paths']=items;b.save(JOURNAL,journal)
     if source.is_dir():shutil.copytree(source,staged,symlinks=True,copy_function=shutil.copy2)
     else:shutil.copy2(source,staged)
     # copy2 does not preserve uid/gid; apply exact extracted ownership recursively.
@@ -248,10 +258,16 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
     for old in paths:
      dest=staged/old.relative_to(source) if old!=source else staged;st=old.lstat();os.lchown(dest,st.st_uid,st.st_gid)
     item.update(staged=str(staged),previous=str(previous),state='prepared')
+   # Flush staged file contents/metadata before a durable switch can be recorded.
+   devices=set()
+   for item in items:
+    device=os.stat(item['staged']).st_dev
+    if device not in devices:b.run(['sync','-f',item['staged']]);devices.add(device)
    # Revalidate actual runtime and root profile immediately before downtime.
    b.profile()
    if b.sha(b.PROFILE)!=profile_digest:raise RuntimeError('Profile changed during staging')
-   journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'stopping','startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'selectedRunningContainers':[r['Id'] for r in desired_rows if r['State'].get('Running')],'paths':items};b.save(JOURNAL,journal)
+   stopped=True
+   journal.update(status='stopping',productionStopped=True,selectedRunningContainers=[r['Id'] for r in desired_rows if r['State'].get('Running')],paths=items);b.save(JOURNAL,journal)
    # All clients stop before databases; cloudflared/SSH/network host plane remains up.
    dbnames={b.database_container(rows,v) for v in DB_VOLUMES}
    for r in sorted(rows,key=lambda r:r['Name'].lstrip('/') in dbnames):
@@ -262,21 +278,47 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    journal['status']='done';journal['finishedAt']=b.now();journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
    proof.update(productionModified=True,runtimeHealthVerified=True,rollbackRetained=True)
    b.save(b.WORK/'latest-production-restore.json',proof);return proof
-  except BaseException:
-   if stopped and journal:
-    journal['status']='rollback-required';b.save(JOURNAL,journal)
-    for r in rows:subprocess.run(['docker','stop','--time','30',r['Id']],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
-    rollback(journal);boot(rows);journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
-   raise
-  finally:
-   if not stopped:
-    for item in items:
-     path=pathlib.Path(item['staged']) if item.get('staged') else None
-     if path and path.exists():
-      if path.is_dir():shutil.rmtree(path)
-      else:path.unlink()
-    shutil.rmtree(scratch)
-   # After any production stop keep protected staging/journal for root review.
+ except BaseException:
+  if stopped and journal:
+   journal['status']='rollback-required';b.save(JOURNAL,journal)
+   for r in rows:subprocess.run(['docker','stop','--time','30',r['Id']],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
+   rollback(journal);boot(rows);journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
+  raise
+ finally:
+  if not stopped and journal.get('productionStopped') is not True:
+   cleanup_staging(journal,rows)
+   health(rows);journal.update(status='rolled-back',runtimeHealthVerified=True,finishedAt=b.now());b.save(JOURNAL,journal)
+  # After a production stop retain protected staging/journal for root review.
+
+def cleanup_staging(journal,rows):
+ operation=journal.get('operation','')
+ if not re.fullmatch('[a-z0-9][a-z0-9-]{15,127}',operation):raise RuntimeError('Malformed staging operation')
+ scratch=b.WORK/('production-stage-'+operation)
+ if journal.get('scratch')!=str(scratch) or scratch.is_symlink():raise RuntimeError('Staging root differs from journal')
+ expected={x['name']:x for x in journal.get('stagingContainers',[])}
+ ids=b.run(['docker','ps','-aq','--no-trunc','--filter','label=platform.vps.restore.operation='+operation]).decode().split()
+ if ids:
+  stages=json.loads(b.run(['docker','inspect',*ids]))
+  if {row['Id'] for row in stages}!=set(ids) or len(stages)!=len(ids):raise RuntimeError('Incomplete staged identity lookup')
+  for row in stages:
+   name=row['Name'].lstrip('/');planned=expected.get(name)
+   if not planned or name not in {'platform-restore-'+engine+'-'+operation[-12:] for engine in DB_VOLUMES.values()}:raise RuntimeError('Unexpected staged container name')
+   mounts=row['Mounts'];source=pathlib.Path(planned['source'])
+   if source.parent!=scratch or source.name not in DB_VOLUMES or planned.get('id') not in (None,row['Id']) or row['Image']!=planned['image'] or row['HostConfig']['NetworkMode']!='none' or row['Config'].get('Labels',{}).get('platform.vps.restore.operation')!=operation:raise RuntimeError('Staging identity differs from journal')
+   if not any(m['Type']=='bind' and m['Source']==str(source) and m['Destination']==planned['destination'] for m in mounts) or any(m['Type']=='bind' and m['Source']!=str(source) for m in mounts):raise RuntimeError('Unexpected staged container mount')
+  b.run(['docker','rm','-f',*ids])
+ allowed={m['Source'] for row in rows for m in row['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows))
+ for item in journal.get('paths',[]):
+  if not item.get('staged'):continue
+  target=item.get('target','');expected_path=target+'.platform-restore-'+operation[-12:]
+  if target not in allowed or item['staged']!=expected_path:raise RuntimeError('Staged sibling outside enrolled scope')
+  staged=pathlib.Path(item['staged'])
+  if staged.is_symlink():raise RuntimeError('Staged sibling became a symlink')
+  if staged.exists():
+   if staged.is_dir():shutil.rmtree(staged)
+   else:staged.unlink()
+   b.fsync_directory(staged.parent)
+ if scratch.exists():b.private(scratch,True);shutil.rmtree(scratch);b.fsync_directory(scratch.parent)
 
 def recover_rollback():
  b.private(JOURNAL);journal=json.loads(JOURNAL.read_text());p=json.loads(b.private(b.PROFILE).read_text())
@@ -284,6 +326,12 @@ def recover_rollback():
  if journal.get('status')=='done':raise RuntimeError('Completed restore requires a separately reviewed rollback decision')
  rows=json.loads(b.run(['docker','inspect',*journal['containers']]))
  if sorted(b.pins(rows),key=lambda r:r['name'])!=sorted(p['pins'],key=lambda r:r['name']):raise RuntimeError('Recovery runtime differs from enrolled pins')
+ if journal.get('productionStopped') is False:
+  cleanup_staging(journal,rows)
+  original=set(journal['runningContainers'])
+  for row in rows:row['State']['Running']=row['Id'] in original
+  health(rows);journal.update(status='rolled-back',runtimeHealthVerified=True,finishedAt=b.now());b.save(JOURNAL,journal)
+  print(json.dumps({'status':'staging-reconciled','productionModified':False}));return
  allowed={m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows))
  operation=journal.get('operation','')
  if not re.fullmatch('[a-z0-9][a-z0-9-]{15,127}',operation):raise RuntimeError('Malformed rollback operation')

@@ -86,4 +86,34 @@ class RuntimeRestoreTests(unittest.TestCase):
    r.restore_file_metadata(file,{'uid':999,'gid':999,'mode':0o600});ownership.assert_called_once_with(file,999,999)
   self.assertEqual(file.stat().st_mode&0o777,0o600)
   with self.assertRaisesRegex(RuntimeError,'ownership'):r.restore_file_metadata(file,{'uid':999,'gid':999})
+ def test_atomic_save_and_switch_sync_parent_directories(self):
+  file=self.root/'durable.json'
+  with patch.object(r.b,'fsync_directory') as sync:
+   r.b.save(file,{'status':'prepared'});sync.assert_called_once_with(file.parent)
+  other=self.root/'renamed.json'
+  with patch.object(r.b,'fsync_directory') as sync:
+   r.b.durable_rename(file,other);sync.assert_called_once_with(file.parent)
+ def staging_fixture(self):
+  operation='restore-example-123456';scratch=self.root/('production-stage-'+operation);scratch.mkdir(mode=0o700)
+  name='platform-restore-postgres-'+operation[-12:];source=scratch/'enterprise_postgres_data';source.mkdir()
+  ident='c'*64;planned={'name':name,'id':None,'source':str(source),'destination':'/var/lib/postgresql','image':'sha256:example'}
+  journal={'operation':operation,'scratch':str(scratch),'stagingContainers':[planned],'paths':[],'productionStopped':False}
+  row={'Id':ident,'Name':'/'+name,'Image':planned['image'],'HostConfig':{'NetworkMode':'none'},'Config':{'Labels':{'platform.vps.restore.operation':operation}},'Mounts':[{'Type':'bind','Source':str(source),'Destination':planned['destination']}]}
+  return journal,row,scratch
+ def test_interrupted_create_cleans_only_recorded_isolated_stage_even_before_id_saved(self):
+  journal,row,scratch=self.staging_fixture();commands=[]
+  def run(args):
+   commands.append(args)
+   if args[1]=='ps':return (row['Id']+'\n').encode()
+   if args[1]=='inspect':return json.dumps([row]).encode()
+   return b''
+  with patch.object(r.b,'WORK',self.root),patch.object(r.b,'private',side_effect=lambda p,*a:p),patch.object(r.b,'run',side_effect=run):r.cleanup_staging(journal,[])
+  self.assertFalse(scratch.exists());self.assertIn(['docker','rm','-f',row['Id']],commands)
+  self.assertFalse(any('stop' in command for command in commands))
+ def test_interrupted_stage_refuses_foreign_network_without_removal(self):
+  journal,row,scratch=self.staging_fixture();row['HostConfig']['NetworkMode']='host'
+  with patch.object(r.b,'WORK',self.root),patch.object(r.b,'run',side_effect=[(row['Id']+'\n').encode(),json.dumps([row]).encode()]) as run:
+   with self.assertRaisesRegex(RuntimeError,'Staging identity'):r.cleanup_staging(journal,[])
+   self.assertEqual(run.call_count,2)
+  self.assertTrue(scratch.exists())
 if __name__=='__main__':unittest.main()
