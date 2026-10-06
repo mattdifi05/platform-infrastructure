@@ -9,7 +9,7 @@ const definition = name => ({ type: "function", function: { name, description: n
 async function run(message, { attemptedTool = null } = {}) {
   const calls = [], rounds = [], events = [];
   const service = createAIService({ registry: {
-    definitions: () => ["readInfrastructure", "changeInfrastructure", "removePortalApplication", "getInfrastructureOperation"].map(definition),
+    definitions: () => ["readInfrastructure", "changeInfrastructure", "removePortalApplication", "getInfrastructureOperation", "createChatFile", "createChatZip", "analyzeChatAttachment"].map(definition),
     execute: async name => { calls.push(name); return { status: "completed" }; },
   } });
   service.accepting = true;
@@ -17,7 +17,7 @@ async function run(message, { attemptedTool = null } = {}) {
   service.createPublicAnalysisSummary = async () => null;
   service.streamOpenAIResponseRound = async options => {
     rounds.push(options);
-    if (attemptedTool) return { content: "", metrics: {}, outputItems: [],
+    if (attemptedTool && rounds.length === 1) return { content: "", metrics: {}, outputItems: [],
       toolCalls: [{ id: "fixture-call", function: { name: attemptedTool, arguments: {} } }] };
     const content = "Il job TLS risulta completato con esito positivo, come verificato nella risposta precedente.";
     await options.onContent(content);
@@ -77,4 +77,36 @@ test("an expansion cannot remove an application from the portal", async () => {
   assert.deepEqual(result.calls, []);
   assert.equal(result.events.at(-1).type, "failed");
   assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED");
+});
+
+test("all curated fresh checks execute reads and discard stale continuation guidance", async () => {
+  const requests = [
+    "Controlla nuovamente lo stato attuale del VPS.",
+    "Leggi i log recenti del servizio coinvolto e verifica la diagnosi.",
+    "Verifica l’esito dell’operazione precedente senza ripeterla.",
+    "Controlla l’ultimo esito del backup e distingui dati verificati e dati mancanti.",
+    "Verifica la pianificazione dei backup sul server e la prossima esecuzione.",
+    "Ricontrolla disponibilità e salute dei servizi e container coinvolti.",
+    "Verifica lo stato attuale di rete, DNS e TLS del server.",
+    "Verifica le risorse attuali del server e gli eventuali colli di bottiglia.",
+    "Leggi l’audit recente relativo all’operazione precedente.",
+  ];
+  for (const message of requests) {
+    const result = await run(message, { attemptedTool: "readInfrastructure" });
+    assert.deepEqual(result.calls, ["readInfrastructure"], message);
+    assert.deepEqual(result.rounds[0].tools.map(t => t.function.name), ["readInfrastructure", "getInfrastructureOperation"], message);
+    const input = JSON.stringify(result.rounds[0].input);
+    assert.match(input, /letture recenti degli strumenti disponibili/);
+    assert.doesNotMatch(input, /Approfondisci l’ultima risposta|Mantieni l’esito già verificato e continua/);
+    assert.equal(result.events.at(-1).type, "completed", message);
+  }
+});
+
+test("fresh-check mutations are rejected even after an explicitly authorized historical operation", async () => {
+  for (const attemptedTool of ["changeInfrastructure", "removePortalApplication", "createChatFile", "createChatZip", "analyzeChatAttachment"]) {
+    const result = await run("Verifica l’esito dell’operazione precedente senza ripeterla.", { attemptedTool });
+    assert.deepEqual(result.calls, [], attemptedTool);
+    assert.equal(result.events.at(-1).type, "failed", attemptedTool);
+    assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED", attemptedTool);
+  }
 });

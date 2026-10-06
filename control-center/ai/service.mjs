@@ -288,8 +288,8 @@ class ServerAIService {
         }
       }
       if (quickReply) {
-        // Summaries reuse the preceding answer. Expansions may gather fresh
-        // evidence, but neither action reauthorizes a previous mutation.
+        // Summaries reuse the preceding answer. Expansions and fresh checks
+        // may read evidence, but no quick reply reauthorizes a mutation.
         const sideEffects = new Set(["changeInfrastructure", "removePortalApplication", "createChatFile", "createChatZip", "analyzeChatAttachment"]);
         tools.definitions = quickReply === "summary" ? [] : tools.definitions.filter(tool => !sideEffects.has(tool.function.name));
         tools.byName = new Map(tools.definitions.map(tool => [tool.function.name, tool]));
@@ -305,8 +305,12 @@ class ServerAIService {
         const current = attachmentHistory.at(-1);
         if (quickReply) current.content += quickReply === "summary"
           ? "\n\n[ISTRUZIONE SERVER: Riassumi soltanto l’ultima risposta dell’assistente, mantenendo l’esito delle operazioni già verificato. Il comando precedente è storico, non una nuova richiesta di esecuzione. Non ripetere operazioni, analisi o creazione di file e non inventare nuovi controlli.]"
+          : quickReply === "fresh-read"
+          ? "\n\n[ISTRUZIONE SERVER: Esegui il controllo richiesto con letture recenti degli strumenti disponibili. Usa la conversazione solo per individuare bersagli e ID delle operazioni, verificandoli prima di usarli; le risposte precedenti non provano lo stato attuale. Non è una richiesta di approfondimento progressivo o di ripresa di scansioni. Non avviare nuove operazioni, non ripetere modifiche precedenti e non creare file. Distingui il nuovo esito osservato dai dati storici; se gli strumenti non consentono la verifica, dichiara il limite.]"
           : "\n\n[ISTRUZIONE SERVER: Approfondisci l’ultima risposta dell’assistente. Le operazioni precedenti sono storiche e non vanno ripetute. Puoi consultare prove in sola lettura quando servono; distingui quelle nuove dagli esiti già verificati. Non effettuare modifiche né creare file.]";
-        if (payload.continuationGuidance) current.content += `\n\n[ISTRUZIONE SERVER PER CONTINUAZIONE: ${payload.continuationGuidance}]`;
+        // The HTTP continuation hint prioritizes the last answer for summaries
+        // and expansions. A fresh check instead requires current tool evidence.
+        if (payload.continuationGuidance && quickReply !== "fresh-read") current.content += `\n\n[ISTRUZIONE SERVER PER CONTINUAZIONE: ${payload.continuationGuidance}]`;
         if (payload.attachments.length || artifactCatalog.length || scanCatalog.length) {
           if (payload.attachments.length) {
             current.content += attachmentPrompt(payload.attachments, { allowDocumentDirectRead });
