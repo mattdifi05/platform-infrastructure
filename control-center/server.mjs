@@ -43,6 +43,8 @@ import {
   parseBackupManifestDocument,
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
+import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
+import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
   applyBackupQueueFileOwnership,
@@ -409,7 +411,7 @@ const registry = createToolRegistry({
     console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event: "machine-adapter-unavailable" }));
     return { ...machine, configured: false };
   }
-}), audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
+}), getHostResources: machine => machine.local === true ? readPrometheusResourceSnapshot() : null, audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
 
 let serverAiConversationStore = null;
 let serverAiConversationsReady = false;
@@ -558,7 +560,8 @@ const server = createServer(async (req, res) => {
         if (setup.complete) {
           throw new AuthRequestError("A Control Center passkey is already registered.", 409);
         }
-        const options = await controlAuth.beginPasskeyRegistration(req);
+        const payload = await readPayload(req);
+        const options = await controlAuth.beginPasskeyRegistration(req, payload.bootstrapToken);
         json(res, { options });
         return;
       }
@@ -718,7 +721,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/" && url.searchParams.get("section") === "secrets") {
+    if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && url.searchParams.get("section") === "secrets") {
       const secretAuthorization = controlAuth.authorize(
         { ...req, controlCenterOperation: { capability: "owner:fresh" } },
         url,
@@ -726,7 +729,7 @@ const server = createServer(async (req, res) => {
       );
       if (!secretAuthorization.ok) {
         if (secretAuthorization.reauthUrl && !wantsJson(req)) {
-          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent("/?section=secrets")}`);
+          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent(`/?section=${url.searchParams.get("section")}`)}`);
           return;
         }
         json(res, { error: secretAuthorization.error || "admin_authorization_required", message: secretAuthorization.message, ...(secretAuthorization.reauthUrl ? { reauthUrl: secretAuthorization.reauthUrl } : {}) }, secretAuthorization.status);
@@ -1085,7 +1088,32 @@ async function handleApi(req, res, url, context, operation) {
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
       case "overview.read": return json(res, context.overview);
-      case "advanced.section.read": return json(res, advancedControlSection(operation.parameters.sectionId, context));
+      case "backup.vps.catalog": return json(res, { catalog: readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT) });
+      case "backup.production-restore": return json(res, planVpsProductionRestore(payload, context), payload.apply === true ? 202 : 200);
+      case "cloudflare.dns.change": {
+        try {
+          const result = await cloudflareDnsChange(payload);
+          appendAudit({ action: `cloudflare.dns.${result.action}`, target: result.zone, environment: context.environment, risk: "high", result: result.dryRun ? "planned" : "success", dryRun: result.dryRun, summary: result.dryRun ? "DNS record change prepared for owner review." : "DNS record change applied and read back from the scoped provider." });
+          return json(res, result);
+        } catch {
+          return json(res, { error: "CLOUDFLARE_DNS_REJECTED", message: "DNS operation unavailable, invalid or changed since review. Read current DNS before retrying." }, 409);
+        }
+      }
+      case "advanced.section.read": {
+        const section = advancedControlSection(operation.parameters.sectionId, context);
+        if (operation.parameters.sectionId === "cloudflare") {
+          const dns = await readCloudflareDnsStatus();
+          if (dns) {
+            section.data.dnsIntegration = dns;
+            section.data.connectionStatus = dns.status;
+            section.data.apply = "POST /control/cloudflare/dns/change: fresh owner, CSRF, reviewed revision and explicit confirmation required";
+            section.data.verifyRemote = "DNS records read from the scoped Cloudflare API; account policies and write permission are not inferred";
+            section.data.accessPolicies = "not supported by DNS-only integration";
+            section.data.cacheRules = "not supported by DNS-only integration";
+          }
+        }
+        return json(res, section);
+      }
       case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
       case "vault.secret.store": return json(res, planVaultSecretCreate(payload, context), 202);
       case "vault.import-existing": return json(res, planVaultSecretImportExisting(payload, context), 202);
@@ -4941,6 +4969,13 @@ function backupFamilySpecs() {
 }
 
 function readFtpsOffsiteSummary(nowMs = Date.now()) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    const point = native.manifests[0];
+    const time = Date.parse(point?.createdAt || "");
+    const verified = Boolean(point) && Number.isFinite(time) && time <= nowMs + 300000 && nowMs - time <= 14 * 86400000;
+    return { verified, backupAt: point?.createdAt || "", manifestId: verified ? point.id : "", retainedPointCount: native.manifests.length, reportPath: "" };
+  }
   const root = "/var/www/project-state/host-recovery";
   const load = (name) => {
     try {
@@ -5157,6 +5192,8 @@ function applicationBackupResources(context, projectOrId, mode = "all") {
 }
 
 function readBackupManifests() {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) return native.manifests;
   const root = path.resolve(backupRoot);
   const directory = path.join(root, "manifests");
   if (!existsSync(directory)) return [];
@@ -5570,6 +5607,11 @@ function uniqueBackupResources(resources) {
 }
 
 function platformBackupResources(context, requestedScope) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    if (!native.enabled || !native.queueActive || requestedScope !== "all" || context.projects.length) throw new ValidationError("Il backup VPS richiede il catalogo infrastruttura completo e attivato.");
+    return native.resources;
+  }
   const resources = [];
   if (requestedScope === "all" || requestedScope === "applications") {
     for (const project of context.projects) resources.push(...applicationBackupResources(context, project, "source"));
@@ -5645,6 +5687,8 @@ function resolveBackupRunRequest(payload, context) {
 }
 
 function resolveBackupRestoreRequest(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native && (!native.enabled || !native.queueActive)) throw new ValidationError("Ripristino VPS non ancora attivato.");
   const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
   if (requestedScope === "application" || requestedScope.startsWith("app-")) {
     const projectId = requestedScope.startsWith("app-")
@@ -6110,7 +6154,28 @@ function queueRestoreDrill(payload, context) {
   return { ...operation, backup, job, selectedManifestId: selected?.manifest?.id || selected?.name || "" };
 }
 
-function createBackupJob({ operation, scope, sourceManifestPath = "", resources, context }) {
+function planVpsProductionRestore(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const selected = native?.manifests.find(manifest => manifest.id === payload.manifestId);
+  if (!selected || !native.restoreProfileDigest) throw new ValidationError("Seleziona un punto VPS verificato e immutabile.");
+  const confirmation = `RESTORE-RUNTIME:${selected.id}:${selected.signature.digest}:${native.restoreProfileDigest}`;
+  const details = {
+    manifestId: selected.id, createdAt: selected.createdAt, manifestDigest: selected.signature.digest,
+    profileDigest: native.restoreProfileDigest, confirmationRequired: confirmation,
+    scope: "Database, 13 volumi persistenti e configurazioni runtime montate; stesso host e stesse immagini.",
+    preserves: "SSH, rete, sistema operativo, credenziali di gestione, authority e coda corrente.",
+    downtimeRequired: true, originalStateRetainedForRollback: true,
+    ownerAccessReturnsToBackupState: true,
+    enabled: native.enabled && native.queueActive && native.productionRestoreEnabled,
+  };
+  if (payload.apply !== true) return { dryRun: true, details };
+  if (!details.enabled || payload.confirm !== confirmation || payload.reviewedManifestId !== selected.id) throw new ValidationError("Ripristino non attivato o conferma del punto non valida.");
+  const job = createBackupJob({ operation: "restore-production", scope: { kind: "platform", id: "platform" }, sourceManifestPath: selected.path, sourceManifestDigest: selected.signature.digest, restoreProfileDigest: native.restoreProfileDigest, resources: selected.resources, context });
+  appendAudit({ action: "backup.restore-production.queue", target: selected.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Manual owner-reviewed runtime recovery queued; SSH, OS and management authority excluded." });
+  return { dryRun: false, job, details };
+}
+
+function createBackupJob({ operation, scope, sourceManifestPath = "", sourceManifestDigest = "", restoreProfileDigest = "", resources, context }) {
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
   const principal = String(identity?.subject || "").trim();
@@ -6129,6 +6194,8 @@ function createBackupJob({ operation, scope, sourceManifestPath = "", resources,
     environment: context.environment,
     createdAt: now,
     sourceManifestPath,
+    sourceManifestDigest,
+    restoreProfileDigest,
   });
   return admitBackupJob({
     jobsDir: backupJobsDir,
@@ -6168,7 +6235,8 @@ function readBackupJobs() {
 async function renderCachedControlCenter(context, params) {
   const section = params.get("section") || "projects";
   if (section === "secrets" || !context?.cacheIdentity) return renderControlCenter(context, params);
-  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
+  const assetVersions = `${controlCenterStylesheetLinks()}\0${controlCenterScriptTags()}`;
+  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}\0${assetVersions}`)}`;
   const cached = await redisOperations.cacheGetJson(key);
   if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
   const rendered = renderControlCenter(context, params);
@@ -6186,6 +6254,7 @@ function renderControlCenter(context, params) {
   const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
   const hidePageHead = Boolean(activeProject) || section === "server-ai";
+  const serverAiNavToggle = section === "server-ai" ? `<button type="button" class="server-ai-portal-nav-toggle" data-ai-portal-nav-toggle aria-label="Apri menu principale" aria-controls="platform-portal-navigation" aria-expanded="false"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>` : "";
   const pageHint = operationPageHint(section, context);
   const pageLabel = hidePageHead ? `aria-label="${escapeHtml(title)}"` : 'aria-labelledby="control-page-title"';
   const pageHead = hidePageHead ? "" : `<div class="ops-page-head">
@@ -6220,6 +6289,7 @@ ${controlCenterScriptTags()}
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
       <a class="ops-brand" href="/?section=projects" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
+      ${serverAiNavToggle}
       ${renderOperationsNav(sections, section, context, activeProject, params)}
       ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Logout" title="Logout">${controlIcon("logout")}</button></form>` : ""}
     </aside>
@@ -6235,7 +6305,7 @@ ${controlCenterScriptTags()}
 
 function renderOperationsNav(sections, section, context, activeProject, params = new URLSearchParams()) {
   const visibleSections = sections.filter((item) => !item.hidden);
-  return `<nav class="ops-nav" aria-label="Sezioni portal">
+  return `<nav id="platform-portal-navigation" class="ops-nav" aria-label="Sezioni portal">
     <span class="ops-nav-pill" aria-hidden="true"></span>
     ${visibleSections.map((item) => renderOperationsNavGroup(item, section, context, activeProject, params)).join("")}
   </nav>`;
@@ -6346,12 +6416,28 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
-  if (section === "server-ai") return renderServerAi();
+  if (section === "server-ai") return renderServerAi({ manualRestore: process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT ? renderVpsProductionRestore() : "" });
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
   return renderOpsProjects(context, params);
+}
+
+function renderVpsProductionRestore() {
+  return `<section class="ops-card" data-vps-restore>
+    <h2>Ripristino manuale dei dati runtime</h2>
+    <p>Ripristina database, volumi persistenti e configurazioni runtime sullo stesso server. SSH, rete, sistema operativo e credenziali di gestione restano correnti.</p>
+    <p>Il portale e i servizi saranno temporaneamente indisponibili. Dati e passkey torneranno allo stato del punto scelto; conserva una passkey valida a quella data.</p>
+    <p data-restore-status role="status" aria-live="polite">Caricamento punti verificati…</p>
+    <label>Punto di ripristino <select data-restore-point></select></label>
+    <button type="button" class="ops-button secondary compact" data-restore-plan>Prepara piano</button>
+    <section data-restore-review hidden><pre data-restore-details></pre>
+      <label>Riscrivi l’identificativo del punto <input data-restore-typed autocomplete="off"></label>
+      <label><input type="checkbox" data-restore-confirm> Confermo sovrascrittura dei dati runtime e interruzione temporanea dei servizi.</label>
+      <button type="button" class="ops-button primary compact" data-restore-apply disabled>Ripristina il punto selezionato</button>
+    </section>
+  </section>`;
 }
 
 function renderOpsRedis(context) {
@@ -9587,6 +9673,7 @@ async function readPrometheusResourceSnapshot() {
   attachPrometheusContainerLimit(platformContainers, results.platformContainerPidsLimit, "pidsLimit");
   const containers = platformContainers;
   const snapshot = sanitizeEvent({
+    capturedAt: new Date().toISOString(),
     available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
     cpu: {
       available: results.cpuPercent.length > 0 || results.cpuCores.length > 0,
@@ -9821,6 +9908,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
   "use strict";
   const button = document.getElementById("app-passkey-register");
   const status = document.getElementById("app-passkey-status");
+  const bootstrapInput = document.getElementById("app-passkey-bootstrap-token");
   const b64 = (value) => {
     const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/") + "===";
     const raw = atob(normalized.slice(0, normalized.length - (normalized.length % 4)));
@@ -9855,11 +9943,13 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     body: JSON.stringify(body || {}),
   });
   button.addEventListener("click", async () => {
+    if (bootstrapInput && !bootstrapInput.reportValidity()) return;
+    const bootstrapToken = bootstrapInput ? bootstrapInput.value : undefined;
     button.disabled = true;
     status.textContent = "Preparazione della passkey…";
     try {
       if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
-      const optionsResponse = await request("/auth/passkey/register/options", {});
+      const optionsResponse = await request("/auth/passkey/register/options", { bootstrapToken });
       const optionsPayload = await optionsResponse.json();
       if (!optionsResponse.ok) throw new Error(optionsPayload.message || "Registrazione non disponibile.");
       const options = optionsPayload.options;
@@ -9872,6 +9962,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
       const credential = await navigator.credentials.create({ publicKey });
       if (!credential) throw new Error("Registrazione annullata.");
       const verifyResponse = await request("/auth/passkey/register/verify", {
+        bootstrapToken,
         challenge: options.challenge,
         credential: serialize(credential),
       });
@@ -9881,6 +9972,8 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     } catch (error) {
       button.disabled = false;
       status.textContent = error?.message || "Registrazione passkey non riuscita.";
+    } finally {
+      if (bootstrapInput) bootstrapInput.value = "";
     }
   });
 })();`;
@@ -9970,6 +10063,7 @@ function safeAppPasskeyReturnTo(value) {
 }
 
 function renderAppPasskeyFirstConfiguration(state) {
+  const requiresBootstrapToken = Boolean(process.env.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE);
   return `<!doctype html>
 <html lang="it">
 <head>
@@ -9986,11 +10080,12 @@ ${controlCenterStylesheetLinks()}
     <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
     <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
     <h1 id="app-passkey-title">Configura l’accesso amministrativo</h1>
-    <p class="first-configuration-lead">Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno.</p>
+    <p class="first-configuration-lead">${requiresBootstrapToken ? "Inserisci il codice di configurazione ricevuto e registra la tua passkey. Il codice serve solo per questa prima registrazione." : "Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno."}</p>
     <section class="first-configuration-card">
       <p class="eyebrow">UNA PASSKEY</p>
       <h2>Registra la passkey</h2>
       <p>La credenziale pubblica resta registrata nel PostgreSQL del Control Center. La sessione termina automaticamente dopo 24 ore.</p>
+      ${requiresBootstrapToken ? '<label for="app-passkey-bootstrap-token">Codice di configurazione</label><input id="app-passkey-bootstrap-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="256">' : ""}
       <button id="app-passkey-register" class="button open" type="button">Registra la passkey</button>
       <p id="app-passkey-status" class="first-configuration-note" role="status"></p>
     </section>

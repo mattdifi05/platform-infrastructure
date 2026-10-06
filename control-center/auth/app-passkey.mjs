@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { isIP } from "node:net";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { BlockList, isIP } from "node:net";
 import pg from "pg";
 import {
   generateAuthenticationOptions,
@@ -110,6 +110,7 @@ export function readAuthConfig(env = process.env) {
     sessionPolicyVersion: requiredText(env.CONTROL_CENTER_SESSION_POLICY_VERSION || "1", "CONTROL_CENTER_SESSION_POLICY_VERSION"),
     allowedCidrs: parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS || "192.168.1.0/24,127.0.0.0/8,::1/128"),
     trustedProxyCidrs: parseCidrs(env.CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS || "172.16.0.0/12,127.0.0.0/8,::1/128"),
+    firstEnrollmentToken: readFirstEnrollmentTokenFile(env.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE),
     store,
     databaseUrl: store === "postgres" ? readDatabaseUrl(env.CONTROL_CENTER_AUTH_DATABASE_URL_FILE) : "",
   };
@@ -130,14 +131,20 @@ export class AppPasskeyAuth {
     this.mode = "app-passkey";
   }
 
-  assertRequest(req, { mutation = false } = {}) {
+  assertRequest(req, { mutation = false, firstEnrollment = firstEnrollmentPage(req) } = {}) {
     const host = appPasskeyRequestHost(this.config, req);
     if (!host || !safeEqualText(host, this.config.publicHost)) {
       throw new AuthRequestError("The exact Control Center host is required.", 421);
     }
     const clientAddress = resolveClientAddress(this.config, req);
-    if (!clientAddress || !cidrListContains(this.config.allowedCidrs, clientAddress)) {
-      throw new AuthRequestError("Passkey authentication is available only from the management LAN.", 403);
+    if (!clientAddress) {
+      throw new AuthRequestError("The Control Center client address could not be verified.", 403);
+    }
+    const enrollmentCidr = firstEnrollment
+      ? this.config.allowedCidrs.find((cidr) => cidrContains(cidr, clientAddress))
+      : null;
+    if (firstEnrollment && !enrollmentCidr) {
+      throw new AuthRequestError("First passkey registration is available only from an approved client address.", 403);
     }
     if (mutation) {
       if (!safeEqualText(String(req?.headers?.origin || ""), this.config.publicOrigin)) {
@@ -149,16 +156,32 @@ export class AppPasskeyAuth {
     }
     return {
       clientAddress,
-      peerHash: sha256(`app-passkey-peer\0${clientAddress}`),
+      // With the short-lived token, bind the first ceremony to the reviewed
+      // management CIDR so IPv6 privacy rotation does not invalidate it.
+      peerHash: sha256(`app-passkey-peer\0${firstEnrollment && this.config.firstEnrollmentToken
+        ? `${enrollmentCidr.address}/${enrollmentCidr.prefix}` : clientAddress}`),
     };
   }
 
-  async beginPasskeyRegistration(req) {
-    const request = this.assertRequest(req, { mutation: true });
+  assertFirstEnrollmentToken(rawToken) {
+    const gate = this.config.firstEnrollmentToken;
+    if (!gate) return;
+    const now = Date.now();
+    const token = String(rawToken || "").trim();
+    if (now < gate.issuedAt - 60_000 || now >= gate.expiresAt
+        || !/^[a-f0-9]{64}$/.test(token)
+        || !safeEqualText(sha256(token), gate.tokenSha256)) {
+      throw new AuthRequestError("The first-enrollment token is invalid or expired.", 403);
+    }
+  }
+
+  async beginPasskeyRegistration(req, bootstrapToken) {
+    const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
     const existing = await this.store.listPasskeys(this.config.adminSubject);
     if (existing.length > 0) {
       throw new AuthRequestError("A Control Center passkey is already registered. Authenticate to manage it.", 409);
     }
+    this.assertFirstEnrollmentToken(bootstrapToken);
     const options = await generateRegistrationOptions({
       rpName: this.config.rpName,
       rpID: this.config.rpId,
@@ -188,7 +211,11 @@ export class AppPasskeyAuth {
   }
 
   async completePasskeyRegistration(req, payload) {
-    const request = this.assertRequest(req, { mutation: true });
+    const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
+    if ((await this.store.listPasskeys(this.config.adminSubject)).length > 0) {
+      throw new AuthRequestError("A Control Center passkey is already registered.", 409);
+    }
+    this.assertFirstEnrollmentToken(payload?.bootstrapToken);
     const challenge = boundedChallenge(payload?.challenge);
     const credential = normalizeCredential(payload?.credential || payload, "registration");
     const consumed = await this.store.consumeWebAuthnChallenge({
@@ -853,6 +880,30 @@ function readDatabaseUrl(filename) {
   return value;
 }
 
+function readFirstEnrollmentTokenFile(filename) {
+  const target = String(filename || "").trim();
+  if (!target) return null;
+  let document;
+  try {
+    const file = lstatSync(target);
+    if (!file.isFile() || file.size > 4096 || file.mode & 0o077) throw new Error("unsafe token file");
+    document = JSON.parse(readFileSync(target, "utf8"));
+  } catch {
+    throw new AuthConfigurationError("The first-enrollment token file must be a private regular JSON file.");
+  }
+  const tokenSha256 = String(document?.tokenSha256 || "");
+  const issuedAtText = String(document?.issuedAt || "");
+  const expiresAtText = String(document?.expiresAt || "");
+  const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+  const issuedAt = timestampPattern.test(issuedAtText) ? Date.parse(issuedAtText) : NaN;
+  const expiresAt = timestampPattern.test(expiresAtText) ? Date.parse(expiresAtText) : NaN;
+  if (!/^[a-f0-9]{64}$/.test(tokenSha256) || !Number.isFinite(issuedAt)
+      || !Number.isFinite(expiresAt) || expiresAt <= issuedAt || expiresAt - issuedAt > 15 * 60_000) {
+    throw new AuthConfigurationError("The first-enrollment token digest and 15-minute validity must be configured.");
+  }
+  return Object.freeze({ tokenSha256, issuedAt, expiresAt });
+}
+
 function exactHttpsOrigin(value, name) {
   const text = requiredText(value, name);
   let url;
@@ -903,9 +954,6 @@ function parseCidr(value) {
   if (!Number.isInteger(prefix) || prefix < 0 || prefix > maximum) {
     throw new AuthConfigurationError(`Invalid CIDR: ${value}`);
   }
-  if (family === 6 && !(address === "::1" && prefix === 128)) {
-    throw new AuthConfigurationError("Only the ::1/128 IPv6 management CIDR is supported.");
-  }
   return { address, family, prefix };
 }
 
@@ -925,6 +973,11 @@ function resolveClientAddress(config, req) {
   return current;
 }
 
+function firstEnrollmentPage(req) {
+  const pathname = String(req?.url || "").split("?", 1)[0];
+  return pathname === "/first-configuration" || pathname === "/first-configuration/";
+}
+
 function cidrListContains(cidrs, address) {
   return cidrs.some((cidr) => cidrContains(cidr, address));
 }
@@ -932,7 +985,11 @@ function cidrListContains(cidrs, address) {
 function cidrContains(cidr, rawAddress) {
   const address = normalizeIp(rawAddress);
   if (cidr.family !== isIP(address)) return false;
-  if (cidr.family === 6) return address === cidr.address;
+  if (cidr.family === 6) {
+    const block = new BlockList();
+    block.addSubnet(cidr.address, cidr.prefix, "ipv6");
+    return block.check(address, "ipv6");
+  }
   const mask = cidr.prefix === 0 ? 0 : (0xffffffff << (32 - cidr.prefix)) >>> 0;
   return (ipv4Number(address) & mask) === (ipv4Number(cidr.address) & mask);
 }

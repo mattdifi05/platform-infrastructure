@@ -6,18 +6,18 @@ import { createAIService } from "../ai/service.mjs";
 const definition = name => ({ type: "function", function: { name, description: name,
   parameters: { type: "object", properties: {}, additionalProperties: false } } });
 
-async function run(message, { attemptedTool = null } = {}) {
+async function run(message, { attemptedTool = null, toolError = null } = {}) {
   const calls = [], rounds = [], events = [];
   const service = createAIService({ registry: {
-    definitions: () => ["readInfrastructure", "changeInfrastructure", "getInfrastructureOperation"].map(definition),
-    execute: async name => { calls.push(name); return { status: "completed" }; },
+    definitions: () => ["readInfrastructure", "changeInfrastructure", "removePortalApplication", "getInfrastructureOperation", "createChatFile", "createChatZip", "analyzeChatAttachment"].map(definition),
+    execute: async name => { calls.push(name); if (toolError) throw toolError; return { status: "completed" }; },
   } });
   service.accepting = true;
   service.ensureProviderReady = async () => {};
   service.createPublicAnalysisSummary = async () => null;
   service.streamOpenAIResponseRound = async options => {
     rounds.push(options);
-    if (attemptedTool) return { content: "", metrics: {}, outputItems: [],
+    if (attemptedTool && rounds.length === 1) return { content: "", metrics: {}, outputItems: [],
       toolCalls: [{ id: "fixture-call", function: { name: attemptedTool, arguments: {} } }] };
     const content = "Il job TLS risulta completato con esito positivo, come verificato nella risposta precedente.";
     await options.onContent(content);
@@ -70,4 +70,61 @@ test("a provider mutation call during a summary is rejected before registry exec
   assert.deepEqual(result.calls, []);
   assert.equal(result.events.at(-1).type, "failed");
   assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED");
+});
+
+test("an expansion cannot remove an application from the portal", async () => {
+  const result = await run("Approfondisci", { attemptedTool: "removePortalApplication" });
+  assert.deepEqual(result.calls, []);
+  assert.equal(result.events.at(-1).type, "failed");
+  assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED");
+});
+
+test("all curated fresh checks execute reads and discard stale continuation guidance", async () => {
+  const requests = [
+    "Controlla lo stato attuale del VPS e segnala solo problemi sostenuti da dati recenti.",
+    "Controlla servizi e container infrastrutturali effettivamente presenti.",
+    "Controlla gli esiti dei backup e le pianificazioni server-side visibili dagli strumenti.",
+    "Controlla nuovamente lo stato attuale del VPS.",
+    "Leggi i log recenti del servizio coinvolto e verifica la diagnosi.",
+    "Verifica l’esito dell’operazione precedente senza ripeterla.",
+    "Controlla l’ultimo esito del backup e distingui dati verificati e dati mancanti.",
+    "Verifica la pianificazione dei backup sul server e la prossima esecuzione.",
+    "Ricontrolla disponibilità e salute dei servizi e container coinvolti.",
+    "Verifica lo stato attuale di rete, DNS e TLS del server.",
+    "Verifica le risorse attuali del server e gli eventuali colli di bottiglia.",
+    "Leggi l’audit recente relativo all’operazione precedente.",
+  ];
+  for (const message of requests) {
+    const result = await run(message, { attemptedTool: "readInfrastructure" });
+    assert.deepEqual(result.calls, ["readInfrastructure"], message);
+    assert.deepEqual(result.rounds[0].tools.map(t => t.function.name), ["readInfrastructure", "getInfrastructureOperation"], message);
+    const input = JSON.stringify(result.rounds[0].input);
+    assert.match(input, /letture recenti degli strumenti disponibili/);
+    assert.doesNotMatch(input, /Approfondisci l’ultima risposta|Mantieni l’esito già verificato e continua/);
+    assert.equal(result.events.at(-1).type, "completed", message);
+  }
+});
+
+test("fresh-check mutations are rejected even after an explicitly authorized historical operation", async () => {
+  for (const attemptedTool of ["changeInfrastructure", "removePortalApplication", "createChatFile", "createChatZip", "analyzeChatAttachment"]) {
+    const result = await run("Verifica l’esito dell’operazione precedente senza ripeterla.", { attemptedTool });
+    assert.deepEqual(result.calls, [], attemptedTool);
+    assert.equal(result.events.at(-1).type, "failed", attemptedTool);
+    assert.equal(result.events.at(-1).payload.code, "TOOL_NOT_ALLOWED", attemptedTool);
+  }
+});
+
+test("infrastructure connection failures expose only a safe diagnostic without claiming mutation outcome", async () => {
+  for (const attemptedTool of ["readInfrastructure", "changeInfrastructure", "getInfrastructureOperation"]) {
+    for (const code of ["ENOENT", "EACCES", "ECONNREFUSED"]) {
+      const result = await run("Aggiorna le metriche TLS interne del server.", { attemptedTool,
+        toolError: Object.assign(new Error("private socket /private/credential.sock secret-detail"), { code }) });
+      const output = JSON.parse(result.rounds[1].input.find(item => item.type === "function_call_output").output);
+      assert.deepEqual(output, { available: false, error: "INFRASTRUCTURE_CONNECTION_UNAVAILABLE", message: "Collegamento agli strumenti del server non disponibile. Non è possibile verificare lo stato o l’esito delle operazioni." });
+    }
+  }
+  const result = await run("Aggiorna le metriche TLS interne del server.", { attemptedTool: "changeInfrastructure",
+    toolError: Object.assign(new Error("Riautenticati con la passkey."), { code: "INFRASTRUCTURE_REAUTH_REQUIRED" }) });
+  const output = JSON.parse(result.rounds[1].input.find(item => item.type === "function_call_output").output);
+  assert.deepEqual(output, { available: false, error: "INFRASTRUCTURE_REAUTH_REQUIRED", message: "Riautenticati con la passkey.", mutationPerformed: false });
 });

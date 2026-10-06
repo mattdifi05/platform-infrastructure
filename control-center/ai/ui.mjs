@@ -1,5 +1,3 @@
-import { SERVER_AI_MODEL_LABEL } from "./model.mjs";
-
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -167,7 +165,7 @@ export function formatServerAiGpuStatus(gpu) {
 export function formatServerAiMachineState(status) {
   const state = String(status?.state || "unavailable").toLowerCase();
   if (state === "active") return "Server AI attivo";
-  if (state === "degraded") return "Chat GPT-6 Luna attiva";
+  if (state === "degraded") return "Chat attiva";
   if (state === "disabled") return "Server AI disattivato";
   if (state === "starting") return "Avvio di Server AI";
   if (state === "stopping") return "Arresto di Server AI";
@@ -181,59 +179,74 @@ const aiIcon = (name) => {
     settings: '<path d="M4 7h7m4 0h5M4 17h3m4 0h9"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     arrow: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
     close: '<path d="m6 6 12 12M6 18 18 6"/>',
-    sidebar: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/>',
+    sidebar: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
     power: '<path d="M12 3v9m-5.5-7a9 9 0 1 0 11 0"/>',
     attach: '<path d="m20.5 11.5-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.5 3.5 0 1 1 5 5l-8.7 8.7a2 2 0 1 1-2.8-2.8l7.8-7.8"/>',
     bolt: '<path d="m13 2-9 12h7l-1 8 9-12h-7z"/>',
+    more: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
+    server: '<rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01"/>',
+    cube: '<path d="m12 3 9 5v9l-9 5-9-5V8l9-5Zm0 9v10M3 8l9 5 9-5"/>',
+    activity: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+    diagonal: '<path d="M6 18 18 6M7 6h11v11"/>',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.plus}</svg>`;
 };
 
-export function renderServerAi() {
+export function renderServerAiEmpty() {
+  const starters = [
+    ["server", "Stato del VPS", "Verifica lo stato attuale e le anomalie.", "Controlla lo stato attuale del VPS e segnala solo problemi sostenuti da dati recenti."],
+    ["cube", "Servizi e container", "Controlla disponibilità e log recenti.", "Controlla servizi e container infrastrutturali effettivamente presenti."],
+    ["activity", "Backup e attività", "Verifica esiti e pianificazioni sul server.", "Controlla gli esiti dei backup e le pianificazioni server-side visibili dagli strumenti."],
+  ];
+  return `<section class="server-ai-empty" data-ai-empty><h2>Da dove iniziamo?</h2><p>Chiedimi di verificare il server o di intervenire sull’infrastruttura.</p><div class="server-ai-suggestions">${starters.map(([icon, label, detail, prompt]) => `<button type="button" data-ai-suggestion="${escapeHtml(prompt)}"><span class="server-ai-starter-icon">${aiIcon(icon)}</span><span class="server-ai-starter-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></span><span class="server-ai-starter-arrow">${aiIcon("diagonal")}</span></button>`).join("")}</div></section>`;
+}
+
+export function renderServerAi({ manualRestore = "" } = {}) {
   return `<section class="server-ai" data-server-ai aria-labelledby="server-ai-title">
     <header class="server-ai-toolbar">
-      <div class="server-ai-brand"><h1 id="server-ai-title">Server AI</h1><span data-ai-model-label>${escapeHtml(SERVER_AI_MODEL_LABEL)}</span></div>
+      <div class="server-ai-brand"><h1 id="server-ai-title">Server AI</h1></div>
       <div class="server-ai-machine" aria-label="Macchina Server AI">
         <div data-ai-machine-name><strong data-ai-machine-label>Caricamento…</strong></div>
         <label class="server-ai-machine-picker" data-ai-machine-picker hidden><span class="sr-only">Macchina</span><select data-ai-machine-select aria-label="Macchina"></select></label>
         <div class="server-ai-health" data-ai-health aria-live="polite"><span></span><strong>Verifica…</strong></div>
       </div>
-      <div class="server-ai-toolbar-actions"><details class="server-ai-admin-diagnostics" data-ai-admin-diagnostics hidden><summary title="Diagnostica amministratore">Diagnostica</summary><dl data-ai-admin-diagnostics-list></dl></details><div class="server-ai-gate-actions"><button type="button" data-ai-disable hidden title="Disattiva Server AI">${aiIcon('power')}<span>Disattiva</span></button></div></div>
+      <div class="server-ai-toolbar-actions"><details class="server-ai-tools" data-ai-tools><summary aria-label="Strumenti Server AI"><span>Strumenti</span>${aiIcon("more")}</summary><div class="server-ai-tools-menu">${manualRestore ? '<button type="button" data-ai-open-restore>Ripristino manuale</button>' : ""}<details class="server-ai-admin-diagnostics" data-ai-admin-diagnostics hidden><summary>Diagnostica</summary><dl data-ai-admin-diagnostics-list></dl></details><div class="server-ai-gate-actions"><button type="button" data-ai-disable hidden>${aiIcon('power')}<span>Disattiva Server AI</span></button></div></div></details></div>
     </header>
     <section class="server-ai-workspace" data-ai-workspace>
       <button class="server-ai-drawer-backdrop" type="button" data-ai-close-conversations aria-label="Chiudi conversazioni" tabindex="-1"></button>
       <aside class="server-ai-conversations" id="server-ai-conversations" data-ai-conversation-drawer aria-label="Conversazioni">
         <div class="server-ai-conversations-head"><button type="button" data-ai-new-conversation>${aiIcon('plus')} Nuova chat</button><button type="button" class="server-ai-drawer-close" data-ai-close-conversations aria-label="Chiudi conversazioni">${aiIcon('close')}</button></div>
         <label class="server-ai-conversation-search">${aiIcon('search')}<input type="search" data-ai-conversation-search placeholder="Cerca nelle chat" aria-label="Cerca nelle chat" autocomplete="off"></label>
+        <h2 class="server-ai-history-title">Conversazioni</h2>
         <ol data-ai-conversation-list></ol>
         <button type="button" class="server-ai-load-older" data-ai-more-conversations hidden>Conversazioni precedenti</button>
         <div class="server-ai-sidebar-footer">Le tue conversazioni, su questo server.</div>
       </aside>
       <div class="server-ai-main">
         <div class="server-ai-chat-head"><button type="button" class="server-ai-drawer-open" data-ai-open-conversations aria-label="Apri conversazioni" aria-controls="server-ai-conversations" aria-expanded="false">${aiIcon('sidebar')}</button><strong data-ai-conversation-title>Nuova chat</strong></div>
-        <section class="server-ai-gate" data-ai-gate aria-live="polite"><span class="server-ai-gate-mark" aria-hidden="true">${aiIcon('power')}</span><div><h2 data-ai-gate-title>Verifica Server AI…</h2><p data-ai-gate-message>Recupero dello stato della macchina.</p></div><ul data-ai-missing hidden></ul><div class="server-ai-gate-actions"><button type="button" data-ai-enable hidden>Attiva Server AI</button></div></section>
+        <section class="server-ai-gate" data-ai-gate aria-live="polite"><span class="server-ai-gate-mark" aria-hidden="true">${aiIcon('power')}</span><div><h2 data-ai-gate-title>Verifica Server AI…</h2><p data-ai-gate-message>Recupero dello stato della macchina.</p><p class="server-ai-action-error" data-ai-action-error role="alert" hidden></p></div><ul data-ai-missing hidden></ul><div class="server-ai-gate-actions"><button type="button" data-ai-enable hidden>Attiva Server AI</button></div></section>
         <div class="server-ai-chat-area" data-ai-chat-area hidden>
             <button type="button" class="server-ai-load-older" data-ai-load-older hidden>Messaggi precedenti</button>
           <div class="server-ai-chat" data-ai-transcript role="log" aria-label="Conversazione" aria-live="polite" aria-relevant="additions text" tabindex="0">
-            <div class="server-ai-empty" data-ai-empty><span class="server-ai-empty-mark" aria-hidden="true">AI</span><h2>Come posso aiutarti?</h2><p>Controlla il server, approfondisci un problema o cerca nella documentazione.</p><div class="server-ai-suggestions"><button type="button" data-ai-suggestion="Controlla lo stato attuale del server.">Stato del server <span>↗</span></button><button type="button" data-ai-suggestion="Aiutami ad analizzare questo problema: ">Analizza un problema <span>↗</span></button><button type="button" data-ai-suggestion="Cerca nella documentazione ufficiale: ">Cerca sul web <span>↗</span></button></div></div>
+            ${renderServerAiEmpty()}
           </div>
           <details class="server-ai-sources" data-ai-sources hidden><summary><span>Fonti della risposta</span><span data-ai-source-count></span></summary><ol data-ai-source-list></ol></details>
           <div class="server-ai-compose-dock">
             <button type="button" class="server-ai-jump-bottom" data-ai-jump-bottom hidden disabled aria-label="Vai in fondo alla conversazione" title="Vai in fondo alla conversazione">${aiIcon('arrow')}</button>
             <p class="server-ai-state" data-ai-state role="status" hidden></p>
             <form class="server-ai-composer" data-ai-form>
-              <label class="sr-only" for="server-ai-prompt">Messaggio per Server AI</label><textarea id="server-ai-prompt" data-ai-prompt rows="1" maxlength="12000" placeholder="Chiedi al tuo server…" autocomplete="off"></textarea>
-                <div class="server-ai-attachments" data-ai-attachments hidden aria-live="polite"></div><section class="server-ai-queue" data-ai-queue hidden aria-live="polite" aria-label="Richieste in coda"></section>
+              <label class="sr-only" for="server-ai-prompt">Messaggio per Server AI</label><textarea id="server-ai-prompt" data-ai-prompt rows="1" maxlength="12000" placeholder="Scrivi una richiesta per il server…" autocomplete="off"></textarea>
+                <div class="server-ai-attachments" data-ai-attachments hidden aria-live="polite"></div>
                 <div class="server-ai-composer-actions">
                 <button type="button" data-ai-attach aria-label="Allega file o immagine" title="Allega file o immagine">${aiIcon('attach')}</button><input data-ai-attachment-input type="file" hidden multiple>
-                <div class="server-ai-mode" role="radiogroup" aria-label="Intensità di ragionamento" data-ai-selected-mode="auto"><button type="button" class="active" data-ai-mode="auto" role="radio" aria-checked="true" tabindex="0" title="Automatico">AUTO</button><button type="button" data-ai-mode="fast" role="radio" aria-checked="false" tabindex="-1" title="Rapido">FAST</button><button type="button" data-ai-mode="deep" role="radio" aria-checked="false" tabindex="-1" title="Analisi approfondita">DEEP</button></div>
-                <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="button" class="server-ai-send-immediate" data-ai-send-immediate hidden aria-label="Invia subito (interrompi la risposta corrente)" title="Invia subito (interrompi la risposta corrente)">${aiIcon('bolt')}</button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
+                <button type="button" data-ai-stop hidden aria-label="Interrompi risposta" title="Interrompi risposta"><span class="server-ai-stop-icon" aria-hidden="true"></span></button><button type="submit" data-ai-send aria-label="Invia messaggio" title="Invia messaggio">${aiIcon('arrow')}</button>
               </div>
             </form>
-            <p class="server-ai-composer-note">GPT-6 Luna tramite OpenAI API · Verifica le informazioni importanti</p>
           </div>
         </div>
       </div>
     </section>
+    <template data-ai-empty-template>${renderServerAiEmpty()}</template>
+    ${manualRestore ? `<dialog class="server-ai-restore-dialog" data-ai-restore-dialog aria-label="Ripristino manuale"><div class="server-ai-dialog-head"><h2>Ripristino manuale</h2><button type="button" data-ai-close-restore aria-label="Chiudi ripristino">${aiIcon("close")}</button></div>${manualRestore}</dialog>` : ""}
   </section>`;
 }

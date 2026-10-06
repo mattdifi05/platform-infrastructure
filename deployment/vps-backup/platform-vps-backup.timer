@@ -1,0 +1,8 @@
+[Unit]
+Description=VPS server backup, weekly Friday 06:05 Rome
+[Timer]
+OnCalendar=Fri *-*-* 06:05:00 Europe/Rome
+Persistent=true
+Unit=platform-vps-backup.service
+[Install]
+WantedBy=timers.target

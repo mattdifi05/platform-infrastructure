@@ -1,0 +1,15 @@
+# Optional VPS-only DNS integration. Never mount an account/Access/tunnel token.
+services:
+  control-center:
+    environment:
+      CLOUDFLARE_DNS_API_TOKEN_FILE: /run/secrets/cloudflare_dns_api_token
+      CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE: /run/cloudflare-dns/zones.json
+    volumes:
+      - type: bind
+        source: /etc/platform-infrastructure/cloudflare-dns/api-token
+        target: /run/secrets/cloudflare_dns_api_token
+        read_only: true
+      - type: bind
+        source: /etc/platform-infrastructure/cloudflare-dns/zones.json
+        target: /run/cloudflare-dns/zones.json
+        read_only: true

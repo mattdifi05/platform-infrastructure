@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "bothWritersQualified": false,
+  "folders": ["/server-platform-backups", "/platform-server-public-backups"],
+  "maximumBytes": 70000000000,
+  "lockDirectory": "/.platform-server-backup-writer-lock"
+}

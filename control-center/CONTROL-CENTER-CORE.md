@@ -65,3 +65,11 @@ The application-owned passkey schema is installed by
 `migrations/001_app_passkey.sql`. State migration remains a separate operation
 and follows `STATE-STORE-MIGRATION.md`; a Control Center image rollout must not
 implicitly migrate metadata or remove PostgreSQL tables.
+
+The explicit empty-VPS first-install script applies the ordered Server AI
+schema migrations `002_server_ai_conversations.sql` through
+`013_server_ai_openai_model.sql` before starting Control Center. They run as the
+PostgreSQL operator; the `control_center_auth` login receives only `USAGE` on
+`server_ai`, `SELECT`/`INSERT`/`UPDATE` on its tables, and `USAGE`/`SELECT` on
+its sequences. The runtime login receives no schema-creation or delete
+privileges. Later image rollouts do not apply these migrations implicitly.

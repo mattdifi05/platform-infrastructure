@@ -1,0 +1,17 @@
+# Fresh VPS local images built from the repository's remediated Dockerfiles.
+# Pulling tagged images is forbidden: the local build is checked by the
+# installation/upgrade script before the Compose project is changed.
+services:
+  postgres:
+    image: platform/postgres:local
+    build:
+      context: .
+      dockerfile: deployment/docker/postgres-remediated.Dockerfile
+    pull_policy: never
+
+  mariadb:
+    image: platform/mariadb:local
+    build:
+      context: .
+      dockerfile: deployment/docker/mariadb-remediated.Dockerfile
+    pull_policy: never

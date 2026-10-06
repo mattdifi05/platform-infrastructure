@@ -5,7 +5,7 @@ export const BACKUP_MANIFEST_SCHEMA = "platform.backup-manifest/v1";
 
 const resourceKinds = new Set(["source", "database", "storage", "platform-state"]);
 const databaseEngines = new Set(["postgres", "mariadb"]);
-const operations = new Set(["backup", "restore-drill"]);
+const operations = new Set(["backup", "restore-drill", "restore-production"]);
 
 function requiredText(value, label, pattern, maxLength = 160) {
   const clean = String(value ?? "").trim();
@@ -98,6 +98,8 @@ export function createBackupJobDocument({
   environment,
   createdAt = new Date().toISOString(),
   sourceManifestPath = "",
+  sourceManifestDigest = "",
+  restoreProfileDigest = "",
 }) {
   const normalizedOperation = requiredText(operation, "backup operation", /^[a-z-]+$/, 32);
   if (!operations.has(normalizedOperation)) throw new Error("Unsupported backup operation.");
@@ -122,9 +124,14 @@ export function createBackupJobDocument({
     resultSummary: "Queued for typed backup executor.",
     reportPaths: [],
   };
-  if (normalizedOperation === "restore-drill") {
+  if (["restore-drill", "restore-production"].includes(normalizedOperation)) {
     document.sourceManifestPath = relativeBackupPath(sourceManifestPath, "source manifest path");
     if (!document.sourceManifestPath.startsWith("manifests/")) throw new Error("Restore source manifest must be under manifests/.");
+  }
+  if (normalizedOperation === "restore-production") {
+    if (normalizedScope.kind !== "platform" || normalizedResources.some(resource => resource.kind !== "platform-state")) throw new Error("Production recovery is restricted to enrolled platform state.");
+    document.sourceManifestDigest = requiredText(sourceManifestDigest, "restore manifest digest", /^[a-f0-9]{64}$/, 64);
+    document.restoreProfileDigest = requiredText(restoreProfileDigest, "restore profile digest", /^[a-f0-9]{64}$/, 64);
   }
   return document;
 }

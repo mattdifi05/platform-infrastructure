@@ -1,0 +1,150 @@
+# Platform trust zones only. Each external workload owns its dedicated internal
+# networks and may extend project-router networking only through the validated
+# hosted workload contract.
+services:
+  traefik:
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.250.3
+      platform_routing: {}
+      platform_observability: {}
+      platform_egress: {}
+
+  waf:
+    networks: !override
+      platform_edge:
+        ipv4_address: 172.30.250.2
+
+  postgres:
+    networks: !override
+      - platform_db_admin
+      - platform_postgres
+
+  redis:
+    networks: !override
+      - platform_cache
+
+  keycloak:
+    networks: !override
+      - platform_routing
+      - platform_postgres
+      - platform_observability
+      - platform_egress
+
+  nats:
+    networks: !override
+      - platform_bus
+
+  minio:
+    networks: !override
+      - platform_storage
+
+  php-apache:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+      - platform_egress
+
+  control-center:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+      - platform_observability
+      - platform_egress
+      - platform_cache
+
+  project-router:
+    networks: !override
+      - platform_routing
+
+  mariadb:
+    networks: !override
+      - platform_db_admin
+
+  phpmyadmin:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+
+  phppgadmin:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+
+  local-dns:
+    networks: !override
+      - platform_egress
+
+  prometheus:
+    networks: !override
+      - platform_observability
+
+  node-exporter:
+    networks: !override
+      - platform_observability
+
+  cadvisor:
+    networks: !override
+      - platform_observability
+
+  alertmanager:
+    networks: !override
+      - platform_observability
+
+  platform-alert-dispatcher:
+    networks: !override
+      - platform_observability
+      - platform_egress
+
+  grafana:
+    networks: !override
+      - platform_observability
+
+  loki:
+    networks: !override
+      - platform_observability
+
+  promtail:
+    networks: !override
+      - platform_observability
+
+networks:
+  platform_edge:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_edge
+    internal: true
+    labels: { com.platform.trust-zone: edge }
+    ipam:
+      config:
+        - subnet: 172.30.250.0/29
+  platform_routing:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_routing
+    internal: true
+    labels: { com.platform.trust-zone: routing }
+  platform_db_admin:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_db_admin
+    internal: true
+    labels: { com.platform.trust-zone: db-admin }
+  platform_postgres:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_postgres
+    internal: true
+    labels: { com.platform.trust-zone: postgres }
+  platform_cache:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_cache
+    internal: true
+    labels: { com.platform.trust-zone: cache }
+  platform_bus:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_bus
+    internal: true
+    labels: { com.platform.trust-zone: bus }
+  platform_storage:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_storage
+    internal: true
+    labels: { com.platform.trust-zone: storage }
+  platform_observability:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_observability
+    internal: true
+    labels: { com.platform.trust-zone: observability }
+  platform_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_egress
+    enable_ipv6: false
+    labels: { com.platform.trust-zone: trusted-platform-egress }

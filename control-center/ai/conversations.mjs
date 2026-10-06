@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { SERVER_AI_MODEL, SERVER_AI_MODEL_LABEL } from "./model.mjs";
 import { normalizeAnalysisSummary } from "./analysis-summary.mjs";
 
@@ -42,10 +42,11 @@ const MAX_INLINE_ATTACHMENT_TEXT_BYTES = 256 * 1024;
 const MAX_ATTACHMENT_PREVIEW_BYTES = 384;
 
 export class ConversationStoreError extends Error {
-  constructor(message, status = 503) {
+  constructor(message, status = 503, code = null) {
     super(message);
     this.name = "ConversationStoreError";
     this.status = status;
+    if (code) this.code = code;
   }
 }
 
@@ -262,6 +263,11 @@ export function normalizeQueueDelivery(value, { allowDefault = true } = {}) {
 function normalizeRequestId(value) {
   if (!UUID_RE.test(String(value || ""))) fail("Identificativo richiesta non valido.");
   return String(value).toLowerCase();
+}
+
+function directRequestMetadata(requestId, owner, machine, conversation, message, attachments, requestedMode) {
+  if (requestId == null) return null;
+  return { id: normalizeRequestId(requestId), fingerprint: createHash("sha256").update(JSON.stringify([owner, machine, conversation, message, attachments, requestedMode])).digest("hex") };
 }
 
 function queueRow(row) {
@@ -1403,14 +1409,16 @@ export class PostgresConversationStore {
     return result.rows[0] ? queueRow(result.rows[0]) : null;
   }
 
+  // Retain legacy message/replay rows for inspection, but never replay a FIFO
+  // after migration to direct single-flight sends. No content is deleted.
   async recoverQueuedOnStartup({ machineIds } = {}) {
     if (!Array.isArray(machineIds) || machineIds.length === 0 || machineIds.length > 64) fail("Registry macchine non valido.");
     const machines = [...new Set(machineIds.map(normalizeMachineId))];
-    const result = ensureResult(await this.pool.query(`update server_ai.conversation_queue q set status=case when q.turn_id is null then 'queued' else 'failed' end, started_at=null, completed_at=case when q.turn_id is null then null else now() end, error_code=case when q.turn_id is null then null else 'RESTART_INTERRUPTED' end where q.status='running' and q.machine_id=any($1::text[]) and exists(select 1 from server_ai.conversations c where c.id=q.conversation_id and c.owner_id=q.owner_id and c.machine_id=q.machine_id and c.deleted_at is null) returning q.id`, [machines]));
+    const result = ensureResult(await this.pool.query(`update server_ai.conversation_queue q set status='failed',completed_at=now(),error_code=case when q.turn_id is null then 'CHAT_QUEUE_RETIRED' else 'RESTART_INTERRUPTED' end where q.status in ('queued','running') and q.machine_id=any($1::text[]) and exists(select 1 from server_ai.conversations c where c.id=q.conversation_id and c.owner_id=q.owner_id and c.machine_id=q.machine_id and c.deleted_at is null) returning q.id`, [machines]));
     return result.rowCount || 0;
   }
 
-  async beginTurn({ ownerId, subject, machineId, conversationId, message, attachmentIds = [], requestedMode = "auto", resolvedMode, queueId = null } = {}) {
+  async beginTurn({ ownerId, subject, machineId, conversationId, message, attachmentIds = [], requestedMode = "auto", resolvedMode, queueId = null, requestId = null } = {}) {
     const owner = ownerFrom(ownerId, subject);
     const machine = normalizeMachineId(machineId);
     const conversation = normalizeConversationId(conversationId);
@@ -1418,6 +1426,7 @@ export class PostgresConversationStore {
     const text = normalizeContent(message);
     const attachments = normalizeAttachmentIds(attachmentIds);
     const requested = normalizeMode(requestedMode);
+    const clientRequest = directRequestMetadata(requestId, owner, machine, conversation, text, attachments, requested);
     const resolved = resolvedMode == null ? (requested === "auto" ? "fast" : requested) : normalizeResolvedMode(resolvedMode);
     const turnId = randomUUID();
     const userId = randomUUID();
@@ -1430,6 +1439,15 @@ export class PostgresConversationStore {
       ));
       const current = conversationResult.rows[0];
       if (!current) return null;
+      if (clientRequest) {
+        const prior = ensureResult(await client.query(`select * from server_ai.messages where conversation_id=$1 and role='assistant' and tool_metadata->'clientRequest'->>'id'=$2 limit 1`, [conversation, clientRequest.id])).rows[0];
+        if (prior) {
+          if (prior.tool_metadata?.clientRequest?.fingerprint !== clientRequest.fingerprint) throw new ConversationStoreError("Identificativo richiesta già usato con contenuti diversi.", 409, "REQUEST_ID_CONFLICT");
+          return { idempotent: true, turnId: prior.turn_id, assistant: rowMessage(prior) };
+        }
+        const legacy = ensureResult(await client.query(`select id from server_ai.conversation_queue where conversation_id=$1 and request_id=$2 limit 1`, [conversation, clientRequest.id]));
+        if (legacy.rows[0]) throw new ConversationStoreError("La richiesta precedente è conservata nella cronologia della coda dismessa e non verrà rieseguita.", 409, "CHAT_QUEUE_RETIRED");
+      }
       const active = ensureResult(await client.query(
         `select m.id from server_ai.messages m
          where m.conversation_id=$1 and m.role='assistant' and m.generation_status in ('pending','streaming')
@@ -1437,7 +1455,7 @@ export class PostgresConversationStore {
          limit 1`,
         [conversation, owner, machine],
       ));
-      if (active.rows[0]) throw new ConversationStoreError("Conversazione già in generazione.", 409);
+      if (active.rows[0]) throw new ConversationStoreError("Conversazione già in generazione.", 409, "GENERATION_ACTIVE");
       if (attachments.filter(id => id).length > MAX_ATTACHMENT_FILES_PER_TURN) fail("Troppi allegati.");
       if (attachments.length && !queue) {
         const reserved = ensureResult(await client.query(`select 1 from server_ai.conversation_queue
@@ -1464,9 +1482,9 @@ export class PostgresConversationStore {
       const assistantResult = ensureResult(await client.query(
         `insert into server_ai.messages
          (id, conversation_id, turn_id, role, content, requested_mode, resolved_mode, model, generation_status, source_metadata, tool_metadata)
-         values ($1,$2,$3,'assistant','',$4,$5,$6,'pending','[]'::jsonb,'{}'::jsonb)
+         values ($1,$2,$3,'assistant','',$4,$5,$6,'pending','[]'::jsonb,$7::jsonb)
          returning id, conversation_id, role, content, created_at, updated_at, requested_mode, resolved_mode, model, generation_status, source_metadata, tool_metadata`,
-        [assistantId, conversation, turnId, requested, resolved, SERVER_AI_MODEL],
+        [assistantId, conversation, turnId, requested, resolved, SERVER_AI_MODEL, JSON.stringify({ requestedMode: requested, resolvedMode: resolved, ...(clientRequest ? { clientRequest } : {}) })],
       ));
       if (queue) {
         const boundQueue = ensureResult(await client.query(`update server_ai.conversation_queue set turn_id=$1
@@ -1501,7 +1519,7 @@ export class PostgresConversationStore {
   // the original user turn has already completed.  This creates only the
   // assistant half of a turn: the original user message remains the sole
   // visible request, and the durable marker makes retries/restarts idempotent.
-  async beginAttachmentContinuation({ ownerId, subject, machineId, conversationId, userMessageId, requestId, requestedMode = "auto", scanId } = {}) {
+  async beginAttachmentContinuation({ ownerId, subject, machineId, conversationId, userMessageId, requestId, requestedMode = "auto", resolvedMode = null, scanId } = {}) {
     const owner = ownerFrom(ownerId, subject);
     const machine = normalizeMachineId(machineId);
     const conversation = normalizeConversationId(conversationId);
@@ -1509,7 +1527,7 @@ export class PostgresConversationStore {
     const request = normalizeRequestId(requestId);
     const scan = normalizeConversationId(scanId);
     const requested = normalizeMode(requestedMode);
-    const resolved = requested === "auto" ? "fast" : requested;
+    const resolved = resolvedMode == null ? (requested === "auto" ? "fast" : requested) : normalizeResolvedMode(resolvedMode);
     return this.withTransaction(async client => {
       const current = ensureResult(await client.query(`select id,summary from server_ai.conversations where id=$1 and owner_id=$2 and machine_id=$3 and deleted_at is null for update`, [conversation, owner, machine]));
       if (!current.rows[0]) return null;
@@ -1518,13 +1536,13 @@ export class PostgresConversationStore {
       const active = ensureResult(await client.query(`select id from server_ai.messages where conversation_id=$1 and role='assistant' and generation_status in ('pending','streaming') limit 1 for update`, [conversation]));
       if (active.rows[0]) return { blocked: true };
       if (existing && ["aborted", "failed"].includes(existing.generation_status)) {
-        const reclaimed = ensureResult(await client.query(`update server_ai.messages set content='',generation_status='pending',updated_at=now() where id=$1 and conversation_id=$2 and role='assistant' and generation_status in ('aborted','failed') returning id,conversation_id,role,content,created_at,updated_at,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata,turn_id`, [existing.id, conversation]));
+        const reclaimed = ensureResult(await client.query(`update server_ai.messages set content='',generation_status='pending',resolved_mode=$3,requested_mode=$4,tool_metadata=tool_metadata || jsonb_build_object('resolvedMode',$3::text,'requestedMode',$4::text),updated_at=now() where id=$1 and conversation_id=$2 and role='assistant' and generation_status in ('aborted','failed') returning id,conversation_id,role,content,created_at,updated_at,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata,turn_id`, [existing.id, conversation, resolved, requested]));
         if (reclaimed.rows[0]) return { turnId: reclaimed.rows[0].turn_id, user: null, assistant: rowMessage(reclaimed.rows[0]), reclaimed: true };
       }
       const original = ensureResult(await client.query(`select id from server_ai.messages where id=$1 and conversation_id=$2 and role='user' and generation_status='completed'`, [user, conversation])).rows[0];
       if (!original) return null;
       const turn = randomUUID(); const assistant = randomUUID();
-      const metadata = JSON.stringify({ autoContinuation: { version: 1, requestId: request, scanId: scan, userMessageId: user } });
+      const metadata = JSON.stringify({ requestedMode: requested, resolvedMode: resolved, autoContinuation: { version: 1, requestId: request, scanId: scan, userMessageId: user } });
       const result = ensureResult(await client.query(`insert into server_ai.messages
         (id,conversation_id,turn_id,role,content,requested_mode,resolved_mode,model,generation_status,source_metadata,tool_metadata)
         values ($1,$2,$3,'assistant','',$4,$5,$6,'pending','[]'::jsonb,$7::jsonb)
@@ -1565,9 +1583,7 @@ export class PostgresConversationStore {
       const result = ensureResult(await client.query(
         `update server_ai.messages m set content=$1, generation_status=$2, resolved_mode=$3,
                 source_metadata=$4::jsonb,
-                tool_metadata=case when m.tool_metadata ? 'autoContinuation'
-                  then jsonb_set($5::jsonb,'{autoContinuation}',m.tool_metadata->'autoContinuation',true)
-                  else $5::jsonb end, updated_at=now()
+                tool_metadata=$5::jsonb || jsonb_strip_nulls(jsonb_build_object('autoContinuation',m.tool_metadata->'autoContinuation','clientRequest',m.tool_metadata->'clientRequest')), updated_at=now()
          where m.conversation_id=$6 and m.turn_id=$7 and m.role='assistant'
            and exists (select 1 from server_ai.conversations c where c.id=m.conversation_id and c.id=$6 and c.owner_id=$8 and c.machine_id=$9 and c.deleted_at is null)
            and m.generation_status in ('pending','streaming')
@@ -1597,7 +1613,7 @@ export class PostgresConversationStore {
     if (sources !== undefined) { sets.push(`source_metadata=$${values.push(JSON.stringify(normalizeSources(sources)))}::jsonb`); }
     if (toolMetadata !== undefined) {
       const index = values.push(JSON.stringify(normalizeToolMetadata(toolMetadata)));
-      sets.push(`tool_metadata=case when m.tool_metadata ? 'autoContinuation' then jsonb_set($${index}::jsonb,'{autoContinuation}',m.tool_metadata->'autoContinuation',true) else $${index}::jsonb end`);
+      sets.push(`tool_metadata=$${index}::jsonb || jsonb_strip_nulls(jsonb_build_object('autoContinuation',m.tool_metadata->'autoContinuation','clientRequest',m.tool_metadata->'clientRequest'))`);
     }
     const result = ensureResult(await this.pool.query(
       `update server_ai.messages m set ${sets.join(", ")}
@@ -1970,13 +1986,22 @@ class MemoryConversationStore {
   async claimQueued(args = {}) { const conversation = this.own(args, args.conversationId); if (!conversation) return null; const rows = this.queue.get(conversation.id) || []; if (rows.some(item => item.status === "running") || (this.messages.get(conversation.id) || []).some(item => item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus))) return null; const item = rows.filter(value => value.status === "queued").sort((a, b) => b.priority - a.priority || a.ordinal - b.ordinal)[0]; if (!item) return null; item.status = "running"; item.startedAt = new Date().toISOString(); return structuredClone(item); }
   async completeQueued(args = {}) { const conversation = this.own(args, args.conversationId); if (!conversation) return null; const id = normalizeConversationId(args.queueId); const status = args.status; if (!["completed", "failed", "cancelled"].includes(status)) fail("Stato coda non valido."); const item = (this.queue.get(conversation.id) || []).find(value => value.id === id && ["queued", "running"].includes(value.status)); if (!item) return null; item.status = status; item.turnId = args.turnId == null ? item.turnId : normalizeConversationId(args.turnId); item.errorCode = args.errorCode || null; item.completedAt = new Date().toISOString(); return structuredClone(item); }
   async cancelQueued(args = {}) { const conversation = this.own(args, args.conversationId); if (!conversation) return null; const id = normalizeConversationId(args.queueId); const item = (this.queue.get(conversation.id) || []).find(value => value.id === id && value.status === "queued"); if (!item) return null; item.status = "cancelled"; item.completedAt = new Date().toISOString(); return structuredClone(item); }
-  async recoverQueuedOnStartup({ machineIds } = {}) { const allowed = new Set((machineIds || []).map(normalizeMachineId)); let count = 0; for (const conversation of this.conversations.values()) if (!conversation.deletedAt && allowed.has(conversation.machineId)) for (const item of this.queue.get(conversation.id) || []) if (item.status === "running") { item.status = item.turnId ? "failed" : "queued"; item.startedAt = null; item.errorCode = item.turnId ? "RESTART_INTERRUPTED" : null; count += 1; } return count; }
+  async recoverQueuedOnStartup({ machineIds } = {}) { const allowed = new Set((machineIds || []).map(normalizeMachineId)); let count = 0; for (const conversation of this.conversations.values()) if (!conversation.deletedAt && allowed.has(conversation.machineId)) for (const item of this.queue.get(conversation.id) || []) if (["queued", "running"].includes(item.status)) { item.status = "failed"; item.completedAt = new Date().toISOString(); item.errorCode = item.turnId ? "RESTART_INTERRUPTED" : "CHAT_QUEUE_RETIRED"; count += 1; } return count; }
 
   async beginTurn(args = {}) {
     const conversation = this.own(args, args.conversationId); if (!conversation) return null;
     const queueId = args.queueId == null ? null : normalizeConversationId(args.queueId);
     const messages = this.messages.get(conversation.id) || [];
-    if (messages.some(item => item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus))) throw new ConversationStoreError("Conversazione già in generazione.", 409);
+    const clientRequest = directRequestMetadata(args.requestId, conversation.ownerId, conversation.machineId, conversation.id, normalizeContent(args.message), normalizeAttachmentIds(args.attachmentIds), normalizeMode(args.requestedMode || "auto"));
+    if (clientRequest) {
+      const prior = messages.find(item => item.role === "assistant" && item.toolMetadata?.clientRequest?.id === clientRequest.id);
+      if (prior) {
+        if (prior.toolMetadata.clientRequest.fingerprint !== clientRequest.fingerprint) throw new ConversationStoreError("Identificativo richiesta già usato con contenuti diversi.", 409, "REQUEST_ID_CONFLICT");
+        return { idempotent: true, turnId: prior.turnId, assistant: structuredClone(prior) };
+      }
+      if ((this.queue.get(conversation.id) || []).some(item => item.requestId === clientRequest.id)) throw new ConversationStoreError("La richiesta precedente è conservata nella cronologia della coda dismessa e non verrà rieseguita.", 409, "CHAT_QUEUE_RETIRED");
+    }
+    if (messages.some(item => item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus))) throw new ConversationStoreError("Conversazione già in generazione.", 409, "GENERATION_ACTIVE");
     const attachmentIds = normalizeAttachmentIds(args.attachmentIds);
     if (!queueId && attachmentIds.some(id => (this.queue.get(conversation.id) || []).some(item => ["queued", "running"].includes(item.status) && item.attachmentIds.includes(id)))) fail("Uno o più allegati sono già riservati nella coda.", 409);
     const pending = this.attachments.get(conversation.id) || [];
@@ -1987,7 +2012,7 @@ class MemoryConversationStore {
     const resolvedMode = args.resolvedMode == null ? (requestedMode === "auto" ? "fast" : requestedMode) : normalizeResolvedMode(args.resolvedMode);
     const turnId = randomUUID(); const now = new Date().toISOString();
     const user = { id: randomUUID(), conversationId: conversation.id, role: "user", content: normalizeContent(args.message), createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: null, generationStatus: "completed", sources: [], toolMetadata: {}, ordinal: ++this.ordinal };
-    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: {}, ordinal: ++this.ordinal, turnId };
+    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: { requestedMode, resolvedMode, ...(clientRequest ? { clientRequest } : {}) }, ordinal: ++this.ordinal, turnId };
     if (queueId) { const queued = (this.queue.get(conversation.id) || []).find(item => item.id === queueId && item.status === "running" && !item.turnId); if (!queued) fail("Coda conversazione non disponibile.", 409); queued.turnId = turnId; }
     selected.forEach(item => { item.messageId = user.id; });
     messages.push(user, assistant); this.messages.set(conversation.id, messages); conversation.summary = appendDeterministicSummary(conversation.summary, user); if (conversation.title === "Nuova chat") conversation.title = deriveConversationTitle(user.content); conversation.updatedAt = now;
@@ -1996,15 +2021,16 @@ class MemoryConversationStore {
   async beginAttachmentContinuation(args = {}) {
     const conversation = this.own(args, args.conversationId); if (!conversation) return null;
     const userId = normalizeConversationId(args.userMessageId); const requestId = normalizeRequestId(args.requestId); const scanId = normalizeConversationId(args.scanId);
+    const requestedMode = normalizeMode(args.requestedMode || "auto"); const resolvedMode = args.resolvedMode == null ? (requestedMode === "auto" ? "fast" : requestedMode) : normalizeResolvedMode(args.resolvedMode);
     const messages = this.messages.get(conversation.id) || [];
     const existing = messages.find(item => item.role === "assistant" && item.toolMetadata?.autoContinuation?.requestId === requestId);
     if (existing && ["pending", "streaming", "completed"].includes(existing.generationStatus)) return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), idempotent: true };
     if (messages.some(item => item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus))) return { blocked: true };
-    if (existing && ["aborted", "failed"].includes(existing.generationStatus)) { existing.content = ""; existing.generationStatus = "pending"; existing.updatedAt = new Date().toISOString(); return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), reclaimed: true }; }
+    if (existing && ["aborted", "failed"].includes(existing.generationStatus)) { existing.content = ""; existing.generationStatus = "pending"; existing.requestedMode = requestedMode; existing.resolvedMode = resolvedMode; existing.toolMetadata = { ...existing.toolMetadata, requestedMode, resolvedMode }; existing.updatedAt = new Date().toISOString(); return { turnId: existing.turnId || null, user: null, assistant: structuredClone(existing), reclaimed: true }; }
     const original = messages.find(item => item.id === userId && item.role === "user" && item.generationStatus === "completed");
     if (!original) return null;
-    const requestedMode = normalizeMode(args.requestedMode || "auto"); const resolvedMode = requestedMode === "auto" ? "fast" : requestedMode; const now = new Date().toISOString(); const turnId = randomUUID();
-    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: { autoContinuation: { version: 1, requestId, scanId, userMessageId: userId } }, ordinal: ++this.ordinal, turnId };
+    const now = new Date().toISOString(); const turnId = randomUUID();
+    const assistant = { id: randomUUID(), conversationId: conversation.id, role: "assistant", content: "", createdAt: now, updatedAt: now, requestedMode, resolvedMode, model: SERVER_AI_MODEL, generationStatus: "pending", sources: [], toolMetadata: { requestedMode, resolvedMode, autoContinuation: { version: 1, requestId, scanId, userMessageId: userId } }, ordinal: ++this.ordinal, turnId };
     messages.push(assistant); this.messages.set(conversation.id, messages); conversation.updatedAt = now;
     return { turnId, user: null, assistant: structuredClone(assistant), idempotent: false };
   }
@@ -2024,7 +2050,7 @@ class MemoryConversationStore {
     message.generationStatus = normalizeGenerationStatus(args.generationStatus); if (message.generationStatus === "pending") fail("Lo stato pending si crea solo con beginTurn.");
     if (args.content !== undefined) message.content = typeof args.content === "string" && args.content.length <= MAX_CONTENT ? args.content : normalizeContent(args.content);
     if (args.sources !== undefined) message.sources = normalizeSources(args.sources);
-    if (args.toolMetadata !== undefined) message.toolMetadata = { ...normalizeToolMetadata(args.toolMetadata), ...(message.toolMetadata?.autoContinuation ? { autoContinuation: structuredClone(message.toolMetadata.autoContinuation) } : {}) };
+    if (args.toolMetadata !== undefined) message.toolMetadata = { ...normalizeToolMetadata(args.toolMetadata), ...(message.toolMetadata?.autoContinuation ? { autoContinuation: structuredClone(message.toolMetadata.autoContinuation) } : {}), ...(message.toolMetadata?.clientRequest ? { clientRequest: structuredClone(message.toolMetadata.clientRequest) } : {}) };
     message.updatedAt = new Date().toISOString(); return structuredClone(message);
   }
   async finishTurn(args = {}) {
@@ -2032,7 +2058,7 @@ class MemoryConversationStore {
     const message = (this.messages.get(conversation.id) || []).find(item => item.turnId === normalizeTurnId(args.turnId) && item.role === "assistant" && ["pending", "streaming"].includes(item.generationStatus));
     if (!message) return null;
     const status = normalizeGenerationStatus(args.generationStatus); if (!["completed", "aborted", "failed"].includes(status)) fail("Lo stato terminale non è valido.");
-    message.content = typeof args.content === "string" && args.content.length <= MAX_CONTENT ? args.content : normalizeContent(args.content); message.generationStatus = status; message.resolvedMode = normalizeResolvedMode(args.resolvedMode); message.sources = normalizeSources(args.sources); message.toolMetadata = { ...normalizeToolMetadata(args.toolMetadata), ...(message.toolMetadata?.autoContinuation ? { autoContinuation: structuredClone(message.toolMetadata.autoContinuation) } : {}) }; message.updatedAt = new Date().toISOString(); conversation.summary = appendDeterministicSummary(conversation.summary, message); conversation.updatedAt = message.updatedAt; return structuredClone(message);
+    message.content = typeof args.content === "string" && args.content.length <= MAX_CONTENT ? args.content : normalizeContent(args.content); message.generationStatus = status; message.resolvedMode = normalizeResolvedMode(args.resolvedMode); message.sources = normalizeSources(args.sources); message.toolMetadata = { ...normalizeToolMetadata(args.toolMetadata), ...(message.toolMetadata?.autoContinuation ? { autoContinuation: structuredClone(message.toolMetadata.autoContinuation) } : {}), ...(message.toolMetadata?.clientRequest ? { clientRequest: structuredClone(message.toolMetadata.clientRequest) } : {}) }; message.updatedAt = new Date().toISOString(); conversation.summary = appendDeterministicSummary(conversation.summary, message); conversation.updatedAt = message.updatedAt; return structuredClone(message);
   }
   async buildContext(args = {}) {
     const conversation = this.own(args, args.conversationId); if (!conversation) return null;

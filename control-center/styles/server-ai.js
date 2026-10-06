@@ -132,44 +132,67 @@
     instance.state.hidden = !error || !value;
   }
 
-  function quickReplyOption(value) {
-    var option = String(value || "")
-      .replace(/[`*_~]/g, "")
-      .replace(/^\s*(?:[-–—•]|\d+[.)])\s*/, "")
-      .replace(/[?.!,:;]+\s*$/, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!option || option.length > 52 || /(?:https?:\/\/|www\.|[\\/]{2,}|\b(?:password|passwd|token|secret|cookie|api[_ -]?key)\b)/i.test(option)) return "";
-    if (/\S{28,}/.test(option)) return "";
-    return option;
+  function updateMachineStatusMessage(instance, status) {
+    if (instance.actionError) {
+      setState(instance, instance.actionError, true);
+      return;
+    }
+    var ready = instance.machineState === "active" || instance.machineState === "degraded";
+    if (ready) {
+      if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione da verificare; la cronologia resta disponibile." : "Disponibile.");
+    } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
+  }
+
+  function renderMachineActionError(instance) {
+    instance.actionErrorNode.textContent = String(instance.actionError || "").slice(0, 320);
+    instance.actionErrorNode.hidden = !instance.actionError;
+  }
+
+  function showMachineActionError(instance, message, action) {
+    instance.actionError = message;
+    instance.actionErrorAction = action || "";
+    renderMachineActionError(instance);
+    setState(instance, message, true);
   }
 
   function deriveQuickReplies(content) {
-    var text = String(content || "").replace(/\r\n?/g, "\n").trim().slice(-4_000);
+    var text = String(content || "").trim().slice(-6000).toLocaleLowerCase("it-IT");
     if (!text) return [];
-    var questionMatch = text.match(/(?:^|[\n.!])\s*([^?\n]{1,220}\?)\s*$/);
-    var question = questionMatch ? questionMatch[1].trim() : "";
-    if (question) {
-      var alternatives = question.match(/\b(?:preferisci|scegli|vuoi)\s+(?:tra\s+)?(.{1,70}?)\s+(?:oppure|o)\s+(.{1,70}?)[?]\s*$/i);
-      if (alternatives) {
-        var options = [quickReplyOption(alternatives[1]), quickReplyOption(alternatives[2])].filter(Boolean);
-        if (options.length === 2 && options[0].toLocaleLowerCase("it") !== options[1].toLocaleLowerCase("it")) {
-          return options.map(function (option) { return { label: option, message: "Scelgo " + option + "." }; }).slice(0, 3);
-        }
-      }
-      if (/\b(?:vuoi che|vuoi procedere|vuoi continuare|desideri che|posso|procedo|confermi|autorizzi|continuo|vado avanti|devo procedere)\b/i.test(question)) {
-        return [
-          { label: "Sì, procedi", message: "Sì, procedi" },
-          { label: "No, fermati", message: "No, fermati" },
-        ];
-      }
+    var replies;
+    // Only fixed reading intents are offered. Model prose cannot manufacture
+    // an approval, a target, an arbitrary option or a mutation request.
+    if (/operazion|intervento|accodat|riavviat|aggiornamento completat|modifica applicat/.test(text)) {
+      replies = [
+        { label: "Verifica l’esito", message: "Verifica l’esito dell’operazione precedente senza ripeterla." },
+        { label: "Leggi l’audit", message: "Leggi l’audit recente relativo all’operazione precedente." },
+      ];
+    } else if (/backup|ripristino|offsite|pianificazion|timer|cron\b/.test(text)) {
+      replies = [
+        { label: "Ultimo esito", message: "Controlla l’ultimo esito del backup e distingui dati verificati e dati mancanti." },
+        { label: "Pianificazione", message: "Verifica la pianificazione dei backup sul server e la prossima esecuzione." },
+      ];
+    } else if (/servizi|container|journal|log\b|arrest|crash|riavvi/.test(text)) {
+      replies = [
+        { label: "Leggi i log", message: "Leggi i log recenti del servizio coinvolto e verifica la diagnosi." },
+        { label: "Ricontrolla servizi", message: "Ricontrolla disponibilità e salute dei servizi e container coinvolti." },
+      ];
+    } else if (/\bdns\b|\btls\b|rete|domini|certificat/.test(text)) {
+      replies = [
+        { label: "Verifica rete e DNS", message: "Verifica lo stato attuale di rete, DNS e TLS del server." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
+    } else if (/\bcpu\b|\bram\b|disco|memoria|risorse|prestazioni|swap/.test(text)) {
+      replies = [
+        { label: "Verifica risorse", message: "Verifica le risorse attuali del server e gli eventuali colli di bottiglia." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
+    } else {
+      replies = [
+        { label: "Ricontrolla ora", message: "Controlla nuovamente lo stato attuale del VPS." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
     }
-    return [
-      // These exact commands are recognized by the backend continuation
-      // selector, which attaches the preceding user/assistant pair.
-      { label: "Approfondisci", message: "Approfondisci" },
-      { label: "Riassumi", message: "Riassumi" },
-    ];
+    return replies.concat({ label: "Riassumi", message: "Riassumi" });
   }
 
   function latestRenderedMessage(instance) {
@@ -240,67 +263,22 @@
     instance.busy = busy;
     instance.root.setAttribute("aria-busy", busy ? "true" : "false");
     instance.stop.hidden = !busy;
-    instance.send.hidden = false;
+    instance.send.hidden = Boolean(busy);
     refreshModeAvailability(instance);
     refreshQuickReplyAvailability(instance);
   }
 
-  var MODE_OPTIONS = ["auto", "fast", "deep"];
-
-  function modeStatus(mode) {
-    if (mode === "deep") return "DEEP: analisi approfondita.";
-    if (mode === "fast") return "FAST: risposta rapida.";
-    return "AUTO: scelta adattiva.";
-  }
-
-  function selectMode(instance, value, announce, focus) {
-    var mode = MODE_OPTIONS.includes(value) ? value : "auto";
-    var selectedButton = null;
-    instance.mode = mode;
-    var group = instance.root.querySelector(".server-ai-mode");
-    if (group) group.setAttribute("data-ai-selected-mode", mode);
-    instance.root.querySelectorAll("[data-ai-mode]").forEach(function (button) {
-      var selected = button.getAttribute("data-ai-mode") === mode;
-      button.classList.toggle("active", selected);
-      button.setAttribute("role", "radio");
-      button.setAttribute("aria-checked", selected ? "true" : "false");
-      button.removeAttribute("aria-pressed");
-      button.tabIndex = selected ? 0 : -1;
-      if (selected) selectedButton = button;
-    });
-    if (focus && selectedButton) selectedButton.focus();
-    if (announce) setState(instance, modeStatus(mode));
-  }
-
-  function initializeModeControl(instance) {
-    var group = instance.root.querySelector(".server-ai-mode");
-    if (!group) return;
-    group.setAttribute("role", "radiogroup");
-    selectMode(instance, instance.mode, false, false);
-  }
-
-
   function refreshModeAvailability(instance) {
-    var chatEnabled = instance.generationAvailable && (instance.machineState === "active" || instance.machineState === "degraded");
-    instance.root.querySelectorAll("[data-ai-mode]").forEach(function (button) {
-      button.disabled = Boolean(!chatEnabled || instance.actionBusy);
-    });
-    // The composer remains editable while a turn is running so the user can
-    // queue a follow-up without losing a draft. Attachments still wait for the
-    // active upload/generation to finish and the stop action stays independent.
-    instance.prompt.disabled = Boolean(!chatEnabled || instance.actionBusy);
-    instance.send.disabled = Boolean(!chatEnabled || instance.actionBusy || instance.attachmentUploading);
-    if (instance.send) {
-      var queueLabel = instance.busy ? "Aggiungi alla coda" : "Invia messaggio";
-      instance.send.setAttribute("aria-label", queueLabel);
-      instance.send.title = queueLabel;
-    }
-    if (instance.sendImmediate) {
-      instance.sendImmediate.hidden = !instance.busy;
-      instance.sendImmediate.disabled = Boolean(!chatEnabled || instance.actionBusy || instance.attachmentUploading);
-    }
-    instance.stop.disabled = Boolean(instance.actionBusy);
-    if (instance.attach) instance.attach.disabled = Boolean(!chatEnabled || instance.busy || instance.actionBusy || instance.attachmentUploading || !instance.attachmentCapabilities || (instance.pendingAttachments || []).length >= 5);
+    var enabled = instance.generationAvailable && (instance.machineState === "active" || instance.machineState === "degraded");
+    instance.mode = "auto";
+    instance.prompt.disabled = Boolean(!enabled || instance.actionBusy || instance.busy || instance.submitting);
+    instance.send.disabled = Boolean(!enabled || instance.actionBusy || instance.busy || instance.submitting || instance.attachmentUploading);
+    instance.send.hidden = Boolean(instance.busy || instance.submitting);
+    instance.send.setAttribute("aria-label", "Invia messaggio");
+    instance.send.title = "Invia messaggio";
+    instance.stop.hidden = !instance.busy && !instance.submitting;
+    instance.stop.disabled = Boolean(instance.actionBusy || instance.cancelBusy);
+    if (instance.attach) instance.attach.disabled = Boolean(!enabled || instance.busy || instance.submitting || instance.actionBusy || instance.attachmentUploading || !instance.attachmentCapabilities || (instance.pendingAttachments || []).length >= 5);
   }
 
   function machineState(status) {
@@ -310,7 +288,7 @@
 
   function stateTitle(state) {
     if (state === "active") return "Server AI attivo";
-    if (state === "degraded") return "Chat GPT-6 Luna attiva";
+    if (state === "degraded") return "Chat attiva";
     if (state === "disabled") return "Server AI disattivato";
     if (state === "starting") return "Avvio di Server AI";
     if (state === "stopping") return "Arresto di Server AI";
@@ -366,7 +344,10 @@
     healthStrong.textContent = shortStateTitle(instance.machineState);
     healthStrong.title = healthLabel;
     instance.gateTitle.textContent = stateTitle(instance.machineState);
-    instance.gateMessage.textContent = String(status && status.label || (instance.machineState === "disabled" ? "Attiva Server AI quando questa macchina è pronta." : "Verifica lo stato della macchina.")).slice(0, 320);
+    var gateMessage = String(status && status.label || (instance.machineState === "disabled" ? "Attiva Server AI quando questa macchina è pronta." : "Verifica lo stato della macchina."));
+    if (!instance.canConfigure) gateMessage += " L’attivazione è riservata ai ruoli owner o admin.";
+    if (instance.pendingAction) gateMessage = instance.pendingAction === "enable" ? "Invio della richiesta di attivazione…" : "Invio della richiesta di disattivazione…";
+    instance.gateMessage.textContent = gateMessage.slice(0, 320);
     var missing = missingRequirements(status);
     instance.missing.replaceChildren();
     missing.forEach(function (message) { var entry = document.createElement("li"); entry.textContent = message; instance.missing.appendChild(entry); });
@@ -380,6 +361,7 @@
     instance.disable.disabled = !canDisable;
     instance.chatArea.hidden = !instance.historyAvailable && instance.machineState !== "active" && instance.machineState !== "degraded";
     instance.gate.hidden = instance.machineState === "active";
+    renderMachineActionError(instance);
     instance.root.classList.toggle("server-ai-transient", transient);
     refreshModeAvailability(instance);
     refreshQuickReplyAvailability(instance);
@@ -660,126 +642,6 @@
     scrollTranscript(instance);
   }
 
-  function queueValues(queue) {
-    var values = Array.isArray(queue) ? queue : queue && Array.isArray(queue.items) ? queue.items : [];
-    return values.filter(function (item) {
-      return item && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(item.id || item.requestId || ""))
-        && ["queued", "running", "cancelling", "failed"].includes(String(item.status || "queued"));
-    }).slice(0, 12).map(function (item) {
-      return { id: String(item.id || item.requestId), requestId: String(item.requestId || item.id), text: String(item.text || item.message || item.prompt || item.content || "").trim().slice(0, 160), status: String(item.status || "queued"), delivery: item.delivery === "immediate" ? "immediate" : "queue" };
-    });
-  }
-
-  function queueStatusLabel(status) {
-    return ({ queued: "In coda", running: "In elaborazione", cancelling: "Annullamento", failed: "Non riuscita", completed: "Completata", aborted: "Interrotta" })[status] || "In coda";
-  }
-
-  function queueActivityLabel(items) {
-    var active = Array.isArray(items) ? items : [];
-    var queued = active.filter(function (item) { return item.status === "queued"; }).length;
-    var running = active.some(function (item) { return item.status === "running"; });
-    var cancelling = active.some(function (item) { return item.status === "cancelling"; });
-    var current = running ? "Elaborazione in corso" : cancelling ? "Annullamento in corso" : "";
-    if (current) return current + (queued ? " · " + queued + " in coda" : "");
-    return queued === 1 ? "Richiesta in coda" : queued ? queued + " richieste in coda" : "";
-  }
-
-  function queueDismissalKey(instance) {
-    return "server-ai.queue-dismissed.v1:" + encodeURIComponent(String(instance.selectedMachineId || "")) + ":" + encodeURIComponent(String(instance.conversationId || ""));
-  }
-
-  function dismissedQueueIds(instance) {
-    var key = queueDismissalKey(instance);
-    if (instance.dismissedQueueErrorKey !== key) {
-      var ids = [];
-      try {
-        var stored = JSON.parse(window.localStorage.getItem(key) || "[]");
-        if (Array.isArray(stored)) ids = stored.filter(function (id) {
-          return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id));
-        }).slice(-100);
-      } catch (_) {}
-      instance.dismissedQueueErrorKey = key;
-      instance.dismissedQueueErrorIds = new Set(ids);
-    }
-    return instance.dismissedQueueErrorIds || new Set();
-  }
-
-  function saveDismissedQueueIds(instance) {
-    try {
-      var ids = Array.from(dismissedQueueIds(instance)).slice(-100);
-      window.localStorage.setItem(queueDismissalKey(instance), JSON.stringify(ids));
-    } catch (_) {}
-  }
-
-  function renderConversationQueue(instance, queue) {
-    var target = instance.queue;
-    if (!target) return;
-    var values = queueValues(queue);
-    var active = values.filter(function (item) { return item.status === "queued" || item.status === "running" || item.status === "cancelling"; });
-    var dismissed = dismissedQueueIds(instance);
-    var errors = values.filter(function (item) { return item.status === "failed" && !dismissed.has(item.requestId); });
-    instance.queueItems = active;
-    instance.queueErrors = errors;
-    instance.queueBusy = active.length > 0;
-    target.replaceChildren();
-    target.hidden = !active.length && !errors.length;
-    target.setAttribute("aria-label", "Stato richieste");
-    if (active.length) {
-      var title = document.createElement("div"); title.className = "server-ai-queue-title";
-      var label = document.createElement("span"); label.textContent = queueActivityLabel(active);
-      title.appendChild(label); target.appendChild(title);
-      var list = document.createElement("ul"); list.className = "server-ai-queue-list";
-      active.forEach(function (item) {
-        var row = document.createElement("li"); row.className = "server-ai-queue-item"; row.setAttribute("data-ai-queue-item", item.requestId);
-        var text = document.createElement("span"); text.textContent = [item.text || "Richiesta", queueStatusLabel(item.status), item.delivery === "immediate" ? "priorità" : ""].filter(Boolean).join(" · "); row.appendChild(text);
-        if (item.status === "queued") {
-          var cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Annulla"; cancel.title = "Annulla richiesta in coda"; cancel.setAttribute("data-ai-queue-cancel", item.id); row.appendChild(cancel);
-        }
-        list.appendChild(row);
-      });
-      target.appendChild(list);
-    }
-    if (errors.length) {
-      var errorTitle = document.createElement("div"); errorTitle.className = "server-ai-queue-title server-ai-queue-title-error";
-      var errorLabel = document.createElement("span"); errorLabel.textContent = errors.length === 1 ? "Richiesta non riuscita" : errors.length + " richieste non riuscite";
-      errorTitle.appendChild(errorLabel); target.appendChild(errorTitle);
-      var errorList = document.createElement("ul"); errorList.className = "server-ai-queue-list server-ai-queue-errors";
-      errors.forEach(function (item) {
-        var row = document.createElement("li"); row.className = "server-ai-queue-item server-ai-queue-item-error"; row.setAttribute("data-ai-queue-item", item.requestId);
-        var text = document.createElement("span"); text.textContent = [item.text || "Richiesta", "Non riuscita"].join(" · "); row.appendChild(text);
-        var dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.textContent = "Nascondi"; dismiss.title = "Nascondi questo avviso senza cancellare la richiesta salvata"; dismiss.setAttribute("data-ai-queue-dismiss", item.requestId); row.appendChild(dismiss);
-        errorList.appendChild(row);
-      });
-      target.appendChild(errorList);
-    }
-  }
-
-  function dismissQueueError(instance, requestId) {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(requestId || ""))) return;
-    dismissedQueueIds(instance).add(String(requestId));
-    saveDismissedQueueIds(instance);
-    renderConversationQueue(instance, (instance.queueItems || []).concat(instance.queueErrors || []));
-  }
-
-  async function cancelQueuedRequest(instance, queueId) {
-    var context = conversationContext(instance); var conversationId = instance.conversationId;
-    if (!conversationId || !context.machineId || !/^[0-9a-f-]{36}$/i.test(String(queueId || ""))) return;
-    var button = null;
-    if (instance.queue) Array.from(instance.queue.querySelectorAll("[data-ai-queue-cancel]")).some(function (candidate) {
-      if (candidate.getAttribute("data-ai-queue-cancel") !== String(queueId)) return false;
-      button = candidate; return true;
-    });
-    if (button) button.disabled = true;
-    try {
-      var response = await fetch(conversationsEndpointFor(context.machineId, "/" + encodeURIComponent(conversationId) + "/queue/" + encodeURIComponent(queueId)), { method: "DELETE", credentials: "same-origin", headers: conversationHeaders() });
-      if (!response.ok) throw new Error(await chatResponseError(response));
-      if (isCurrentConversationContext(instance, context) && instance.conversationId === conversationId) scheduleConversationPoll(instance, context, true);
-    } catch (error) {
-      if (isCurrentConversationContext(instance, context) && instance.conversationId === conversationId) setState(instance, error && error.message ? error.message : "Annullamento non riuscito.", true);
-      if (button) button.disabled = false;
-    }
-  }
-
   async function requestAttachmentScan(instance, button, action) {
     var context = conversationContext(instance); var conversationId = instance.conversationId;
     if (!conversationId || !context.machineId || button.disabled) return;
@@ -997,16 +859,9 @@
   }
 
   function renderMessageMode(node, requestedMode, resolvedMode) {
-    var requested = String(requestedMode || "").toLowerCase();
-    var resolved = String(resolvedMode || requested).toLowerCase();
-    if (!["auto", "fast", "deep"].includes(requested) || !["fast", "deep"].includes(resolved)) return;
+    node.item._serverAiResolvedMode = resolvedMode === "deep" ? "deep" : resolvedMode === "fast" ? "fast" : null;
     var badge = node.item.querySelector(".server-ai-message-mode");
-    if (!badge) {
-      badge = document.createElement("small");
-      badge.className = "server-ai-message-mode";
-      node.item.appendChild(badge);
-    }
-    badge.textContent = requested.toUpperCase() + " · " + resolved.toUpperCase();
+    if (badge) badge.remove();
   }
 
   function renderGenerationStatus(node, status) {
@@ -1025,7 +880,7 @@
     var labels = {
       queued: "In attesa della risposta",
       preparing: "Preparazione della risposta",
-      loading: "Connessione a GPT-6 Luna",
+      loading: "Connessione al servizio",
       thinking: "Analisi della richiesta",
       tools: "Consultazione degli strumenti",
       summarizing: "Sintesi della risposta",
@@ -1115,9 +970,11 @@
   }
 
   function renderReasoning(node, activities, complete) {
-    var view = reasoningView(activities);
-    var signature = JSON.stringify([Boolean(complete), view.publicSummary, view.summary, view.activities]);
     var previous = node.item.querySelector(".server-ai-reasoning");
+    if (node.item._serverAiResolvedMode !== "deep") { if (previous) previous.remove(); return; }
+    var view = reasoningView(activities);
+    if (!view.summary && !view.activities.length) { if (previous) previous.remove(); return; }
+    var signature = JSON.stringify([Boolean(complete), view.publicSummary, view.summary, view.activities]);
     if (previous && previous._serverAiReasoningSignature === signature) return;
     var wasOpen = previous && previous.open;
     if (previous) previous.remove();
@@ -1166,7 +1023,7 @@
       var requested = String(payload.requestedMode || "").toLowerCase();
       var resolved = String(payload.resolvedMode || "").toLowerCase();
       if (requested && resolved) renderMessageMode(message.node, requested, resolved);
-    setState(instance, "Risposta GPT-6 Luna in corso…");
+      setState(instance, "");
     } else if (type === "analysis_summary") {
       message.analysisSummary = typeof payload.text === "string" ? Array.from(payload.text).slice(0, 1200).join("") : "";
       renderReasoning(message.node, { summary: message.analysisSummary, publicSummary: Boolean(message.analysisSummary), activities: message.activities }, false);
@@ -1230,26 +1087,17 @@
   }
 
   function generationResponseIds(response, payload) {
-    var uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    var queueItem = payload && payload.queueItem && typeof payload.queueItem === "object" ? payload.queueItem : null;
-    var queueItemId = queueItem && uuid.test(String(queueItem.id || "")) ? String(queueItem.id) : "";
-    var responseRequestId = queueItem && uuid.test(String(queueItem.requestId || "")) ? String(queueItem.requestId) : "";
-    // Immediate generations may already have an assistant id. Queued
-    // generations intentionally do not: their durable identity is the
-    // nested queueItem envelope returned by the HTTP contract.
-    var assistantId = queueItem && uuid.test(String(queueItem.assistantId || "")) ? String(queueItem.assistantId) : (payload && uuid.test(String(payload.assistantId || "")) ? String(payload.assistantId) : "");
-    return { queueItem: queueItem, queueItemId: queueItemId, responseRequestId: responseRequestId, assistantId: assistantId, accepted: response.status === 202 && Boolean(assistantId || responseRequestId) };
+    var id = payload && typeof payload.assistantId === "string" ? payload.assistantId : "";
+    var valid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    return { assistantId: valid ? id : "", accepted: response.status === 202 && valid };
   }
 
   async function send(instance) {
     var text = instance.prompt.value.trim();
     var attachmentIds = (instance.pendingAttachments || []).map(function (item) { return item.id; });
-    var wasBusy = instance.busy;
-    // Every ordinary send is durable queue work, including an idle chat. The
-    // separate priority action is the only way to request interruption.
-    var delivery = instance.nextDelivery === "immediate" ? "immediate" : "queue";
-    instance.nextDelivery = null;
-    if ((!text && !attachmentIds.length) || instance.attachmentUploading || !instance.generationAvailable || (instance.machineState !== "active" && instance.machineState !== "degraded") || !instance.selectedMachineId) return;
+    if (instance.busy || instance.submitting || (!text && !attachmentIds.length) || instance.attachmentUploading || !instance.generationAvailable || (instance.machineState !== "active" && instance.machineState !== "degraded") || !instance.selectedMachineId) return;
+    instance.submitting = true; instance.stopRequested = false;
+    setBusy(instance, true);
     clearQuickReplies(instance);
     instance.chatError = false;
     var context = conversationContext(instance);
@@ -1257,21 +1105,25 @@
       try { await createConversation(instance); }
       catch (error) {
         if (isCurrentConversationContext(instance, context) && (!error || error.name !== "AbortError")) setState(instance, error && error.message ? error.message : "Impossibile creare la conversazione.", true);
-        return;
+        instance.submitting = false; setBusy(instance, false); return;
       }
     }
-    if (!isCurrentConversationContext(instance, context) || !instance.conversationId) return;
+    if (!isCurrentConversationContext(instance, context) || !instance.conversationId) { instance.submitting = false; return; }
+    if (instance.stopRequested) { instance.submitting = false; if (!instance.prompt.value.trim()) instance.prompt.value = text; setBusy(instance, false); resizePrompt(instance); return; }
+    instance.submitting = true; setBusy(instance, true);
     var targetConversationId = String(instance.conversationId);
     // The idempotency key belongs to this exact operation.  In particular,
-    // changing mode, delivery, machine, or chat must never reuse a previous
+    // changing the message, machine, or chat must never reuse a previous
     // key after a late network response.
-    var requestFingerprint = JSON.stringify([text, attachmentIds, instance.mode, delivery, context.machineId, targetConversationId]);
+    var requestFingerprint = JSON.stringify([text, attachmentIds, "auto", context.machineId, targetConversationId]);
     var requestId = instance.pendingRequest && instance.pendingRequest.fingerprint === requestFingerprint ? instance.pendingRequest.id : newRequestId();
     instance.pendingRequest = { id: requestId, fingerprint: requestFingerprint };
+    var createdUserNode = false;
     var userNode = Array.from(instance.transcript.querySelectorAll(".server-ai-message.user[data-ai-request-id]")).map(function (item) {
       return { item: item, content: item.querySelector(".server-ai-message-content") };
     }).find(function (node) { return node.item.getAttribute("data-ai-request-id") === requestId; });
     if (!userNode) {
+      createdUserNode = true;
       userNode = addMessage(instance, "user", text || "Analizza gli allegati.", false);
       renderMessageAttachments(instance, userNode, instance.pendingAttachments);
     }
@@ -1282,11 +1134,11 @@
     var controller = new AbortController();
     instance.controller = controller;
     setBusy(instance, true);
-    setState(instance, instance.mode === "deep" ? "Ragionamento…" : "Risposta GPT-6 Luna…");
+    setState(instance, "");
     try {
       var response = await fetch(conversationsEndpointFor(context.machineId, "/" + encodeURIComponent(instance.conversationId) + "/messages"), {
         method: "POST", credentials: "same-origin", headers: conversationHeaders(), signal: controller.signal,
-        body: JSON.stringify({ message: text, requestedMode: instance.mode, delivery: delivery, requestId: requestId, ...(attachmentIds.length ? { attachmentIds: attachmentIds } : {}) }),
+        body: JSON.stringify({ message: text, requestedMode: "auto", requestId: requestId, ...(attachmentIds.length ? { attachmentIds: attachmentIds } : {}) }),
       });
       var payload = await response.json().catch(function () { return {}; });
       // A response may arrive after navigation or machine/chat selection. Do
@@ -1294,13 +1146,19 @@
       // uploads with data from the old context.
       if (!isCurrentConversationContext(instance, context) || instance.conversationId !== targetConversationId) return;
       var parsed = generationResponseIds(response, payload);
-      var queueItem = parsed.queueItem;
-      var queueItemId = parsed.queueItemId;
-      var responseRequestId = parsed.responseRequestId;
       var assistantId = parsed.assistantId;
-      if (!parsed.accepted) throw new Error(await chatResponseError(response));
+      if (!parsed.accepted) {
+        if (createdUserNode) userNode.item.remove();
+        if (response.status === 409 && payload.error === "GENERATION_ACTIVE") {
+          instance.activeAssistantId = payload.assistantId || null;
+          if (!instance.prompt.value.trim()) { instance.prompt.value = text; resizePrompt(instance); }
+          instance.submitting = false; setBusy(instance, true); scheduleConversationPoll(instance, context, true); return;
+        }
+        throw new Error(String(payload.message || payload.error || "La richiesta AI non è disponibile."));
+      }
       if (assistantId) {
         message.node = addMessage(instance, "assistant", "", true);
+        renderMessageMode(message.node, "auto", payload.resolvedMode);
         renderReasoning(message.node, message.activities, false);
         bindStreamMessageId(message.node, response);
         if (!message.node.item.getAttribute("data-ai-message-id")) message.node.item.setAttribute("data-ai-message-id", assistantId);
@@ -1308,15 +1166,11 @@
       if (requestId) userNode.item.setAttribute("data-ai-request-id", requestId);
       if (message.node && requestId) message.node.item.setAttribute("data-ai-request-id", requestId);
       instance.pendingRequest = null;
-      if (delivery === "immediate" || !instance.activeAssistantId) instance.activeAssistantId = assistantId || instance.activeAssistantId;
+      instance.activeAssistantId = assistantId;
+      if (instance.stopRequested) { instance.cancelBusy = false; await requestGenerationCancel(instance); }
       instance.pendingAttachments = []; renderPendingAttachments(instance);
       if (!isCurrentConversationContext(instance, context)) return;
-      if (payload.queued === true || payload.delivery === "queue" || delivery === "queue" || queueItem) {
-        var queued = (instance.queueItems || []).filter(function (item) { return item.requestId !== requestId; });
-        if (requestId) queued.push({ id: queueItemId || responseRequestId || requestId, requestId: responseRequestId || requestId, text: text, status: queueItem && queueItem.status || "queued", delivery: queueItem && queueItem.delivery || delivery, errorCode: queueItem && queueItem.errorCode || "" });
-        renderConversationQueue(instance, queued);
-        setState(instance, "Richiesta aggiunta alla coda.");
-      } else setState(instance, "Elaborazione in corso…");
+      setState(instance, "");
       scheduleConversationPoll(instance, context, true);
     } catch (error) {
       if (!isCurrentConversationContext(instance, context)) return;
@@ -1333,12 +1187,14 @@
       setState(instance, error && error.message ? error.message : "La risposta AI non è disponibile.", true);
       // A failed queued/priority follow-up must not stop the already-running
       // turn. Restore the state captured before this request was attempted.
-      setBusy(instance, wasBusy);
+      if (createdUserNode) userNode.item.remove();
+      instance.submitting = false; setBusy(instance, false);
       // A rejected request can still have crossed the durable bind boundary.
       // Reload pending metadata only for this unchanged chat so stale IDs are
       // never retried after the assistant has been finalized as failed.
       void loadPendingAttachments(instance, context, instance.conversationId).catch(function () {});
     } finally {
+      instance.submitting = false; refreshModeAvailability(instance);
       if (instance.controller === controller) instance.controller = null;
     }
   }
@@ -1460,10 +1316,12 @@
     var conversations = instance.conversations.filter(function (conversation) {
       return !query || String(conversation.title || "Nuova chat").toLocaleLowerCase("it-IT").includes(query);
     });
-    if (!conversations.length && query) {
+    if (!conversations.length) {
       var empty = document.createElement("li");
       empty.className = "server-ai-conversation-empty";
-      empty.textContent = "Nessuna conversazione trovata.";
+      var title = document.createElement("strong"); title.textContent = "Nessuna conversazione";
+      var detail = document.createElement("span"); detail.textContent = instance.conversationSearch.value.trim() ? "Nessuna chat corrisponde alla ricerca." : "Le tue conversazioni appariranno qui.";
+      empty.appendChild(title); empty.appendChild(detail);
       instance.conversationList.appendChild(empty);
       return;
     }
@@ -1596,7 +1454,7 @@
 
   async function refreshActiveConversation(instance, context) {
     var id = instance.conversationId;
-    if (!id || (!instance.busy && !instance.scanBusy && !instance.queueBusy) || !isCurrentConversationContext(instance, context)) return;
+    if (!id || (!instance.busy && !instance.scanBusy) || !isCurrentConversationContext(instance, context)) return;
     if (instance.generationPollController) instance.generationPollController.abort();
     var controller = new AbortController();
     instance.generationPollController = controller;
@@ -1606,7 +1464,6 @@
       if (controller.signal.aborted || instance.generationPollController !== controller || !isCurrentConversationContext(instance, context) || id !== instance.conversationId) return;
       if (!response.ok || !payload.conversation || !Array.isArray(payload.messages)) throw new Error(String(payload.message || payload.error || "Conversazione non disponibile."));
       renderConversationScans(instance, payload.scans, payload.continuationPending);
-      renderConversationQueue(instance, payload.queue || payload.conversation.queue);
       reconcileStoredMessages(instance, payload.messages);
       var activeMessage = null;
       payload.messages.forEach(function (stored) {
@@ -1619,19 +1476,18 @@
       if (activeMessage) {
         instance.activeAssistantId = activeMessage.id || null;
         setBusy(instance, true);
-        setState(instance, activeMessage.toolMetadata && activeMessage.toolMetadata.state === "tools" ? "Consultazione strumenti…" : "Elaborazione in corso…");
+        setState(instance, "");
         scheduleConversationPoll(instance, context, false);
         return;
       }
       instance.activeAssistantId = null;
       setBusy(instance, false);
       var terminal = payload.messages.filter(function (stored) { return stored && stored.role === "assistant"; }).at(-1);
-      if (instance.queueBusy) setState(instance, queueActivityLabel(instance.queueItems));
-      else if (terminal && terminal.generationStatus === "aborted") setState(instance, "Risposta interrotta.");
+      if (terminal && terminal.generationStatus === "aborted") setState(instance, "Risposta interrotta.");
       else if (terminal && terminal.generationStatus === "failed") setState(instance, "Risposta non completata.", true);
-      else setState(instance, "Risposta completata.");
+      else setState(instance, "");
       renderLatestQuickReplies(instance, payload.messages);
-      if (instance.scanBusy || instance.queueBusy) scheduleConversationPoll(instance, context, false);
+      if (instance.scanBusy) scheduleConversationPoll(instance, context, false);
       void loadConversations(instance).catch(function () {});
     } finally {
       if (instance.generationPollController === controller) instance.generationPollController = null;
@@ -1640,9 +1496,9 @@
 
   function scheduleConversationPoll(instance, context, immediate) {
     if (instance.generationPollTimer) window.clearTimeout(instance.generationPollTimer);
-    if (!isCurrentConversationContext(instance, context) || !instance.conversationId || (!instance.busy && !instance.scanBusy && !instance.queueBusy)) return;
+    if (!isCurrentConversationContext(instance, context) || !instance.conversationId || (!instance.busy && !instance.scanBusy)) return;
     instance.generationPollTimer = window.setTimeout(function () {
-      if (!isCurrentConversationContext(instance, context) || !instance.conversationId || (!instance.busy && !instance.scanBusy && !instance.queueBusy)) return;
+      if (!isCurrentConversationContext(instance, context) || !instance.conversationId || (!instance.busy && !instance.scanBusy)) return;
       refreshActiveConversation(instance, context).catch(function (error) {
         if (error && error.name !== "AbortError" && isCurrentConversationContext(instance, context)) {
           setState(instance, error.message || "Aggiornamento conversazione non disponibile.", true);
@@ -1691,17 +1547,15 @@
     if (!loadingOlder && id === instance.conversationId) {
       setBusy(instance, inProgress);
       renderConversationScans(instance, payload.scans, payload.continuationPending);
-      renderConversationQueue(instance, payload.queue || payload.conversation.queue);
       if (inProgress) {
         var activeMessage = payload.messages.filter(function (stored) { return stored && stored.role === "assistant" && (stored.generationStatus === "pending" || stored.generationStatus === "streaming"); }).at(-1);
         instance.activeAssistantId = activeMessage && activeMessage.id || null;
-        setState(instance, activeMessage && activeMessage.toolMetadata && activeMessage.toolMetadata.state === "tools" ? "Consultazione strumenti…" : "Elaborazione in corso…");
+        setState(instance, "");
         scheduleConversationPoll(instance, context, false);
       } else {
         instance.activeAssistantId = null;
-        if (instance.queueBusy) setState(instance, queueActivityLabel(instance.queueItems));
         renderLatestQuickReplies(instance, payload.messages);
-      if (instance.scanBusy || instance.queueBusy) scheduleConversationPoll(instance, context, false);
+      if (instance.scanBusy) scheduleConversationPoll(instance, context, false);
       }
       void loadPendingAttachments(instance, context, id).catch(function (error) { if (isCurrentConversationContext(instance, context) && instance.conversationId === id) setState(instance, error.message || "Allegati non disponibili.", true); });
     }
@@ -1779,18 +1633,18 @@
   }
 
   function isMobileDrawer() {
-    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 980px)").matches;
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 1180px)").matches;
   }
 
   function setDrawerOpen(instance, open, returnFocus) {
     var mobile = isMobileDrawer();
-    instance.root.classList.toggle("server-ai-drawer-open", Boolean(open));
+    instance.root.classList.toggle("server-ai-drawer-open", Boolean(mobile && open));
     if (instance.drawer) {
       if (mobile && "inert" in instance.drawer) instance.drawer.inert = !open;
       else if (!mobile && "inert" in instance.drawer) instance.drawer.inert = false;
       instance.drawer.setAttribute("aria-hidden", mobile && !open ? "true" : "false");
     }
-    if (instance.openConversations) instance.openConversations.setAttribute("aria-expanded", open ? "true" : "false");
+    if (instance.openConversations) instance.openConversations.setAttribute("aria-expanded", (mobile ? open : !instance.root.classList.contains("server-ai-history-collapsed")) ? "true" : "false");
     if (!open && returnFocus && instance.drawerOpener && instance.drawerOpener.isConnected) instance.drawerOpener.focus();
   }
 
@@ -1799,43 +1653,14 @@
   }
 
   function renderEmptyConversation(instance) {
-    var empty = document.createElement("section");
-    empty.className = "server-ai-empty";
-    empty.setAttribute("data-ai-empty", "");
-    var mark = document.createElement("span");
-    mark.className = "server-ai-empty-mark";
-    mark.textContent = "AI";
-    var title = document.createElement("h2");
-    title.textContent = "Come posso aiutarti?";
-    var copy = document.createElement("p");
-    copy.textContent = "Controlla il server, approfondisci un problema o cerca nella documentazione.";
-    var suggestions = document.createElement("div");
-    suggestions.className = "server-ai-suggestions";
-    [
-      ["Stato del server", "Controlla lo stato attuale del server."],
-      ["Analizza un problema", "Aiutami ad analizzare questo problema: "],
-      ["Cerca sul web", "Cerca nella documentazione ufficiale: "],
-    ].forEach(function (suggestion) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.setAttribute("data-ai-suggestion", suggestion[1]);
-      button.textContent = suggestion[0];
-      suggestions.appendChild(button);
-    });
-    empty.appendChild(mark);
-    empty.appendChild(title);
-    empty.appendChild(copy);
-    empty.appendChild(suggestions);
-    instance.transcript.appendChild(empty);
+    var template = instance.root.querySelector("[data-ai-empty-template]");
+    if (template && template.content) instance.transcript.appendChild(template.content.cloneNode(true));
   }
 
   function clearConversation(instance) {
     instance.scanBusy = false;
-    instance.queueBusy = false;
-    instance.queueItems = [];
     instance.queueErrors = [];
     instance.pendingRequest = null;
-    renderConversationQueue(instance, []);
     instance.chatError = false;
     cancelTranscriptScrollFrames(instance);
     if (instance.generationPollTimer) window.clearTimeout(instance.generationPollTimer);
@@ -1880,14 +1705,16 @@
       var status = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(String(status.message || status.error || "Stato non disponibile."));
       if (active !== instance || machineId !== instance.selectedMachineId) return null;
+      var actualState = machineState(status);
+      if ((instance.actionErrorAction === "enable" && status.enabled === true && (actualState === "active" || actualState === "degraded")) ||
+          (instance.actionErrorAction === "disable" && status.enabled === false && actualState === "disabled")) {
+        instance.actionError = "";
+        instance.actionErrorAction = "";
+      }
       instance.lastMachineStatus = status;
       renderMachine(instance, status || {});
-      var ready = instance.machineState === "active" || instance.machineState === "degraded";
       instance.models = Array.isArray(status.models) ? status.models : null;
-
-      if (ready) {
-        if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione OpenAI da verificare; la cronologia resta disponibile." : "Disponibile tramite OpenAI.");
-      } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
+      updateMachineStatusMessage(instance, status);
       return status;
     } catch (error) {
       if (error && error.name === "AbortError") return null;
@@ -1909,14 +1736,14 @@
           instance.chatArea.hidden = false;
           refreshModeAvailability(instance);
           refreshQuickReplyAvailability(instance);
-          setState(instance, "Controllo temporaneamente non raggiungibile; cronologia conservata.");
+          setState(instance, instance.actionError || "Controllo temporaneamente non raggiungibile; cronologia conservata.", Boolean(instance.actionError));
         } else {
           renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: "unavailable", enabled: instance.enabled, canConfigure: instance.canConfigure, label: "Stato della macchina non disponibile." });
           instance.health.classList.add("bad");
           var unavailableHealth = instance.health.querySelector("strong");
           unavailableHealth.textContent = "Non disponibile";
           unavailableHealth.title = "Stato AI non disponibile";
-          setState(instance, error && error.message ? error.message : "Stato AI non disponibile.", true);
+          setState(instance, instance.actionError || (error && error.message ? error.message : "Stato AI non disponibile."), true);
         }
       }
       return null;
@@ -1942,8 +1769,10 @@
     instance.contextEpoch += 1;
     abortConversationRequests(instance);
     instance.conversationId = "";
-    instance.queueBusy = false;
-    instance.queueItems = [];
+    instance.actionError = "";
+    instance.actionErrorAction = "";
+    instance.pendingAction = "";
+    renderMachineActionError(instance);
     instance.queueErrors = [];
     instance.pendingRequest = null;
     instance.nextBefore = null;
@@ -2005,42 +1834,75 @@
   }
 
   async function requestGenerationCancel(instance) {
-    if (!instance.conversationId || !instance.selectedMachineId || !instance.busy || instance.cancelBusy) return;
-    instance.cancelBusy = true;
-    setState(instance, "Interruzione richiesta…");
+    if (!instance.selectedMachineId || !instance.busy || instance.cancelBusy) return;
+    instance.stopRequested = true;
+    if (!instance.conversationId) return;
+    instance.cancelBusy = true; refreshModeAvailability(instance);
     try {
       var response = await fetch(conversationsEndpointFor(instance.selectedMachineId, "/" + encodeURIComponent(instance.conversationId) + "/cancel"), { method: "POST", credentials: "same-origin", headers: conversationHeaders(), body: "{}" });
-      if (response.status !== 202) throw new Error(await chatResponseError(response));
-      scheduleConversationPoll(instance, conversationContext(instance), true);
+      if (![200, 202].includes(response.status)) throw new Error(await chatResponseError(response));
+      if (response.status === 200 && !instance.submitting) { setBusy(instance, false); void openConversation(instance, instance.conversationId); }
+      else if (!instance.submitting) scheduleConversationPoll(instance, conversationContext(instance), true);
     } catch (error) { setState(instance, error && error.message ? error.message : "Interruzione non riuscita.", true); }
-    finally { instance.cancelBusy = false; }
+    finally { instance.cancelBusy = false; refreshModeAvailability(instance); }
   }
 
   async function requestMachineAction(instance, action) {
-    if (!instance.selectedMachineId || !instance.canConfigure || instance.actionBusy) return;
-    if (action === "enable" && (instance.machineState !== "disabled" || !instance.missing.hidden)) return;
-    if (action === "disable" && !instance.enabled) return;
+    if (!instance.selectedMachineId) { showMachineActionError(instance, "Seleziona una macchina prima di continuare.", action); return; }
+    if (instance.actionBusy) return;
+    if (!instance.canConfigure) { showMachineActionError(instance, "L’attivazione è riservata ai ruoli owner o admin.", action); return; }
+    if (action === "enable" && instance.machineState !== "disabled") { showMachineActionError(instance, "La macchina deve essere nello stato disattivato prima di poterla attivare.", action); return; }
+    if (action === "enable" && !instance.missing.hidden) { showMachineActionError(instance, "Completa i prerequisiti elencati prima di attivare Server AI.", action); return; }
+    if (action === "disable" && !instance.enabled) { showMachineActionError(instance, "La macchina risulta già disattivata.", action); return; }
+    var actionMachineId = instance.selectedMachineId;
+    instance.actionError = "";
+    instance.actionErrorAction = "";
+    renderMachineActionError(instance);
+    setState(instance, "");
     instance.actionBusy = true;
+    instance.pendingAction = action;
     if (action === "disable") {
       if (instance.controller) instance.controller.abort();
       instance.controller = null;
       setBusy(instance, false);
     }
-    renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: action === "enable" ? "starting" : "stopping", enabled: instance.enabled, canConfigure: instance.canConfigure, label: action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina." });
-    instance.transientUntil = Date.now() + 60_000;
+    renderMachine(instance, instance.lastMachineStatus || { machineLabel: instance.selectedMachineLabel, state: instance.machineState, enabled: instance.enabled, canConfigure: instance.canConfigure });
+    var actionError = "";
     try {
       var headers = new Headers({ Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "platform-control-center" });
       var csrf = csrfToken();
       if (csrf) headers.set("X-CSRF-Token", csrf);
       var response = await fetch(endpoint(instance, "/" + action), { method: "POST", credentials: "same-origin", headers: headers, body: "{}" });
       var payload = await response.json().catch(function () { return {}; });
-      if (response.status !== 202) throw new Error(String(payload.message || payload.error || "Operazione non avviata."));
-      setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
+      if (actionMachineId !== instance.selectedMachineId) return;
+      if (response.status !== 202) {
+        actionError = String(payload.message || payload.error || "Operazione non avviata.");
+        if (payload.reauthUrl) actionError += " Effettua di nuovo l’accesso con passkey.";
+        instance.actionError = actionError;
+        instance.actionErrorAction = action;
+      }
+      if (!actionError) {
+        instance.pendingAction = "";
+        instance.transientUntil = Date.now() + 60_000;
+        renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: action === "enable" ? "starting" : "stopping", enabled: instance.enabled, canConfigure: instance.canConfigure, label: action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina." });
+        setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
+      }
     } catch (error) {
-      setState(instance, error && error.message ? error.message : "Operazione non avviata.", true);
+      if (actionMachineId !== instance.selectedMachineId) return;
+      actionError = error && error.message ? error.message : "Operazione non avviata.";
+      instance.actionError = actionError;
+      instance.actionErrorAction = action;
     } finally {
+      instance.pendingAction = "";
       instance.actionBusy = false;
       if (instance.root.isConnected) await refreshStatus(instance);
+      // The status refresh clears its own transient state. Restore a failed
+      // action afterwards so auth, CSRF, and server-side rejection details
+      // remain visible instead of making the button appear to do nothing.
+      if (actionError && instance.root.isConnected && actionMachineId === instance.selectedMachineId) {
+        renderMachineActionError(instance);
+        setState(instance, actionError, true);
+      }
     }
   }
 
@@ -2077,6 +1939,10 @@
     }
     if (active.pointerMoveHandler) window.removeEventListener("pointermove", active.pointerMoveHandler);
     if (active.resizeHandler) window.removeEventListener("resize", active.resizeHandler);
+    var restoreDialog = active.root.querySelector("[data-ai-restore-dialog]");
+    if (restoreDialog && restoreDialog.open) restoreDialog.close();
+    var shell = active.root.closest(".ops-shell");
+    if (shell) shell.classList.remove("server-ai-portal-nav-open");
     active = null;
   }
 
@@ -2085,29 +1951,29 @@
     var root = document.querySelector("[data-server-ai]");
     if (!root) return;
     active = {
-      root: root, mode: "auto", models: null, machines: [], conversations: [], queueItems: [], queueBusy: false, conversationId: "", nextBefore: null, nextConversationCursor: null, contextEpoch: 0, selectedMachineId: "", selectedMachineLabel: "", machineState: "unavailable", generationAvailable: false, historyAvailable: false, lastMachineStatus: null, transientUntil: 0, busy: false, actionBusy: false, enabled: false, canConfigure: false, controller: null, statusController: null, machineController: new AbortController(), conversationListController: null, conversationDetailController: null, conversationCreateController: null, generationPollController: null, attachmentUploadController: null, attachmentUpload: null, pollTimer: null, generationPollTimer: null, activeAssistantId: null, cancelBusy: false, nextDelivery: null, attachmentCapabilities: null, pendingAttachments: [], attachmentUploading: false, autoScroll: true, programmaticScroll: false, pointerScrolling: false, userScrollUntil: 0, scrollFrame: null, scrollResetFrame: null, pointerEndHandler: null, pointerMoveHandler: null, drawerOpener: null, resizeHandler: null,
-      transcript: root.querySelector("[data-ai-transcript]"), prompt: root.querySelector("[data-ai-prompt]"), send: root.querySelector("[data-ai-send]"), sendImmediate: root.querySelector("[data-ai-send-immediate]"), stop: root.querySelector("[data-ai-stop]"), jumpBottom: root.querySelector("[data-ai-jump-bottom]"), queue: root.querySelector("[data-ai-queue]"),
+      root: root, mode: "auto", models: null, machines: [], conversations: [], conversationId: "", nextBefore: null, nextConversationCursor: null, contextEpoch: 0, selectedMachineId: "", selectedMachineLabel: "", machineState: "unavailable", generationAvailable: false, historyAvailable: false, lastMachineStatus: null, transientUntil: 0, busy: false, actionBusy: false, actionError: "", actionErrorAction: "", pendingAction: "", enabled: false, canConfigure: false, controller: null, statusController: null, machineController: new AbortController(), conversationListController: null, conversationDetailController: null, conversationCreateController: null, attachmentUploadController: null, attachmentUpload: null, pollTimer: null, generationPollTimer: null, activeAssistantId: null, cancelBusy: false, submitting: false, stopRequested: false, attachmentCapabilities: null, pendingAttachments: [], attachmentUploading: false, autoScroll: true, programmaticScroll: false, pointerScrolling: false, userScrollUntil: 0, scrollFrame: null, scrollResetFrame: null, pointerEndHandler: null, pointerMoveHandler: null, drawerOpener: null, resizeHandler: null,
+      transcript: root.querySelector("[data-ai-transcript]"), prompt: root.querySelector("[data-ai-prompt]"), send: root.querySelector("[data-ai-send]"), stop: root.querySelector("[data-ai-stop]"), jumpBottom: root.querySelector("[data-ai-jump-bottom]"),
       state: root.querySelector("[data-ai-state]"), health: root.querySelector("[data-ai-health]"), attachments: root.querySelector("[data-ai-attachments]"), attach: root.querySelector("[data-ai-attach]"), attachmentInput: root.querySelector("[data-ai-attachment-input]"),
       machineLabel: root.querySelector("[data-ai-machine-label]"), machineName: root.querySelector("[data-ai-machine-name]"), machinePicker: root.querySelector("[data-ai-machine-picker]"), machineSelect: root.querySelector("[data-ai-machine-select]"),
-      gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
+      gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), actionErrorNode: root.querySelector("[data-ai-action-error]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
     };
     var instance = active;
-    initializeModeControl(instance);
     root.addEventListener("click", function (event) {
-      var quickReply = event.target.closest("[data-ai-quick-reply]");
-      if (quickReply) { activateQuickReply(instance, quickReply); return; }
-      var sendImmediate = event.target.closest("[data-ai-send-immediate]");
-      if (sendImmediate) { if (!sendImmediate.disabled) { instance.nextDelivery = "immediate"; send(instance); } return; }
-      var queueDismiss = event.target.closest("[data-ai-queue-dismiss]");
-      if (queueDismiss) { dismissQueueError(instance, queueDismiss.getAttribute("data-ai-queue-dismiss")); return; }
-      var queueCancel = event.target.closest("[data-ai-queue-cancel]");
-      if (queueCancel) { void cancelQueuedRequest(instance, queueCancel.getAttribute("data-ai-queue-cancel")); return; }
-      var mode = event.target.closest("[data-ai-mode]");
-      if (mode) {
-        if (mode.disabled || instance.actionBusy) return;
-        selectMode(instance, mode.getAttribute("data-ai-mode"), true, false);
+      var restoreOpen = event.target.closest("[data-ai-open-restore]");
+      if (restoreOpen) {
+        var dialog = instance.root.querySelector("[data-ai-restore-dialog]");
+        closeOpenDetails(instance);
+        if (dialog && !dialog.open) { instance.restoreOpener = restoreOpen; dialog.showModal(); document.dispatchEvent(new CustomEvent("server-ai:restore-open")); }
         return;
       }
+      if (event.target.closest("[data-ai-close-restore]")) {
+        var restore = instance.root.querySelector("[data-ai-restore-dialog]");
+        if (restore) restore.close();
+        var tools = instance.root.querySelector("[data-ai-tools] > summary"); if (tools) tools.focus();
+        return;
+      }
+      var quickReply = event.target.closest("[data-ai-quick-reply]");
+      if (quickReply) { activateQuickReply(instance, quickReply); return; }
       var jumpBottom = event.target.closest("[data-ai-jump-bottom]");
       if (jumpBottom) {
         instance.userScrollUntil = 0;
@@ -2161,23 +2027,12 @@
       }
       if (event.target.closest("[data-ai-open-conversations]")) {
         instance.drawerOpener = event.target.closest("[data-ai-open-conversations]");
-        setDrawerOpen(instance, true);
+        if (!isMobileDrawer()) { instance.root.classList.toggle("server-ai-history-collapsed"); setDrawerOpen(instance, false); }
+        else setDrawerOpen(instance, true);
       }
       if (event.target.closest("[data-ai-close-conversations]")) setDrawerOpen(instance, false, true);
     });
     root.addEventListener("keydown", function (event) {
-      var modeButton = event.target.closest("[data-ai-mode]");
-      var key = event.key;
-      if (modeButton && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(key)) {
-        if (modeButton.disabled || instance.actionBusy) return;
-        var index = MODE_OPTIONS.indexOf(instance.mode);
-        if (key === "Home") index = 0;
-        else if (key === "End") index = MODE_OPTIONS.length - 1;
-        else index = (index + (key === "ArrowRight" || key === "ArrowDown" ? 1 : -1) + MODE_OPTIONS.length) % MODE_OPTIONS.length;
-        event.preventDefault();
-        selectMode(instance, MODE_OPTIONS[index], true, true);
-        return;
-      }
       if (event.key !== "Escape") return;
       var openDetails = root.querySelector("details[open]");
       if (openDetails) { closeOpenDetails(instance); event.preventDefault(); return; }
@@ -2227,6 +2082,19 @@
   function start() {
     mount();
     document.addEventListener("cc:navigation-complete", mount);
+    document.addEventListener("click", function (event) {
+      if (!active) return;
+      var toggle = event.target.closest("[data-ai-portal-nav-toggle]");
+      var shell = active.root.closest(".ops-shell");
+      if (!shell) return;
+      if (toggle) { var open = shell.classList.toggle("server-ai-portal-nav-open"); toggle.setAttribute("aria-expanded", String(open)); }
+      else if (shell.classList.contains("server-ai-portal-nav-open") && !event.target.closest(".ops-sidebar")) { shell.classList.remove("server-ai-portal-nav-open"); var control = shell.querySelector("[data-ai-portal-nav-toggle]"); if (control) control.setAttribute("aria-expanded", "false"); }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (!active || event.key !== "Escape") return;
+      var shell = active.root.closest(".ops-shell");
+      if (shell && shell.classList.contains("server-ai-portal-nav-open")) { shell.classList.remove("server-ai-portal-nav-open"); var toggle = shell.querySelector("[data-ai-portal-nav-toggle]"); if (toggle) { toggle.setAttribute("aria-expanded", "false"); toggle.focus(); } }
+    });
     observer = new MutationObserver(function () {
       if (active && !active.root.isConnected) cleanup();
     });

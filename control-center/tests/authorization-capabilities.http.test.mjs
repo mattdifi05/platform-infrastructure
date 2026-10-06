@@ -23,6 +23,10 @@ let publicOrigin = "";
 let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
+  ["POST", "/control/backups/production-restore"],
+  ["GET", "/control/backups/vps"],
+  ["POST", "/control/cloudflare/dns/change"],
+  ["GET", "/control/advanced/cloudflare"],
   ["GET", "/control/overview"],
   ["GET", "/control/advanced/backup-restore"],
   ["POST", "/control/vault/secrets/example/reveal"],
@@ -80,6 +84,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_BIND_HOST: "127.0.0.1",
       CONTROL_CENTER_AUTH_MODE: "app-passkey",
       CONTROL_CENTER_AUTH_STORE: "memory",
+      CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE: "/nonexistent-test-only-cloudflare-config",
       CONTROL_CENTER_PUBLIC_ORIGIN: publicOrigin,
       CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1",
       CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled",
@@ -212,6 +217,20 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   restoreStateAfterDenied();
 
   assert.equal((await request(baseUrl, "GET", "/?section=vault", identities.owner)).status, 200, "fresh owner reaches Vault UI");
+  for (const pathname of ["/?section=cloudflare", "/index.html?section=cloudflare", "/?section=vps-backups"]) {
+    const legacyPage = await request(baseUrl, "GET", pathname, identities.owner301);
+    assert.equal(legacyPage.status, 200, `${pathname} follows standard Applications access`);
+    const html = await legacyPage.text();
+    assert.match(html, /<h1 id="control-page-title">Applicazioni<\/h1>/, `${pathname} falls back to Applications`);
+    assert.doesNotMatch(html, /data-cloudflare-dns|data-vps-restore/, `${pathname} does not render removed page tools`);
+    assert.doesNotMatch(html, /data-ai-portal-nav-toggle/, `${pathname} does not render the Server AI mobile menu toggle`);
+  }
+  const serverAiPage = await request(baseUrl, "GET", "/?section=server-ai", identities.owner);
+  assert.equal(serverAiPage.status, 200);
+  const serverAiHtml = await serverAiPage.text();
+  assert.doesNotMatch(serverAiHtml, /data-ai-restore-dialog|data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
+  assert.match(serverAiHtml, /data-ai-portal-nav-toggle[^>]*aria-controls="platform-portal-navigation"[^>]*aria-expanded="false"/);
+  assert.equal((serverAiHtml.match(/id="platform-portal-navigation"/g) || []).length, 1, "Server AI has one addressable operations nav");
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {

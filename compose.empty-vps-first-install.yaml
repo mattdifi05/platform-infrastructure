@@ -1,0 +1,166 @@
+# Initial operator installation on a proven empty VPS only. This is not a
+# release overlay and must never be loaded by compose-vps.sh or a release gate.
+services:
+  postgres:
+    # The custom init entrypoint does not inherit the image CMD after Compose
+    # merges overlays; pass the daemon explicitly on a fresh installation.
+    command: ["postgres"]
+
+  mariadb:
+    group_add: ["1000"]
+
+  nats-volume-init:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    network_mode: none
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown -R 1000:1000 /data"]
+    volumes:
+      - enterprise_nats_data:/data
+    security_opt: ["no-new-privileges:true"]
+
+  nats:
+    depends_on:
+      nats-volume-init:
+        condition: service_completed_successfully
+
+  project-router:
+    environment:
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: ${EMPTY_VPS_HOSTED_LOCK_SHA256:?set verified empty-host lock digest}
+
+  control-center:
+    user: "1000:1000"
+    build:
+      args:
+        NODE_IMAGE: node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
+    environment:
+      CONTROL_CENTER_FIRST_CONFIGURATION_MODE: required
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false"
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: "false"
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:?set reviewed Mac client CIDR}
+
+  php-apache:
+    profiles:
+      - legacy-shared-runtime-disabled
+
+  minio:
+    profiles:
+      - removed-minio-community
+
+  rustfs-volume-init:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    network_mode: none
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown -R 10001:10001 /data /logs"]
+    volumes:
+      - platform_rustfs_data:/data
+      - platform_rustfs_logs:/logs
+    security_opt:
+      - no-new-privileges:true
+
+  rustfs-backend:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    container_name: gf-rustfs
+    user: "10001:10001"
+    group_add: ["1000"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY_FILE: /run/secrets/rustfs_access_key
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/rustfs_secret_key
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUST_LOG: warn
+    secrets:
+      - rustfs_access_key
+      - rustfs_secret_key
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    volumes:
+      - platform_rustfs_data:/data
+      - platform_rustfs_logs:/logs
+    networks:
+      - platform_storage
+    depends_on:
+      rustfs-volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+  rustfs-gateway:
+    image: platform/rustfs-gateway:local
+    build:
+      context: .
+      dockerfile: deployment/docker/s3-gateway.Dockerfile
+    container_name: gf-minio-gateway
+    user: "101:101"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    pids_limit: 128
+    mem_limit: 128m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    volumes:
+      - ./deployment/config/storage/rustfs-gateway.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      platform_storage:
+        aliases: [minio]
+    depends_on:
+      rustfs-backend:
+        condition: service_healthy
+
+  waf:
+    group_add: ["1000"]
+    environment:
+      NGINX_ALWAYS_TLS_REDIRECT: "off"
+    ports: !override []
+
+  waf-loopback-proxy:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    container_name: platform-waf-loopback-proxy
+    network_mode: host
+    user: "101:101"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    pids_limit: 64
+    mem_limit: 64m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    volumes:
+      - ./deployment/config/empty-vps-loopback-nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      waf:
+        condition: service_healthy
+
+  alertmanager:
+    volumes: !override
+      - enterprise_alertmanager_data:/alertmanager
+      - ./deployment/config/empty-vps-alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+volumes:
+  platform_rustfs_data:
+    name: platform_rustfs_data
+  platform_rustfs_logs:
+    name: platform_rustfs_logs
+
+secrets:
+  rustfs_access_key:
+    file: ./secrets/rustfs_access_key.txt
+  rustfs_secret_key:
+    file: ./secrets/rustfs_secret_key.txt
