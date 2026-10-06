@@ -22,6 +22,7 @@ def main():
  with (b.WORK/'operation.lock').open('a') as lock:
   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   except BlockingIOError:return
+  b.settle_restore_journal()
   running=queue_command('claim')
   if not running:return
   jobpath=pathlib.Path(running);root=QUEUE/'running'

@@ -61,4 +61,29 @@ class RuntimeRestoreTests(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,'Missing enrolled'):r.b.inspect([{'id':x} for x in ids])
   with patch.object(r.b,'run',return_value=('c'*64+'\n').encode()):
    with self.assertRaisesRegex(RuntimeError,'Unexpected running'):r.b.inspect([{'id':x} for x in ids])
+ def test_pending_journal_blocks_and_verified_terminal_archives_without_deleting_originals(self):
+  previous=self.root/'original';previous.write_text('keep')
+  journal={'operation':'restore-example-123456','status':'rolled-back','paths':[{'previous':str(previous)}]}
+  r.b.save(r.JOURNAL,journal)
+  with patch.object(r.b,'private',side_effect=lambda p,*a:p):
+   with self.assertRaisesRegex(RuntimeError,'Incomplete production'):r.b.settle_restore_journal(r.JOURNAL)
+   journal['runtimeHealthVerified']=True;r.b.save(r.JOURNAL,journal);r.b.settle_restore_journal(r.JOURNAL)
+   self.assertFalse(r.JOURNAL.exists());self.assertTrue((self.root/'restore-journals'/'restore-example-123456.json').exists())
+   self.assertEqual(previous.read_text(),'keep');r.b.settle_restore_journal(r.JOURNAL)
+ def test_selected_running_state_does_not_mutate_current_rollback_state(self):
+  current=[{'Id':'current','Name':'/ai','State':{'Running':True}}];snapshot=[{'Name':'/ai','State':{'Running':False}}]
+  selected=r.selected_running_state(current,snapshot)
+  self.assertFalse(selected[0]['State']['Running']);self.assertTrue(current[0]['State']['Running']);self.assertEqual(selected[0]['Id'],'current')
+ def test_only_cc_bootstrap_environment_is_exempt_from_persistent_comparison(self):
+  base={'Name':'/enterprise-control-center','Config':{'Env':['PGDATABASE=original','CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS=old']}}
+  changed={'Name':base['Name'],'Config':{'Env':['PGDATABASE=original','CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS=new']}}
+  self.assertEqual(r.persistent_env(base),r.persistent_env(changed))
+  changed['Config']['Env'][0]='PGDATABASE=other';self.assertNotEqual(r.persistent_env(base),r.persistent_env(changed))
+  changed['Name']='/other';self.assertIn('CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS=new',r.persistent_env(changed))
+ def test_database_configuration_uses_captured_numeric_ownership_and_file_mode(self):
+  file=self.root/'tls.key';file.write_text('fixture')
+  with patch.object(r.os,'chown') as ownership:
+   r.restore_file_metadata(file,{'uid':999,'gid':999,'mode':0o600});ownership.assert_called_once_with(file,999,999)
+  self.assertEqual(file.stat().st_mode&0o777,0o600)
+  with self.assertRaisesRegex(RuntimeError,'ownership'):r.restore_file_metadata(file,{'uid':999,'gid':999})
 if __name__=='__main__':unittest.main()

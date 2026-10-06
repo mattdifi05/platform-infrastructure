@@ -38,6 +38,25 @@ def run(args,timeout=300,output=None):
  if r.returncode:raise RuntimeError('Native command failed: '+pathlib.Path(args[0]).name+' exit '+str(r.returncode))
  return r.stdout
 
+def settle_restore_journal(file=None):
+ file=pathlib.Path(file) if file is not None else WORK/'production-restore.json'
+ if not file.exists() and not file.is_symlink():return
+ private(file);journal=json.loads(file.read_text())
+ if journal.get('status') not in ('done','rolled-back') or journal.get('runtimeHealthVerified') is not True:raise RuntimeError('Incomplete production restore requires native reconciliation before backup or queue work')
+ operation=journal.get('operation','')
+ if not re.fullmatch('[a-z0-9][a-z0-9-]{15,127}',operation):raise RuntimeError('Invalid terminal restore journal')
+ history=file.parent/'restore-journals';history.mkdir(mode=0o700,exist_ok=True);private(history,True)
+ target=history/(operation+'.json')
+ if target.exists() or target.is_symlink():raise RuntimeError('Terminal restore journal already archived; reconcile duplicate')
+ os.rename(file,target) # Keep original rollback paths and root replay ledger intact.
+
+def capture_file_metadata(container,source):
+ raw=run(['docker','exec',container,'stat','-Lc','%u:%g:%a:%f',source]).decode().strip().split(':')
+ if len(raw)!=4 or not all(v.isdigit() for v in raw[:3]) or not re.fullmatch('[a-fA-F0-9]+',raw[3]) or not stat.S_ISREG(int(raw[3],16)):raise RuntimeError('Expected regular native database configuration file')
+ mode=int(raw[2],8)
+ if mode&~0o777:raise RuntimeError('Unexpected database configuration mode')
+ return {'uid':int(raw[0]),'gid':int(raw[1]),'mode':mode}
+
 def inspect(enrolled=None):
  active=run(['docker','ps','-q','--no-trunc']).decode().split()
  if enrolled is not None:
@@ -99,6 +118,7 @@ def database_container(rows,volume):
  return matches[0]
 
 def capture():
+ settle_restore_journal()
  if (WORK/'paused.json').exists():raise RuntimeError('Prior pause journal must be reconciled before a new capture')
  p,rows=profile()
  pg=database_container(rows,'enterprise_postgres_data');maria=database_container(rows,'enterprise_mariadb_data')
@@ -132,12 +152,12 @@ def capture():
   recovery_spec=importlib.util.spec_from_file_location('vps_recovery',HERE/'production-restore.py');recovery=importlib.util.module_from_spec(recovery_spec);recovery_spec.loader.exec_module(recovery)
   save(runtime/'database-semantics.json',recovery.semantic_inventory(pg,maria))
   # Preserve live DB configuration/TLS as well as logical contents. Values stay encrypted.
-  pgpaths={}
+  pgpaths={};file_metadata={'postgres':{},'mariadb':{}}
   for setting,name in [('hba_file','pg_hba.conf'),('ident_file','pg_ident.conf'),('config_file','postgresql.conf'),('data_directory','postgresql.auto.conf')]:
    source=run(['docker','exec',pg,'psql','-U','postgres','-Atc','SHOW '+setting]).decode().strip()
    if not source.startswith('/') or '\n' in source or '..' in pathlib.PurePosixPath(source).parts:raise RuntimeError('Unexpected live PostgreSQL config path')
    if setting=='data_directory':source+='/postgresql.auto.conf'
-   pgpaths[name]=source
+   pgpaths[name]=source;file_metadata['postgres'][name]=capture_file_metadata(pg,source)
    run(['docker','cp',pg+':'+source,str(runtime/name)])
   save(runtime/'postgres-live-config-paths.json',pgpaths)
   tls=run(['docker','exec',maria,'sh','-c',"MYSQL_PWD=\"$(cat /run/secrets/mariadb_root_password)\" exec mariadb -uroot -N -B -e \"SHOW VARIABLES WHERE Variable_name IN ('ssl_ca','ssl_cert','ssl_key')\""]).decode().splitlines()
@@ -146,8 +166,10 @@ def capture():
    variable,source=line.split('\t',1)
    if not source:continue
    if variable not in ('ssl_ca','ssl_cert','ssl_key') or not source.startswith(('/var/lib/mysql/','/etc/','/run/')) or '..' in pathlib.PurePosixPath(source).parts:raise RuntimeError('Unexpected live MariaDB TLS path')
+   file_metadata['mariadb'][variable]=capture_file_metadata(maria,source)
    run(['docker','cp',maria+':'+source,str(runtime/('mariadb-'+variable))]);tls_paths[variable]=source
   save(runtime/'mariadb-live-tls-paths.json',tls_paths)
+  save(runtime/'database-file-metadata.json',file_metadata)
   if p.get('pauseAuthorized') is not True:raise RuntimeError('Consistent filesystem capture requires explicit infrastructure pause authorization')
   pause_names={'gf-rustfs','enterprise-nats','enterprise-redis','enterprise-grafana','enterprise-prometheus','enterprise-loki','enterprise-alertmanager'}
   # Journal lets ExecStopPost recover only containers paused by this operation.
@@ -181,6 +203,7 @@ def capture():
    target=art/'host-config.tar'
    with tarfile.open(target,'w:',dereference=False) as t:
     def filter_host(info):
+     if any('.platform-restore-' in part for part in pathlib.PurePosixPath(info.name).parts):return None
      if info.name.startswith('host/var/lib/platform-server-ai-admin/operations.sqlite'):return None
      if not(info.isfile() or info.isdir() or info.issym() or info.islnk()):return None
      return info

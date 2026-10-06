@@ -188,7 +188,8 @@ credentials, AI authority/tokens, backup authority and current queue are preserv
 The encrypted OS capsule is for separately operated offline Hostinger recovery;
 this operation does not restore a complete VM or change images automatically.
 The portal's users/passkeys and application data return to the selected point.
-Previously disabled containers remain disabled; all 21 enrolled identities remain
+Successful recovery adopts the selected point’s running/stopped service states;
+rollback restores the pre-operation service states. All 21 enrolled identities remain
 covered even when only 19 are running. Capture reports both counts explicitly.
 
 Before downtime, the selected remote receipt, ciphertext, manifest and every
@@ -205,7 +206,10 @@ source unit tests are not evidence that a production restore has run.
 
 After staging, the root consumer rechecks the profile, stops clients before the
 DB engines, and switches same-filesystem paths while retaining original siblings.
-It restarts databases before the originally running services and checks health.
+It restarts databases before the services running in the selected point and checks
+that running/stopped state and health. Original-state rollback uses the pre-operation
+service states. Database/TLS numeric UID/GID and modes come from metadata captured
+inside the original database containers, never from a staging directory fallback.
 Failure triggers rollback to retained originals; a process interruption requires
 explicit root reconciliation, never blind retry. The protected journal is
 `/var/lib/platform-vps-backup/production-restore.json`. For an interrupted operation,
@@ -213,9 +217,20 @@ root may invoke the installed `production-restore.py --recover-rollback`; it che
 profile signature, container pins and exact enrolled paths before switching back.
 A completed journal is deliberately not accepted by this recovery command.
 
-After any production attempt, root must inspect the outcome and retained original
-paths, reconcile the queue's unknown/failed state if needed, and explicitly archive
-the journal and remove only that operation's retained/staged siblings after review.
-No automatic cleanup deletes the last rollback copy. The next operation refuses
-an existing journal. Neither the UI nor timers trigger a production restore
+An incomplete journal blocks capture, queue claims and further restores. A completed
+or fully rolled-back journal is terminal only after runtime health has been verified.
+The next native operation moves that journal to the root-protected `restore-journals`
+directory, retaining the replay ledger and original copies; weekly backups then
+continue normally. Original siblings are root-owned and private, with their original
+permissions recorded for rollback. Capture excludes those retained siblings. Root
+reviews and removes only the specific old rollback/staging copies when appropriate;
+no automatic cleanup deletes the last rollback copy. Unknown queue outcomes still
+require explicit reconciliation. Neither the UI nor timers trigger a production restore
 automatically. Gates remain closed until review and the real isolated-engine test.
+
+The strict container compatibility comparison excludes only Control Center's
+`CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS`,
+`CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS`, and
+`CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE`. These current management-bootstrap
+settings stay in place. Database variables, all other environment entries, images,
+mounts, user, command and entrypoint must still match the selected point.

@@ -55,12 +55,27 @@ def unpack_bundle(plain,directory):
    with t.extractfile(a['path']) as src,dest.open('xb') as out:shutil.copyfileobj(src,out)
  return manifest
 
+BOOTSTRAP_ENV={'CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS','CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS','CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE'}
+def persistent_env(row):
+ ignored=BOOTSTRAP_ENV if row['Name']=='/enterprise-control-center' else set()
+ return sorted(e for e in row['Config'].get('Env',[]) if e.split('=',1)[0] not in ignored)
+
+def selected_running_state(current,snapshot):
+ desired={r['Name']:bool(r['State'].get('Running')) for r in snapshot}
+ if set(desired)!={r['Name'] for r in current}:raise RuntimeError('Selected runtime state differs from current membership')
+ return [{**r,'State':{**r['State'],'Running':desired[r['Name']]}} for r in current]
+
+def restore_file_metadata(destination,metadata):
+ if set(metadata)!={'uid','gid','mode'} or any(type(v) is not int or v<0 for v in metadata.values()) or metadata['mode']&~0o7777:raise RuntimeError('Missing or invalid captured database file ownership')
+ os.chown(destination,metadata['uid'],metadata['gid']);os.chmod(destination,metadata['mode'])
+
 def compatible(snapshot,current,profile):
  old={r['Name']:r for r in snapshot};now={r['Name']:r for r in current}
  if set(old)!=set(now) or len(old)!=21:raise RuntimeError('Restore runtime membership differs')
  for name,r in old.items():
   if r['Image']!=now[name]['Image'] or r['Mounts']!=now[name]['Mounts']:raise RuntimeError('Restore requires the same enrolled images and mount topology')
-  if any(r['Config'].get(k)!=now[name]['Config'].get(k) for k in ('Env','Cmd','Entrypoint','User')):raise RuntimeError('Restore container configuration differs from selected point')
+  if any(r['Config'].get(k)!=now[name]['Config'].get(k) for k in ('Cmd','Entrypoint','User')):raise RuntimeError('Restore container configuration differs from selected point')
+  if persistent_env(r)!=persistent_env(now[name]):raise RuntimeError('Persistent runtime environment differs from selected point')
  if sorted({m['Name'] for r in snapshot for m in r['Mounts'] if m['Type']=='volume'})!=sorted({m['Name'] for r in current for m in r['Mounts'] if m['Type']=='volume'}):raise RuntimeError('Restore volume scope differs')
  if any((r['Config'].get('Labels') or {}).get('com.docker.compose.project') not in b.ALLOW_PROJECTS for r in snapshot):raise RuntimeError('Foreign workload in restore capsule')
 
@@ -133,12 +148,13 @@ def stage_databases(directory,runtime,rows,volumes,operation):
   for volume,engine in DB_VOLUMES.items():
    row=next(r for r in rows if any(m.get('Name')==volume for m in r['Mounts']));mount=next(m for m in row['Mounts'] if m.get('Name')==volume)
    mapping=json.loads((runtime/('postgres-live-config-paths.json' if engine=='postgres' else 'mariadb-live-tls-paths.json')).read_text())
+   metadata=json.loads((runtime/'database-file-metadata.json').read_text())[engine]
    for name,target in mapping.items():
     if not within(target,mount['Destination']):continue # Other paths are enrolled bind configs.
     dest=stages[volume]/pathlib.PurePosixPath(target).relative_to(mount['Destination']);dest.parent.mkdir(parents=True,exist_ok=True)
-    owner=dest.stat() if dest.exists() else stages[volume].stat()
+    if name not in metadata:raise RuntimeError('Missing original database configuration ownership')
     src=runtime/(name if engine=='postgres' else 'mariadb-'+name)
-    shutil.copyfile(src,dest);os.chown(dest,owner.st_uid,owner.st_gid);os.chmod(dest,stat.S_IMODE(owner.st_mode) if dest.is_file() and stat.S_ISREG(owner.st_mode) else 0o600)
+    shutil.copyfile(src,dest);restore_file_metadata(dest,metadata[name])
   return stages
  finally:
   for name in reversed(created):
@@ -167,7 +183,9 @@ def switch_paths(items,journal):
   target=pathlib.Path(item['target']);staged=pathlib.Path(item['staged']);previous=pathlib.Path(item['previous'])
   if previous.exists() or previous.is_symlink():raise RuntimeError('Rollback path already exists')
   item['state']='switching';b.save(JOURNAL,journal)
-  os.rename(target,previous);os.rename(staged,target)
+  os.rename(target,previous)
+  os.chown(previous,0,0);os.chmod(previous,0o700 if previous.is_dir() else 0o600)
+  os.rename(staged,target)
   item['state']='switched';b.save(JOURNAL,journal)
 
 def rollback(journal):
@@ -178,12 +196,14 @@ def rollback(journal):
    if target.exists() or target.is_symlink():
     if failed.exists() or failed.is_symlink():raise RuntimeError('Rollback requires manual path reconciliation')
     os.rename(target,failed)
+   metadata=item.get('previousMetadata')
+   if metadata:restore_file_metadata(previous,metadata)
    os.rename(previous,target)
   item['state']='rolled-back';b.save(JOURNAL,journal)
- journal['status']='rolled-back';journal['finishedAt']=b.now();b.save(JOURNAL,journal)
+ journal['status']='rolled-back';journal['runtimeHealthVerified']=False;journal['finishedAt']=b.now();b.save(JOURNAL,journal)
 
 def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
- if JOURNAL.exists():raise RuntimeError('Prior restore journal requires explicit reconciliation')
+ b.settle_restore_journal(JOURNAL)
  if not re.fullmatch('[a-f0-9]{64}',digest) or not re.fullmatch('[a-f0-9]{64}',profile_digest):raise RuntimeError('Immutable restore digests required')
  def interrupted(*_):raise InterruptedError('Manual restore interrupted; rollback required')
  signal.signal(signal.SIGTERM,interrupted)
@@ -198,7 +218,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    manifest=unpack_bundle(plain,scratch)
    if sorted(manifest['resources'],key=lambda r:r['id'])!=sorted(b.enrolled_resources(p),key=lambda r:r['id']):raise RuntimeError('Restore resource set differs from enrolled scope')
    runtime=extract_subset(scratch/'host-config.tar',scratch/'capsule','runtime')
-   snapshot=json.loads((runtime/'containers.json').read_text());compatible(snapshot,rows,p)
+   snapshot=json.loads((runtime/'containers.json').read_text());compatible(snapshot,rows,p);desired_rows=selected_running_state(rows,snapshot)
    volume_sources={m['Name']:m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}
    metadata=json.loads(b.run(['docker','volume','inspect',*sorted(volume_sources)]))
    if len(volume_sources)!=13 or any(v['Driver']!='local' or v.get('Options') for v in metadata):raise RuntimeError('Only enrolled local persistent volumes can switch')
@@ -219,7 +239,8 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
     suffix='.platform-restore-'+operation[-12:]
     staged=target.with_name(target.name+suffix);previous=target.with_name(target.name+suffix+'-previous')
     if staged.exists() or staged.is_symlink() or previous.exists() or previous.is_symlink():raise RuntimeError('Restore sibling state already exists')
-    item.update(staged=str(staged),previous=str(previous),state='preparing')
+    original=target.stat()
+    item.update(staged=str(staged),previous=str(previous),state='preparing',previousMetadata={'uid':original.st_uid,'gid':original.st_gid,'mode':stat.S_IMODE(original.st_mode)})
     if source.is_dir():shutil.copytree(source,staged,symlinks=True,copy_function=shutil.copy2)
     else:shutil.copy2(source,staged)
     # copy2 does not preserve uid/gid; apply exact extracted ownership recursively.
@@ -230,22 +251,22 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    # Revalidate actual runtime and root profile immediately before downtime.
    b.profile()
    if b.sha(b.PROFILE)!=profile_digest:raise RuntimeError('Profile changed during staging')
-   journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'stopping','startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'paths':items};b.save(JOURNAL,journal)
+   journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'stopping','startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'selectedRunningContainers':[r['Id'] for r in desired_rows if r['State'].get('Running')],'paths':items};b.save(JOURNAL,journal)
    # All clients stop before databases; cloudflared/SSH/network host plane remains up.
    dbnames={b.database_container(rows,v) for v in DB_VOLUMES}
    for r in sorted(rows,key=lambda r:r['Name'].lstrip('/') in dbnames):
     if not r['State'].get('Running'):continue
     stopped=True;b.run(['docker','stop','--time','60',r['Id']],timeout=90)
    journal['status']='switching';b.save(JOURNAL,journal);switch_paths(items,journal)
-   journal['status']='starting';b.save(JOURNAL,journal);boot(rows)
-   journal['status']='done';journal['finishedAt']=b.now();b.save(JOURNAL,journal)
+   journal['status']='starting';b.save(JOURNAL,journal);boot(desired_rows)
+   journal['status']='done';journal['finishedAt']=b.now();journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
    proof.update(productionModified=True,runtimeHealthVerified=True,rollbackRetained=True)
    b.save(b.WORK/'latest-production-restore.json',proof);return proof
   except BaseException:
    if stopped and journal:
     journal['status']='rollback-required';b.save(JOURNAL,journal)
     for r in rows:subprocess.run(['docker','stop','--time','30',r['Id']],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
-    rollback(journal);boot(rows)
+    rollback(journal);boot(rows);journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
    raise
   finally:
    if not stopped:
@@ -272,7 +293,7 @@ def recover_rollback():
  for r in rows:b.run(['docker','stop','--time','60',r['Id']],timeout=90)
  if not isinstance(journal.get('runningContainers'),list) or set(journal['runningContainers'])-set(journal['containers']):raise RuntimeError('Missing original runtime state')
  for r in rows:r['State']['Running']=r['Id'] in journal['runningContainers']
- rollback(journal);boot(rows)
+ rollback(journal);boot(rows);journal['runtimeHealthVerified']=True;b.save(JOURNAL,journal)
  print(json.dumps({'status':'rolled-back','runtimeHealthVerified':True,'operation':operation}))
 
 if __name__=='__main__':
