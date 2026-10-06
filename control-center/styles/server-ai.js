@@ -132,6 +132,22 @@
     instance.state.hidden = !error || !value;
   }
 
+  function updateMachineStatusMessage(instance, status) {
+    if (instance.actionError) {
+      setState(instance, instance.actionError, true);
+      return;
+    }
+    var ready = instance.machineState === "active" || instance.machineState === "degraded";
+    if (ready) {
+      if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione OpenAI da verificare; la cronologia resta disponibile." : "Disponibile tramite OpenAI.");
+    } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
+  }
+
+  function showMachineActionError(instance, message) {
+    instance.actionError = message;
+    setState(instance, message, true);
+  }
+
   function quickReplyOption(value) {
     var option = String(value || "")
       .replace(/[`*_~]/g, "")
@@ -366,7 +382,9 @@
     healthStrong.textContent = shortStateTitle(instance.machineState);
     healthStrong.title = healthLabel;
     instance.gateTitle.textContent = stateTitle(instance.machineState);
-    instance.gateMessage.textContent = String(status && status.label || (instance.machineState === "disabled" ? "Attiva Server AI quando questa macchina è pronta." : "Verifica lo stato della macchina.")).slice(0, 320);
+    var gateMessage = String(status && status.label || (instance.machineState === "disabled" ? "Attiva Server AI quando questa macchina è pronta." : "Verifica lo stato della macchina."));
+    if (!instance.canConfigure) gateMessage += " L’attivazione è riservata ai ruoli owner o admin.";
+    instance.gateMessage.textContent = gateMessage.slice(0, 320);
     var missing = missingRequirements(status);
     instance.missing.replaceChildren();
     missing.forEach(function (message) { var entry = document.createElement("li"); entry.textContent = message; instance.missing.appendChild(entry); });
@@ -1882,12 +1900,8 @@
       if (active !== instance || machineId !== instance.selectedMachineId) return null;
       instance.lastMachineStatus = status;
       renderMachine(instance, status || {});
-      var ready = instance.machineState === "active" || instance.machineState === "degraded";
       instance.models = Array.isArray(status.models) ? status.models : null;
-
-      if (ready) {
-        if (!instance.busy && !instance.chatError) setState(instance, status.online === false ? "Connessione OpenAI da verificare; la cronologia resta disponibile." : "Disponibile tramite OpenAI.");
-      } else setState(instance, String(status.label || stateTitle(instance.machineState)).slice(0, 320), instance.machineState === "unavailable");
+      updateMachineStatusMessage(instance, status);
       return status;
     } catch (error) {
       if (error && error.name === "AbortError") return null;
@@ -1909,14 +1923,14 @@
           instance.chatArea.hidden = false;
           refreshModeAvailability(instance);
           refreshQuickReplyAvailability(instance);
-          setState(instance, "Controllo temporaneamente non raggiungibile; cronologia conservata.");
+          setState(instance, instance.actionError || "Controllo temporaneamente non raggiungibile; cronologia conservata.", Boolean(instance.actionError));
         } else {
           renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: "unavailable", enabled: instance.enabled, canConfigure: instance.canConfigure, label: "Stato della macchina non disponibile." });
           instance.health.classList.add("bad");
           var unavailableHealth = instance.health.querySelector("strong");
           unavailableHealth.textContent = "Non disponibile";
           unavailableHealth.title = "Stato AI non disponibile";
-          setState(instance, error && error.message ? error.message : "Stato AI non disponibile.", true);
+          setState(instance, instance.actionError || (error && error.message ? error.message : "Stato AI non disponibile."), true);
         }
       }
       return null;
@@ -1942,6 +1956,7 @@
     instance.contextEpoch += 1;
     abortConversationRequests(instance);
     instance.conversationId = "";
+    instance.actionError = "";
     instance.queueBusy = false;
     instance.queueItems = [];
     instance.queueErrors = [];
@@ -2017,9 +2032,14 @@
   }
 
   async function requestMachineAction(instance, action) {
-    if (!instance.selectedMachineId || !instance.canConfigure || instance.actionBusy) return;
-    if (action === "enable" && (instance.machineState !== "disabled" || !instance.missing.hidden)) return;
-    if (action === "disable" && !instance.enabled) return;
+    if (!instance.selectedMachineId) { showMachineActionError(instance, "Seleziona una macchina prima di continuare."); return; }
+    if (instance.actionBusy) return;
+    if (!instance.canConfigure) { showMachineActionError(instance, "L’attivazione è riservata ai ruoli owner o admin."); return; }
+    if (action === "enable" && instance.machineState !== "disabled") { showMachineActionError(instance, "La macchina deve essere nello stato disattivato prima di poterla attivare."); return; }
+    if (action === "enable" && !instance.missing.hidden) { showMachineActionError(instance, "Completa i prerequisiti elencati prima di attivare Server AI."); return; }
+    if (action === "disable" && !instance.enabled) { showMachineActionError(instance, "La macchina risulta già disattivata."); return; }
+    instance.actionError = "";
+    setState(instance, "");
     instance.actionBusy = true;
     if (action === "disable") {
       if (instance.controller) instance.controller.abort();
@@ -2028,19 +2048,29 @@
     }
     renderMachine(instance, { machineLabel: instance.selectedMachineLabel, state: action === "enable" ? "starting" : "stopping", enabled: instance.enabled, canConfigure: instance.canConfigure, label: action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina." });
     instance.transientUntil = Date.now() + 60_000;
+    var actionError = "";
     try {
       var headers = new Headers({ Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "platform-control-center" });
       var csrf = csrfToken();
       if (csrf) headers.set("X-CSRF-Token", csrf);
       var response = await fetch(endpoint(instance, "/" + action), { method: "POST", credentials: "same-origin", headers: headers, body: "{}" });
       var payload = await response.json().catch(function () { return {}; });
-      if (response.status !== 202) throw new Error(String(payload.message || payload.error || "Operazione non avviata."));
-      setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
+      if (response.status !== 202) {
+        actionError = String(payload.message || payload.error || "Operazione non avviata.");
+        if (payload.reauthUrl) actionError += " Effettua di nuovo l’accesso con passkey.";
+        instance.actionError = actionError;
+      }
+      if (!actionError) setState(instance, action === "enable" ? "Avvio richiesto per questa macchina." : "Arresto richiesto per questa macchina.");
     } catch (error) {
-      setState(instance, error && error.message ? error.message : "Operazione non avviata.", true);
+      actionError = error && error.message ? error.message : "Operazione non avviata.";
+      instance.actionError = actionError;
     } finally {
       instance.actionBusy = false;
       if (instance.root.isConnected) await refreshStatus(instance);
+      // The status refresh clears its own transient state. Restore a failed
+      // action afterwards so auth, CSRF, and server-side rejection details
+      // remain visible instead of making the button appear to do nothing.
+      if (actionError && instance.root.isConnected) setState(instance, actionError, true);
     }
   }
 
