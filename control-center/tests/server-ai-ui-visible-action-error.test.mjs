@@ -55,8 +55,7 @@ test("a rejected enable remains visible in the real gate while the chat is hidde
     fetch: () => new Promise(resolve => { resolvePost = resolve; }),
   };
   vm.runInNewContext([
-    section("  function setState(instance, value, error)", "  function quickReplyOption"),
-    section("  function formatHostBytes(value)", "  function renderMachine(instance, status)"),
+    section("  function setState(instance, value, error)", "  function deriveQuickReplies"),
     section("  function renderMachine(instance, status)", "  function resizePrompt"),
     section("  async function requestMachineAction(instance, action)", "  async function viewProjectSource"),
     "globalThis.renderMachine = renderMachine; globalThis.updateMachineStatusMessage = updateMachineStatusMessage; globalThis.requestMachineAction = requestMachineAction;",

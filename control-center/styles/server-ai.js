@@ -155,44 +155,44 @@
     setState(instance, message, true);
   }
 
-  function quickReplyOption(value) {
-    var option = String(value || "")
-      .replace(/[`*_~]/g, "")
-      .replace(/^\s*(?:[-–—•]|\d+[.)])\s*/, "")
-      .replace(/[?.!,:;]+\s*$/, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!option || option.length > 52 || /(?:https?:\/\/|www\.|[\\/]{2,}|\b(?:password|passwd|token|secret|cookie|api[_ -]?key)\b)/i.test(option)) return "";
-    if (/\S{28,}/.test(option)) return "";
-    return option;
-  }
-
   function deriveQuickReplies(content) {
-    var text = String(content || "").replace(/\r\n?/g, "\n").trim().slice(-4_000);
+    var text = String(content || "").trim().slice(-6000).toLocaleLowerCase("it-IT");
     if (!text) return [];
-    var questionMatch = text.match(/(?:^|[\n.!])\s*([^?\n]{1,220}\?)\s*$/);
-    var question = questionMatch ? questionMatch[1].trim() : "";
-    if (question) {
-      var alternatives = question.match(/\b(?:preferisci|scegli|vuoi)\s+(?:tra\s+)?(.{1,70}?)\s+(?:oppure|o)\s+(.{1,70}?)[?]\s*$/i);
-      if (alternatives) {
-        var options = [quickReplyOption(alternatives[1]), quickReplyOption(alternatives[2])].filter(Boolean);
-        if (options.length === 2 && options[0].toLocaleLowerCase("it") !== options[1].toLocaleLowerCase("it")) {
-          return options.map(function (option) { return { label: option, message: "Scelgo " + option + "." }; }).slice(0, 3);
-        }
-      }
-      if (/\b(?:vuoi che|vuoi procedere|vuoi continuare|desideri che|posso|procedo|confermi|autorizzi|continuo|vado avanti|devo procedere)\b/i.test(question)) {
-        return [
-          { label: "Sì, procedi", message: "Sì, procedi" },
-          { label: "No, fermati", message: "No, fermati" },
-        ];
-      }
+    var replies;
+    // Only fixed reading intents are offered. Model prose cannot manufacture
+    // an approval, a target, an arbitrary option or a mutation request.
+    if (/operazion|intervento|accodat|riavviat|aggiornamento completat|modifica applicat/.test(text)) {
+      replies = [
+        { label: "Verifica l’esito", message: "Verifica l’esito dell’operazione precedente senza ripeterla." },
+        { label: "Leggi l’audit", message: "Leggi l’audit recente relativo all’operazione precedente." },
+      ];
+    } else if (/backup|ripristino|offsite|pianificazion|timer|cron\b/.test(text)) {
+      replies = [
+        { label: "Ultimo esito", message: "Controlla l’ultimo esito del backup e distingui dati verificati e dati mancanti." },
+        { label: "Pianificazione", message: "Verifica la pianificazione dei backup sul server e la prossima esecuzione." },
+      ];
+    } else if (/servizi|container|journal|log\b|arrest|crash|riavvi/.test(text)) {
+      replies = [
+        { label: "Leggi i log", message: "Leggi i log recenti del servizio coinvolto e verifica la diagnosi." },
+        { label: "Ricontrolla servizi", message: "Ricontrolla disponibilità e salute dei servizi e container coinvolti." },
+      ];
+    } else if (/\bdns\b|\btls\b|rete|domini|certificat/.test(text)) {
+      replies = [
+        { label: "Verifica rete e DNS", message: "Verifica lo stato attuale di rete, DNS e TLS del server." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
+    } else if (/\bcpu\b|\bram\b|disco|memoria|risorse|prestazioni|swap/.test(text)) {
+      replies = [
+        { label: "Verifica risorse", message: "Verifica le risorse attuali del server e gli eventuali colli di bottiglia." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
+    } else {
+      replies = [
+        { label: "Ricontrolla ora", message: "Controlla nuovamente lo stato attuale del VPS." },
+        { label: "Approfondisci", message: "Approfondisci" },
+      ];
     }
-    return [
-      // These exact commands are recognized by the backend continuation
-      // selector, which attaches the preceding user/assistant pair.
-      { label: "Approfondisci", message: "Approfondisci" },
-      { label: "Riassumi", message: "Riassumi" },
-    ];
+    return replies.concat({ label: "Riassumi", message: "Riassumi" });
   }
 
   function latestRenderedMessage(instance) {
@@ -371,31 +371,6 @@
     instance.adminDiagnostics.hidden = instance.adminDiagnosticsList.children.length === 0;
   }
 
-  function formatHostBytes(value) {
-    var bytes = Number(value);
-    if (!Number.isFinite(bytes) || bytes < 0) return "Non disponibile";
-    var units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    var unit = 0;
-    while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; }
-    return bytes.toLocaleString("it-IT", { maximumFractionDigits: 1 }) + " " + units[unit];
-  }
-
-  function renderHostMetrics(instance, status) {
-    var metrics = status && status.hostResources || {};
-    var cpu = metrics.cpu && metrics.cpu.available === true ? metrics.cpu : null;
-    var memory = metrics.memory && metrics.memory.available === true ? metrics.memory : null;
-    var disk = metrics.disk && metrics.disk.available === true ? metrics.disk : null;
-    if (!instance.hostMetricNodes) return;
-    instance.hostMetricNodes.cpu.textContent = cpu ? Number(cpu.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
-    instance.hostMetricNodes.cpuDetail.textContent = cpu ? (Number.isFinite(cpu.cores) && cpu.cores > 0 ? cpu.cores.toLocaleString("it-IT") + " core" : "Utilizzo CPU host") : "Metriche host non disponibili.";
-    instance.hostMetricNodes.memory.textContent = memory ? Number(memory.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
-    instance.hostMetricNodes.memoryDetail.textContent = memory ? formatHostBytes(memory.usedBytes) + " usati · " + formatHostBytes(memory.totalBytes) + " totali" : "Metriche host non disponibili.";
-    instance.hostMetricNodes.disk.textContent = disk ? Number(disk.usedPercent).toLocaleString("it-IT", { maximumFractionDigits: 1 }) + "%" : "Non disponibile";
-    instance.hostMetricNodes.diskDetail.textContent = disk ? formatHostBytes(disk.usedBytes) + " usati · " + formatHostBytes(disk.totalBytes) + " totali" : "Metriche host non disponibili.";
-    var capturedAt = metrics.capturedAt && Number.isFinite(Date.parse(metrics.capturedAt)) ? new Date(metrics.capturedAt) : null;
-    instance.hostMetricNodes.captured.textContent = capturedAt ? "Aggiornato " + capturedAt.toLocaleTimeString("it-IT") : "";
-  }
-
   function renderMachine(instance, status) {
     instance.machineState = machineState(status);
     instance.enabled = status && status.enabled === true;
@@ -404,7 +379,6 @@
     instance.historyAvailable = Boolean(status && status.historyAvailable === true);
     instance.root.setAttribute("data-ai-machine-state", instance.machineState);
     renderAdminDiagnostics(instance, status);
-    renderHostMetrics(instance, status);
     instance.machineLabel.textContent = String(status && status.machineLabel || instance.selectedMachineLabel || "Macchina selezionata").slice(0, 160);
     var healthLabel = String(status && status.label || stateTitle(instance.machineState)).slice(0, 180);
     var healthStrong = instance.health.querySelector("strong");
@@ -1513,10 +1487,12 @@
     var conversations = instance.conversations.filter(function (conversation) {
       return !query || String(conversation.title || "Nuova chat").toLocaleLowerCase("it-IT").includes(query);
     });
-    if (!conversations.length && query) {
+    if (!conversations.length) {
       var empty = document.createElement("li");
       empty.className = "server-ai-conversation-empty";
-      empty.textContent = "Nessuna conversazione trovata.";
+      var title = document.createElement("strong"); title.textContent = "Nessuna conversazione";
+      var detail = document.createElement("span"); detail.textContent = instance.conversationSearch.value.trim() ? "Nessuna chat corrisponde alla ricerca." : "Le tue conversazioni appariranno qui.";
+      empty.appendChild(title); empty.appendChild(detail);
       instance.conversationList.appendChild(empty);
       return;
     }
@@ -1832,18 +1808,18 @@
   }
 
   function isMobileDrawer() {
-    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 980px)").matches;
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 1180px)").matches;
   }
 
   function setDrawerOpen(instance, open, returnFocus) {
     var mobile = isMobileDrawer();
-    instance.root.classList.toggle("server-ai-drawer-open", Boolean(open));
+    instance.root.classList.toggle("server-ai-drawer-open", Boolean(mobile && open));
     if (instance.drawer) {
       if (mobile && "inert" in instance.drawer) instance.drawer.inert = !open;
       else if (!mobile && "inert" in instance.drawer) instance.drawer.inert = false;
       instance.drawer.setAttribute("aria-hidden", mobile && !open ? "true" : "false");
     }
-    if (instance.openConversations) instance.openConversations.setAttribute("aria-expanded", open ? "true" : "false");
+    if (instance.openConversations) instance.openConversations.setAttribute("aria-expanded", (mobile ? open : !instance.root.classList.contains("server-ai-history-collapsed")) ? "true" : "false");
     if (!open && returnFocus && instance.drawerOpener && instance.drawerOpener.isConnected) instance.drawerOpener.focus();
   }
 
@@ -1852,34 +1828,8 @@
   }
 
   function renderEmptyConversation(instance) {
-    var empty = document.createElement("section");
-    empty.className = "server-ai-empty";
-    empty.setAttribute("data-ai-empty", "");
-    var mark = document.createElement("span");
-    mark.className = "server-ai-empty-mark";
-    mark.textContent = "AI";
-    var title = document.createElement("h2");
-    title.textContent = "Come posso aiutarti?";
-    var copy = document.createElement("p");
-    copy.textContent = "Controlla il server, approfondisci un problema o cerca nella documentazione.";
-    var suggestions = document.createElement("div");
-    suggestions.className = "server-ai-suggestions";
-    [
-      ["Stato del server", "Controlla lo stato attuale del server."],
-      ["Analizza un problema", "Aiutami ad analizzare questo problema: "],
-      ["Cerca sul web", "Cerca nella documentazione ufficiale: "],
-    ].forEach(function (suggestion) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.setAttribute("data-ai-suggestion", suggestion[1]);
-      button.textContent = suggestion[0];
-      suggestions.appendChild(button);
-    });
-    empty.appendChild(mark);
-    empty.appendChild(title);
-    empty.appendChild(copy);
-    empty.appendChild(suggestions);
-    instance.transcript.appendChild(empty);
+    var template = instance.root.querySelector("[data-ai-empty-template]");
+    if (template && template.content) instance.transcript.appendChild(template.content.cloneNode(true));
   }
 
   function clearConversation(instance) {
@@ -2167,6 +2117,10 @@
     }
     if (active.pointerMoveHandler) window.removeEventListener("pointermove", active.pointerMoveHandler);
     if (active.resizeHandler) window.removeEventListener("resize", active.resizeHandler);
+    var restoreDialog = active.root.querySelector("[data-ai-restore-dialog]");
+    if (restoreDialog && restoreDialog.open) restoreDialog.close();
+    var shell = active.root.closest(".ops-shell");
+    if (shell) shell.classList.remove("server-ai-portal-nav-open");
     active = null;
   }
 
@@ -2180,11 +2134,23 @@
       state: root.querySelector("[data-ai-state]"), health: root.querySelector("[data-ai-health]"), attachments: root.querySelector("[data-ai-attachments]"), attach: root.querySelector("[data-ai-attach]"), attachmentInput: root.querySelector("[data-ai-attachment-input]"),
       machineLabel: root.querySelector("[data-ai-machine-label]"), machineName: root.querySelector("[data-ai-machine-name]"), machinePicker: root.querySelector("[data-ai-machine-picker]"), machineSelect: root.querySelector("[data-ai-machine-select]"),
       gate: root.querySelector("[data-ai-gate]"), gateTitle: root.querySelector("[data-ai-gate-title]"), gateMessage: root.querySelector("[data-ai-gate-message]"), actionErrorNode: root.querySelector("[data-ai-action-error]"), missing: root.querySelector("[data-ai-missing]"), enable: root.querySelector("[data-ai-enable]"), disable: root.querySelector("[data-ai-disable]"), chatArea: root.querySelector("[data-ai-chat-area]"), conversationList: root.querySelector("[data-ai-conversation-list]"), conversationSearch: root.querySelector("[data-ai-conversation-search]"), conversationTitle: root.querySelector("[data-ai-conversation-title]"), drawer: root.querySelector("[data-ai-conversation-drawer]"), openConversations: root.querySelector("[data-ai-open-conversations]"), loadOlder: root.querySelector("[data-ai-load-older]"), moreConversations: root.querySelector("[data-ai-more-conversations]"), adminDiagnostics: root.querySelector("[data-ai-admin-diagnostics]"), adminDiagnosticsList: root.querySelector("[data-ai-admin-diagnostics-list]"),
-      hostMetricNodes: { cpu: root.querySelector("[data-ai-host-cpu]"), cpuDetail: root.querySelector("[data-ai-host-cpu-detail]"), memory: root.querySelector("[data-ai-host-memory]"), memoryDetail: root.querySelector("[data-ai-host-memory-detail]"), disk: root.querySelector("[data-ai-host-disk]"), diskDetail: root.querySelector("[data-ai-host-disk-detail]"), captured: root.querySelector("[data-ai-host-captured]") },
     };
     var instance = active;
     initializeModeControl(instance);
     root.addEventListener("click", function (event) {
+      var restoreOpen = event.target.closest("[data-ai-open-restore]");
+      if (restoreOpen) {
+        var dialog = instance.root.querySelector("[data-ai-restore-dialog]");
+        closeOpenDetails(instance);
+        if (dialog && !dialog.open) { instance.restoreOpener = restoreOpen; dialog.showModal(); document.dispatchEvent(new CustomEvent("server-ai:restore-open")); }
+        return;
+      }
+      if (event.target.closest("[data-ai-close-restore]")) {
+        var restore = instance.root.querySelector("[data-ai-restore-dialog]");
+        if (restore) restore.close();
+        var tools = instance.root.querySelector("[data-ai-tools] > summary"); if (tools) tools.focus();
+        return;
+      }
       var quickReply = event.target.closest("[data-ai-quick-reply]");
       if (quickReply) { activateQuickReply(instance, quickReply); return; }
       var sendImmediate = event.target.closest("[data-ai-send-immediate]");
@@ -2252,7 +2218,8 @@
       }
       if (event.target.closest("[data-ai-open-conversations]")) {
         instance.drawerOpener = event.target.closest("[data-ai-open-conversations]");
-        setDrawerOpen(instance, true);
+        if (!isMobileDrawer()) { instance.root.classList.toggle("server-ai-history-collapsed"); setDrawerOpen(instance, false); }
+        else setDrawerOpen(instance, true);
       }
       if (event.target.closest("[data-ai-close-conversations]")) setDrawerOpen(instance, false, true);
     });
@@ -2318,6 +2285,19 @@
   function start() {
     mount();
     document.addEventListener("cc:navigation-complete", mount);
+    document.addEventListener("click", function (event) {
+      if (!active) return;
+      var toggle = event.target.closest("[data-ai-portal-nav-toggle]");
+      var shell = active.root.closest(".ops-shell");
+      if (!shell) return;
+      if (toggle) { var open = shell.classList.toggle("server-ai-portal-nav-open"); toggle.setAttribute("aria-expanded", String(open)); }
+      else if (shell.classList.contains("server-ai-portal-nav-open") && !event.target.closest(".ops-sidebar")) { shell.classList.remove("server-ai-portal-nav-open"); var control = shell.querySelector("[data-ai-portal-nav-toggle]"); if (control) control.setAttribute("aria-expanded", "false"); }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (!active || event.key !== "Escape") return;
+      var shell = active.root.closest(".ops-shell");
+      if (shell && shell.classList.contains("server-ai-portal-nav-open")) { shell.classList.remove("server-ai-portal-nav-open"); var toggle = shell.querySelector("[data-ai-portal-nav-toggle]"); if (toggle) { toggle.setAttribute("aria-expanded", "false"); toggle.focus(); } }
+    });
     observer = new MutationObserver(function () {
       if (active && !active.root.isConnected) cleanup();
     });

@@ -60,8 +60,8 @@ test('machine status returns host metrics while Server AI is disabled', async ()
   }
 });
 
-test('Server AI panel includes a dedicated host resource summary', () => {
+test('Server AI remains a conversation surface without host metric tiles', () => {
   const html = renderServerAi();
-  for (const key of ['cpu', 'memory', 'disk']) assert.match(html, new RegExp(`data-ai-host-${key}`));
-  assert.match(html, /Metriche host non disponibili/);
+  assert.doesNotMatch(html, /data-ai-host-(?:cpu|memory|disk|metrics)/);
+  assert.match(html, /data-ai-empty-template/);
 });

@@ -5,7 +5,7 @@ import test from "node:test";
 
 const source = fs.readFileSync(new URL("../styles/server-ai.js", import.meta.url), "utf8");
 const begin = source.indexOf("function updateMachineStatusMessage(instance, status)");
-const end = source.indexOf("\n  function quickReplyOption", begin);
+const end = source.indexOf("\n  function deriveQuickReplies", begin);
 assert.ok(begin >= 0 && end > begin, "machine status message helper exists");
 const helper = source.slice(begin, end);
 
