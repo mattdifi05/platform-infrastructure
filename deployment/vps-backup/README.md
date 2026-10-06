@@ -83,27 +83,23 @@ be parameterized for this host. Existing native catalog covers keycloak DB,
 RustFS/Control Center/Secret Manager; it does **not** currently cover all above
 volumes. Do not label its existing catalog a complete VPS backup.
 
-## Remaining native integration (blocking activation)
+## Authority, custody and portal contracts
 
-- Parameterize the existing capture/dedup/restore helpers with a root-owned VPS
-  profile; preserve default home behavior. Read FTP credentials only from the exact
-  authorized native FTPS config; no complete rclone config or OneDrive OAuth copy.
-- Native v2 admission currently fixes the home folder, host paths, broker identity
-  and previous FTPS activation proof. Add an explicit fresh-host genesis flow whose
-  genuine generation-1 authority and first local manifest precede the first remote
-  receipt. Do not synthesize activation evidence or repurpose home generation 18.
-- Generate new VPS encryption/HMAC/repository credentials using native CSPRNG and a
-  fresh admission authority under protected custody. Mac recovery custody must be
-  an explicitly protected dedicated location containing the recovery material and
-  public inventory; do not read/copy/hash the existing Mac private authority leaf.
-  Fresh VPS-only encryption and manifest keys and Ed25519 root-profile authority were generated on the VPS. Protected independent custody exists on the Mac at `$HOME/.local/share/platform-recovery/platform-server-public-genesis-20261006` (directory 0700, files 0600). No home key was read or copied.
-- Reuse existing authenticated backup queue/manual-restore portal contracts and
-  immutable operation bindings; a shell backup command is not panel integration.
-  Manual restoration must preserve owner freshness/passkey checks and persistent
-  operation/replay state, with first restore isolated before any production action.
-- Complete product owner-authenticated queue wiring and native v2 admission integration before announcing panel restore capability. The root capture profile is a distinct signed configuration and must not be presented as the existing v2 broker admission.
-- Backup runtime/service/timer files are installed. Capture and verified FTPS uploads
-  have run; the queue and scheduled backup timers await native recovery qualification.
+- The installed VPS helpers consume a root-owned signed VPS profile and only the
+  exact authorized FTPS JSON. They do not copy rclone/OneDrive credentials or
+  replace the home backup authority.
+- VPS encryption, manifest HMAC and Ed25519 profile keys are independent. Protected
+  custody exists on the Mac at
+  `$HOME/.local/share/platform-recovery/platform-server-public-genesis-20261006`
+  (directory 0700, files 0600). The existing home private authority was not read,
+  copied or hashed. The VPS root profile is distinct from the home v2 broker admission.
+- The portal uses its existing authenticated queue and immutable manual-restore
+  contracts. Restore requires a fresh owner passkey session, CSRF, a reviewed
+  manifest/profile binding and explicit typed confirmation of the selected point.
+  Queue replay state and the management authority are preserved during recovery.
+- Capture and verified FTPS publication have run. The queue and weekly VPS timer
+  await native staging qualification of persisted database data and permissions;
+  the manual production restore gate is independently closed until that succeeds.
 
 The VPS timer is weekly Friday 06:05 Europe/Rome with Persistent=true. This is
 provisional while Hostinger has weekly backup enabled but no available point or
@@ -145,11 +141,10 @@ Interrupted remote uploads require reconciliation; unknown objects are never
 silently deleted. `--restore-manifest-id` verifies one immutable authenticated point
 in protected temporary storage and never restores over production.
 
-Read-only FTPS observation on 2026-10-06: certificate verified, home namespace 38
-files / 26,209,164,424 bytes, VPS namespace absent (550). This was not an upload or
-proof of backup. Root must qualify HOME shared quota before creating the VPS folder
-or opening offsite execution. Root must also confirm user passkey setup before
-opening the full-capture gate.
+Initial prequalification FTPS observation on 2026-10-06: certificate verified, home namespace 38
+files / 26,209,164,424 bytes, VPS namespace absent (550). That initial observation was not a backup. Shared quota, passkey enrollment and
+subsequent encrypted capture/upload/download verification are now complete; the
+remaining activation condition is native recovery qualification as described above.
 
 
 ## Existing owner-authenticated panel queue
