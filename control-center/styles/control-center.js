@@ -1708,7 +1708,9 @@
     api().then(function (value) {
       var catalog = value.catalog;
       if (!catalog) throw Error('Catalogo VPS non configurato.');
-      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.textContent = point.createdAt + ' · ' + point.id; select.append(option); });
+      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.disabled = point.restoreCompatible === false; option.textContent = point.createdAt + ' · ' + point.id + (point.restoreCompatible === false ? ' · precedente a Scripta' : ''); select.append(option); });
+      var compatible = catalog.manifests.find(function (point) { return point.restoreCompatible !== false; });
+      if (compatible) select.value = compatible.id;
       status.textContent = catalog.manifests.length ? catalog.manifests.length + ' punti remoti verificati. Scegli un punto per il piano manuale.' : 'Nessun backup remoto verificato: ripristino non disponibile.';
     }).catch(function (error) { status.textContent = error.message; });
   }

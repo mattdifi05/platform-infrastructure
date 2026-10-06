@@ -63,6 +63,7 @@ const CONTROL_ROUTES = Object.freeze([
   admin("projects.delete.apply", "control", "projects", parameter("projectId"), "delete", "apply"),
 
   viewer("applications.list", "control", "applications"),
+  viewer("applications.observed", "control", "applications", "observed"),
   admin("applications.create", "control", "applications"),
   admin("applications.lifecycle", "control", "applications", parameter("applicationId"), parameter("action")),
 

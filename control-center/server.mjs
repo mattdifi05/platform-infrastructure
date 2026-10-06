@@ -44,6 +44,7 @@ import {
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
+import { readObservedApplications, renderObservedApplicationRow, renderObservedApplicationDetail } from "./observed-applications.mjs";
 import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
@@ -1184,6 +1185,10 @@ async function handleApi(req, res, url, context, operation) {
       return json(res, operation, 202);
     }
 
+    if (method === "GET" && route(parts, "control", "applications", "observed")) {
+      try { return json(res, { applications: observedApplications(true) }); }
+      catch { return json(res, { error: "OBSERVATIONS_UNAVAILABLE", message: "Il catalogo delle applicazioni VPS è in aggiornamento." }, 503); }
+    }
     if (method === "GET" && route(parts, "control", "applications")) return json(res, { applications: context.applications });
     if (method === "POST" && route(parts, "control", "applications")) return json(res, planApplicationCreate(payload, context), 202);
     if (method === "POST" && parts.length === 4 && route(parts.slice(0, 2), "control", "applications")) {
@@ -6158,6 +6163,7 @@ function planVpsProductionRestore(payload, context) {
   const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
   const selected = native?.manifests.find(manifest => manifest.id === payload.manifestId);
   if (!selected || !native.restoreProfileDigest) throw new ValidationError("Seleziona un punto VPS verificato e immutabile.");
+  if (selected.restoreCompatible === false) throw new ValidationError("Questo punto precede l’inclusione di Scripta e non ripristina il runtime corrente. Seleziona un backup recente.");
   const confirmation = `RESTORE-RUNTIME:${selected.id}:${selected.signature.digest}:${native.restoreProfileDigest}`;
   const details = {
     manifestId: selected.id, createdAt: selected.createdAt, manifestDigest: selected.signature.digest,
@@ -6687,7 +6693,22 @@ function selectedStatusGroup(groups, params = new URLSearchParams()) {
     || { meta: statusCategoryMeta("operational-evidence"), rows: [] };
 }
 
+function observedApplications(strict = false) {
+  const root = process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT;
+  if (!root) return [];
+  try {
+    const catalog = readVpsBackupCatalog(root);
+    return readObservedApplications(root, catalog?.restoreProfileDigest);
+  } catch (error) {
+    if (strict) throw error;
+    return []; // Metadata refresh must not break managed application pages.
+  }
+}
+
 function renderOpsProjects(context, params = new URLSearchParams()) {
+  const observed = observedApplications();
+  const selectedObserved = observed.find(app => app.id === params.get("observed"));
+  if (selectedObserved) return renderObservedApplicationDetail(selectedObserved, controlIcon);
   const resourcesByProject = projectResourceRowsByProject(context);
   const selectedSlug = sanitizeIdentifier(params.get("project") || "");
   const selectedProject = context.projects.find((project) => project.slug === selectedSlug || project.id === selectedSlug);
@@ -6695,7 +6716,7 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
 
   const rows = sortedOpsProjects(context.projects)
     .map((project) => renderOpsProjectRow(project))
-    .join("");
+    .join("") + observed.map(app => renderObservedApplicationRow(app, controlIcon)).join("");
   return `<section class="ops-section ops-projects-redesign">
     <div class="ops-project-list" aria-label="Applicazioni">
       ${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}
