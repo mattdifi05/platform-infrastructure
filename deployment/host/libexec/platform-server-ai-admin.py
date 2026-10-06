@@ -16,8 +16,8 @@ INVENTORY=pathlib.Path('/etc/platform-infrastructure/server-ai/infrastructure-in
 SERVICES=frozenset('chrony.service fail2ban.service cron.service systemd-resolved.service platform-docker-observer-proxy.service'.split())
 JOBS={'dns':'platform-dns-probe.service','tls':'platform-db-tls-metrics.service','backup_metrics':'platform-backup-health-metrics.service','backup':'platform-backup-schedule.service','rustfs_recovery':'platform-rustfs-recovery.service','host_recovery':'platform-host-recovery.service','local_recovery':'platform-local-dedup.service'}
 PACKAGES=frozenset('openssl ca-certificates curl wget openssh-client openssh-server chrony fail2ban ufw auditd apparmor rsync jq python3 python3-minimal sudo tar gzip coreutils dnsutils iproute2 iptables nftables logrotate'.split())
-OPERATIONS=('service_start','service_restart','container_start','container_restart','container_resources','package_refresh','package_upgrade','dns_record_set','dns_record_remove','firewall_ban','firewall_unban','firewall_reapply','database_reload','maintenance_run','log_rotate')
-TOPICS=('capabilities','os','packages','services','containers','network','firewall','dns','tls','storage','logs','resources','backups','databases','audit','operation')
+OPERATIONS=('service_start','service_restart','service_stop','service_reload','service_enable','service_disable','config_patch','container_start','container_restart','container_resources','package_refresh','package_upgrade','package_install','dns_record_set','dns_record_remove','firewall_ban','firewall_unban','firewall_reapply','database_reload','maintenance_run','log_rotate')
+TOPICS=('capabilities','os','packages','services','timers','identity','config','containers','network','firewall','dns','tls','storage','logs','resources','backups','databases','audit','operation')
 PROTECTED_DNS=frozenset('ns portal admin auth login keycloak vpn'.split())
 LOCK=threading.Lock()
 EXECUTOR=concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -28,6 +28,7 @@ HOST_CONFIG_PATH='/etc/platform-infrastructure/server-ai/admin-host.json'
 VPS_CONTAINERS=(CORE_CONTAINERS-frozenset(['gf-server-ai-project-source-reader','gf-server-ai-project-query-reader']))|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler gf-server-ai-controller'.split())
 VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-promtail enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
 VPS_SERVICES=SERVICES|frozenset(['docker.service','ssh.service','auditd.service','apparmor.service','ufw.service'])
+LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','platform-cloudflared-vps.service','platform-server-ai-admin.service','platform-docker-observer-proxy.service'])
 HOME_JOBS=dict(JOBS)
 def protected_json(filename,limit=262144):
  p=pathlib.Path(filename)
@@ -79,18 +80,22 @@ def portable_catalog():
   except Rejected:pass
  topics=['capabilities','os','storage','resources','audit','operation','dns'];ops=[]
  if shutil.which('dpkg-query'):topics.append('packages')
- if shutil.which('apt-get'):ops+=['package_refresh','package_upgrade']
- if shutil.which('systemctl'):topics+=['services','logs']
- if services:ops+=['service_start','service_restart']
+ if shutil.which('apt-get') and shutil.which('apt-cache'):ops+=['package_refresh','package_upgrade','package_install']
+ if shutil.which('systemctl'):topics+=['services','timers','logs','config']
+ if shutil.which('getent'):topics.append('identity')
+ if shutil.which('systemctl'):ops+=['service_start','service_restart','service_stop','service_reload','service_enable','service_disable']
+ if all(shutil.which(x) for x in ['sshd','systemd-analyze']):ops.append('config_patch')
  if containers:topics+=['containers','databases'];ops+=['container_start','container_restart','container_resources']
  if set(containers)&{'gf-postgres','enterprise-postgres'}:ops.append('database_reload')
  if all(shutil.which(x) for x in ['ip','ss']):topics.append('network')
- if shutil.which('iptables-save'):topics.append('firewall')
+ if any(shutil.which(x) for x in ['iptables-save','ufw','nft']):topics.append('firewall')
+ if pathlib.Path('/var/lib/platform-vps-backup/public/catalog.json').is_file():topics.append('backups')
+ if pathlib.Path('/etc/platform-infrastructure/cloudflare-dns/zones.json').is_file():topics.append('tls')
  if shutil.which('fail2ban-client') and 'fail2ban.service' in services:
   try:command(['fail2ban-client','status','sshd']);ops+=['firewall_ban','firewall_unban']
   except Rejected:pass
  if jobs:ops.append('maintenance_run')
- if RUNTIME is not None and 'backup' in jobs:topics.append('backups')
+ if RUNTIME is not None and 'backup' in jobs and 'backups' not in topics:topics.append('backups')
  if shutil.which('logrotate') and pathlib.Path('/etc/logrotate.conf').is_file():ops.append('log_rotate')
  return topics,ops,containers,services,jobs
 def exact(value,keys,required=None):
@@ -101,7 +106,10 @@ def clean(value):
  if isinstance(value,str):
   value=re.sub(r'-----BEGIN[^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?-----END[^-]+-----','[redacted]',value,flags=re.S)
   value=re.sub(r'(?i)(?:bearer\s+|sk-[A-Za-z0-9_-]+)[A-Za-z0-9._-]*','[redacted]',value)
-  value=re.sub(r'(?i)(password|secret|token|authorization|cookie|credential)[\s"\x27:=]+[^\s,;}]+',r'\1=[redacted]',value)
+  value=re.sub(r'(?i)(password|secret|token|authorization|cookie|credential|[a-z0-9_]*private_?key|[a-z0-9_]*api_?key)[\s"\x27:=]+[^\s,;}]+',r'\1=[redacted]',value)
+  value=re.sub(r'\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b','[redacted]',value)
+  value=re.sub(r'(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{48,}(?![A-Za-z0-9])','[redacted]',value)
+  value=re.sub(r'([?&][A-Za-z0-9_-]+=)[^&\s]+',r'\1[redacted]',value)
   value=re.sub(r'([a-z][a-z0-9+.-]*://)[^/@\s]+:[^/@\s]+@',r'\1[redacted]@',value)
   return value[:16000]
  return value
@@ -155,15 +163,100 @@ def container_summary(c):
  h=c['HostConfig'];s=c['State']
  return {'name':c['Name'].lstrip('/'),'id':c['Id'],'imageId':c['Image'],'running':s['Running'],'health':s.get('Health',{}).get('Status'),'restarts':c['RestartCount'],'memoryBytes':h['Memory'],'nanoCpus':h['NanoCpus'],'pidsLimit':h.get('PidsLimit'),'readOnlyRoot':h['ReadonlyRootfs'],'publishedPorts':h.get('PortBindings') or {},'capabilitiesDropped':h.get('CapDrop') or []}
 def service_status(name):
- return command(['systemctl','show',name,'--no-pager','--property=Id,LoadState,ActiveState,SubState,Result,UnitFileState,MemoryCurrent,CPUUsageNSec,InvocationID,ExecMainStatus,ExecMainStartTimestampMonotonic']).strip()
+ return command(['systemctl','show',name,'--no-pager','--property=Id,LoadState,ActiveState,SubState,Result,UnitFileState,FragmentPath,CanReload,MemoryCurrent,CPUUsageNSec,InvocationID,ExecMainStatus,ExecMainStartTimestampMonotonic']).strip()
+def discovered_unit(name,kind='service'):
+ if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,120}\.'+kind,name):raise Rejected('Invalid unit name')
+ names={line.split()[0] for line in command(['systemctl','list-unit-files','--type='+kind,'--no-legend','--no-pager']).splitlines() if line.split()}
+ if name not in names:raise Rejected('Unit is not installed on this host')
+ return name
+def writable_service(name,operation):
+ discovered_unit(name)
+ if re.match(r'^(?:php-|node-|gf-|enterprise-|project-|app-)',name):raise Rejected('Project and container units are outside infrastructure scope')
+ if '@' in name or re.search(r'(?i)(backup|restore|recovery|snapshot|capture)',name):raise Rejected('Backup, restore and template units remain manual')
+ values=dict(line.split('=',1) for line in command(['systemctl','show',name,'--no-pager','--property=Id,LoadState,FragmentPath,CanReload,UnitFileState']).splitlines() if '=' in line)
+ if values.get('Id')!=name or values.get('LoadState')!='loaded':raise Rejected('Unit identity or load state changed')
+ fragment=pathlib.Path(values.get('FragmentPath',''))
+ if not fragment.is_absolute():raise Rejected('Unit fragment is not an installed file')
+ resolved=fragment.resolve()
+ if not any(str(resolved).startswith(prefix) for prefix in ['/usr/lib/systemd/system/','/lib/systemd/system/']):
+  if not str(resolved).startswith('/etc/systemd/system/platform-'):raise Rejected('Only distro or reviewed platform infrastructure units may change')
+ info=resolved.stat()
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise Rejected('Unit fragment is not root protected')
+ if operation in ['service_stop','service_disable'] and name in LOCKOUT_SERVICES:raise Rejected('Stop or disable would lock out server administration')
+ if operation=='service_reload' and values.get('CanReload')!='yes':raise Rejected('Unit does not support reload')
+ if operation in ['service_enable','service_disable'] and values.get('UnitFileState') in ['static','masked','indirect','generated','transient']:raise Rejected('Unit cannot be enabled or disabled')
+ return name
+def metadata_file(filename):
+ p=pathlib.Path(filename)
+ try:
+  s=p.lstat()
+  if not stat.S_ISREG(s.st_mode) or s.st_size>65536:return {'available':False}
+  return {'available':True,'ownerUid':s.st_uid,'mode':oct(stat.S_IMODE(s.st_mode)),'bytes':s.st_size}
+ except OSError:return {'available':False}
+def package_rows():
+ return sorted((line.split('\t',1) for line in command(['dpkg-query','-W','-f=${binary:Package}\t${Version}\n']).splitlines() if '\t' in line),key=lambda row:row[0])
+def official_apt_candidate(package,allow_vendor=False):
+ if not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,100}(?::[a-z0-9-]+)?',package):raise Rejected('Invalid exact package name')
+ if package in command(['apt-mark','showhold']).splitlines():raise Rejected('Held package cannot be changed')
+ lines=command(['apt-cache','policy',package]).splitlines()
+ candidate=next((line.split(':',1)[1].strip() for line in lines if line.strip().startswith('Candidate:')),None)
+ if not candidate or candidate=='(none)':raise Rejected('No configured APT candidate')
+ matching=False;official=False
+ for line in lines:
+  match=re.match(r'^\s*(?:\*\*\*\s+)?(\S+)\s+\d+\s*$',line)
+  if match:matching=match[1]==candidate;continue
+  if matching and re.search(r'\bhttps?://(?:archive|security)\.ubuntu\.com/ubuntu(?:\s|/)|\bhttps?://ports\.ubuntu\.com/ubuntu-ports(?:\s|/)',line):official=True
+  if matching and allow_vendor and re.search(r'\bhttps://(?:download\.docker\.com/linux/ubuntu|pkg\.cloudflare\.com/cloudflared)\s',line):official=True
+ if not official:raise Rejected('Candidate is not from an approved configured signed APT archive')
+ return candidate
+def checked_apt_plan(package,install):
+ candidate=official_apt_candidate(package,allow_vendor=not install)
+ argv=['apt-get','-s','--no-install-recommends','--no-remove','install']+([] if install else ['--only-upgrade'])+[package]
+ simulated=command(argv,timeout=30)
+ planned=re.findall(r'^Inst\s+([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?)\s',simulated,re.M)
+ if not planned and install:raise Rejected('APT simulation did not plan an installation')
+ installed={name.split(':')[0] for name,_ in package_rows()}
+ for dependency in planned:official_apt_candidate(dependency,allow_vendor=not install and dependency.split(':')[0] in installed)
+ if re.search(r'^(?:Remv|Purg)\s',simulated,re.M):raise Rejected('APT simulation would remove packages')
+ return {'candidate':candidate,'plannedPackages':planned}
+def selected_sshd():
+ selected={'port','addressfamily','permitrootlogin','passwordauthentication','pubkeyauthentication','kbdinteractiveauthentication','authenticationmethods','allowusers','allowgroups','denyusers','denygroups','x11forwarding','permittty','maxauthtries','clientaliveinterval','clientalivecountmax','loglevel','logingracetime','allowtcpforwarding','gatewayports'}
+ try:return {parts[0]:parts[1] for line in command(['sshd','-T'],timeout=8).splitlines() if len(parts:=line.split(None,1))==2 and parts[0] in selected}
+ except Rejected:return {'available':False}
+def selected_config(name):
+ if name=='sshd':
+  fields={'ClientAliveInterval','ClientAliveCountMax','MaxAuthTries','LogLevel','PasswordAuthentication','PermitRootLogin','PubkeyAuthentication'}
+  sources={}
+  for p in [pathlib.Path('/etc/ssh/sshd_config'),*sorted(pathlib.Path('/etc/ssh/sshd_config.d').glob('*.conf'))[:20]]:
+   if p.is_symlink() or not p.is_file() or p.stat().st_size>65536:continue
+   rows={}
+   for line in p.read_text().splitlines():
+    match=re.match(r'^\s*([A-Za-z]+)\s+([A-Za-z0-9_-]+)\s*$',line)
+    if match and match[1] in fields:rows[match[1]]=match[2]
+   sources[p.name]=rows
+  return {'effective':selected_sshd(),'selectedSourceDirectives':sources}
+ if name=='docker':
+  try:
+   value=protected_json('/etc/docker/daemon.json',limit=65536)
+   return {k:v for k,v in value.items() if k in ['log-driver','live-restore','iptables','ip6tables','userland-proxy'] and isinstance(v,(str,bool))} if isinstance(value,dict) else {}
+  except (OSError,Rejected):return {'available':False}
+ if name=='ufw':
+  try:
+   lines=pathlib.Path('/etc/default/ufw').read_text().splitlines()
+   keys={'IPV6','DEFAULT_INPUT_POLICY','DEFAULT_OUTPUT_POLICY','DEFAULT_FORWARD_POLICY'}
+   return {m[1]:m[2] for line in lines if (m:=re.fullmatch(r'([A-Z_]+)="?(ACCEPT|DROP|REJECT|yes|no)"?',line.strip())) and m[1] in keys}
+  except OSError:return {'available':False}
+ if name in ['vps-backup-timer','vps-backup-queue-timer']:
+  unit='platform-'+name.replace('vps-backup-queue-timer','vps-backup-queue').replace('vps-backup-timer','vps-backup')+'.timer'
+  return command(['systemctl','show',unit,'--no-pager','--property=Id,LoadState,ActiveState,UnitFileState,TimersCalendar,NextElapseUSecRealtime,LastTriggerUSec,Unit'])
+ if name=='cloudflared':return service_status('platform-cloudflared-vps.service')
+ return {'contentExposed':False}
 def capabilities():
  topics,operations,containers,services,jobs=portable_catalog() if PORTABLE else (list(TOPICS),list(OPERATIONS),sorted(CONTAINERS),sorted(SERVICES),JOBS)
  packages=sorted(PACKAGES)
  if PORTABLE:
   packages=[]
-  if 'packages' in topics:
-   packages=sorted(PACKAGES & set(line.split('\t')[0].split(':')[0] for line in command(['dpkg-query','-W','-f=${binary:Package}\t${db:Status-Status}\n']).splitlines() if line.endswith('\tinstalled')))
- return {'source':'live-host-typed-infrastructure-bridge','machineId':MACHINE,'readTopics':topics,'writeOperations':operations,'containers':containers,'services':services,'packages':packages,'maintenanceTargets':jobs,'dnsZone':None if PORTABLE else 'platform-infrastructure.com','limits':{'writes':'owner + fresh active session + explicit trusted user turn','projectCodeAndData':'no project containers or source/data APIs' if PORTABLE else 'no source/data read/write API; reviewed hosting containers allow lifecycle and resource budgets only','database':'engine health/resources/lifecycle and PostgreSQL configuration reload only; no SQL or database content','firewall':'existing reviewed policy reapply and public-IP fail2ban sshd bans only','tls':'verified local certificate inspection and existing TLS metrics; no disabling TLS or exposing private keys','resources':'runtime limits persisted in bridge audit/desired limits; not an application compose/source edit','unsupported':'arbitrary shell/files/SQL, project edits, image/volume/database deletion, restore over live data, arbitrary network/routing changes, new package repositories, trust-key changes; require separate operator workflow'}}
+ return {'source':'live-host-typed-infrastructure-bridge','machineId':MACHINE,'readTopics':topics,'writeOperations':operations,'containers':containers,'services':services,'packages':packages,'packageRead':'all installed packages, 50 per page or exact lookup' if PORTABLE else 'reviewed package allowlist','packageWrites':'legacy reviewed upgrades plus exact official Ubuntu APT candidates' if PORTABLE else 'reviewed installed package allowlist','serviceRead':'all installed unit status and bounded journals' if PORTABLE else 'reviewed unit inventory','serviceWriteScope':'installed root-protected distro and platform infrastructure units; backup/restore manual, stop/disable lockout protected' if PORTABLE else 'reviewed service inventory','maintenanceTargets':jobs,'dnsZone':None if PORTABLE else 'platform-infrastructure.com','limits':{'writes':'owner + fresh active session + explicit trusted user turn','projectCodeAndData':'no project container/source/data APIs' if PORTABLE else 'no source/data read/write API; reviewed hosting containers allow lifecycle and resource budgets only','database':'engine health/resources/lifecycle and PostgreSQL configuration reload only; no SQL or database content','firewall':'existing reviewed policy reapply and public-IP fail2ban sshd bans only','tls':'public certificate metadata for hostnames in configured zones' if PORTABLE else 'verified local certificate inspection and existing TLS metrics','resources':'runtime limits persisted in bridge audit/desired limits; not an application compose/source edit','unsupported':'arbitrary shell/files/SQL, project edits, image/volume/database deletion, restore over live data, arbitrary network/routing changes, new package repositories, trust-key changes; require separate operator workflow'}}
 def portal_tls_context():
     # Explicit dedicated trust store: never add ambient system roots here.
     ca=pathlib.Path('/etc/platform-infrastructure/tls/portal-new-root.pem')
@@ -183,11 +276,50 @@ def read(topic,target,subject):
  if topic=='capabilities':return capabilities()
  if topic=='os':return {'kernel':os.uname().release,'uptimeSeconds':float(pathlib.Path('/proc/uptime').read_text().split()[0]),'load':list(os.getloadavg()),'memory':{k:int(v.split()[0])*1024 for k,v in (line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines()) if k in ['MemTotal','MemAvailable','SwapTotal','SwapFree']},'release':{k:v.strip('"') for k,v in (line.split('=',1) for line in pathlib.Path('/etc/os-release').read_text().splitlines() if '=' in line) if k in ['NAME','VERSION','VERSION_ID']}}
  if topic=='packages':
+  if PORTABLE:
+   rows=package_rows()
+   if target and not target.startswith('page:'):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,100}(?::[a-z0-9-]+)?',target):raise Rejected('Invalid package name')
+    rows=[row for row in rows if row[0]==target or row[0].split(':')[0]==target]
+    return {'installed':rows,'count':len(rows),'lookup':target}
+   page=int(target[5:]) if re.fullmatch(r'page:[0-9]{1,4}',target) else 0
+   if target and not re.fullmatch(r'page:[0-9]{1,4}',target):raise Rejected('Invalid package page')
+   return {'installed':rows[page*50:(page+1)*50],'page':page,'pageSize':50,'total':len(rows)}
   if target and target not in PACKAGES:raise Rejected('Package outside managed upgrade allowlist')
   return {'installed':'\n'.join(line for line in command(['dpkg-query','-W','-f=${binary:Package}\t${Version}\n']).splitlines() if line.split('\t')[0].split(':')[0] in ([target] if target else PACKAGES)),'upgradePolicy':'installed packages only; signed configured distro repositories; no removal'}
  if topic=='services':
+  if PORTABLE:
+   if target and not target.startswith('page:'):return {'services':{target:service_status(discovered_unit(target))}}
+   if target and not re.fullmatch(r'page:[0-9]{1,4}',target):raise Rejected('Invalid service page')
+   page=int(target[5:]) if target else 0
+   names=[line.split()[0] for line in command(['systemctl','list-unit-files','--type=service','--no-legend','--no-pager']).splitlines() if line.split()]
+   return {'installedServiceCount':len(names),'installedServices':names[page*100:(page+1)*100],'page':page,'pageSize':100,'detail':'Use page:N or one exact installed .service target for status'}
   if target and target not in SERVICES and target not in JOBS.values() and (PORTABLE or target!='platform-server-ai-egress.service'):raise Rejected('Service outside reviewed infrastructure inventory')
   return {'services':{n:service_status(n) for n in ([target] if target else sorted(SERVICES))}}
+ if topic=='timers':
+  if target:return {'timer':target,'status':service_status(discovered_unit(target,'timer'))}
+  return {'timers':command(['systemctl','list-timers','--all','--no-pager','--no-legend'])[:16000]}
+ if topic=='identity':
+  if target and not target.startswith('page:'):
+   if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}',target):raise Rejected('Invalid account name')
+   passwd=command(['getent','passwd',target]).strip().split(':')
+   return {'user':{'name':passwd[0],'uid':passwd[2],'gid':passwd[3],'home':passwd[5],'shell':passwd[6]},'sshd':selected_sshd()}
+  if target and not re.fullmatch(r'page:[0-9]{1,4}',target):raise Rejected('Invalid identity page')
+  page=int(target[5:]) if target else 0
+  users=[]
+  for line in command(['getent','passwd']).splitlines():
+   p=line.split(':')
+   if len(p)>=7:users.append({'name':p[0],'uid':p[2],'gid':p[3],'home':p[5],'shell':p[6]})
+  groups=[]
+  for line in command(['getent','group']).splitlines():
+   p=line.split(':')
+   if len(p)>=4:groups.append({'name':p[0],'gid':p[2],'members':p[3].split(',')[:30] if p[3] else []})
+  return {'users':users[page*50:(page+1)*50],'groups':groups[page*50:(page+1)*50],'page':page,'pageSize':50,'userCount':len(users),'groupCount':len(groups),'sshd':selected_sshd(),'authorizedKeyMetadataOnly':True}
+ if topic=='config':
+  paths={'sshd':'/etc/ssh/sshd_config','docker':'/etc/docker/daemon.json','cloudflared':'/etc/systemd/system/platform-cloudflared-vps.service','ufw':'/etc/default/ufw','vps-backup-timer':'/etc/systemd/system/platform-vps-backup.timer','vps-backup-queue-timer':'/etc/systemd/system/platform-vps-backup-queue.timer','server-ai-admin':'/etc/platform-infrastructure/server-ai/admin-host.json'}
+  if target and target not in paths:raise Rejected('Only reviewed configuration metadata is exposed')
+  keys=[target] if target else list(paths)
+  return {'files':{key:{**metadata_file(paths[key]),'selectedValues':selected_config(key)} for key in keys},'rawContentExposed':False}
  if topic in ['containers','databases']:
   names=[target] if target else ([n for n in (['gf-postgres','gf-mariadb','gf-redis','enterprise-postgres','enterprise-redis','mariadb'] if PORTABLE else ['gf-postgres','gf-mariadb','gf-redis']) if not PORTABLE or n in CONTAINERS] if topic=='databases' else sorted(CONTAINERS));result=[]
   for name in names:
@@ -196,11 +328,39 @@ def read(topic,target,subject):
   return {'containers':result,'databaseContentsRead':False}
  if topic=='network':return {'addresses':json.loads(command(['ip','-j','address'])), 'routes':json.loads(command(['ip','-j','route'])),'listeners':command(['ss','-lntup'])}
  if topic=='firewall':
-  result={'iptables':command(['iptables-save'])}
+  result={}
+  if shutil.which('iptables-save'):result['iptables']=command(['iptables-save'])[:12000]
+  if PORTABLE and shutil.which('ufw'):
+   try:result['ufw']=command(['ufw','status','verbose'])[:12000]
+   except Rejected as error:result['ufwError']=str(error)
+  if PORTABLE and shutil.which('nft'):
+   try:result['nft']=command(['nft','-j','list','ruleset'])[:12000]
+   except Rejected as error:result['nftError']=str(error)
   if not PORTABLE or 'firewall_ban' in portable_catalog()[1]:result['fail2banSshd']=command(['fail2ban-client','status','sshd'])
   return result
- if topic=='dns':return {'zone':None if PORTABLE else 'platform-infrastructure.com','records':None if PORTABLE else safe_zone().decode(),'resolver':pathlib.Path('/etc/resolv.conf').read_text()}
+ if topic=='dns':
+  if PORTABLE:
+   result={'resolver':pathlib.Path('/etc/resolv.conf').read_text()[:4000]}
+   zones=pathlib.Path('/etc/platform-infrastructure/cloudflare-dns/zones.json')
+   if zones.is_file():
+    value=protected_json(str(zones))
+    result['cloudflareZones']=[{'name':row.get('name'),'zoneId':row.get('id')} for row in value.get('zones',[])[:30] if isinstance(row,dict) and isinstance(row.get('name'),str)] if isinstance(value,dict) else []
+   result['cloudflaredService']=service_status('platform-cloudflared-vps.service')
+   result['cloudflaredRouteConfig']='Provider-managed; no local public route file enrolled'
+   return result
+  return {'zone':'platform-infrastructure.com','records':safe_zone().decode(),'resolver':pathlib.Path('/etc/resolv.conf').read_text()}
  if topic=='tls':
+  if PORTABLE:
+   zones=protected_json('/etc/platform-infrastructure/cloudflare-dns/zones.json')
+   names=[row.get('name') for row in zones.get('zones',[]) if isinstance(row,dict) and isinstance(row.get('name'),str)]
+   if not target or not re.fullmatch(r'[a-z0-9.-]{1,120}',target) or not any(target==name or target.endswith('.'+name) for name in names):raise Rejected('TLS target must be an exact hostname in a configured zone')
+   addresses={row[4][0] for row in socket.getaddrinfo(target,443,type=socket.SOCK_STREAM)}
+   if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):raise Rejected('TLS hostname does not resolve only to public addresses')
+   context=ssl.create_default_context()
+   with socket.create_connection((sorted(addresses)[0],443),timeout=5) as raw:
+    with context.wrap_socket(raw,server_hostname=target) as tls:
+     cert=tls.getpeercert()
+     return {'hostname':target,'verified':True,'protocol':tls.version(),'notBefore':cert.get('notBefore'),'notAfter':cert.get('notAfter'),'subjectAltNames':[v for k,v in cert.get('subjectAltName',[]) if k=='DNS'][:50]}
   host=target or 'portal.platform-infrastructure.com'
   if not re.fullmatch(r'[a-z0-9-]+\.platform-infrastructure\.com',host):raise Rejected('TLS target outside configured infrastructure zone')
   context=portal_tls_context()
@@ -208,14 +368,34 @@ def read(topic,target,subject):
    with socket.create_connection(('127.0.0.1',443),timeout=4) as raw:
     with context.wrap_socket(raw,server_hostname=host) as tls:return {'hostname':host,'verified':True,'protocol':tls.version(),'cipher':tls.cipher()[0],'certificate':tls.getpeercert()}
   except ssl.SSLCertVerificationError as error:return {'hostname':host,'verified':False,'error':'CERTIFICATE_VALIDATION_FAILED','verificationError':str(error),'trustStore':'dedicated Portal root'}
- if topic=='storage':return {'filesystems':command(['df','-PT','-B1']),'inodes':command(['df','-Pi']),'blockDevices':json.loads(command(['lsblk','-J','-o','NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS']))}
+ if topic=='storage':
+  result={'filesystems':command(['df','-PT','-B1']),'inodes':command(['df','-Pi']),'blockDevices':json.loads(command(['lsblk','-J','-o','NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS']))}
+  if PORTABLE and shutil.which('docker'):result['dockerVolumes']=command(['docker','volume','ls','--format','{{.Name}}']).splitlines()[:150]
+  return result
  if topic=='logs':
-  if target not in SERVICES and target not in JOBS.values() and target not in (['platform-server-ai-admin.service'] if PORTABLE else ['platform-server-ai-egress.service','platform-server-ai-admin.service']):raise Rejected('Logs require one reviewed infrastructure unit')
+  if PORTABLE:discovered_unit(target)
+  elif target not in SERVICES and target not in JOBS.values() and target not in ['platform-server-ai-egress.service','platform-server-ai-admin.service']:raise Rejected('Logs require one reviewed infrastructure unit')
   raw=command(['journalctl','--unit='+target,'--since=-30min','--lines=80','--no-pager','--output=short-iso'],timeout=5)
-  return {'unit':target,'redactedJournal':'\n'.join('[sensitive log line redacted]' if re.search(r'password|secret|token|authorization|cookie|credential|private.?key|sk-',line,re.I) else clean(line) for line in raw.splitlines())}
+  return {'unit':target,'redactedJournal':'\n'.join('[sensitive log line redacted]' if re.search(r'password|secret|token|authorization|cookie|credential|private.?key|api.?key|sk-',line,re.I) else clean(line) for line in raw.splitlines())}
  if topic=='resources':
   return {'cpuCounters':pathlib.Path('/proc/stat').read_text()[:12000],'diskCounters':pathlib.Path('/proc/diskstats').read_text()[:12000],'pressure':{n:(pathlib.Path('/proc/pressure')/n).read_text() for n in ['cpu','io','memory']},'inodes':command(['df','-Pi'])}
  if topic=='backups':
+  if PORTABLE:
+   catalog=pathlib.Path('/var/lib/platform-vps-backup/public/catalog.json')
+   if catalog.is_symlink() or not catalog.is_file() or catalog.stat().st_size>65536:raise Rejected('Public backup catalog unavailable')
+   value=json.loads(catalog.read_bytes())
+   if not isinstance(value,dict) or value.get('schema')!='platform.vps-backup-catalog/v1':raise Rejected('Invalid public backup catalog')
+   config=pathlib.Path('/etc/platform-vps-backup');profile=config/'profile.json';signature=config/'profile.sig';public=config/'authority-public.pem'
+   if any(p.is_symlink() or not p.is_file() for p in [profile,signature,public]):raise Rejected('Signed backup profile unavailable')
+   digest=hashlib.sha256(profile.read_bytes()).hexdigest()
+   if digest!=value.get('restoreProfileDigest'):raise Rejected('Public catalog profile digest differs from signed profile')
+   command(['openssl','pkeyutl','-verify','-pubin','-inkey',str(public),'-rawin','-in',str(profile),'-sigfile',str(signature)],timeout=8)
+   points=[]
+   for row in value.get('points',[])[:20]:
+    if not isinstance(row,dict):continue
+    manifest=row.get('manifest',{})
+    points.append({'manifestId':manifest.get('id'),'manifestDigest':manifest.get('signature',{}).get('digest') if isinstance(manifest.get('signature'),dict) else None,'createdAt':manifest.get('createdAt'),'offsiteVerified':row.get('offsiteVerified'),'verifiedAt':row.get('verifiedAt')})
+   return {'catalogMetadata':{'schema':value['schema'],'updatedAt':value.get('updatedAt'),'profileDigest':digest,'profileSignatureVerified':True,'scheduleActive':value.get('scheduleActive'),'queueActive':value.get('queueActive'),'points':points},'weeklyTimer':service_status('platform-vps-backup.timer'),'queueTimer':service_status('platform-vps-backup-queue.timer'),'artifactBytesExposed':False,'restoreOverLiveDataAllowed':False}
   result={}
   for name,p in [('rustfs',RUNTIME/'rustfs-recovery/latest.json'),('host',RUNTIME/'host-recovery/host-recovery-proof.json'),('ftps',RUNTIME/'host-recovery/ftps-proof.json'),('ftpsAttempt',RUNTIME/'host-recovery/ftps-last-attempt.json'),('ftpsRetention',RUNTIME/'host-recovery/ftps-retention-proof.json'),('localRecovery',RUNTIME/'host-recovery/local-dedup-proof.json')]:
    if p.is_file() and not p.is_symlink() and p.stat().st_size<128*1024:
@@ -264,11 +444,94 @@ def safe_zone():
  data=ZONE.read_bytes()
  if b'$ORIGIN platform-infrastructure.com.' not in data:raise Rejected('DNS zone boundary mismatch')
  return data
+def replace_fixed_config(path,data):
+ parent=path.parent
+ info=parent.stat()
+ if parent.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:raise Rejected('Configuration directory is not root protected')
+ mode=0o644
+ if path.exists() or path.is_symlink():
+  existing=path.lstat()
+  if not stat.S_ISREG(existing.st_mode) or existing.st_uid!=0 or existing.st_mode&0o022:raise Rejected('Existing configuration is not root protected')
+  mode=stat.S_IMODE(existing.st_mode)
+ fd,name=tempfile.mkstemp(prefix='.platform-server-ai-',dir=parent)
+ try:
+  with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fchmod(out.fileno(),mode);os.fsync(out.fileno())
+  os.replace(name,path)
+  sync_config_directory(parent)
+ finally:
+  try:os.unlink(name)
+  except FileNotFoundError:pass
+def sync_config_directory(parent):
+ fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(fd)
+ finally:os.close(fd)
+def patch_config(args):
+ target=args['target']
+ if target=='vps-backup-timer':
+  path=pathlib.Path('/etc/systemd/system/platform-vps-backup.timer.d/90-platform-server-ai-schedule.conf')
+  path.parent.mkdir(mode=0o755,exist_ok=True)
+  calendar=args['onCalendar']
+  command(['systemd-analyze','calendar',calendar],timeout=8)
+  data=('[Timer]\nOnCalendar=\nOnCalendar='+calendar+'\n').encode()
+  validate=lambda:command(['systemctl','daemon-reload'],timeout=15)
+  readback=lambda:selected_config('vps-backup-timer')
+ else:
+  path=pathlib.Path('/etc/ssh/sshd_config.d/90-platform-server-ai-hardening.conf')
+  path.parent.mkdir(mode=0o755,exist_ok=True)
+  current={}
+  if path.exists():
+   if path.is_symlink() or path.stat().st_size>4096:raise Rejected('Existing SSH drop-in is not a bounded regular file')
+   for line in path.read_text().splitlines():
+    match=re.fullmatch(r'(ClientAliveInterval|ClientAliveCountMax|MaxAuthTries|LogLevel)\s+([A-Za-z0-9]+)',line.strip())
+    if not match:raise Rejected('SSH drop-in contains unreviewed directives')
+    current[match[1]]=match[2]
+  mapping={'clientAliveInterval':'ClientAliveInterval','clientAliveCountMax':'ClientAliveCountMax','maxAuthTries':'MaxAuthTries','logLevel':'LogLevel'}
+  current.update({directive:str(args[key]) for key,directive in mapping.items() if key in args})
+  data=(''.join(f'{key} {current[key]}\n' for key in mapping.values() if key in current)).encode()
+  def validate():
+   command(['sshd','-t'],timeout=8)
+   observed=selected_sshd()
+   for key,directive in mapping.items():
+    if key in args and observed.get(directive.lower())!=str(args[key]).lower():raise Rejected('SSH effective configuration differs from requested hardening')
+   command(['systemctl','reload','ssh.service'],timeout=15)
+  readback=selected_sshd
+ if path.exists() or path.is_symlink():
+  prior=path.lstat()
+  if not stat.S_ISREG(prior.st_mode) or prior.st_uid!=0 or prior.st_mode&0o022 or prior.st_size>4096:raise Rejected('Existing configuration is not bounded and root protected')
+ old=path.read_bytes() if path.exists() else None
+ try:
+  replace_fixed_config(path,data)
+  validate()
+  observed=readback()
+  if target=='vps-backup-timer' and ('LoadState=loaded' not in observed or 'ActiveState=active' not in observed or 'OnCalendar='+calendar not in observed):raise Rejected('Backup timer schedule or active state did not match')
+ except Exception:
+  try:
+   if old is None:
+    if path.exists():path.unlink();sync_config_directory(path.parent)
+   else:replace_fixed_config(path,old)
+   if target=='vps-backup-timer':command(['systemctl','daemon-reload'],timeout=15)
+   else:command(['sshd','-t'],timeout=8);command(['systemctl','reload','ssh.service'],timeout=15)
+  except Exception as rollback_error:raise Rejected('Configuration failed and rollback could not be verified: '+clean(str(rollback_error)))
+  raise
+ return {'target':target,'selectedReadback':observed,'fileMetadata':metadata_file(str(path))}
 def validate_change(op,args):
  if op not in (portable_catalog()[1] if PORTABLE else OPERATIONS):raise Rejected('Unsupported infrastructure operation; no shell/project/SQL fallback')
- exact(args,['target','memoryMiB','cpus','pids','address'],['target']);target=args['target']
+ exact(args,['target','memoryMiB','cpus','pids','address','onCalendar','clientAliveInterval','clientAliveCountMax','maxAuthTries','logLevel'],['target']);target=args['target']
  if not isinstance(target,str) or len(target)>160 or not target or any(c in target for c in '\r\n\0/\\'):raise Rejected('Invalid infrastructure target')
  allowed={'target'}
+ if op=='config_patch':
+  if not PORTABLE:raise Rejected('Typed configuration patch applies only to the enrolled VPS')
+  if target=='vps-backup-timer':
+   allowed.add('onCalendar')
+   if not re.fullmatch(r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (?:0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]:00 Europe/Rome',str(args.get('onCalendar',''))):raise Rejected('Backup calendar must be one weekly Rome time')
+  elif target=='sshd-hardening':
+   bounds={'clientAliveInterval':(30,3600),'clientAliveCountMax':(1,10),'maxAuthTries':(3,10)}
+   allowed.update([*bounds,'logLevel'])
+   if len(args)<2:raise Rejected('No SSH hardening field supplied')
+   for key,(low,high) in bounds.items():
+    if key in args and (type(args[key]) is not int or not low<=args[key]<=high):raise Rejected('SSH hardening value outside safe bounds')
+   if 'logLevel' in args and args['logLevel'] not in ['INFO','VERBOSE']:raise Rejected('SSH log level outside reviewed values')
+  else:raise Rejected('Configuration target is outside the reviewed allowlist')
  if op=='container_resources':
   allowed|={'memoryMiB','cpus','pids'}
   if len(args)<2:raise Rejected('No resource limit supplied')
@@ -278,8 +541,17 @@ def validate_change(op,args):
  if op=='dns_record_set':allowed.add('address')
  if set(args)-allowed:raise Rejected('Fields do not belong to this operation')
  if op.startswith('container_') and target not in CONTAINERS:raise Rejected('Container is outside the reviewed runtime inventory')
- if op.startswith('service_') and target not in (portable_catalog()[3] if PORTABLE else SERVICES):raise Rejected('Service outside reviewed infrastructure allowlist')
- if op=='package_upgrade' and target not in PACKAGES:raise Rejected('Package outside managed installed-package allowlist')
+ if op.startswith('service_'):
+  if PORTABLE:
+   writable_service(target,op)
+  elif target not in SERVICES:raise Rejected('Service outside reviewed infrastructure allowlist')
+ if op in ['package_upgrade','package_install']:
+  if PORTABLE:
+   installed={name.split(':')[0] for name,_ in package_rows()}
+   if op=='package_upgrade' and target.split(':')[0] not in installed:raise Rejected('Upgrade requires an installed package')
+   if op=='package_install' and target.split(':')[0] in installed:raise Rejected('Install requires an absent package; use upgrade')
+   if op=='package_install' or target not in PACKAGES:checked_apt_plan(target,op=='package_install')
+  elif target not in PACKAGES:raise Rejected('Package outside managed installed-package allowlist')
  if op=='package_refresh' and target!='apt':raise Rejected('Only configured signed APT repositories are supported')
  if op.startswith('dns_record_'):
   label=target.removesuffix('.platform-infrastructure.com')
@@ -321,13 +593,24 @@ def mutate(op,args):
    desired=STATE/'desired-resource-limits.json';values=json.loads(desired.read_text()) if desired.exists() else {};values[target]={k:v for k,v in args.items() if k!='target'};desired.write_bytes(encode(values));desired.chmod(0o600)
   else:command(['docker',op.split('_')[1],*(['--time','20'] if op.endswith('restart') else []),inspected['Id']],timeout=50)
   return {'completionMeaning':'Command ended; use observed health and logs to determine service health','before':before,'after':container_summary(docker(target)),'persistence':'runtime Docker settings; desired limits recorded for reviewed recovery, project compose files not changed'}
- if op.startswith('service_'):command(['systemctl',op.split('_')[1],target],timeout=60);return {'service':target,'observed':service_status(target)}
+ if op.startswith('service_'):
+  if PORTABLE:writable_service(target,op)
+  command(['systemctl',op.split('_')[1],target],timeout=60)
+  return {'service':target,'observed':service_status(target)}
+ if op=='config_patch':return patch_config(args)
  if op=='package_refresh':return {'diagnostic':clean(command(['apt-get','-o','DPkg::Lock::Timeout=30','-o','Acquire::http::Timeout=30','-o','Acquire::https::Timeout=30','-o','Acquire::Retries=2','update'],transaction=True))}
- if op=='package_upgrade':
-  before=command(['dpkg-query','-W','-f=${Status} ${Version}',target])
-  if not before.startswith('install ok installed '):raise Rejected('Package must already be installed')
-  out=command(['apt-get','-o','DPkg::Lock::Timeout=30','install','--only-upgrade','--no-remove','--assume-yes',target],transaction=True)
-  return {'package':target,'before':before,'after':command(['dpkg-query','-W','-f=${Status} ${Version}',target]),'diagnostic':clean(out),'rebootRequired':pathlib.Path('/var/run/reboot-required').exists()}
+ if op in ['package_upgrade','package_install']:
+  before=next((version for name,version in package_rows() if name==target or name.split(':')[0]==target),None)
+  if PORTABLE:
+   if op=='package_upgrade' and before is None or op=='package_install' and before is not None:raise Rejected('Package installed state changed')
+   plan=checked_apt_plan(target,op=='package_install') if op=='package_install' or target not in PACKAGES else {'legacyReviewedPackage':True}
+   argv=['apt-get','-o','DPkg::Lock::Timeout=30','--no-install-recommends','--no-remove','--assume-yes','install']+([] if op=='package_install' else ['--only-upgrade'])+[target]
+  else:
+   if before is None:raise Rejected('Package must already be installed')
+   plan={};argv=['apt-get','-o','DPkg::Lock::Timeout=30','install','--only-upgrade','--no-remove','--assume-yes',target]
+  out=command(argv,transaction=True)
+  after=next((version for name,version in package_rows() if name==target or name.split(':')[0]==target),None)
+  return {'package':target,'before':before,'after':after,'plan':plan,'diagnostic':clean(out),'rebootRequired':pathlib.Path('/var/run/reboot-required').exists()}
  if op.startswith('dns_record_'):
   import shutil
   if not shutil.which('dig'):raise Rejected('DNS write requires the installed dig validator')
