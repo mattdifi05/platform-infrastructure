@@ -156,4 +156,11 @@ class RuntimeRestoreTests(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'membership'):r.b.reviewed_membership([*base,{'Name':'/unreviewed'}])
   node['Mounts'][0]['RW']=True
   with self.assertRaisesRegex(RuntimeError,'Metrics mounts'):r.b.reviewed_membership([*base,node])
+ def test_database_acl_diagnostic_checks_defaults_and_effective_grant_attributes(self):
+  before=json.dumps([{'datname':'private-db','owner':'private-owner','datacl':None}]);after=json.dumps([{'datname':'private-db','owner':'private-owner','datacl':'{}'}]);queries=[]
+  def query(pg,sql):queries.append(sql);return '[]'
+  with patch.object(r,'pg_sql',side_effect=query):details=r.database_grant_diagnostics('isolated',before,after)
+  self.assertEqual(details['ownerChangedCount'],0);self.assertEqual(details['dataclChangedCount'],1);self.assertTrue(details['effectiveACLsame'])
+  self.assertTrue(any('aclexplode' in q and 'acldefault' in q and 'is_grantable' in q for q in queries))
+  self.assertNotIn('private-owner',json.dumps(details));self.assertNotIn('private-db',json.dumps(details))
 if __name__=='__main__':unittest.main()

@@ -3,7 +3,7 @@
 All selected artifacts authenticate before staging; native DB engines qualify the
 staged state before stopping production. A root journal retains rollback paths.
 """
-import importlib.util,json,os,pathlib,re,shutil,signal,stat,subprocess,tarfile,tempfile,time
+import base64,importlib.util,json,os,pathlib,re,shutil,signal,stat,subprocess,tarfile,tempfile,time
 HERE=pathlib.Path(__file__).resolve().parent
 s=importlib.util.spec_from_file_location('runner',HERE/'platform-vps-backup-runner.py');b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
 JOURNAL=b.WORK/'production-restore.json'
@@ -105,7 +105,20 @@ def semantic_inventory(pg,maria,isolated=False):
   result['mariadb']['databases'][db]={t:maria_sql(maria,'SELECT count(*) FROM '+identifier(db,'mariadb')+'.'+identifier(t,'mariadb'),isolated) for t in tables}
  return result
 
-def semantic_difference_summary(expected,actual):
+def database_grant_diagnostics(pg,expected,actual):
+ before=json.loads(expected);after=json.loads(actual)
+ old={r['datname']:r for r in before};new={r['datname']:r for r in after};shared=old.keys()&new.keys()
+ def acl(rows,effective):
+  encoded=base64.b64encode(json.dumps(rows).encode()).decode()
+  source="jsonb_to_recordset(convert_from(decode('"+encoded+"','base64'),'UTF8')::jsonb) AS d(datname text,owner text,datacl text)"
+  if effective:
+   query="SELECT coalesce(json_agg(r ORDER BY datname,grantor,grantee,privilege_type,is_grantable),'[]') FROM (SELECT d.datname,a.grantor::regrole::text AS grantor,CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee,a.privilege_type,a.is_grantable FROM "+source+" CROSS JOIN LATERAL aclexplode(coalesce(d.datacl::aclitem[],acldefault('d',d.owner::regrole))) a) r"
+  else:
+   query="SELECT coalesce(json_agg(r ORDER BY datname),'[]') FROM (SELECT d.datname,CASE WHEN d.datacl IS NULL THEN NULL ELSE (SELECT json_agg(x::text ORDER BY x::text) FROM unnest(d.datacl::aclitem[]) x) END AS acl FROM "+source+") r"
+  return json.loads(pg_sql(pg,query))
+ return {'datnameChangedCount':len(old.keys()^new.keys()),'ownerChangedCount':sum(old[k]['owner']!=new[k]['owner'] for k in shared),'dataclChangedCount':sum(old[k]['datacl']!=new[k]['datacl'] for k in shared),'arrayACLorderOnly':set(old)==set(new) and all(old[k]['owner']==new[k]['owner'] for k in shared) and acl(before,False)==acl(after,False),'effectiveACLsame':acl(before,True)==acl(after,True)}
+
+def semantic_difference_summary(expected,actual,database_grants=None):
  # Diagnostic categories/counts only. This never weakens the equality gate.
  differences=[]
  for engine,categories in {'postgres':('roles','membership','databaseGrants','databases','tableGrants'),'mariadb':('accounts','grants','databases')}.items():
@@ -127,6 +140,7 @@ def semantic_difference_summary(expected,actual):
      item['recordOrderOnly']=sorted(old.splitlines())==sorted(new.splitlines())
      try:item['jsonFormattingOnly']=json.loads(old)==json.loads(new)
      except (ValueError,TypeError):pass
+    if engine=='postgres' and category=='databaseGrants' and database_grants is not None:item.update(database_grants)
     differences.append(item)
  return differences
 
@@ -203,7 +217,9 @@ def stage_databases(directory,runtime,rows,volumes,operation,journal):
   expected=json.loads((runtime/'database-semantics.json').read_text())
   actual=semantic_inventory(names['postgres'],names['mariadb'],True)
   if actual!=expected:
-   summary=semantic_difference_summary(expected,actual)
+   grants=None
+   if expected['postgres']['databaseGrants']!=actual['postgres']['databaseGrants']:grants=database_grant_diagnostics(names['postgres'],expected['postgres']['databaseGrants'],actual['postgres']['databaseGrants'])
+   summary=semantic_difference_summary(expected,actual,grants)
    b.save(b.WORK/('semantic-differences-'+operation+'.json'),{'operation':operation,'manifestId':journal.get('manifestId'),'differences':summary,'productionModified':False})
    raise RuntimeError('Restored database semantics differ: '+','.join(x['engine']+'.'+x['category'] for x in summary))
   for name in created:b.run(['docker','stop','--time','60',name],timeout=90)
