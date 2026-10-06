@@ -560,7 +560,8 @@ const server = createServer(async (req, res) => {
         if (setup.complete) {
           throw new AuthRequestError("A Control Center passkey is already registered.", 409);
         }
-        const options = await controlAuth.beginPasskeyRegistration(req);
+        const payload = await readPayload(req);
+        const options = await controlAuth.beginPasskeyRegistration(req, payload.bootstrapToken);
         json(res, { options });
         return;
       }
@@ -9892,6 +9893,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
   "use strict";
   const button = document.getElementById("app-passkey-register");
   const status = document.getElementById("app-passkey-status");
+  const bootstrapInput = document.getElementById("app-passkey-bootstrap-token");
   const b64 = (value) => {
     const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/") + "===";
     const raw = atob(normalized.slice(0, normalized.length - (normalized.length % 4)));
@@ -9926,11 +9928,13 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     body: JSON.stringify(body || {}),
   });
   button.addEventListener("click", async () => {
+    if (bootstrapInput && !bootstrapInput.reportValidity()) return;
+    const bootstrapToken = bootstrapInput ? bootstrapInput.value : undefined;
     button.disabled = true;
     status.textContent = "Preparazione della passkey…";
     try {
       if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
-      const optionsResponse = await request("/auth/passkey/register/options", {});
+      const optionsResponse = await request("/auth/passkey/register/options", { bootstrapToken });
       const optionsPayload = await optionsResponse.json();
       if (!optionsResponse.ok) throw new Error(optionsPayload.message || "Registrazione non disponibile.");
       const options = optionsPayload.options;
@@ -9943,6 +9947,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
       const credential = await navigator.credentials.create({ publicKey });
       if (!credential) throw new Error("Registrazione annullata.");
       const verifyResponse = await request("/auth/passkey/register/verify", {
+        bootstrapToken,
         challenge: options.challenge,
         credential: serialize(credential),
       });
@@ -9952,6 +9957,8 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     } catch (error) {
       button.disabled = false;
       status.textContent = error?.message || "Registrazione passkey non riuscita.";
+    } finally {
+      if (bootstrapInput) bootstrapInput.value = "";
     }
   });
 })();`;
@@ -10041,6 +10048,7 @@ function safeAppPasskeyReturnTo(value) {
 }
 
 function renderAppPasskeyFirstConfiguration(state) {
+  const requiresBootstrapToken = Boolean(process.env.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE);
   return `<!doctype html>
 <html lang="it">
 <head>
@@ -10057,11 +10065,12 @@ ${controlCenterStylesheetLinks()}
     <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
     <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
     <h1 id="app-passkey-title">Configura l’accesso amministrativo</h1>
-    <p class="first-configuration-lead">Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno.</p>
+    <p class="first-configuration-lead">${requiresBootstrapToken ? "Inserisci il codice di configurazione ricevuto e registra la tua passkey. Il codice serve solo per questa prima registrazione." : "Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno."}</p>
     <section class="first-configuration-card">
       <p class="eyebrow">UNA PASSKEY</p>
       <h2>Registra la passkey</h2>
       <p>La credenziale pubblica resta registrata nel PostgreSQL del Control Center. La sessione termina automaticamente dopo 24 ore.</p>
+      ${requiresBootstrapToken ? '<label for="app-passkey-bootstrap-token">Codice di configurazione</label><input id="app-passkey-bootstrap-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="256">' : ""}
       <button id="app-passkey-register" class="button open" type="button">Registra la passkey</button>
       <p id="app-passkey-status" class="first-configuration-note" role="status"></p>
     </section>
