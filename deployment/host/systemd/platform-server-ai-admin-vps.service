@@ -13,6 +13,7 @@ Restart=on-failure
 RestartSec=3
 RuntimeDirectory=platform-server-ai-admin
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
 StateDirectory=platform-server-ai-admin
 StateDirectoryMode=0700
 UMask=0077
