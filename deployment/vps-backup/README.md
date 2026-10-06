@@ -1,12 +1,13 @@
 # Fresh VPS backup preparation
 
-Status: **capture and production recovery gates remain closed pending qualification**.
-The dedicated remote namespace and shared writer quota admission are prepared; see
-`HOME-FORWARD-QUOTA.md`. Namespace preparation is not a verified recovery point.
-The runner implements capture and authenticated encrypted verification. The signed
-root profile currently denies capture and offsite publication. Timer is not enabled.
-AI admin continues to announce zero backup jobs. Human first-owner/passkey setup must precede
-the first full server backup.
+Status observed on 2026-10-06: encrypted capture and FTPS publication are enabled
+and two remotely verified VPS recovery points are retained. The home shared-quota
+writer is qualified under its existing generation-19 authority. The VPS has an
+independent signed root profile and protected recovery-key custody on the Mac.
+Manual production recovery and its queue/timers remain disabled until the native
+PostgreSQL/MariaDB staging qualification preserves the captured database permissions.
+Owner passkey enrollment is complete. Server AI is active through the official
+OpenAI API; the empty VPS has 22 enrolled infrastructure containers and no hosted apps.
 
 ## Destination and quota
 
@@ -27,8 +28,9 @@ peer deletion is performed. Lost sessions leave an abandoned lock; an operator m
 first reconcile both writers before removing it. No age-based lock theft is allowed.
 A local configuration flag alone is **not** evidence the other host cooperates.
 
-`home-shared-quota.patch` is a review artifact, not applied to the source helper or
-home. It preserves owner marker and public receipt quota at 70 GB while reserving
+`home-shared-quota.patch` is a historical review artifact, not a replacement for
+the installed home helper. The actual home forward change is qualified at generation
+19; see `HOME-FORWARD-QUOTA.md`. It preserves owner marker and public receipt quota at 70 GB while reserving
 peer bytes in the existing helper's working capacity. All home mutation CLI paths
 are wrapped, including generation supplements. Read-only latest selection remains
 unchanged. Existing retention/point verification is unchanged. The module SHA is
@@ -59,7 +61,9 @@ Qualification before activation:
 mounts and volume names from projects `platform_infra_vps` and `platform_server_ai`.
 It refuses unclassified running containers and omits environment/command values.
 This is a capture plan, **not** a signed backup manifest or successful proof.
-Observed 2026-10-06: 21 containers, 13 named volumes, 54 distinct bind sources.
+Observed 2026-10-06 after restricted host metrics activation: 22 containers and
+13 named volumes. The four additional collector binds contain regenerable kernel
+statistics and an empty filesystem metadata directory.
 Regenerate after any core/container change. No source/project reader is admitted.
 
 Capture all persistent volumes or explicitly justify their reconstruction; do not
@@ -98,14 +102,19 @@ volumes. Do not label its existing catalog a complete VPS backup.
   Manual restoration must preserve owner freshness/passkey checks and persistent
   operation/replay state, with first restore isolated before any production action.
 - Complete product owner-authenticated queue wiring and native v2 admission integration before announcing panel restore capability. The root capture profile is a distinct signed configuration and must not be presented as the existing v2 broker admission.
-- Backup runtime/service/timer files are installed but no timer is enabled; no capture or upload has run.
+- Backup runtime/service/timer files are installed. Capture and verified FTPS uploads
+  have run; the queue and scheduled backup timers await native recovery qualification.
 
-Timer is M/W/F 04:05 Europe/Rome with Persistent=true. It runs capture followed by
-FTPS publication; both signed profile gates are currently false. ExecStopPost
+The VPS timer is weekly Friday 06:05 Europe/Rome with Persistent=true. This is
+provisional while Hostinger has weekly backup enabled but no available point or
+exposed weekday. The temporary thread follow-up aligns this timer midway between
+provider backups once the first provider timestamp exists. The home timer keeps its
+existing Monday/Wednesday/Friday schedule. The VPS timer runs capture followed by
+FTPS publication; its capture/offsite gates are enabled. ExecStopPost
 recovers only writer container IDs in the protected pause journal. Targeted local
 quota tests cover traversal, unsupported objects, missing sizes, two-folder totals,
-contention, unqualified peer and capacity failure; provider MKD semantics and native
-admission integration have not yet been tested live.
+contention, unqualified peer and capacity failure; provider MKD exclusivity was verified with two TLS sessions, and both installed
+writers were qualified through their existing native authority mechanisms.
 
 
 ## Implemented native runner
