@@ -85,6 +85,23 @@ stay exactly `portal.stexor.com` and `https://portal.stexor.com`. The client
 CIDR restricts first enrollment; later login still requires the registered
 passkey, exact host and origin, a valid session, and CSRF checks.
 
+If the Mac rotates its IPv6 address within the reviewed management `/64`, use
+`deployment/host/empty-vps/compose.first-enrollment.yaml` for the first
+passkey registration. Set only that reviewed `/64` in the protected VPS `.env`
+before loading the overlay. Immediately before the owner uses Touch ID,
+generate a random 32-byte lowercase-hex browser token on the owner's Mac.
+Keep the raw token in an owner-protected local file, and place only a mode-`0400`,
+UID-1000 regular verifier file at
+`/etc/platform-infrastructure/first-enrollment/verifier.json` on the VPS.
+Its JSON fields are `tokenSha256` (SHA-256 of the raw token), `issuedAt`, and
+`expiresAt` (UTC ISO timestamps no more than 15 minutes apart). The overlay
+binds that file read-only into Control Center; it contains no token value.
+Recreate only Control Center with the complete active Compose overlay chain,
+including Server AI, backup, and Cloudflare DNS when present. If the token
+expires before registration, replace the verifier with a new short-lived one
+and recreate Control Center; do not widen the CIDR. A real registered passkey
+closes first enrollment independently of token expiry.
+
 For a new VPS, first confirm with the owner which Cloudflare account owns this
 infrastructure. The same Cloudflare account can also host NAS or other
 projects; keep this platform's Tunnel, route, and any temporary Access change

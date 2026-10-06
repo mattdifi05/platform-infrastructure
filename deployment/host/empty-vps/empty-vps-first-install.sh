@@ -198,14 +198,18 @@ COMPOSE+=(-p platform_infra_vps
 if [[ -n "$AI_ACTIVE" ]]; then
   COMPOSE+=(-f compose.server-ai-control-center.yaml -f compose.server-ai-empty-host-control-center.yaml)
 fi
-BACKUP_OVERLAY=$ROOT/deployment/vps-backup/compose.control-center.yaml
 CC_CONFIG_FILES=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' enterprise-control-center 2>/dev/null || true)
-case ",$CC_CONFIG_FILES," in
-  *,"$BACKUP_OVERLAY",*)
-    [[ -f "$BACKUP_OVERLAY" ]] || { echo 'The active Control Center backup overlay is missing.' >&2; exit 1; }
-    COMPOSE+=(-f deployment/vps-backup/compose.control-center.yaml)
-    ;;
-esac
+for overlay in \
+  deployment/vps-backup/compose.control-center.yaml \
+  deployment/cloudflare-dns/compose.control-center.yaml \
+  deployment/host/empty-vps/compose.first-enrollment.yaml; do
+  case ",$CC_CONFIG_FILES," in
+    *,"$ROOT/$overlay",*)
+      [[ -f "$ROOT/$overlay" ]] || { echo "The active Control Center overlay is missing: $overlay" >&2; exit 1; }
+      COMPOSE+=(-f "$overlay")
+      ;;
+  esac
+done
 "${COMPOSE[@]}" config --quiet
 if ! docker image inspect platform/runtime-helpers:go1.27.1 >/dev/null 2>&1; then
   docker build --quiet -f deployment/docker/runtime-helpers.Dockerfile -t platform/runtime-helpers:go1.27.1 . >/dev/null

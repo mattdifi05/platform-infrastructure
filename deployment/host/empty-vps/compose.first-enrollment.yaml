@@ -1,0 +1,14 @@
+# Optional first-enrollment gate for this VPS. The host file contains only a
+# SHA-256 verifier and 15-minute timestamps, never the raw browser token.
+services:
+  control-center:
+    environment:
+      CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: ${CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS:?set reviewed Mac management IPv6 CIDR}
+      CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE: /run/secrets/platform-first-enrollment.json
+    volumes:
+      - type: bind
+        source: /etc/platform-infrastructure/first-enrollment/verifier.json
+        target: /run/secrets/platform-first-enrollment.json
+        read_only: true
+        bind:
+          create_host_path: false
