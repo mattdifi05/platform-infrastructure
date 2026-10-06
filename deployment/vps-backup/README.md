@@ -246,3 +246,10 @@ checks the unchanged production state. It never switches production paths when
 existing explicit quota-lock reconciliation; this routine does not steal leases.
 Journal atomic replacements and data-path renames fsync their parent directories.
 Staged files are flushed on their filesystems before recording stop/switch intent.
+
+
+The signed cold-recovery capture roots include `/etc/platform-ftps-backup`, which
+contains the shared FTP quota policy. Existing signed profiles require an explicit
+root-approved update and a new complete point to include this directory; changing
+the enrollment template does not retroactively complete an earlier backup.
+Manual runtime restoration preserves the current FTP policy and management plane.
