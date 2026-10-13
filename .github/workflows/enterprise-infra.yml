@@ -235,8 +235,8 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/local-private-input/combined-render.yaml")][0].source) as $brokerRenderSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/control-center-state")][0].source) as $controlStateSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
-            (.secrets | length) == 20 and
-            (.networks | length) == 11 and
+            (.secrets | length) == 14 and
+            (.networks | length) == 9 and
             (.volumes | length) == 12 and
             (.services["backup-scheduler"].network_mode == "none") and
             (.services["docker-action-broker"].user == "1000:1000") and
