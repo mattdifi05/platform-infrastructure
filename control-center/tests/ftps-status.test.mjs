@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readVpsBackupCatalog } from '../backup/vps-catalog.mjs';
 
 const source = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 const start = source.indexOf('function readFtpsOffsiteSummary(');
@@ -19,6 +20,8 @@ function evaluate(proof, destination = { backend: 'ftps-encrypted-bundles' }, li
   const files = { 'ftps-proof.json': proof, 'offsite-destination.json': destination };
   const bind = {
     path,
+    readVpsBackupCatalog,
+    process: { env: {} },
     lstatSync(file) {
       if (!(path.basename(file) in files)) throw Error('missing');
       return { isFile: () => true, isSymbolicLink: () => linked, size: 1024 };

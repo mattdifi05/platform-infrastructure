@@ -64,6 +64,8 @@ function runExecutor(jobFile, expectSuccess = true) {
 try {
   mkdirSync(path.join(replicaRoot, "scripts"), { recursive: true });
   mkdirSync(path.join(replicaRoot, "control-center", "backup"), { recursive: true });
+  mkdirSync(path.join(replicaRoot, "vendor"), { recursive: true });
+  cpSync(path.join(repositoryRoot, "vendor", "json-schema"), path.join(replicaRoot, "vendor", "json-schema"), { recursive: true });
   cpSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), path.join(replicaRoot, "scripts", "infra-ops.mjs"));
   for (const moduleName of [
     "network-segmentation-policy.mjs",
@@ -79,6 +81,11 @@ try {
     "command-safety.mjs",
     "restic-secret-transport.mjs",
     "safe-tar-path.mjs",
+    "rustfs-native-checkpoint.mjs",
+    "local-private-backup-docker-policy.mjs",
+    "local-private-backup-admission.mjs",
+    "backup-native-v2-contract.mjs",
+    "docker-action-contract.mjs",
     "secret-store-metadata.mjs",
     "backup-import-policy.mjs",
     "postgres-restore-sandbox.mjs",
@@ -90,9 +97,25 @@ try {
     "evidence-bundle-phase.mjs",
     "edge-provider-evidence.mjs",
     "admin-access-inventory.mjs",
+    "deployment-admission-policy.mjs",
+    "deployment-receipt-policy.mjs",
+    "trusted-provider-run-policy.mjs",
+    "release-go-no-go-policy.mjs",
+    "privileged-workflow-policy.mjs",
+    "stable-json-artifact.mjs",
+    "source-archive-policy.mjs",
+    "buildkit-sbom-policy.mjs",
+    "release-registry-resolution.mjs",
+    "local-private-compatibility-source-boundary.mjs",
+    "release-artifact-policy.mjs",
+    "runtime-intent-policy.mjs",
+    "cyclonedx-schema-policy.mjs",
     "provider-mfa-assurance.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
-  cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
+  for (const moduleName of ["core-contracts.mjs", "contracts.mjs"]) {
+    cpSync(path.join(repositoryRoot, "control-center", "backup", moduleName), path.join(replicaRoot, "control-center", "backup", moduleName));
+  }
+  cpSync(path.join(repositoryRoot, "control-center", "host-extension.mjs"), path.join(replicaRoot, "control-center", "host-extension.mjs"));
   mkdirSync(path.join(sourceRoot, "fixture-app", "src"), { recursive: true });
   const sourceFile = path.join(sourceRoot, "fixture-app", "src", "index.js");
   writeFileSync(sourceFile, "export const fixture = true;\n");

@@ -186,30 +186,6 @@ services:
         source: ${SERVER_AI_PROJECT_READERS_TOKEN_FILE:-/REPLACE/WITH/PRIVATE/server-ai-project-readers-token}
         target: /run/secrets/server_ai_project_readers_token
         read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_FIPLATFORM_FIP_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-fiplatform-fiplatform-ro.json}
-        target: /run/secrets/server_ai_fiplatform_mariadb_fiplatform_ro.json
-        read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_FIPLATFORM_U778675014_FIP_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-fiplatform-u778675014-fip-ro.json}
-        target: /run/secrets/server_ai_fiplatform_mariadb_u778675014_fip_ro.json
-        read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_WORKCALENDAR_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-workcalendar-workcalendar-ro.json}
-        target: /run/secrets/server_ai_workcalendar_mariadb_workcalendar_ro.json
-        read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_ANNIVERSARY_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-anniversary-anniversary-ro.json}
-        target: /run/secrets/server_ai_anniversary_mariadb_anniversary_ro.json
-        read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_STREAM_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-stream-stream-ro.json}
-        target: /run/secrets/server_ai_stream_mariadb_stream_ro.json
-        read_only: true
-      - type: bind
-        source: ${SERVER_AI_DB_ACCOUNT_POSTGRES_CREDENTIAL_FILE:-/REPLACE/WITH/PRIVATE/db-stexor-postgres-stexor-ro.json}
-        target: /run/secrets/server_ai_account_postgres_stexor_ro.json
-        read_only: true
     networks: [project-query, database]
     read_only: true
     cap_drop: [ALL]

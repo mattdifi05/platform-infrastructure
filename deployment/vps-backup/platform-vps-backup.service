@@ -1,0 +1,15 @@
+[Unit]
+Description=Admitted full VPS infrastructure backup
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-vps-backup/deployment/vps-backup/platform-vps-backup-runner.py capture
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-vps-backup/deployment/vps-backup/ftps-sync.py
+ExecStopPost=/usr/bin/python3 /usr/local/libexec/platform-vps-backup/deployment/vps-backup/platform-vps-backup-runner.py recover-unpause
+TimeoutStartSec=43200
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=1G
+TasksMax=128

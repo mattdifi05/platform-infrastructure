@@ -30,41 +30,8 @@ except ImportError:  # Unit tests can import pure validation with dependencies i
     parse = None
 
 
-DATABASES = {
-    "fiplatform-mariadb-fiplatform": {
-        "projectId": "fiplatform", "dialect": "mariadb", "driver": "mariadb",
-        "host": "mariadb", "port": 3306, "database": "fiplatform",
-        "secret": Path("/run/secrets/server_ai_fiplatform_mariadb_fiplatform_ro"),
-    },
-    "fiplatform-mariadb-u778675014-fip": {
-        "projectId": "fiplatform", "dialect": "mariadb", "driver": "mariadb",
-        "host": "mariadb", "port": 3306, "database": "u778675014_fip",
-        "secret": Path("/run/secrets/server_ai_fiplatform_mariadb_u778675014_fip_ro"),
-    },
-    "workcalendar-mariadb-workcalendar": {
-        "projectId": "workcalendar", "dialect": "mariadb", "driver": "mariadb",
-        "host": "mariadb", "port": 3306, "database": "workcalendar",
-        "secret": Path("/run/secrets/server_ai_workcalendar_mariadb_workcalendar_ro"),
-    },
-    "anniversary-mariadb-anniversary": {
-        "projectId": "anniversary", "dialect": "mariadb", "driver": "mariadb",
-        "host": "mariadb", "port": 3306, "database": "anniversary",
-        "secret": Path("/run/secrets/server_ai_anniversary_mariadb_anniversary_ro"),
-    },
-    "stream-mariadb-stream": {
-        "projectId": "stream", "dialect": "mariadb", "driver": "mariadb",
-        "host": "mariadb", "port": 3306, "database": "stream",
-        "secret": Path("/run/secrets/server_ai_stream_mariadb_stream_ro"),
-    },
-    # account-postgres-stexor is intentionally exposed through the canonical
-    # managed source root, not through its container or application aliases.
-    "account-postgres-stexor": {
-        "projectId": "stexor", "dialect": "postgresql", "driver": "postgresql",
-        "host": "postgres", "port": 5432, "database": "stexor",
-        "schemas": ("stexor_account", "stexor_platform"),
-        "secret": Path("/run/secrets/server_ai_account_postgres_stexor_ro"),
-    },
-}
+# No application databases are enrolled in a fresh installation.
+DATABASES = {}
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,63}$")
 PLACEHOLDER = re.compile(r"^p([1-9]|[12][0-9]|3[0-2])$")
 PARAM_SENTINEL = re.compile(r"__SERVER_AI_PARAM_([1-9]|[12][0-9]|3[0-2])__")
@@ -217,7 +184,7 @@ def _safe_value(value: Any) -> Any:
 class QueryReader:
     def __init__(self, databases: dict[str, dict[str, Any]] = DATABASES, token: bytes | None = None,
                  connectors: dict[str, Any] | None = None):
-        if not databases or set(databases) - set(DATABASES):
+        if not isinstance(databases, dict) or set(databases) - set(DATABASES):
             raise RuntimeError("query reader databases are invalid")
         self.databases = databases
         self.token = token if token is not None else load_token()

@@ -288,7 +288,8 @@ const CORE_SEMANTIC_POLICY = {
             "fallback": "true"
           },
           "CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS": {
-            "literal": "true"
+            "variable": "CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS",
+            "fallback": "false"
           },
           "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS": {
             "variable": "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS",
@@ -5492,14 +5493,16 @@ export const LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES = Object.freeze([
 
 export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
   mode: "true",
-  hostSuffix: ".platform-infrastructure.com",
-  allowedUpstreams: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80",
-  nodeProjectUpstreams: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
-  phpProjectUpstreams: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80",
+  hostSuffix: ".localhost.com",
+  allowedUpstreams: "control-center:8080",
+  hostExtensionFile: "/run/platform-host-extension/project-router.json",
+  hostExtensionSha256: "",
   emptyMaps: Object.freeze([
     "NODE_PROJECT_HOSTS",
     "PROJECT_UPSTREAMS",
     "STATIC_PROJECT_UPSTREAMS",
+    "NODE_PROJECT_UPSTREAMS",
+    "PHP_PROJECT_UPSTREAMS",
   ]),
   metadataMount: "/var/www/projects",
   projectStateMount: "/var/www/project-state",
@@ -5508,24 +5511,6 @@ export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
     network: "platform_db_admin",
     alias: "platform.local",
   }),
-  routeOwnership: Object.freeze({
-    account: Object.freeze({ sourceSlug: "stexor", projectSlug: "account", type: "node" }),
-    anniversary: Object.freeze({ sourceSlug: "anniversary", projectSlug: "anniversary", type: "php" }),
-    fiplatform: Object.freeze({ sourceSlug: "fiplatform", projectSlug: "fiplatform", type: "php" }),
-    fireport: Object.freeze({ sourceSlug: "fiplatform", projectSlug: "fiplatform", type: "php" }),
-    matthewdifilippo: Object.freeze({ sourceSlug: "matthewdifilippo", projectSlug: "matthewdifilippo", type: "php" }),
-    opstudents: Object.freeze({ sourceSlug: "opstudents", projectSlug: "opstudents", type: "node" }),
-    stream: Object.freeze({ sourceSlug: "stream", projectSlug: "stream", type: "php" }),
-    ui: Object.freeze({ sourceSlug: "stexor", projectSlug: "ui", type: "node" }),
-  }),
-  reservedPlatformSlugs: Object.freeze([
-    "admin",
-    "api",
-    "auth",
-    "docs",
-    "portal",
-    "projects",
-  ]),
 });
 
 export const LOCAL_PRIVATE_BASE_SECRET_AUTHORITY = Object.freeze(
@@ -7885,13 +7870,15 @@ export function projectLocalPrivateNoHostedAuthority(
     PROJECT_HOST_SUFFIX: LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostSuffix,
     PROJECT_ROUTER_ALLOWED_UPSTREAMS:
       LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.allowedUpstreams,
+    PROJECT_ROUTER_HOST_EXTENSION_FILE:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostExtensionFile,
+    PROJECT_ROUTER_HOST_EXTENSION_SHA256:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostExtensionSha256,
     NODE_PROJECT_HOSTS: "",
     PROJECT_UPSTREAMS: "",
     STATIC_PROJECT_UPSTREAMS: "",
-    NODE_PROJECT_UPSTREAMS:
-      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.nodeProjectUpstreams,
-    PHP_PROJECT_UPSTREAMS:
-      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.phpProjectUpstreams,
+    NODE_PROJECT_UPSTREAMS: "",
+    PHP_PROJECT_UPSTREAMS: "",
   };
   if (!plainObject(projectRouterEnvironment)
       || Object.entries(compatibilityEnvironment).some(([key, value]) =>
@@ -7901,6 +7888,8 @@ export function projectLocalPrivateNoHostedAuthority(
     for (const key of [
       "PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE",
       "PROJECT_ROUTER_WORKLOAD_LOCK_SHA256",
+      "PROJECT_ROUTER_HOST_EXTENSION_FILE",
+      "PROJECT_ROUTER_HOST_EXTENSION_SHA256",
       "NODE_PROJECT_HOSTS",
       "PROJECT_UPSTREAMS",
       "STATIC_PROJECT_UPSTREAMS",

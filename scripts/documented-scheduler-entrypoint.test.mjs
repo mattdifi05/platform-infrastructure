@@ -93,6 +93,8 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
     "scripts/backup-queue-control.mjs",
     "scripts/docker-action-client.mjs",
     "scripts/docker-action-contract.mjs",
+    "control-center/host-extension.mjs",
+    "control-center/backup/core-contracts.mjs",
     "control-center/backup/contracts.mjs",
     "control-center/backup/queue-admission.mjs",
     "control-center/backup/queue-operation-adapter.mjs",
@@ -106,7 +108,7 @@ test("FG-005 dedicated scheduler image source contains no Docker tooling", () =>
   );
   assert.match(
     candidates[0].source,
-    /^COPY --chmod=0444 control-center\/backup\/contracts\.mjs control-center\/backup\/queue-admission\.mjs control-center\/backup\/queue-operation-adapter\.mjs \/opt\/platform-backup-scheduler\/control-center\/backup\/$/m,
+    /^COPY --chmod=0444 control-center\/backup\/core-contracts\.mjs control-center\/backup\/contracts\.mjs control-center\/backup\/queue-admission\.mjs control-center\/backup\/queue-operation-adapter\.mjs \/opt\/platform-backup-scheduler\/control-center\/backup\/$/m,
     "queue control dependencies must preserve their repository-relative import graph",
   );
   assert.match(

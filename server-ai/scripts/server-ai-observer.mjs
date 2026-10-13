@@ -7,6 +7,7 @@ const MAX_LOG_BYTES = 32 * 1024;
 const REQUEST_TIMEOUT_MS = 3000;
 const ID_RE = /^[a-f0-9]{64}$/i;
 const SINCE = { "15m": 15 * 60, "1h": 60 * 60, "24h": 24 * 60 * 60 };
+// Container scope is enforced by the protected native observer proxy.
 
 export function redactText(value) {
   return redactSensitive(value);
@@ -23,8 +24,13 @@ function redactSensitive(text) {
 
 function tokenDigest(value) { return createHash("sha256").update(String(value || "")).digest(); }
 function isAuthorized(header, token) {
-  const supplied = /^Bearer\s+(.+)$/i.exec(String(header || ""))?.[1] || "";
-  return timingSafeEqual(tokenDigest(supplied), tokenDigest(token));
+  const value = String(header || "");
+  const hasLineTerminator = value.includes("\r") || value.includes("\n") || value.includes("\u2028") || value.includes("\u2029");
+  const bearer = value.slice(0, 6).toLowerCase() === "bearer";
+  const separator = value[6] === " " || value[6] === "\t";
+  const supplied = bearer && separator && !hasLineTerminator ? value.slice(7).trimStart() : "";
+  const matches = timingSafeEqual(tokenDigest(supplied), tokenDigest(token));
+  return supplied.length > 0 && matches;
 }
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -119,7 +125,8 @@ export function createObserverServer(options = {}) {
     if (!result || result.statusCode < 200 || result.statusCode >= 300) throw dockerError();
     const body = Buffer.from(result.body || ""); body.truncated = result.truncated === true; return body;
   }
-  async function list(signal) { return parseJson(await docker("/containers/json?all=1&limit=100", signal)).slice(0, 100).map(normalizedContainer).filter((item) => ID_RE.test(item.id)); }
+  async function list(signal) { return parseJson(await docker("/containers/json?all=1&limit=100", signal)).slice(0, 100)
+    .map(normalizedContainer).filter(item => ID_RE.test(item.id)); }
   async function known(id, signal) { const rows = await list(signal); if (!rows.some((row) => row.id.toLowerCase() === id.toLowerCase())) { const error = new Error("Container not found."); error.status = 404; throw error; } }
   const server = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req, res) => {
     if (inFlight >= maxConcurrent) return apiError(res, 503, "observer_busy", "Observer busy.");

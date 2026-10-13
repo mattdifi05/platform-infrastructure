@@ -91,6 +91,15 @@ test("typed PostgreSQL restore stages one digest-identical 0444 copy and preserv
   assert.doesNotMatch(restore, /hostPathForContainerMount\(backupFile\).*input\.dump/);
 });
 
+test("clean-base typed PostgreSQL evidence is closed to the Keycloak database and artifact family", () => {
+  const cli = body("function expectedTypedEvidenceCli", "function initializeTypedEvidenceInvocation");
+  const artifacts = body("function assertTypedEvidenceArtifactArgument", "function expectedTypedEvidenceCli");
+  assert.match(cli, /String\(argv\.database \?\? \"\"\) !== \"keycloak\"/);
+  assert.match(cli, /\"--container\", \"enterprise-postgres\", \"--database\", \"keycloak\"/);
+  assert.match(artifacts, /\[\"10-pg-keycloak\", \/\^keycloak-/);
+  assert.doesNotMatch(`${cli}\n${artifacts}`, /stexor|09-pg-/i);
+});
+
 test("PostgreSQL canonical structure removes only volatile dump envelope lines", () => {
   const schema = body("function postgresCanonicalSchemaDigest", "function decodeHexIdentifier");
   assert.match(schema, /pg_dump[\s\S]*--schema-only[\s\S]*--no-owner[\s\S]*--no-acl[\s\S]*--quote-all-identifiers/);

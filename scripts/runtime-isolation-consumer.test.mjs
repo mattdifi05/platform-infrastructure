@@ -2608,7 +2608,7 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v2",
-    sha256: "57960990121b0eb4e1bb2e7c40375db420b3f328bf374b9e081e8b7e14036f91",
+    sha256: "6ff31a09ab8a65455bbe433a18e53dee0643ad583492cfdd755476ab1d33e00a",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
@@ -3241,13 +3241,13 @@ function localPrivateQa8Fixture(sandbox) {
     PROJECT_HOST_SUFFIX: LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostSuffix,
     PROJECT_ROUTER_ALLOWED_UPSTREAMS:
       LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.allowedUpstreams,
-    NODE_PROJECT_HOSTS: "",
-    PROJECT_UPSTREAMS: "",
-    STATIC_PROJECT_UPSTREAMS: "",
-    NODE_PROJECT_UPSTREAMS:
-      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.nodeProjectUpstreams,
-    PHP_PROJECT_UPSTREAMS:
-      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.phpProjectUpstreams,
+    PROJECT_ROUTER_HOST_EXTENSION_FILE:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostExtensionFile,
+    PROJECT_ROUTER_HOST_EXTENSION_SHA256:
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.hostExtensionSha256,
+    ...Object.fromEntries(
+      LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.emptyMaps.map((key) => [key, ""]),
+    ),
   });
   config.services.mariadb.networks = {
     [LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY.mariadbCompatibilityAlias.network]: {

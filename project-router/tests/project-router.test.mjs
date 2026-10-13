@@ -72,7 +72,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: expectedWorkloadLockSha256,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
-      PHP_PROJECT_UPSTREAMS: `php-demo=http://127.0.0.1:${serverPort(phpServer)},fiplatform=http://127.0.0.1:${serverPort(phpServer)}`,
+      PHP_PROJECT_UPSTREAMS: `php-demo=http://127.0.0.1:${serverPort(phpServer)},demo-php=http://127.0.0.1:${serverPort(phpServer)}`,
       NODE_PROJECT_UPSTREAMS: `node-demo=http://127.0.0.1:${serverPort(nodeServer)}`,
       STATIC_PROJECT_UPSTREAMS: `static-demo=http://127.0.0.1:${serverPort(staticServer)}`,
       PROJECT_UPSTREAMS: "legacy-php=http://fixture-app-web:3000",
@@ -118,19 +118,19 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(fallbackPhp.statusCode, 503);
   assert.match(fallbackPhp.body, /PHP project has no dedicated upstream/);
 
-  const fiplatform = await httpGet(routerPort, "fiplatform.localhost.com", "/");
-  assert.equal(fiplatform.statusCode, 200);
-  assert.equal(fiplatform.body, "php-dedicated:fiplatform.localhost.com:/");
+  const demoPhp = await httpGet(routerPort, "demo-php.localhost.com", "/");
+  assert.equal(demoPhp.statusCode, 200, stderr);
+  assert.equal(demoPhp.body, "php-dedicated:demo-php.localhost.com:/");
 
-  const fireportAlias = await httpGet(routerPort, "fireport.localhost.com", "/");
-  assert.equal(fireportAlias.statusCode, 200);
-  assert.equal(fireportAlias.body, "php-dedicated:fireport.localhost.com:/");
+  const demoArchiveAlias = await httpGet(routerPort, "demo-archive.localhost.com", "/");
+  assert.equal(demoArchiveAlias.statusCode, 200);
+  assert.equal(demoArchiveAlias.body, "php-dedicated:demo-archive.localhost.com:/");
 
-  writeFileSync(path.join(projectsRoot, "fiplatform", ".platform", "project.json"), `${JSON.stringify({
-    projects: [{ slug: "fiplatform", name: "fiplatform", type: "php", aliases: ["attacker-alias"] }],
+  writeFileSync(path.join(projectsRoot, "demo-php", ".platform", "project.json"), `${JSON.stringify({
+    projects: [{ slug: "demo-php", name: "demo-php", type: "php", aliases: ["attacker-alias"] }],
     type: "php",
   })}\n`);
-  const signedAliasStillAvailable = await httpGet(routerPort, "fireport.localhost.com", "/signed-snapshot");
+  const signedAliasStillAvailable = await httpGet(routerPort, "demo-archive.localhost.com", "/signed-snapshot");
   assert.equal(signedAliasStillAvailable.statusCode, 200);
   const unsignedReplacement = await httpGet(routerPort, "attacker-alias.localhost.com", "/");
   assert.equal(unsignedReplacement.statusCode, 404);
@@ -372,156 +372,120 @@ test("production routing ignores legacy discovery and environment maps", async (
   assert.match(response.body, /Project not found/);
 });
 
-test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved application route map", async (t) => {
+test("LOCAL_PRIVATE without an external host profile exposes zero project routes", async (t) => {
   const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
   const projects = path.join(root, "projects");
   const state = path.join(root, "state");
   const lockFile = path.join(state, "hosted-workloads.lock.json");
-  mkdirSync(path.join(projects, "stexor", ".platform"), { recursive: true });
-  mkdirSync(path.join(projects, "opstudents"), { recursive: true });
-  mkdirSync(path.join(projects, "fiplatform", ".platform"), { recursive: true });
-  for (const slug of ["anniversary", "fiplatform", "matthewdifilippo", "stream"]) {
-    mkdirSync(path.join(projects, slug, "public"), { recursive: true });
-    writeFileSync(path.join(projects, slug, "public", "index.php"), "<?php\n");
-  }
-  writeFileSync(path.join(projects, "stexor", "package.json"), "{}\n");
-  writeFileSync(path.join(projects, "stexor", ".platform", "project.json"), `${JSON.stringify({
-    type: "node",
-    projects: [
-      { slug: "account", name: "Stexor account", type: "node" },
-      { slug: "ui", name: "Stexor UI", type: "node" },
-    ],
-  })}\n`);
-  writeFileSync(path.join(projects, "opstudents", "package.json"), "{}\n");
-  writeFileSync(path.join(projects, "opstudents", "platform.project.json"), `${JSON.stringify({
-    type: "node",
-    host: "opstudents.platform-infrastructure.com",
-  })}\n`);
-  writeFileSync(path.join(projects, "fiplatform", ".platform", "project.json"), `${JSON.stringify({
-    type: "php",
-    projects: [{ slug: "fiplatform", name: "fiplatform", type: "php", aliases: ["fireport"] }],
-  })}\n`);
+  const source = path.join(projects, "demo");
+  mkdirSync(path.join(source, ".platform"), { recursive: true });
   mkdirSync(state, { recursive: true });
-  writeFileSync(path.join(state, "projects.json"), "{\"projects\":{}}\n");
+  writeFileSync(path.join(source, "package.json"), "{}\n");
+  writeFileSync(path.join(source, ".platform", "project.json"), `${JSON.stringify({
+    type: "node",
+    projects: [{ slug: "demo", name: "Demo", type: "node" }],
+  })}\n`);
+  writeFileSync(path.join(state, "projects.json"), `{"projects":{}}\n`);
   const zeroWorkloadLock = readFileSync(path.join(infraRoot, "config", "no-hosted-workloads.local-private.lock.json"));
   writeFileSync(lockFile, zeroWorkloadLock, { mode: 0o600 });
   chmodSync(lockFile, 0o600);
 
   const routerPort = await freePort();
-  const routerEnv = {
-      ...process.env,
-      NODE_ENV: "production",
-      PROJECT_ROUTER_PORT: String(routerPort),
-      PROJECT_ROUTER_UPSTREAM_TIMEOUT_MS: "100",
-      PROJECTS_ROOT: projects,
-      PROJECT_STATE_FILE: path.join(state, "projects.json"),
-      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
-      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
-      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: sha256(zeroWorkloadLock),
-      PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true",
-      CONTROL_CENTER_HOST: "portal.platform-infrastructure.com",
-      CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
-      PROJECT_HOST_SUFFIX: ".platform-infrastructure.com",
-      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80",
-      NODE_PROJECT_HOSTS: "",
-      PROJECT_UPSTREAMS: "",
-      STATIC_PROJECT_UPSTREAMS: "",
-      NODE_PROJECT_UPSTREAMS: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
-      PHP_PROJECT_UPSTREAMS: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80",
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    PROJECT_ROUTER_PORT: String(routerPort),
+    PROJECTS_ROOT: projects,
+    PROJECT_STATE_FILE: path.join(state, "projects.json"),
+    PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
+    PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+    PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: sha256(zeroWorkloadLock),
+    PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true",
+    CONTROL_CENTER_HOST: "portal.example.test",
+    CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+    PROJECT_HOST_SUFFIX: ".example.test",
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
   };
-  const child = spawn(process.execPath, [routerScript], {
-    cwd: infraRoot,
-    env: routerEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawn(process.execPath, [routerScript], { cwd: infraRoot, env, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(async () => { await stopChild(child); rmSync(root, { recursive: true, force: true }); });
+  await waitForHealth(routerPort, "portal.example.test");
+  const route = await httpGet(routerPort, "demo.example.test", "/");
+  assert.equal(route.statusCode, 404);
+  assert.match(route.body, /Project not found/);
+});
+
+test("LOCAL_PRIVATE accepts only routes in a pinned external host profile", async (t) => {
+  const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
+  const projects = path.join(root, "projects");
+  const state = path.join(root, "state");
+  const lockFile = path.join(state, "hosted-workloads.lock.json");
+  const source = path.join(projects, "demo");
+  const extensionPath = path.join(root, "project-router.json");
+  mkdirSync(path.join(source, ".platform"), { recursive: true });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(path.join(source, "package.json"), "{}\n");
+  writeFileSync(path.join(source, ".platform", "project.json"), `${JSON.stringify({
+    type: "node",
+    projects: [{ slug: "demo", name: "Demo", type: "node" }],
+  })}\n`);
+  writeFileSync(path.join(state, "projects.json"), `{"projects":{}}\n`);
+  const zeroWorkloadLock = readFileSync(path.join(infraRoot, "config", "no-hosted-workloads.local-private.lock.json"));
+  writeFileSync(lockFile, zeroWorkloadLock, { mode: 0o600 });
+  chmodSync(lockFile, 0o600);
+  const extensionBytes = Buffer.from(`${JSON.stringify({
+    schema: "platform-project-router-host-extension/v1",
+    hostSuffix: ".example.test",
+    services: ["node-demo:3000"],
+    routes: [{ slug: "demo", sourceSlug: "demo", projectSlug: "demo", type: "node", service: "node-demo", port: 3000 }],
+  })}\n`);
+  writeFileSync(extensionPath, extensionBytes, { mode: 0o444 });
+  chmodSync(extensionPath, 0o444);
+
+  const routerPort = await freePort();
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    PROJECT_ROUTER_PORT: String(routerPort),
+    PROJECTS_ROOT: projects,
+    PROJECT_STATE_FILE: path.join(state, "projects.json"),
+    PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
+    PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+    PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: sha256(zeroWorkloadLock),
+    PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE: "true",
+    PROJECT_ROUTER_HOST_EXTENSION_FILE: extensionPath,
+    PROJECT_ROUTER_HOST_EXTENSION_SHA256: sha256(extensionBytes),
+    CONTROL_CENTER_HOST: "portal.example.test",
+    CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+    PROJECT_HOST_SUFFIX: ".example.test",
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
+  };
+  const child = spawn(process.execPath, [routerScript], { cwd: infraRoot, env, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
-  t.after(async () => {
-    await stopChild(child);
-    rmSync(root, { recursive: true, force: true });
-  });
-  await waitForHealth(routerPort);
+  t.after(async () => { await stopChild(child); rmSync(root, { recursive: true, force: true }); });
+  await waitForHealth(routerPort, "portal.example.test").catch((error) => { throw new Error(`${error.message}: ${stderr}`); });
+  const route = await httpGet(routerPort, "demo.example.test", "/");
+  assert.equal(route.statusCode, 502, stderr);
+  assert.match(route.body, /upstream unavailable/);
+  const unlisted = await httpGet(routerPort, "unknown.example.test", "/");
+  assert.equal(unlisted.statusCode, 404);
+  const reserved = await httpGet(routerPort, "portal.example.test", "/__health");
+  assert.equal(reserved.statusCode, 200);
 
-  for (const host of [
-    "account.platform-infrastructure.com",
-    "ui.platform-infrastructure.com",
-    "opstudents.platform-infrastructure.com",
-    "anniversary.platform-infrastructure.com",
-    "fiplatform.platform-infrastructure.com",
-    "fireport.platform-infrastructure.com",
-    "matthewdifilippo.platform-infrastructure.com",
-    "stream.platform-infrastructure.com",
-  ]) {
-    const response = await httpGet(routerPort, host, "/");
-    assert.equal(response.statusCode, 502, `${host} did not select its closed preserved upstream: ${stderr}`);
-    assert.match(response.body, /upstream unavailable/);
-  }
-  const wildcardHost = await httpGet(
-    routerPort,
-    "account.platform-infrastructure.com.attacker.invalid",
-    "/",
-  );
-  assert.equal(wildcardHost.statusCode, 404, "LOCAL_PRIVATE accepted a non-canonical wildcard Host");
-  const unknown = await httpGet(routerPort, "unknown.platform-infrastructure.com", "/");
-  assert.equal(unknown.statusCode, 404);
-
-  // A stale folder and enabled state cannot reacquire the retired app's authority.
-  mkdirSync(path.join(projects, "workcalendar", "public"), { recursive: true });
-  writeFileSync(path.join(projects, "workcalendar", "public", "index.php"), "<?php\n");
-  writeFileSync(path.join(state, "projects.json"), JSON.stringify({ projects: { workcalendar: { enabled: true } } }));
-  const retired = await httpGet(routerPort, "workcalendar.platform-infrastructure.com", "/");
-  assert.equal(retired.statusCode, 404, "retired app source/state reacquired route authority");
-
-  for (const stale of [
-    { PHP_PROJECT_UPSTREAMS: `${routerEnv.PHP_PROJECT_UPSTREAMS},workcalendar=http://php-workcalendar:80` },
-    { PROJECT_ROUTER_ALLOWED_UPSTREAMS: `${routerEnv.PROJECT_ROUTER_ALLOWED_UPSTREAMS},php-workcalendar:80` },
+  for (const invalidEnvironment of [
+    { NODE_PROJECT_UPSTREAMS: "demo=http://node-demo:3000" },
+    { PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,node-demo:3000" },
   ]) {
     const rejected = spawn(process.execPath, [routerScript], {
       cwd: infraRoot,
-      env: { ...routerEnv, ...stale, PROJECT_ROUTER_PORT: String(await freePort()) },
+      env: { ...env, ...invalidEnvironment, PROJECT_ROUTER_PORT: String(await freePort()) },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let failure = "";
-    rejected.stderr.on("data", (chunk) => { failure += chunk.toString("utf8"); });
     t.after(async () => { await stopChild(rejected); });
-    const result = await Promise.race([
-      new Promise((resolve) => rejected.once("exit", (code) => resolve({ code }))),
-      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5000)),
-    ]);
-    assert.equal(result.timedOut, undefined, "retired authority did not fail at startup");
+    const result = await childOutputAndExit(rejected);
     assert.notEqual(result.code, 0);
-    assert.match(failure, /route authority differs from the closed V1 map/);
+    assert.match(result.stderr, /route authority must come from the external host extension/);
   }
-
-  const stexorMetadata = path.join(projects, "stexor", ".platform", "project.json");
-  writeFileSync(stexorMetadata, `${JSON.stringify({
-    type: "node",
-    projects: [{ slug: "ui", name: "Stexor UI", type: "node" }],
-  })}\n`);
-  utimesSync(stexorMetadata, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
-  mkdirSync(path.join(projects, "sibling", ".platform"), { recursive: true });
-  writeFileSync(path.join(projects, "sibling", "package.json"), "{}\n");
-  writeFileSync(
-    path.join(projects, "sibling", ".platform", "project.json"),
-    `${JSON.stringify({
-      type: "node",
-      projects: [{ slug: "sibling", type: "node", aliases: ["account"] }],
-    })}\n`,
-  );
-  const stolenAccount = await httpGet(routerPort, "account.platform-infrastructure.com", "/");
-  assert.equal(stolenAccount.statusCode, 404, "sibling metadata alias claimed the account upstream");
-  for (const reserved of ["admin", "api", "auth", "docs", "projects"]) {
-    const response = await httpGet(routerPort, `${reserved}.platform-infrastructure.com`, "/");
-    assert.equal(response.statusCode, 404, `${reserved} escaped the LOCAL_PRIVATE reserved-host deny`);
-  }
-
-  const overlay = readFileSync(path.join(infraRoot, "compose.local-private.yaml"), "utf8");
-  assert.match(overlay, /PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE:\s+"true"/);
-  assert.match(overlay, /node-opstudents:3000/);
-  assert.doesNotMatch(overlay, /php-workcalendar:80/);
-  assert.match(overlay, /\/var\/www\/projects:ro/);
-  const routerOverlay = /\n  project-router:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:|\nsecrets:)/.exec(overlay)?.[0] || "";
-  assert.doesNotMatch(routerOverlay, /PLATFORM_STATE_DIR[^\n]*:\/var\/www\/project-state/);
 });
 
 test("LOCAL_PRIVATE keeps the project wildcard below portal, docs and identity routes", () => {
@@ -1053,8 +1017,8 @@ function prepareFixture() {
   removeFixtureTree();
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "legacy-php", "public"), { recursive: true });
-  mkdirSync(path.join(projectsRoot, "fiplatform", ".platform"), { recursive: true });
-  mkdirSync(path.join(projectsRoot, "fiplatform", "public"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "demo-php", ".platform"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "demo-php", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "static-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "metadata-demo", ".platform"), { recursive: true });
@@ -1067,25 +1031,25 @@ function prepareFixture() {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "legacy-php", "public", "index.php"), "<?php echo 'legacy-php';\n");
-  const fiplatformMetadata = `${JSON.stringify({
+  const demoPhpMetadata = `${JSON.stringify({
     projects: [
       {
-        slug: "fiplatform",
-        name: "fiplatform",
+        slug: "demo-php",
+        name: "demo-php",
         type: "php",
-        aliases: ["fireport"],
+        aliases: ["demo-archive"],
       },
     ],
     type: "php",
   }, null, 2)}\n`;
-  const fiplatformMetadataSource = path.join(projectsRoot, "fiplatform", ".platform", "project.json");
-  const fiplatformMetadataSnapshot = path.join(snapshotGeneration, "project-metadata.json");
-  writeFileSync(fiplatformMetadataSource, fiplatformMetadata);
-  writeFileSync(fiplatformMetadataSnapshot, fiplatformMetadata);
-  chmodSync(fiplatformMetadataSnapshot, 0o400);
+  const demoPhpMetadataSource = path.join(projectsRoot, "demo-php", ".platform", "project.json");
+  const demoPhpMetadataSnapshot = path.join(snapshotGeneration, "project-metadata.json");
+  writeFileSync(demoPhpMetadataSource, demoPhpMetadata);
+  writeFileSync(demoPhpMetadataSnapshot, demoPhpMetadata);
+  chmodSync(demoPhpMetadataSnapshot, 0o400);
   chmodSync(snapshotGeneration, 0o500);
   chmodSync(snapshotRoot, 0o700);
-  writeFileSync(path.join(projectsRoot, "fiplatform", "public", "index.php"), "<?php echo 'fiplatform';\n");
+  writeFileSync(path.join(projectsRoot, "demo-php", "public", "index.php"), "<?php echo 'demo-php';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "static-demo", "public", "index.html"), "<!doctype html><title>static</title>\n");
   writeFileSync(path.join(projectsRoot, "metadata-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
@@ -1105,16 +1069,16 @@ function prepareFixture() {
   }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
-  const metadataStat = statSync(fiplatformMetadataSnapshot, { bigint: true });
+  const metadataStat = statSync(demoPhpMetadataSnapshot, { bigint: true });
   const snapshotRootStat = statSync(snapshotRoot, { bigint: true });
   const snapshotGenerationStat = statSync(snapshotGeneration, { bigint: true });
   const metadataRecord = {
     kind: "project-metadata",
     workloadId: "fixture-app",
-    sourcePath: fiplatformMetadataSource,
-    path: fiplatformMetadataSnapshot,
-    sha256: createHash("sha256").update(fiplatformMetadata).digest("hex"),
-    sizeBytes: Buffer.byteLength(fiplatformMetadata),
+    sourcePath: demoPhpMetadataSource,
+    path: demoPhpMetadataSnapshot,
+    sha256: createHash("sha256").update(demoPhpMetadata).digest("hex"),
+    sizeBytes: Buffer.byteLength(demoPhpMetadata),
     snapshot: true,
     snapshotDevice: String(metadataStat.dev),
     snapshotInode: String(metadataStat.ino),
@@ -1129,8 +1093,8 @@ function prepareFixture() {
     workloads: [{
       id: "fixture-app",
       services: [{ name: "fixture-app-web", role: "web", routes: [manifestRouteFixture()] }],
-      projectMetadataSourcePath: fiplatformMetadataSource,
-      projectMetadataPath: fiplatformMetadataSnapshot,
+      projectMetadataSourcePath: demoPhpMetadataSource,
+      projectMetadataPath: demoPhpMetadataSnapshot,
     }],
     files: [metadataRecord],
   };
@@ -1350,11 +1314,11 @@ function childOutputAndExit(child, timeoutMs = 5000) {
   });
 }
 
-async function waitForHealth(port) {
+async function waitForHealth(port, host = "portal.localhost.com") {
   const started = Date.now();
   while (Date.now() - started < 10000) {
     try {
-      const response = await httpGet(port, "portal.localhost.com", "/__health");
+      const response = await httpGet(port, host, "/__health");
       if (response.statusCode === 200) return;
     } catch {
       // Keep probing until the router has bound its port.

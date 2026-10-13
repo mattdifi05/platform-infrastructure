@@ -29,3 +29,6 @@
 /.tmp export-ignore
 /security/sbom export-ignore
 /security/dast export-ignore
+
+# Unified patch context lines retain their required leading space.
+deployment/vps-backup/*.patch whitespace=-blank-at-eol

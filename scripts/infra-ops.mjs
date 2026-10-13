@@ -213,14 +213,6 @@ const typedEvidenceActionToOperation = Object.freeze({
   RESTORE_KEYCLOAK: "restore-test-keycloak",
 });
 const typedEvidenceApplicationSlugs = Object.freeze([
-  "anniversary",
-  "fiplatform",
-  "matthewdifilippo",
-  "opstudents",
-  "public",
-  "stexor",
-  "stream",
-  "workcalendar",
 ]);
 const typedEvidenceRunIdPattern = /^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$/;
 const typedEvidenceImageIdPattern = /^sha256:[a-f0-9]{64}$/;
@@ -272,7 +264,6 @@ function sameStringArray(left, right) {
 function assertTypedEvidenceArtifactArgument(filePath, action, artifactRoot) {
   const expected = {
     RESTORE_POSTGRES: [
-      ["09-pg-stexor", /^stexor-[0-9]{8}-[0-9]{6}\.dump$/],
       ["10-pg-keycloak", /^keycloak-[0-9]{8}-[0-9]{6}\.dump$/],
     ],
     RESTORE_MARIADB: [["11-mariadb", /^mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz$/]],
@@ -295,8 +286,8 @@ function expectedTypedEvidenceCli(action, artifactRoot) {
   const base = [typedEvidenceActionToOperation[action], "--skipEvidence", "true"];
   if (action === "BACKUP_APPLICATIONS" || action === "BACKUP_SECRET_METADATA") return base;
   if (action === "BACKUP_POSTGRES") {
-    if (!['stexor', 'keycloak'].includes(String(argv.database ?? ""))) {
-      fail("Typed PostgreSQL backup database is outside the fixed pair.");
+    if (String(argv.database ?? "") !== "keycloak") {
+      fail("Typed PostgreSQL backup database is outside the clean-base Keycloak database.");
     }
     return [...base, "--container", "enterprise-postgres", "--database", argv.database, "--user", "postgres"];
   }
@@ -307,10 +298,9 @@ function expectedTypedEvidenceCli(action, artifactRoot) {
   const artifact = assertTypedEvidenceArtifactArgument(backupFile, action, artifactRoot);
   const restoreBase = [...base, "--backupFile", artifact.filePath, "--v1EvidenceReceipt", "true"];
   if (action === "RESTORE_POSTGRES") {
-    const database = artifact.family === "09-pg-stexor" ? "stexor" : "keycloak";
     return [
       ...restoreBase,
-      "--container", "enterprise-postgres", "--database", database,
+      "--container", "enterprise-postgres", "--database", "keycloak",
       "--countAllUserTables", "true", "--minimumTables", "1",
     ];
   }
@@ -2298,7 +2288,7 @@ function applicationSourceDirectories(options = {}) {
         || !sameStringArray(names, typedEvidenceApplicationSlugs)
         || entries.some((entry) => entry.name !== entry.slug)
         || new Set(slugs).size !== slugs.length) {
-      fail("Typed V1 application backup source set differs from the exact closed eight applications.");
+      fail("Typed V1 application backup source set differs from the exact clean-base empty inventory.");
     }
     const byName = new Map(entries.map((entry) => [entry.name, entry]));
     return typedEvidenceApplicationSlugs.map((slug) => byName.get(slug));
@@ -2345,7 +2335,9 @@ async function backupApplications(options = {}) {
       });
     }
     const finishedAt = new Date();
-    const status = artifacts.length ? "success" : "failed";
+    const emptyTypedInventory = typedEvidenceInvocation?.action === "BACKUP_APPLICATIONS"
+      && applications.length === 0;
+    const status = artifacts.length || emptyTypedInventory ? "success" : "failed";
     const payload = {
       generatedAt: finishedAt.toISOString(),
       startedAt: startedAt.toISOString(),
@@ -2360,10 +2352,12 @@ async function backupApplications(options = {}) {
       artifactSha256: artifacts[0]?.artifactSha256 ?? null,
       signaturePath: artifacts[0]?.signaturePath ?? null,
       signatureKeyId: artifacts[0]?.signatureKeyId ?? null,
-      integrityVerified: artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
+      integrityVerified: artifacts.length > 0
+        && artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
       metadata: {
         sourceRoot,
         applicationCount: artifacts.length,
+        emptyTypedInventory,
         excluded: applicationSourceBackupExcludes(),
         artifacts,
         secretsExcluded: true,
@@ -3029,22 +3023,68 @@ function pruneManifestBackups() {
   return payload;
 }
 
+function certificateExpiryCa(file) {
+  if (!file) return undefined;
+  const absolute = path.resolve(infraRoot, file);
+  const owners = new Set([0, process.geteuid?.() ?? process.getuid?.()]);
+  for (let parent = path.dirname(absolute); ; parent = path.dirname(parent)) {
+    const info = fs.lstatSync(parent);
+    if (!info.isDirectory() || !owners.has(info.uid) || (info.mode & 0o022)) {
+      throw new Error("Certificate CA parent must be a protected administrator-owned directory");
+    }
+    if (parent === path.dirname(parent)) break;
+  }
+  const descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = fs.fstatSync(descriptor);
+    const maxBytes = 128 * 1024;
+    if (!before.isFile() || !owners.has(before.uid) || (before.mode & 0o022) || before.size < 1 || before.size > maxBytes) {
+      throw new Error("Certificate CA must be a bounded protected administrator-owned public certificate file");
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (size !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new Error("Certificate CA changed while reading");
+    }
+    const pem = buffer.subarray(0, size).toString("utf8");
+    const certificates = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    if (!certificates.length || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim()
+        || certificates.some(cert => !new crypto.X509Certificate(cert).ca)) {
+      throw new Error("Certificate CA file must contain only public CA certificates");
+    }
+    return pem;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
     env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "portal.localhost.com",
     env.DOCS_HOST ?? "docs.localhost.com",
   ].join(",");
-  const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
+  const hostInput = argv.hosts ?? defaultHosts;
+  const hosts = typeof hostInput === "string" ? hostInput.split(",").map((host) => host.trim()).filter(Boolean) : [];
   const warnDays = Number(argv.warnDays ?? 30);
   await withLocalCheckReport("certificate-expiry-check", async () => {
+    if (!hosts.length) throw new Error("Certificate expiry check requires at least one hostname");
+    if (!Number.isFinite(warnDays) || warnDays < 0) throw new Error("Certificate warning days must be a non-negative finite number");
+    const ca = certificateExpiryCa(argv.caFile ?? env.CERTIFICATE_EXPIRY_CA_FILE ?? process.env.CERTIFICATE_EXPIRY_CA_FILE);
     for (const host of hosts) {
       await new Promise((resolve, reject) => {
         const socket = tls.connect({
           host,
           port: 443,
           servername: host,
-          rejectUnauthorized: false,
+          rejectUnauthorized: true,
+          ...(ca ? { ca: [...tls.getCACertificates("default"), ca] } : {}),
         }, () => {
           const cert = socket.getPeerCertificate();
           socket.end();
@@ -3526,9 +3566,12 @@ function infraTestingHygiene() {
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
     "scripts/bounded-file-hash.test.mjs",
+    "scripts/certificate-expiry-check.test.mjs",
     "scripts/backup-artifact-publication.mjs",
     "scripts/backup-artifact-publication.test.mjs",
     "scripts/database-restore-semantic-comparator.test.mjs",
+    "project-router/host-extension.mjs",
+    "project-router/host-extension.test.mjs",
     "scripts/local-private-compatibility-source-boundary.mjs",
     "scripts/local-private-compatibility-source-boundary.test.mjs",
     "scripts/command-safety.mjs",
@@ -3570,7 +3613,7 @@ function infraTestingHygiene() {
     ...dockerActionBrokerTestFiles,
   ], { cwd: infraRoot });
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
-  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs", "project-router/host-extension.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-admin-profile-safety.test.mjs"], { cwd: infraRoot });
   run("ruby", ["scripts/hosted-workload-source-policy.test.rb"], { cwd: infraRoot });
@@ -3585,6 +3628,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/platform-release-context.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/certificate-expiry-check.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-restore-semantic-comparator.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/local-private-compatibility-source-boundary.test.mjs"], { cwd: infraRoot });
@@ -3631,7 +3675,7 @@ function controlCenterTestFiles() {
 async function projectRouterTests() {
   await withLocalCheckReport("project-router-tests", async () => {
     log("==> Project Router tests");
-    run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+    run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs", "project-router/host-extension.test.mjs"], { cwd: infraRoot });
     log("Project Router tests passed.");
   });
 }
@@ -10952,23 +10996,23 @@ function repoCoverageCategory(filePath) {
     ["database", /^deployment\/config\/gf-mariadb\//],
     ["observability", /^deployment\/config\/gf-promtail\//],
     ["object-storage", /^deployment\/config\/storage\//],
-    ["platform-config", /^(?:config\/.+\.json|deployment\/config\/.+|deployment\/host\/libexec\/.+\.json|deployment\/reference\/home-server\/.+\.conf\.txt)$/],
+    ["platform-config", /^(?:config\/.+\.json|deployment\/config\/.+|deployment\/host\/libexec\/.+\.json|deployment\/reference\/home-server\/.+\.conf\.txt|deployment\/vps-backup\/[^/]+\.example\.json)$/],
     ["object-storage", /^minio\//],
-    ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets|deployment|server-ai)\/README\.md$/],
-    ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
-    ["host-service", /^(?:systemd\/[^/]+\.service|deployment\/host\/systemd\/.+\.(?:service|timer|conf))$/],
+    ["documentation", /^[A-Z][A-Z0-9_.-]*\.md$|^(?:cloudflare|keycloak|minio|secrets|deployment|server-ai)\/README\.md$|^deployment\/vps-backup\/(?:README|HOME-FORWARD-QUOTA)\.md$|^deployment\/cloudflare-dns\/README\.md$/],
+    ["compose", /^(?:compose(?:\.[^.]+)?\.ya?ml|deployment\/vps-backup\/compose\.[^/]+\.ya?ml|deployment\/cloudflare-dns\/compose\.control-center\.yaml|deployment\/host\/empty-vps\/compose\.(?:first-enrollment|host-metrics)\.yaml)$/],
+    ["host-service", /^(?:systemd\/[^/]+\.service|deployment\/host\/systemd\/.+\.(?:service|timer|conf)|deployment\/vps-backup\/[^/]+\.(?:service|timer))$/],
     ["host-privilege-policy", /^sudoers\/[^/]+$/],
     ["dns", /^(?:dns\/|deployment\/docker\/coredns-)/],
     ["docker-build", /^(?:docker\/[^/]+\.Dockerfile|deployment\/docker\/[^/]+\.Dockerfile|server-ai\/docker\/[^/]+\.Dockerfile)$/],
     ["messaging", /^(?:nats\/|scripts\/(?:render-workload-broker-config|workload-broker-policy)\.mjs$)/],
     ["security-regression", /^(?:scripts\/postfix_evidence\/|tests\/pre-fix\/)/],
-    ["operations-script", /^(?:scripts\/.+\.(?:awk|sh|mjs|py|rb)|deployment\/host\/libexec\/.+\.(?:sh|mjs|py)|server-ai\/scripts\/.+\.(?:sh|mjs|py))$/],
+    ["operations-script", /^(?:scripts\/.+\.(?:awk|sh|mjs|py|rb)|deployment\/host\/(?:libexec|empty-vps)\/.+\.(?:sh|mjs|py)|deployment\/vps-backup\/.+\.(?:sh|mjs|py)|server-ai\/scripts\/.+\.(?:sh|mjs|py))$/],
     ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/.+\.(?:json|pem))$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
-    ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
+    ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\/|^deployment\/host\/empty-vps\/prometheus\.host-metrics\.yml$/],
     ["identity", /^keycloak\//],
     ["database", /^(?:postgres|mariadb|phppgadmin)\//],
-    ["control-plane", /^(?:control-center|server-ai)\/|^deployment\/phpmyadmin\/composer\.(?:json|lock)$/],
+    ["control-plane", /^(?:control-center|server-ai)\/|^deployment\/(?:phpmyadmin\/composer\.(?:json|lock)|vps-backup\/.+\.(?:patch|test\.mjs))$/],
     ["php-runtime", /^(?:php-apache|phpmyadmin|php-runtime-root|projects-portal)\//],
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],

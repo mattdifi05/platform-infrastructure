@@ -133,7 +133,7 @@ test("manifest import rejects undeclared artifacts and tampered metadata", () =>
   assert.throws(() => createBackupManifestDocument({
     id: "manifest-stream-foreign",
     job: document,
-    artifacts: [artifact("database:workcalendar", "foreign")],
+    artifacts: [artifact("database:foreign-project", "foreign")],
   }), /undeclared resource/);
 
   const manifest = createBackupManifestDocument({
@@ -164,4 +164,14 @@ test("job parser rejects legacy global command queues", () => {
     commands: [{ command: "backup-postgres" }],
     status: "queued",
   }), /Invalid backup operation/);
+});
+
+test("manual production recovery binds immutable manifest and root profile", () => {
+  const input = { id: "restore-vps-example", operation: "restore-production", scope: { kind: "platform", id: "platform" }, resources: [{ id: "platform-state:host-config", externalId: "host-config", kind: "platform-state", projectId: "platform", name: "host-config" }], requestedBy: "owner", environment: "local", sourceManifestPath: "manifests/manifest-vps-example.json", sourceManifestDigest: "a".repeat(64), restoreProfileDigest: "b".repeat(64) };
+  const document = createBackupJobDocument(input);
+  assert.equal(parseBackupJobDocument(document).restoreProfileDigest, input.restoreProfileDigest);
+  assert.equal(parseBackupJobDocument(document).sourceManifestDigest, input.sourceManifestDigest);
+  assert.throws(() => createBackupJobDocument({ ...input, sourceManifestDigest: "" }), /manifest digest/);
+  assert.throws(() => createBackupJobDocument({ ...input, restoreProfileDigest: "" }), /profile digest/);
+  assert.throws(() => createBackupJobDocument({ ...input, resources: [sourceResource("stream")] }), /platform state|another project/);
 });

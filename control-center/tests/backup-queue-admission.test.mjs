@@ -112,7 +112,7 @@ function rejectedCode(fn, code, ErrorType = BackupQueueAdmissionError) {
 }
 
 test("registry adapter accepts canonical aliases by operation identity and fails closed", () => {
-  assert.deepEqual(listBackupQueueOperationIds(), ["backup.run", "database.backup", "legacy.backup", "legacy.database"]);
+  assert.deepEqual(listBackupQueueOperationIds(), ["backup.production-restore", "backup.run", "database.backup", "legacy.backup", "legacy.database"]);
   // FG-004/043 resolves /control and /control/v1 aliases to this same frozen
   // canonical identity; FG-069 never receives or re-matches their raw paths.
   for (const alias of ["/control/backups/run", "/control/v1/backups/run"]) {
@@ -125,6 +125,9 @@ test("registry adapter accepts canonical aliases by operation identity and fails
   }
   assert.equal(requireCanonicalBackupQueueOperation(operation("legacy.backup", false), "restore-drill").jobOperation, "restore-drill");
   assert.equal(requireCanonicalBackupQueueOperation(operation("legacy.database", false), "backup").jobOperation, "backup");
+  assert.equal(requireCanonicalBackupQueueOperation(operation("backup.production-restore", true), "restore-production").jobOperation, "restore-production");
+  rejectedCode(() => requireCanonicalBackupQueueOperation(operation("legacy.backup", false), "restore-production"), "job_operation_mismatch", BackupQueueOperationError);
+  rejectedCode(() => requireCanonicalBackupQueueOperation(operation("server-ai.action", true), "restore-production"), "operation_not_admitted", BackupQueueOperationError);
 
   rejectedCode(() => requireCanonicalBackupQueueOperation({ ...operation() }, "backup"), "operation_not_canonical", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(Object.freeze({ ...operation(), classified: false }), "backup"), "operation_not_privileged", BackupQueueOperationError);

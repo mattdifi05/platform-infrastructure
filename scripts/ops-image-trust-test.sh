@@ -12,6 +12,7 @@ mkdir -p "$FIXTURE_ROOT" "$FIXTURE_BIN"
 cp -R "$ROOT/scripts" "$ROOT/governance" "$ROOT/vendor" "$FIXTURE_ROOT/"
 mkdir -p "$FIXTURE_ROOT/control-center"
 cp -R "$ROOT/control-center/backup" "$FIXTURE_ROOT/control-center/"
+cp "$ROOT/control-center/host-extension.mjs" "$FIXTURE_ROOT/control-center/"
 tar -cf "$TMP/fake-infra-source.tar" -C "$FIXTURE_ROOT" scripts governance
 cat > "$FIXTURE_ROOT/scripts/source-archive-policy.mjs" <<'JS'
 #!/usr/bin/env node
