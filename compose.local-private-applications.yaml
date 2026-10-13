@@ -520,22 +520,6 @@ services:
       - platform_db_admin
       - platform_egress
 
-  php-workcalendar:
-    <<: *dedicated_php_app
-    container_name: php-workcalendar
-    volumes:
-      - ${PHP_SOURCE_DIR:-./php-runtime-root}:/var/www/html
-      - .:/var/www/infra-docs:ro
-      - ${PHP_PROJECTS_DIR:-../src}/workcalendar:/var/www/projects/workcalendar
-      - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:?Set PLATFORM_CERTS_DIR}:/etc/apache2/certs:ro
-    networks:
-      - enterprise_net
-      - platform_routing
-      - platform_db_admin
-
   # Direct-recovery start ordering only. The admitted Hosted package must
   # express this through its signed project-router platform extension.
   project-router:
@@ -554,10 +538,8 @@ services:
         condition: service_healthy
       php-stream:
         condition: service_healthy
-      php-workcalendar:
-        condition: service_healthy
 
-  # The five dedicated PHP services above replace the broad legacy shared
+  # The four dedicated PHP services above replace the broad legacy shared
   # runtime. The core deliberately leaves this service outside its protected
   # service set so a hosted overlay may disable it.
   php-apache:

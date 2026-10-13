@@ -5493,9 +5493,9 @@ export const LOCAL_PRIVATE_ADDITIONAL_SERVICE_NAMES = Object.freeze([
 export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
   mode: "true",
   hostSuffix: ".platform-infrastructure.com",
-  allowedUpstreams: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80",
+  allowedUpstreams: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80",
   nodeProjectUpstreams: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
-  phpProjectUpstreams: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80",
+  phpProjectUpstreams: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80",
   emptyMaps: Object.freeze([
     "NODE_PROJECT_HOSTS",
     "PROJECT_UPSTREAMS",
@@ -5517,7 +5517,6 @@ export const LOCAL_PRIVATE_PROJECT_ROUTER_COMPATIBILITY = Object.freeze({
     opstudents: Object.freeze({ sourceSlug: "opstudents", projectSlug: "opstudents", type: "node" }),
     stream: Object.freeze({ sourceSlug: "stream", projectSlug: "stream", type: "php" }),
     ui: Object.freeze({ sourceSlug: "stexor", projectSlug: "ui", type: "node" }),
-    workcalendar: Object.freeze({ sourceSlug: "workcalendar", projectSlug: "workcalendar", type: "php" }),
   }),
   reservedPlatformSlugs: Object.freeze([
     "admin",

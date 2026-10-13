@@ -235,7 +235,8 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/local-private-input/combined-render.yaml")][0].source) as $brokerRenderSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/control-center-state")][0].source) as $controlStateSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
-            (.services | length) == 35 and
+            (.services | length) == 34 and
+            (.services["php-workcalendar"] == null) and
             (.secrets | length) == 20 and
             (.networks | length) == 11 and
             (.volumes | length) == 12 and
@@ -279,9 +280,9 @@ jobs:
             (.services["node-exporter"] != null) and
             (.services["cadvisor"] == null) and
             (.services["docker-action-activation-sidecar"] == null) and
-            (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream", "php-workcalendar"] | all(. as $service | $root.services | has($service))) and
+            (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream"] | all(. as $service | $root.services | has($service))) and
             (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
-            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 7, "php-fiplatform": 8, "php-matthewdifilippo": 7, "php-stream": 7, "php-workcalendar": 7} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
+            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 7, "php-fiplatform": 8, "php-matthewdifilippo": 7, "php-stream": 7} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
           ' "${RUNNER_TEMP}/v1-current-render.json"
       - name: Render staging and backup compose
         run: |

@@ -66,7 +66,6 @@ const localPrivateCompatibilityContract = Object.freeze({
     ["fireport", "http://php-fiplatform:80"],
     ["matthewdifilippo", "http://php-matthewdifilippo:80"],
     ["stream", "http://php-stream:80"],
-    ["workcalendar", "http://php-workcalendar:80"],
   ]),
   allowedUpstreams: Object.freeze([
     "control-center:8080",
@@ -77,7 +76,6 @@ const localPrivateCompatibilityContract = Object.freeze({
     "php-fiplatform:80",
     "php-matthewdifilippo:80",
     "php-stream:80",
-    "php-workcalendar:80",
   ]),
   routeOwnership: Object.freeze([
     Object.freeze(["account", "stexor", "account", "node"]),
@@ -88,7 +86,6 @@ const localPrivateCompatibilityContract = Object.freeze({
     Object.freeze(["opstudents", "opstudents", "opstudents", "node"]),
     Object.freeze(["stream", "stream", "stream", "php"]),
     Object.freeze(["ui", "stexor", "ui", "node"]),
-    Object.freeze(["workcalendar", "workcalendar", "workcalendar", "php"]),
   ]),
   reservedPlatformSlugs: Object.freeze([
     "admin",
