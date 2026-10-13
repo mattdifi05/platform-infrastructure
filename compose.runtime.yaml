@@ -43,7 +43,7 @@ services:
 
   control-center:
     environment:
-      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true"
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: ${CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS:-false}
 
 volumes:
   enterprise_local_registry_data:
