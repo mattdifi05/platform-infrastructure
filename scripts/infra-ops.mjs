@@ -3029,22 +3029,68 @@ function pruneManifestBackups() {
   return payload;
 }
 
+function certificateExpiryCa(file) {
+  if (!file) return undefined;
+  const absolute = path.resolve(infraRoot, file);
+  const owners = new Set([0, process.geteuid?.() ?? process.getuid?.()]);
+  for (let parent = path.dirname(absolute); ; parent = path.dirname(parent)) {
+    const info = fs.lstatSync(parent);
+    if (!info.isDirectory() || !owners.has(info.uid) || (info.mode & 0o022)) {
+      throw new Error("Certificate CA parent must be a protected administrator-owned directory");
+    }
+    if (parent === path.dirname(parent)) break;
+  }
+  const descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const before = fs.fstatSync(descriptor);
+    const maxBytes = 128 * 1024;
+    if (!before.isFile() || !owners.has(before.uid) || (before.mode & 0o022) || before.size < 1 || before.size > maxBytes) {
+      throw new Error("Certificate CA must be a bounded protected administrator-owned public certificate file");
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (size !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new Error("Certificate CA changed while reading");
+    }
+    const pem = buffer.subarray(0, size).toString("utf8");
+    const certificates = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    if (!certificates.length || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim()
+        || certificates.some(cert => !new crypto.X509Certificate(cert).ca)) {
+      throw new Error("Certificate CA file must contain only public CA certificates");
+    }
+    return pem;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
     env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "portal.localhost.com",
     env.DOCS_HOST ?? "docs.localhost.com",
   ].join(",");
-  const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
+  const hostInput = argv.hosts ?? defaultHosts;
+  const hosts = typeof hostInput === "string" ? hostInput.split(",").map((host) => host.trim()).filter(Boolean) : [];
   const warnDays = Number(argv.warnDays ?? 30);
   await withLocalCheckReport("certificate-expiry-check", async () => {
+    if (!hosts.length) throw new Error("Certificate expiry check requires at least one hostname");
+    if (!Number.isFinite(warnDays) || warnDays < 0) throw new Error("Certificate warning days must be a non-negative finite number");
+    const ca = certificateExpiryCa(argv.caFile ?? env.CERTIFICATE_EXPIRY_CA_FILE ?? process.env.CERTIFICATE_EXPIRY_CA_FILE);
     for (const host of hosts) {
       await new Promise((resolve, reject) => {
         const socket = tls.connect({
           host,
           port: 443,
           servername: host,
-          rejectUnauthorized: false,
+          rejectUnauthorized: true,
+          ...(ca ? { ca: [...tls.getCACertificates("default"), ca] } : {}),
         }, () => {
           const cert = socket.getPeerCertificate();
           socket.end();
@@ -3526,6 +3572,7 @@ function infraTestingHygiene() {
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
     "scripts/bounded-file-hash.test.mjs",
+    "scripts/certificate-expiry-check.test.mjs",
     "scripts/backup-artifact-publication.mjs",
     "scripts/backup-artifact-publication.test.mjs",
     "scripts/database-restore-semantic-comparator.test.mjs",
@@ -3587,6 +3634,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/platform-release-context.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/certificate-expiry-check.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-restore-semantic-comparator.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/local-private-compatibility-source-boundary.test.mjs"], { cwd: infraRoot });

@@ -24,8 +24,13 @@ function redactSensitive(text) {
 
 function tokenDigest(value) { return createHash("sha256").update(String(value || "")).digest(); }
 function isAuthorized(header, token) {
-  const supplied = /^Bearer\s+(.+)$/i.exec(String(header || ""))?.[1] || "";
-  return timingSafeEqual(tokenDigest(supplied), tokenDigest(token));
+  const value = String(header || "");
+  const hasLineTerminator = value.includes("\r") || value.includes("\n") || value.includes("\u2028") || value.includes("\u2029");
+  const bearer = value.slice(0, 6).toLowerCase() === "bearer";
+  const separator = value[6] === " " || value[6] === "\t";
+  const supplied = bearer && separator && !hasLineTerminator ? value.slice(7).trimStart() : "";
+  const matches = timingSafeEqual(tokenDigest(supplied), tokenDigest(token));
+  return supplied.length > 0 && matches;
 }
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);

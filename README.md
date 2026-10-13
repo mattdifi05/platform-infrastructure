@@ -550,6 +550,8 @@ sh ./scripts/linux-portability-check.sh
 sh ./scripts/secret-scan.sh
 sh ./scripts/secret-rotation-evidence.sh
 sh ./scripts/certificate-expiry-check.sh
+# Optional dedicated public CA for a private TLS endpoint:
+node ./scripts/infra-ops.mjs certificate-expiry-check --hosts portal.example.test --caFile /etc/platform-infrastructure/tls/portal-root.pem
 sh ./scripts/supply-chain-hygiene.sh
 sh ./scripts/generate-sbom.sh
 sh ./scripts/production-preflight.sh
@@ -1133,3 +1135,5 @@ documentazione esterna e non e' un input della prima installazione.
 The current Control Center, OpenAI-only Server AI, native FTPS/RustFS backup integration and infrastructure host helpers are versioned in this repository. See [deployment/README.md](deployment/README.md) for the installed host source snapshot and [server-ai/README.md](server-ai/README.md) for the optional AI stack. Live credentials, signed admissions, replay state, backups and application data stay outside Git. OpenAI credentials are supplied exclusively through a protected runtime file; examples contain file references only.
 
 The source synchronization does not deploy or migrate a server. A new Hostinger instance is intended to start with no hosted applications or VPN and a separately configured domain/Cloudflare origin. Historical home-specific backup catalogs are not a workload seed for that instance.
+
+Certificate-expiry checks verify the TLS chain and hostname before reporting expiry. The direct read-only Node command above supports a dedicated local CA without replacing the runtime default trust store, including `NODE_EXTRA_CA_CERTS`. The trusted ops shell wrapper additionally requires an explicitly configured network and a mounted CA path; this example does not establish that wrapper configuration. Private endpoints may explicitly supply `--caFile` or `CERTIFICATE_EXPIRY_CA_FILE` in the infrastructure `.env`. The file must contain only public CA certificates (maximum 128 KiB), with no symlinks; it and its parent directories must be owned by root or the invoking administrator and not writable by group/others. Private keys and self-signed verification bypasses are not accepted.

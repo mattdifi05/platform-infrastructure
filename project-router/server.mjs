@@ -797,7 +797,12 @@ function normalizeHost(host) {
 }
 
 function slugify(value) {
-  return String(value).trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const slug = String(value).trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  let start = 0;
+  let end = slug.length;
+  while (start < end && slug[start] === "-") start += 1;
+  while (end > start && slug[end - 1] === "-") end -= 1;
+  return slug.slice(start, end);
 }
 
 function safeIsDirectory(value) {
