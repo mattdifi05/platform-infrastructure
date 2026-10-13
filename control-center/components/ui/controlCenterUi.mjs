@@ -17,22 +17,18 @@ export const controlCenterComponents = [
 
 export const controlCenterCssEntrypoints = [
   "/assets/control-center/control-center.css",
-  "/assets/control-center/server-ai.css",
 ];
 
 export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
-  "/assets/control-center/server-ai.js",
 ];
 
 // Derive each cache token from the exact asset bytes. A stale environment
-// variable or forgotten manual version bump must never keep old AI controls
+// variable or forgotten manual version bump must never keep old controls
 // in the browser after a container update.
 const assetVersionByHref = new Map([
   ["/assets/control-center/control-center.css", "../../styles/control-center.css"],
-  ["/assets/control-center/server-ai.css", "../../styles/server-ai.css"],
   ["/assets/control-center/control-center.js", "../../styles/control-center.js"],
-  ["/assets/control-center/server-ai.js", "../../styles/server-ai.js"],
 ].map(([href, relativePath]) => [
   href,
   createHash("sha256").update(readFileSync(new URL(relativePath, import.meta.url))).digest("hex").slice(0, 20),

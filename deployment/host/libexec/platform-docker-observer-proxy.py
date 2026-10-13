@@ -14,6 +14,27 @@ import urllib.parse
 SOCKET = os.environ.get('OBSERVER_PROXY_SOCKET', '/run/platform-docker-observer/docker.sock')
 UPSTREAM = os.environ.get('OBSERVER_PROXY_UPSTREAM', '/run/docker.sock')
 MAX_BODY = 8 * 1024 * 1024
+MANUAL_ONLY_CONTAINERS = frozenset(['node-scriptastudents', 'scripta-postgres', 'students-beta-redis', 'scriptastudents-ingress', 'phppgadmin'])
+
+
+def manual_only_name(value):
+    return isinstance(value, str) and value.lstrip('/') in MANUAL_ONLY_CONTAINERS
+
+
+def infrastructure_rows(rows):
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise ValueError('Invalid observer inventory')
+    if any(not isinstance(row, dict) or not re.fullmatch(r'[a-f0-9]{64}', str(row.get('Id', ''))) for row in rows) \
+            or len({row['Id'] for row in rows}) != len(rows):
+        raise ValueError('Ambiguous observer inventory')
+    return [row for row in rows if isinstance(row, dict)
+            and isinstance(row.get('Names'), list) and row['Names']
+            and all(isinstance(name, str) for name in row['Names'])
+            and not any(manual_only_name(name) for name in row['Names'])]
+
+
+def admitted_container(rows, identity):
+    return any(row.get('Id') == identity for row in infrastructure_rows(rows))
 
 
 class DockerConnection(http.client.HTTPConnection):
@@ -62,6 +83,8 @@ def admitted_path(path):
 
 
 def limited_inspect(data):
+    if manual_only_name(data.get('Name')):
+        raise PermissionError('Container not admitted')
     state = data.get('State') or {}
     host = data.get('HostConfig') or {}
     config = data.get('Config') or {}
@@ -141,6 +164,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if self.expired.is_set():
                 return
+            target = re.fullmatch(r'/containers/([a-f0-9]{64})/(json|stats|logs)(?:\?.*)?', path)
+            if target:
+                # Discover names using metadata only before requesting any log,
+                # health output or inspect data. Opaque IDs cannot skip scope.
+                connection.request('GET', '/containers/json?all=1&limit=100', headers={'Connection': 'close'})
+                inventory_response = connection.getresponse()
+                inventory = inventory_response.read(MAX_BODY + 1)
+                if inventory_response.status != 200 or len(inventory) > MAX_BODY:
+                    return self.reply(502, b'{"error":"Docker inventory unavailable"}')
+                if not admitted_container(json.loads(inventory), target.group(1)):
+                    return self.deny()
+                connection.close()
+                connection = DockerConnection('localhost', timeout=2)
+                connection.absolute_deadline = self.absolute_deadline
+                self.upstream = connection
             connection.request('GET', path, headers={'Connection': 'close'})
             response = connection.getresponse()
             body = response.read(MAX_BODY + 1)
@@ -149,13 +187,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if response.status == 200 and re.fullmatch(r'/containers/[a-f0-9]{64}/json', path):
                 body = json.dumps(limited_inspect(json.loads(body))).encode()
             elif response.status == 200 and path.startswith('/containers/json?'):
-                rows = json.loads(body)
+                rows = infrastructure_rows(json.loads(body))
                 for row in rows:
                     row.pop('Labels', None)
                     row.pop('Command', None)
                     row['Mounts'] = [{k: m[k] for k in ['Type', 'Destination'] if k in m} for m in row.get('Mounts') or []]
                 body = json.dumps(rows).encode()
             self.reply(response.status, body, response.getheader('Content-Type', 'application/json'))
+        except PermissionError:
+            self.deny()
         except (OSError, ValueError, http.client.HTTPException):
             self.reply(502, b'{"error":"Docker request failed"}')
         finally:

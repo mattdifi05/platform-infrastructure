@@ -738,7 +738,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(projectDetailHtml, /Solo database/);
   assert.match(projectDetailHtml, /Solo sorgenti/);
   assert.match(projectDetailHtml, /Backup da ripristinare/);
-  assert.match(projectDetailHtml, /Avvia restore drill/);
+  assert.match(projectDetailHtml, /Verifica ripristino isolato/);
   assert.doesNotMatch(projectDetailHtml, />Ripristina backup</);
   assert.match(projectDetailHtml, /Avvia backup/);
   assert.match(projectDetailHtml, /action="\/actions\/backup-delete-command"[^>]*data-passkey-submit/);

@@ -1,4 +1,5 @@
 const QUEUE_OPERATIONS = Object.freeze(new Map([
+  ["backup.production-restore", Object.freeze({ control: true, jobOperations: Object.freeze(["restore-production"]) })],
   ["backup.run", Object.freeze({ control: true, jobOperations: Object.freeze(["backup"]) })],
   ["database.backup", Object.freeze({ control: true, jobOperations: Object.freeze(["backup"]) })],
   ["legacy.backup", Object.freeze({ control: false, jobOperations: Object.freeze(["backup", "restore-drill"]) })],

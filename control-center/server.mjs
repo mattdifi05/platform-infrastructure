@@ -2,7 +2,6 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
-import { cpus, loadavg } from "node:os";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -12,6 +11,8 @@ import { AuthRequestError, createControlCenterAuth } from "./auth/app-passkey.mj
 import { createFirstConfiguration } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
+import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
+import { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, assertExternalDatabaseAction } from "./database/trusted-external.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -43,6 +44,10 @@ import {
   parseBackupManifestDocument,
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
+import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
+import { workcalendarDatabasePanel } from "./database/workcalendar-panel.mjs";
+import { readObservedApplications, renderObservedApplicationRow, renderObservedApplicationDetail } from "./observed-applications.mjs";
+import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
   applyBackupQueueFileOwnership,
@@ -68,28 +73,6 @@ import {
 } from "./status/event-stream.mjs";
 import { createProjectDiskUsageReader, unavailableUsage as unavailableProjectDiskUsage } from "./resources/project-disk-usage.mjs";
 import { createRedisOperations, RedisOperationsError, validateRedisBackupDocument } from "./redis/operations.mjs";
-import { createAIService } from "./ai/service.mjs";
-import { createInfrastructureAdmin, createInfrastructureSessionAuthorizer } from "./ai/infrastructure-admin.mjs";
-import { createPortalApplicationRemoval } from "./ai/portal-application-removal.mjs";
-import { createToolRegistry } from "./ai/tools.mjs";
-import { readGpuSnapshot } from "./ai/diagnostics.mjs";
-import { createMachineAiManager, readMachineRegistry, MachineAiError } from "./ai/machines.mjs";
-import { createWebTools } from "./ai/web.mjs";
-import { renderServerAi } from "./ai/ui.mjs";
-import { createPostgresConversationStore, createMemoryConversationStore, ConversationStoreError } from "./ai/conversations.mjs";
-import { createConversationHttp, ConversationHttpError } from "./ai/conversation-http.mjs";
-import { createContinuationAuthorizer } from "./ai/continuation-auth.mjs";
-import { createAttachmentStorage } from "./ai/attachment-storage.mjs";
-import { createArtifactStorage } from "./ai/artifacts.mjs";
-import { PostgresAttachmentScanStore } from "./ai/scan-store.mjs";
-import { attachmentCapabilities } from "./ai/attachments.mjs";
-import { composeRetrievalContext, createAuxiliaryRetrievalClient, createRetrievalPipeline } from "./ai/retrieval.mjs";
-import { createPostgresVectorStore } from "./ai/vector-store.mjs";
-import { createProjectRegistry } from "./ai/project-registry.mjs";
-import { createProjectReaders } from "./ai/project-readers.mjs";
-import { createMachineProjectCatalog } from "./ai/machine-project-catalog.mjs";
-import { createProjectIndexPipeline, shouldPauseProjectIndex } from "./ai/project-index.mjs";
-import { createProjectVectorStore } from "./ai/project-vector-store.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -104,6 +87,9 @@ const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-st
 const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
 const databaseDeleteOperationsFile = process.env.PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE || "/var/www/project-state/database-destructive-operations.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
+const trustedExternalDatabase = process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE
+  ? readTrustedExternalDatabase(process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE, { approvedDigest: process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_SHA256 })
+  : null;
 const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
 const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || "";
 const vaultActiveKeyId = process.env.CONTROL_CENTER_VAULT_ACTIVE_KEY_ID || "";
@@ -221,278 +207,6 @@ const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
 const firstConfiguration = await createFirstConfiguration({ auth: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
-const serverAiIdentityOptions = {
-  identityFile: process.env.CONTROL_CENTER_MACHINE_ID_FILE,
-  label: process.env.CONTROL_CENTER_MACHINE_LABEL || "Server locale",
-};
-let serverAiMachines;
-try {
-  serverAiMachines = readMachineRegistry({ ...serverAiIdentityOptions, registryFile: process.env.SERVER_AI_MACHINE_REGISTRY_FILE });
-} catch {
-  console.warn(JSON.stringify({ service: "server-ai", event: "machine-registry-unavailable" }));
-  serverAiMachines = readMachineRegistry(serverAiIdentityOptions);
-}
-let serverAiAttachmentStorage = null;
-try {
-  if (process.env.SERVER_AI_ATTACHMENTS_ROOT === "/var/lib/server-ai-attachments") {
-    serverAiAttachmentStorage = createAttachmentStorage({ root: process.env.SERVER_AI_ATTACHMENTS_ROOT });
-    await serverAiAttachmentStorage.ready();
-  }
-} catch {
-  await serverAiAttachmentStorage?.close?.();
-  serverAiAttachmentStorage = null;
-  console.warn(JSON.stringify({ service: "server-ai", event: "attachment-storage-unavailable" }));
-}
-let serverAiArtifactStorage = null;
-let serverAiScanStore = null;
-if (serverAiAttachmentStorage) {
-  try {
-    serverAiArtifactStorage = createArtifactStorage({ root: process.env.SERVER_AI_ATTACHMENTS_ROOT + "/generated" });
-    await serverAiArtifactStorage.ready();
-  } catch {
-    serverAiArtifactStorage = null;
-    console.warn(JSON.stringify({ service: "server-ai", event: "artifact-storage-unavailable" }));
-  }
-  if (controlAuth.store?.pool) {
-    try {
-      serverAiScanStore = new PostgresAttachmentScanStore({ pool: controlAuth.store.pool, attachmentStorage: serverAiAttachmentStorage });
-      await serverAiScanStore.ready();
-    } catch {
-      serverAiScanStore = null;
-      console.warn(JSON.stringify({ service: "server-ai", event: "attachment-scans-unavailable" }));
-    }
-  }
-}
-const serverAiProjectCatalogs = new Map();
-async function refreshServerAiProjectCatalogs() {
-  await Promise.all([...serverAiProjectCatalogs.values()].map(catalog => catalog.refresh({ force: true })));
-}
-const serverAiProjectRegistry = createProjectRegistry({
-  stateFile: process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json",
-  // Project metadata is machine-scoped.  Do not make locally discovered roots
-  // visible merely because a caller supplied another syntactically-valid ID.
-  getProjects: ({ machineId } = {}) => serverAiProjectCatalogs.get(machineId)?.snapshot({ machineId }) || [],
-});
-const serverAiServices = new Map();
-const serverAiManager = createMachineAiManager({ stateFile: process.env.PROJECT_STATE_FILE, machines: serverAiMachines.map(machine => {
-  if (!machine.configured) return machine;
-  try {
-  const web = createWebTools({ searxngUrl: machine.searxngUrl || "http://searxng:8080" });
-  const gpu = () => readGpuSnapshot(machine.gpuSnapshotFile);
-  const auxiliary = null;
-  const conversationRetrieval = auxiliary
-    ? createRetrievalPipeline({
-      embeddings: auxiliary, reranker: auxiliary,
-      vectorStore: createPostgresVectorStore({ pool: controlAuth.store.pool }),
-      logger: {
-        info: (event, fields = {}) => console.info(JSON.stringify({ service: "server-ai", machineId: machine.id, event, ...fields })),
-        warn: (event, fields = {}) => console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event, ...fields })),
-      },
-    })
-    : null;
-  const projectReaders = machine.local === true && machine.projectReadersConfigured === true ? createProjectReaders({ tokenFile: machine.projectReadersTokenFile, sourceUrl: machine.projectSourceReaderUrl, queryUrl: machine.projectQueryReaderUrl }) : null;
-  const projectContext = async () => { const state = readState(); return buildCachedContext({ state, projects: discoverProjects(state) }); };
-  const projectCatalog = createMachineProjectCatalog({ machineId: machine.id, local: machine.local === true, reader: projectReaders, getDiscoveredProjects: async () => discoverProjects(readState()), getHiddenProjectIds: async () => Object.entries(readState().projects).filter(([, metadata]) => metadata?.deletedAt).map(([id]) => id) });
-  serverAiProjectCatalogs.set(machine.id, projectCatalog);
-  const canonicalProjectId = value => projectCatalog.resolveApplicationProjectId(String(value || ''), { machineId: machine.id });
-  const getProjectDatabases = async projectId => { const context = await projectContext(); return (context.databases || []).filter(row => canonicalProjectId(row?.projectId) === projectId).map(row => ({ id: row?.id, dialect: row?.engine === 'postgres' ? 'postgresql' : row?.engine === 'mariadb' ? 'mariadb' : '' })).filter(row => /^[a-z0-9][a-z0-9-]{0,95}$/.test(row.id || '') && row.dialect); };
-  const authorizeMachineProject = ({ projectId, subject, role, machineId }) => {
-    if (machineId !== machine.id) throw new Error('Autorizzazione progetto non disponibile.');
-    return serverAiProjectRegistry.resolve({ projectId, subject, role, machineId: machine.id });
-  };
-  const authorizeMachineProjectLive = async ({ signal, ...scope }) => {
-    await projectCatalog.refresh({ signal });
-    return authorizeMachineProject(scope);
-  };
-  let service;
-  const projectIndex = auxiliary && projectReaders
-    ? createProjectIndexPipeline({
-      reader: projectReaders,
-      embeddings: auxiliary,
-      reranker: auxiliary,
-      authorizeProject: authorizeMachineProject,
-      getProjectDatabases,
-      // `loadavg()` is host-wide on Linux. Compare it to host CPU capacity,
-      // never the container's cgroup-constrained Node parallelism.
-      shouldPause: () => shouldPauseProjectIndex({
-        busy: service?.busy === true,
-        queued: service?.queue?.length || 0,
-        oneMinuteLoad: loadavg()[0],
-        hostCpuCount: cpus().length,
-      }),
-      store: createProjectVectorStore({ pool: controlAuth.store.pool }),
-    })
-    : null;
-  const retrieval = conversationRetrieval ? {
-    resume() { conversationRetrieval.resume?.(); projectIndex?.resume?.(); },
-    async shutdown() { projectIndex?.stop?.(); await conversationRetrieval.shutdown?.(); },
-    diagnostics() { return { ...(conversationRetrieval.diagnostics?.() || {}), projectIndex: Boolean(projectIndex) }; },
-    enqueueConversationMessage: (...args) => conversationRetrieval.enqueueConversationMessage?.(...args),
-    enqueueBackfill: (...args) => conversationRetrieval.enqueueBackfill?.(...args),
-    markConversationDeleted: (...args) => conversationRetrieval.markConversationDeleted?.(...args),
-    enqueueProjectIndex: (...args) => projectIndex?.enqueue?.(...args) || { queued: false },
-    async retrieve(scope) {
-      if (scope.projectId) {
-        try { authorizeMachineProject(scope); }
-        catch { return { status: "denied", chunks: [], context: null, citations: [], projectMetadata: { fallbackReason: "project_access_revoked" } }; }
-      }
-      const memory = await conversationRetrieval.retrieve(scope);
-      if (!scope.projectId || !projectIndex) return memory;
-      const project = await projectIndex.retrieve(scope);
-      if (project.denied) return { status: "denied", chunks: [], context: null, citations: [], projectMetadata: project.metadata || null };
-      return { ...memory, context: composeRetrievalContext({ historicalMemory: memory.context, freshProjectEvidence: project.context }), citations: (project.citations || []).slice(0, 24), projectMetadata: project.metadata || null };
-    },
-  } : null;
-const registry = createToolRegistry({
-  infrastructureAdmin: machine.local ? createInfrastructureAdmin({ authorize: createInfrastructureSessionAuthorizer(controlAuth) }) : null,
-  removePortalApplication: machine.local ? createPortalApplicationRemoval({
-    authorize: createInfrastructureSessionAuthorizer(controlAuth),
-    getContext: projectContext,
-    applyDelete: applyProjectListRemoval,
-    invalidate: async () => {
-      await invalidateControlContextCache();
-      await projectCatalog.refresh({ force: true });
-    },
-    verify: async projectId => {
-      const context = await projectContext();
-      return !context.projects.some(project => project.slug === projectId)
-        && !projectCatalog.snapshot({ machineId: machine.id }).some(project => project.id === projectId || project.applicationIds.includes(projectId))
-        && projectCatalog.diagnostics().available === true;
-    },
-    machineId: machine.id,
-  }) : null,
-  web,
-  observerUrl: machine.observerUrl || "http://server-ai-observer:8090",
-  observerTokenFile: machine.observerTokenFile,
-  projectReaders,
-  reranker: auxiliary,
-  getMachineProjects: ({ subject, role, machineId, signal }) => {
-    if (machineId !== machine.id) throw new Error('Elenco progetti non disponibile.');
-    // Refresh only the fixed, authenticated reader catalog; labels and aliases
-    // are merged from server-owned discovery by the catalog module.
-    return projectCatalog.refresh({ signal }).then(() => serverAiProjectRegistry.list({ subject, role, machineId }));
-  },
-  authorizeProject: authorizeMachineProjectLive,
-  getProjectKnowledge: async ({ projectId, subject, role, machineId, query, signal }) => {
-    if (machineId !== machine.id || !projectIndex) return { context: null, citations: [], degraded: true };
-    // Indexing remains lazy and per-project. A first semantic request queues a
-    // bounded scan but never turns a machine-wide chat into a filesystem scan.
-    projectIndex.enqueue({ ownerId: subject, subject, role, machineId, projectId, signal });
-    return projectIndex.retrieve({ ownerId: subject, subject, role, machineId, projectId, query, signal });
-  },
-  getProjectContainers: async projectId => { const context = await projectContext(); return (context.resources?.containersByProject || []).filter(row => canonicalProjectId(row?.projectId) === projectId || canonicalProjectId(row?.applicationId) === projectId).map(row => ({ service: String(row.name || row.service || row.container || '') })).filter(row => /^[a-z0-9][a-z0-9_.-]{0,127}$/i.test(row.service)); },
-  getProjectDatabases,
-  getContext: async () => { if (!machine.local) return { resources: { source: "machine-adapter-unavailable" }, projects: [], applications: [] }; const context = await projectContext(); return { ...context, applications: (context.applications || []).map(item => ({ ...item, projectId: canonicalProjectId(item?.projectId) || item?.projectId })) }; },
-  getHostMetrics: async (name) => {
-    if (!machine.local) return { available: false, message: "Adattatore metriche macchina non configurato." };
-    const queries = name === "getSystemUptime" ? { uptimeSeconds: "time() - node_boot_time_seconds" }
-      : { oneMinute: "node_load1", fiveMinutes: "node_load5", fifteenMinutes: "node_load15" };
-    const values = Object.fromEntries(await Promise.all(Object.entries(queries).map(async ([key, query]) => [key, firstPrometheusValue(await prometheusQuery(query))])));
-    return { source: "prometheus-node-exporter", capturedAt: new Date().toISOString(), ...values };
-  },
-  getGpuStatus: async () => {
-    const status = await service.status();
-    const snapshot = gpu();
-    return { ...snapshot, online: status.online, loaded: status.loaded, hardwareCountersAvailable: snapshot.available };
-  },
-});
-  service = createAIService({
-  scanStore: serverAiScanStore,
-  contextLength: machine.contextLength,
-  registry,
-  logger: Object.fromEntries(["info", "warn", "error"].map(level => [level, event => console[level](JSON.stringify({ service: "server-ai", machineId: machine.id, requestId: requestIdentity.getStore()?.requestId, ...event }))])),
-  retrieval,
-});
-  serverAiServices.set(machine.id, service);
-  return { ...machine, service, web, gpu, retrieval, projectReaders, projectCatalog, projectIndex };
-  } catch {
-    console.warn(JSON.stringify({ service: "server-ai", machineId: machine.id, event: "machine-adapter-unavailable" }));
-    return { ...machine, configured: false };
-  }
-}), audit: event => appendAudit({ action: `server-ai.${event.action}`, target: event.machineId, environment, risk: "low", result: event.result, dryRun: false, summary: `Server AI ${event.action}: ${event.result}` }) });
-
-let serverAiConversationStore = null;
-let serverAiConversationsReady = false;
-try {
-  if (controlAuth.store?.pool) {
-    serverAiConversationStore = createPostgresConversationStore({ pool: controlAuth.store.pool, attachmentStorage: serverAiAttachmentStorage, artifactStorage: serverAiArtifactStorage });
-  } else if (process.env.NODE_ENV === "test" && process.env.CONTROL_CENTER_AUTH_STORE === "memory") {
-    serverAiConversationStore = createMemoryConversationStore({ attachmentStorage: serverAiAttachmentStorage, artifactStorage: serverAiArtifactStorage });
-  }
-  if (serverAiConversationStore) {
-    await serverAiConversationStore.ready();
-    await serverAiConversationStore.recoverOnStartup({ machineIds: serverAiManager.list().map(machine => machine.id) });
-    await serverAiConversationStore.recoverQueuedOnStartup?.({ machineIds: serverAiManager.list().map(machine => machine.id) });
-    serverAiConversationsReady = true;
-  }
-} catch {
-  console.warn(JSON.stringify({ service: "server-ai", event: "conversation-store-unavailable" }));
-}
-const handleServerAiConversation = createConversationHttp({
-  store: serverAiConversationStore, manager: serverAiManager, readPayload, json,
-  authorizeContinuation: createContinuationAuthorizer(controlAuth),
-  attachmentStorage: serverAiAttachmentStorage,
-  artifactStorage: serverAiArtifactStorage,
-  scanStore: serverAiScanStore,
-  isReady: () => serverAiConversationsReady,
-  getRetrieval: machineId => serverAiManager.retrieval(machineId),
-  getProjectReaders: machineId => serverAiManager.projectReaders?.(machineId) || null,
-  projectRegistry: serverAiProjectRegistry,
-  refreshProjectCatalog: ({ machineId }) => serverAiManager.projectCatalog?.(machineId)?.refresh?.() || Promise.resolve([]),
-});
-// Resume only durable, server-owned attachment requests. Reuse the existing
-// machine reconcile cadence; an empty queue never triggers a model call.
-const serverAiContinuationReconciles = new Map();
-let serverAiContinuationsClosing = false;
-async function reconcileServerAiAttachmentContinuations(onlyMachineId = null) {
-  if (serverAiContinuationsClosing || !serverAiConversationsReady || !serverAiScanStore?.listPendingContinuationScopes) return;
-  for (const { id: machineId } of serverAiManager.list()) {
-    if (onlyMachineId && onlyMachineId !== machineId) continue;
-    if (!serverAiServices.has(machineId) || serverAiContinuationReconciles.has(machineId)) continue;
-    const work = (async () => {
-      const scopes = await serverAiScanStore.listPendingContinuationScopes({ machineId });
-      if (!Array.isArray(scopes) || !scopes.length || serverAiContinuationsClosing) return;
-      const status = await serverAiManager.status(machineId);
-      if (!status || !["active", "degraded"].includes(status.state) || serverAiContinuationsClosing) return;
-      for (const scope of scopes.slice(0, 32)) {
-        if (serverAiContinuationsClosing) break;
-        if (scope?.machineId !== machineId || typeof scope.ownerId !== "string" || !scope.ownerId
-          || !/^[0-9a-f-]{36}$/.test(scope.conversationId || "") || !["owner", "admin", "viewer"].includes(scope.role)) continue;
-        await handleServerAiConversation.processAttachmentContinuations(scope);
-      }
-    })().catch(() => {
-      console.warn(JSON.stringify({ service: "server-ai", machineId, event: "attachment-continuation-retry" }));
-    }).finally(() => serverAiContinuationReconciles.delete(machineId));
-    serverAiContinuationReconciles.set(machineId, work);
-    await work;
-  }
-}
-for (const [machineId, service] of serverAiServices) {
-  service.onAttachmentScanTerminal = () => {
-    if (!serverAiContinuationsClosing) setTimeout(() => { void reconcileServerAiAttachmentContinuations(machineId); }, 25).unref();
-  };
-}
-async function reconcileServerAiRuntime() {
-  if (serverAiContinuationsClosing) return;
-  await serverAiManager.reconcileDisabled();
-  await reconcileServerAiAttachmentContinuations();
-}
-let serverAiDatabaseHealthAt = 0;
-let serverAiDatabaseHealthPending = null;
-async function serverAiDatabaseHealthy() {
-  if (!serverAiConversationStore) return false;
-  if (Date.now() - serverAiDatabaseHealthAt < 5000) return serverAiConversationsReady;
-  if (serverAiDatabaseHealthPending) return serverAiDatabaseHealthPending;
-  serverAiDatabaseHealthPending = (async () => {
-    try { await serverAiConversationStore.ready(); serverAiConversationsReady = true; }
-    catch { serverAiConversationsReady = false; }
-    serverAiDatabaseHealthAt = Date.now();
-    serverAiDatabaseHealthPending = null;
-    return serverAiConversationsReady;
-  })();
-  return serverAiDatabaseHealthPending;
-}
-
 const docs = {
   "Overview": [
     ["DOCUMENTATION-INDEX.md", "Documentation map and source-of-truth order"],
@@ -558,7 +272,8 @@ const server = createServer(async (req, res) => {
         if (setup.complete) {
           throw new AuthRequestError("A Control Center passkey is already registered.", 409);
         }
-        const options = await controlAuth.beginPasskeyRegistration(req);
+        const payload = await readPayload(req);
+        const options = await controlAuth.beginPasskeyRegistration(req, payload.bootstrapToken);
         json(res, { options });
         return;
       }
@@ -718,7 +433,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/" && url.searchParams.get("section") === "secrets") {
+    if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && url.searchParams.get("section") === "secrets") {
       const secretAuthorization = controlAuth.authorize(
         { ...req, controlCenterOperation: { capability: "owner:fresh" } },
         url,
@@ -726,7 +441,7 @@ const server = createServer(async (req, res) => {
       );
       if (!secretAuthorization.ok) {
         if (secretAuthorization.reauthUrl && !wantsJson(req)) {
-          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent("/?section=secrets")}`);
+          redirect(res, `${secretAuthorization.reauthUrl}?returnTo=${encodeURIComponent(`/?section=${url.searchParams.get("section")}`)}`);
           return;
         }
         json(res, { error: secretAuthorization.error || "admin_authorization_required", message: secretAuthorization.message, ...(secretAuthorization.reauthUrl ? { reauthUrl: secretAuthorization.reauthUrl } : {}) }, secretAuthorization.status);
@@ -826,6 +541,26 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/actions/project-file-view") {
+      try {
+        const project = findById(context.projects, url.searchParams.get("projectId") || "", "Project");
+        if (!project.filesAvailable) throw new ValidationError("Project files unavailable.");
+        const file = readManualApplicationFile(resolveProjectRoot(project), url.searchParams.get("path") || "");
+        res.setHeader("content-security-policy", "default-src 'none'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+        res.setHeader("x-content-type-options", "nosniff");
+        res.setHeader("referrer-policy", "no-referrer");
+        html(res, `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(file.name)} · ${escapeHtml(project.name)}</title>${controlCenterStylesheetLinks()}</head><body class="ops-file-view"><main class="ops-panel"><div class="ops-panel-head"><div><h1>${escapeHtml(file.name)}</h1><p>${escapeHtml(project.name)} · ${escapeHtml(file.path)} · ${escapeHtml(bytesLabel(file.sizeBytes))} · sola lettura</p></div><a class="ops-button secondary" href="/?section=projects&amp;project=${encodeURIComponent(project.slug)}">Torna all’applicazione</a></div><pre class="ops-file-source"><code>${escapeHtml(file.content)}</code></pre></main></body></html>`);
+      } catch (error) {
+        if (error instanceof ValidationError) {
+          renderTransientMessage(res, 404, "File non disponibile", "L’applicazione o il file richiesto non è disponibile.");
+          return;
+        }
+        if (!(error instanceof ManualApplicationFileError)) throw error;
+        renderTransientMessage(res, error.status, "File non apribile", "L’anteprima è disponibile per i file di testo fino a 256 KB. Secret, dati e file privati sono esclusi.");
+      }
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/storage-command") {
       await handleStorageCommand(req, res, context);
       return;
@@ -917,10 +652,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, bindHost, () => {
   console.log(`control-center listening on ${bindHost}:${port} with ${controlAuth.mode} authentication`);
-  void reconcileServerAiRuntime();
 });
-const serverAiReconcileTimer = setInterval(() => { void reconcileServerAiRuntime(); }, 30_000);
-serverAiReconcileTimer.unref();
 
 async function handleDirectFirstConfiguration(req, res, url) {
   firstConfigurationHeaders(res);
@@ -963,13 +695,9 @@ function rawRequestPathname(requestTarget) {
 }
 
 async function shutdown() {
-  serverAiContinuationsClosing = true;
-  clearInterval(serverAiReconcileTimer);
   statusEventBroker.close();
   setTimeout(() => process.exit(1), 10_000).unref();
   const closed = new Promise(resolve => server.close(resolve));
-  await serverAiManager.shutdown();
-  await serverAiAttachmentStorage?.close?.();
   await closed;
   await Promise.all([controlAuth.close(), firstConfiguration.close(), redisOperations.close()]);
   process.exit(0);
@@ -978,45 +706,6 @@ async function shutdown() {
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
 
-function serverAiAdminDiagnostics(status) {
-  const entries = [];
-  const add = (label, value) => { if (value !== undefined && value !== null && String(value).trim()) entries.push({ label, value: String(value).slice(0, 160) }); };
-  add("Provider AI", status.provider === "openai" ? "OpenAI Responses API" : "Non disponibile");
-  add("Modello", status.model?.model || "Non disponibile");
-  const metrics = status.latestMetrics;
-  if (metrics && typeof metrics === "object") {
-    if (Number.isFinite(Number(metrics.ttftMs))) add("TTFT", `${Math.round(Number(metrics.ttftMs))} ms`);
-    if (Number.isFinite(Number(metrics.tokensPerSecond))) add("Token/s", Number(metrics.tokensPerSecond).toFixed(1));
-  }
-  add("Ricerca web", status.search?.online ? "Disponibile" : "Non disponibile");
-  add("Coda", Number.isInteger(status.queue) ? String(status.queue) : "Non disponibile");
-  if (status.retrieval && typeof status.retrieval === "object") {
-    add("Indicizzazione memoria", Number.isInteger(status.retrieval.pending) && status.retrieval.pending > 0 ? `In attesa: ${status.retrieval.pending}` : "Aggiornata");
-    if (status.retrieval.backfillPending === true) add("Storico memoria", "Indicizzazione limitata in corso");
-    if (Number.isInteger(status.retrieval.capacityDeferred) && status.retrieval.capacityDeferred > 0) add("Memoria", "Limite locale raggiunto");
-    if (Number.isInteger(status.retrieval.degraded) && status.retrieval.degraded > 0) add("Ricerca semantica", "Fallback locale attivo");
-  }
-  if (status.auxiliary?.configured === true) {
-    for (const service of Array.isArray(status.auxiliary.services) ? status.auxiliary.services : []) {
-      const label = service.service === "server-ai-embedding" ? "Embedding" : service.service === "server-ai-reranker" ? "Reranker" : null;
-      if (!label) continue;
-      add(label, service.available ? (service.deviceVerified === true ? `${service.device} verificato` : "Disponibile, dispositivo non verificato") : "Non disponibile");
-    }
-  }
-  return { allowed: true, entries: entries.slice(0, 12) };
-}
-
-function publicServerAiStatus(status) {
-  const { latestMetrics, loaded, gpu, retrieval, auxiliary, ...rest } = status;
-  return {
-    ...rest,
-    models: Array.isArray(status.models) ? status.models.map(model => ({ mode: model.mode, model: model.model, available: model.available === true })) : [],
-    loaded: Array.isArray(loaded) ? loaded.map(model => ({ model: model.model })) : [],
-    gpu: gpu ? { available: gpu.available === true, stale: gpu.stale === true } : { available: false, stale: false },
-    ...(auxiliary?.configured === true ? { auxiliary: { available: auxiliary.available === true } } : {}),
-  };
-}
-
 async function handleApi(req, res, url, context, operation) {
   if (!operation?.classified || operation.control !== true) {
     notFound(res);
@@ -1024,59 +713,6 @@ async function handleApi(req, res, url, context, operation) {
   }
   const method = operation.method;
   const parts = operation.canonicalPath.split("/").filter(Boolean);
-  if (operation.operationId.startsWith("ai.") && req.controlCenterPayloadMalformed) {
-    return json(res, { error: "INVALID_REQUEST", message: "Il corpo JSON della richiesta non è valido." }, 400);
-  }
-  if (method === "GET" && operation.operationId === "ai.machines") return json(res, { machines: serverAiManager.list() });
-  if (method === "GET" && operation.operationId === "ai.attachment-formats") {
-    if (!serverAiManager.list().some(machine => machine.id === operation.parameters.machineId)) return json(res, { error: "AI_MACHINE_NOT_FOUND", message: "Macchina non trovata." }, 404);
-    if (!serverAiAttachmentStorage) return json(res, { error: "ATTACHMENT_STORAGE_UNAVAILABLE", message: "Archivio allegati non disponibile." }, 503);
-    return json(res, { supported: attachmentCapabilities() });
-  }
-  if (method === "GET" && operation.operationId === "ai.status") {
-    try {
-      const status = await serverAiManager.status(operation.parameters.machineId);
-      const databaseAvailable = await serverAiDatabaseHealthy();
-      const identity = requestIdentity.getStore();
-      const admin = identity?.role === "admin";
-      const safeStatus = admin ? status : publicServerAiStatus(status);
-      return json(res, {
-        ...safeStatus,
-        ...(!databaseAvailable && ["active", "degraded"].includes(status.state) ? { state: "error", missing: [...(status.missing || []), "Archivio conversazioni non disponibile."] } : {}),
-        conversationStore: { available: databaseAvailable },
-        canConfigure: ["owner", "admin"].includes(identity?.role),
-        ...(admin ? { adminDiagnostics: serverAiAdminDiagnostics(status) } : {}),
-      });
-    }
-    catch (error) { return json(res, { error: "AI_MACHINE_UNAVAILABLE", message: error instanceof MachineAiError ? error.message : "Stato macchina non disponibile." }, error.status || 503); }
-  }
-  if (operation.operationId === "ai.projects") {
-    const identity = requestIdentity.getStore();
-    try { await serverAiManager.projectCatalog?.(operation.parameters.machineId)?.refresh?.(); return json(res, { projects: serverAiProjectRegistry.list({ subject: identity?.subject, role: identity?.role, machineId: operation.parameters.machineId }) }); }
-    catch (error) { return json(res, { error: "PROJECTS_UNAVAILABLE", message: "Progetti AI non disponibili." }, error.status || 503); }
-  }
-  if (operation.operationId.startsWith("ai.conversations.")) {
-    const identity = requestIdentity.getStore();
-    try { await serverAiDatabaseHealthy(); return await handleServerAiConversation(req, res, url, operation, identity); }
-    catch (error) {
-      if (res.headersSent || res.writableEnded || res.destroyed) { if (!res.writableEnded) res.end(); return; }
-      const expected = error instanceof ConversationHttpError || error instanceof ConversationStoreError || error instanceof MachineAiError;
-      return json(res, { error: expected ? error.code || "CONVERSATION_UNAVAILABLE" : "CONVERSATIONS_UNAVAILABLE", message: expected ? error.message : "Archivio conversazioni non disponibile." }, expected ? error.status || 503 : 503);
-    }
-  }
-  if (method === "POST" && operation.operationId === "ai.enable") {
-    const payload = await readPayload(req);
-    if (Object.keys(payload).some(key => key !== "_csrf")) return json(res, { error: "INVALID_REQUEST", message: "L’attivazione non accetta parametri macchina o container." }, 400);
-    if (!await serverAiDatabaseHealthy()) return json(res, { error: "CONVERSATIONS_UNAVAILABLE", message: "Archivio conversazioni non disponibile." }, 503);
-    try { return json(res, await serverAiManager.enable(operation.parameters.machineId), 202); }
-    catch (error) { return json(res, { error: "AI_ENABLE_REJECTED", message: error instanceof MachineAiError ? error.message : "Attivazione non disponibile." }, error.status || 503); }
-  }
-  if (method === "POST" && operation.operationId === "ai.disable") {
-    const payload = await readPayload(req);
-    if (Object.keys(payload).some(key => key !== "_csrf")) return json(res, { error: "INVALID_REQUEST", message: "La disattivazione non accetta parametri macchina o container." }, 400);
-    try { return json(res, serverAiManager.disable(operation.parameters.machineId), 202); }
-    catch (error) { return json(res, { error: "AI_DISABLE_REJECTED", message: error instanceof MachineAiError ? error.message : "Arresto non disponibile." }, error.status || 503); }
-  }
   const payload = method === "POST" ? await readPayload(req) : {};
 
   try {
@@ -1085,7 +721,39 @@ async function handleApi(req, res, url, context, operation) {
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
       case "overview.read": return json(res, context.overview);
-      case "advanced.section.read": return json(res, advancedControlSection(operation.parameters.sectionId, context));
+      case "backup.vps.catalog": {
+        const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+        const projectId = url.searchParams.get("projectId");
+        if (!projectId) return json(res, { catalog });
+        const application = catalog?.applications?.find(app => app.id === projectId);
+        if (!application || !resolveContextProject(context, projectId)) throw new ValidationError("Applicazione non ammessa nel catalogo backup VPS.");
+        return json(res, { catalog: { ...application, queueActive: catalog.queueActive } });
+      }
+      case "backup.production-restore": return json(res, planVpsProductionRestore(payload, context), payload.apply === true ? 202 : 200);
+      case "cloudflare.dns.change": {
+        try {
+          const result = await cloudflareDnsChange(payload);
+          appendAudit({ action: `cloudflare.dns.${result.action}`, target: result.zone, environment: context.environment, risk: "high", result: result.dryRun ? "planned" : "success", dryRun: result.dryRun, summary: result.dryRun ? "DNS record change prepared for owner review." : "DNS record change applied and read back from the scoped provider." });
+          return json(res, result);
+        } catch {
+          return json(res, { error: "CLOUDFLARE_DNS_REJECTED", message: "DNS operation unavailable, invalid or changed since review. Read current DNS before retrying." }, 409);
+        }
+      }
+      case "advanced.section.read": {
+        const section = advancedControlSection(operation.parameters.sectionId, context);
+        if (operation.parameters.sectionId === "cloudflare") {
+          const dns = await readCloudflareDnsStatus();
+          if (dns) {
+            section.data.dnsIntegration = dns;
+            section.data.connectionStatus = dns.status;
+            section.data.apply = "POST /control/cloudflare/dns/change: fresh owner, CSRF, reviewed revision and explicit confirmation required";
+            section.data.verifyRemote = "DNS records read from the scoped Cloudflare API; account policies and write permission are not inferred";
+            section.data.accessPolicies = "not supported by DNS-only integration";
+            section.data.cacheRules = "not supported by DNS-only integration";
+          }
+        }
+        return json(res, section);
+      }
       case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
       case "vault.secret.store": return json(res, planVaultSecretCreate(payload, context), 202);
       case "vault.import-existing": return json(res, planVaultSecretImportExisting(payload, context), 202);
@@ -1152,10 +820,13 @@ async function handleApi(req, res, url, context, operation) {
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "list", "remove")) {
       const operation = applyProjectListRemoval(parts[2], payload, context);
-      await refreshServerAiProjectCatalogs();
       return json(res, operation, 202);
     }
 
+    if (method === "GET" && route(parts, "control", "applications", "observed")) {
+      try { return json(res, { applications: observedApplications(true) }); }
+      catch { return json(res, { error: "OBSERVATIONS_UNAVAILABLE", message: "Il catalogo delle applicazioni VPS è in aggiornamento." }, 503); }
+    }
     if (method === "GET" && route(parts, "control", "applications")) return json(res, { applications: context.applications });
     if (method === "POST" && route(parts, "control", "applications")) return json(res, planApplicationCreate(payload, context), 202);
     if (method === "POST" && parts.length === 4 && route(parts.slice(0, 2), "control", "applications")) {
@@ -1444,7 +1115,6 @@ async function handleProjectListRemoval(req, res, context) {
     if (error instanceof RejectedOperationError) return json(res, { error: "operation_rejected", message: error.message }, 409);
     throw error;
   }
-  await refreshServerAiProjectCatalogs();
   if (wantsJson(req)) return json(res, operation, 202);
   redirect(res, "/?section=projects");
 }
@@ -1534,6 +1204,7 @@ async function handleDatabaseCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
+    assertExternalDatabaseOperation(payload.id || payload.databaseId || "", action);
     if (action === "create") operation = planDatabaseCreate(payload, context);
     else if (action === "update") operation = planDatabaseUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "delete") operation = planDatabaseDelete(payload.id || payload.databaseId || "", payload, context);
@@ -2125,7 +1796,9 @@ async function buildContext({ projects, state }) {
   ];
   const databaseNameHints = discoverProjectDatabaseHints(projects);
   const databasePrincipalBindings = readDatabasePrincipalsState().bindings;
-  const databases = Object.values(readDatabasesState())
+  const databaseRows = Object.values(readDatabasesState()).filter(database => database?.id !== trustedExternalDatabase?.id);
+  if (trustedExternalDatabase) databaseRows.push(externalDatabaseRecord(trustedExternalDatabase));
+  const databases = databaseRows
     .filter((database) => database && !database.deletedAt)
     .map((database) => {
       const binding = principalBindingFor(databasePrincipalBindings, database);
@@ -4781,6 +4454,7 @@ function readProjectFiles(id, requestedPath, context) {
   }
   const projectRoot = resolveProjectRoot(project);
   const relativePath = safeRelativeProjectPath(requestedPath || "");
+  if (isHiddenProjectPath(relativePath)) throw new ValidationError("Project file path is not browsable.");
   const target = path.resolve(projectRoot, relativePath);
   if (!(target === projectRoot || target.startsWith(`${projectRoot}${path.sep}`))) {
     throw new ValidationError("Invalid project file path.");
@@ -4804,7 +4478,7 @@ function readProjectFiles(id, requestedPath, context) {
     });
   }
   const entries = readdirSync(target, { withFileTypes: true })
-    .filter((entry) => !hiddenProjectFile(entry.name))
+    .filter((entry) => !isHiddenProjectPath(joinRelativePath(relativePath, entry.name)))
     .slice(0, 250)
     .map((entry) => fileEntryRecord(path.join(target, entry.name), entry.name, joinRelativePath(relativePath, entry.name)))
     .filter(Boolean)
@@ -4877,7 +4551,7 @@ function parentRelativePath(value) {
 }
 
 function hiddenProjectFile(name) {
-  return [".git", "node_modules", "vendor", ".next", "dist", "build", ".turbo", ".cache", ".env", ".env.local", ".env.production"].includes(name);
+  return isHiddenProjectPath(name);
 }
 
 function italianDateTimeLabel(value) {
@@ -4941,6 +4615,13 @@ function backupFamilySpecs() {
 }
 
 function readFtpsOffsiteSummary(nowMs = Date.now()) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    const point = native.manifests[0];
+    const time = Date.parse(point?.createdAt || "");
+    const verified = Boolean(point) && Number.isFinite(time) && time <= nowMs + 300000 && nowMs - time <= 14 * 86400000;
+    return { verified, backupAt: point?.createdAt || "", manifestId: verified ? point.id : "", retainedPointCount: native.manifests.length, reportPath: "" };
+  }
   const root = "/var/www/project-state/host-recovery";
   const load = (name) => {
     try {
@@ -5061,7 +4742,15 @@ function buildBackupInventory(records = []) {
 function applicationBackupInventory(context, project) {
   const databases = projectBackupDatabases(context, project);
   const storage = projectStorage(context, project);
-  const resources = applicationBackupResources(context, project);
+  // A pending native catalog blocks operations, not the read-only application
+  // screen. In particular first qualification must not hide the entire portal.
+  let resources = [];
+  let availabilityMessage = "";
+  try { resources = applicationBackupResources(context, project); }
+  catch (error) {
+    if (!(error instanceof ValidationError)) throw error;
+    availabilityMessage = "Backup dell’applicazione non ancora disponibile: il catalogo VPS deve essere verificato.";
+  }
   const sourcePath = applicationSourceBackupPath(project);
   const sourceStats = readBackupDirectoryStats(sourcePath);
   const manifests = applicationBackupManifests(project);
@@ -5089,6 +4778,8 @@ function applicationBackupInventory(context, project) {
     databaseCount: databases.length,
     storageCount: storage.buckets.length + storage.webspaces.length,
     resourceCount: resources.length,
+    backupAvailable: resources.length > 0,
+    availabilityMessage,
     restoreOptions,
     jobs,
     records,
@@ -5130,6 +4821,12 @@ function applicationBackupResources(context, projectOrId, mode = "all") {
   const project = resolveContextProject(context, projectOrId);
   if (!project) return [];
   const backupMode = applicationBackupMode(mode);
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    const application = native.applications?.find(app => app.id === project.slug);
+    if (!application?.enabled || !native.enabled || !native.queueActive) throw new ValidationError("Applicazione non ammessa nel catalogo backup VPS attivo.");
+    return application.resources.filter(resource => backupMode === "all" || resource.kind === (backupMode === "source" ? "source" : "database"));
+  }
   const resources = [];
   if ((backupMode === "all" || backupMode === "source") && project.filesystemExists !== false) {
     resources.push({
@@ -5157,6 +4854,8 @@ function applicationBackupResources(context, projectOrId, mode = "all") {
 }
 
 function readBackupManifests() {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) return [...native.manifests, ...(native.applicationManifests || [])];
   const root = path.resolve(backupRoot);
   const directory = path.join(root, "manifests");
   if (!existsSync(directory)) return [];
@@ -5570,6 +5269,11 @@ function uniqueBackupResources(resources) {
 }
 
 function platformBackupResources(context, requestedScope) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native) {
+    if (!native.enabled || !native.queueActive || requestedScope !== "all" || context.projects.some(project => !native.applications?.some(app => app.id === project.slug))) throw new ValidationError("Il backup VPS richiede il catalogo infrastruttura completo e attivato.");
+    return native.resources;
+  }
   const resources = [];
   if (requestedScope === "all" || requestedScope === "applications") {
     for (const project of context.projects) resources.push(...applicationBackupResources(context, project, "source"));
@@ -5645,6 +5349,8 @@ function resolveBackupRunRequest(payload, context) {
 }
 
 function resolveBackupRestoreRequest(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  if (native && (!native.enabled || !native.queueActive)) throw new ValidationError("Ripristino VPS non ancora attivato.");
   const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
   if (requestedScope === "application" || requestedScope.startsWith("app-")) {
     const projectId = requestedScope.startsWith("app-")
@@ -6082,7 +5788,8 @@ function directBackupTimestamp() {
 
 function queueRestoreDrill(payload, context) {
   const { scopeLabel, scope, backupRef, resources, project, selected, mode } = resolveBackupRestoreRequest(payload, context);
-  const job = createBackupJob({ operation: "restore-drill", scope, sourceManifestPath: backupRef, resources, context });
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const job = createBackupJob({ operation: "restore-drill", scope, sourceManifestPath: backupRef, resources, context, ...(native && project ? { sourceManifestDigest: selected.manifest.signature.digest, restoreProfileDigest: native.restoreProfileDigest } : {}) });
   appendAudit({ action: "restore.queue", target: scopeLabel, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: project ? `Exact-manifest restore drill queued for ${project.slug} (${applicationRestoreModeLabel(mode)}).` : "Exact-manifest restore drill queued for backup scheduler execution." });
   const operation = operationPlan("restore.queue", context.environment, false, ["validate signed source manifest", "verify exact artifact signatures", "restore only into disposable targets", "write drill evidence"], {
     scope: scopeLabel,
@@ -6110,7 +5817,39 @@ function queueRestoreDrill(payload, context) {
   return { ...operation, backup, job, selectedManifestId: selected?.manifest?.id || selected?.name || "" };
 }
 
-function createBackupJob({ operation, scope, sourceManifestPath = "", resources, context }) {
+function planVpsProductionRestore(payload, context) {
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const projectId = payload.projectId ? sanitizeIdentifier(payload.projectId) : "";
+  const application = projectId ? native?.applications?.find(app => app.id === projectId) : null;
+  if (projectId && (!application || !resolveContextProject(context, projectId))) throw new ValidationError("Applicazione non ammessa nel catalogo backup VPS.");
+  const selected = (application ? application.manifests : native?.manifests)?.find(manifest => manifest.id === payload.manifestId);
+  if (!selected || !native.restoreProfileDigest) throw new ValidationError("Seleziona un punto VPS verificato e immutabile.");
+  if (selected.restoreCompatible === false) throw new ValidationError("Questo punto precede l’inclusione di Scripta e non ripristina il runtime corrente. Seleziona un backup recente.");
+  const mode = application ? applicationRestoreMode(payload.restoreMode || "all") : "all";
+  const resources = selected.resources.filter(resource => mode === "all" || resource.kind === (mode === "source" ? "source" : "database"));
+  if (!resources.length) throw new ValidationError("Il punto selezionato non contiene il contenuto richiesto.");
+  const restoresDatabase = resources.some(resource => resource.kind === "database");
+  const confirmation = application
+    ? `RESTORE-APPLICATION:${projectId}:${mode}:${selected.id}:${selected.signature.digest}:${native.restoreProfileDigest}`
+    : `RESTORE-RUNTIME:${selected.id}:${selected.signature.digest}:${native.restoreProfileDigest}`;
+  const details = {
+    manifestId: selected.id, createdAt: selected.createdAt, manifestDigest: selected.signature.digest,
+    resources: resources.map(resource => ({ kind: resource.kind, name: resource.name })), restoreMode: mode,
+    profileDigest: native.restoreProfileDigest, confirmationRequired: confirmation,
+    scope: application ? (restoresDatabase ? "Solo le risorse di Scripta elencate nel piano. Per il database viene richiesta la stessa struttura delle tabelle; cache Redis e sessioni dell’app vengono azzerate." : "Solo la copia consultabile dei sorgenti elencata nel piano. Database, cache Redis e sessioni restano correnti. Il codice in esecuzione non viene sostituito.") : "Database, 13 volumi persistenti e configurazioni runtime montate; stesso host e stesse immagini.",
+    preserves: application ? "Altri servizi, account del Control Center, configurazioni, credenziali e immagini correnti. Il codice in esecuzione non viene sostituito dalla copia dei sorgenti." : "SSH, rete, sistema operativo, credenziali di gestione, authority e coda corrente.",
+    downtimeRequired: true, originalStateRetainedForRollback: true,
+    ownerAccessReturnsToBackupState: !application,
+    enabled: native.enabled && native.queueActive && (application ? application.productionRestoreEnabled : native.productionRestoreEnabled),
+  };
+  if (payload.apply !== true) return { dryRun: true, details };
+  if (!details.enabled || payload.confirm !== confirmation || payload.reviewedManifestId !== selected.id) throw new ValidationError("Ripristino non attivato o conferma del punto non valida.");
+  const job = createBackupJob({ operation: "restore-production", scope: application ? { kind: "application", id: projectId } : { kind: "platform", id: "platform" }, sourceManifestPath: selected.path, sourceManifestDigest: selected.signature.digest, restoreProfileDigest: native.restoreProfileDigest, resources, context });
+  appendAudit({ action: "backup.restore-production.queue", target: selected.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Manual owner-reviewed runtime recovery queued; SSH, OS and management authority excluded." });
+  return { dryRun: false, job, details };
+}
+
+function createBackupJob({ operation, scope, sourceManifestPath = "", sourceManifestDigest = "", restoreProfileDigest = "", resources, context }) {
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
   const principal = String(identity?.subject || "").trim();
@@ -6129,6 +5868,8 @@ function createBackupJob({ operation, scope, sourceManifestPath = "", resources,
     environment: context.environment,
     createdAt: now,
     sourceManifestPath,
+    sourceManifestDigest,
+    restoreProfileDigest,
   });
   return admitBackupJob({
     jobsDir: backupJobsDir,
@@ -6168,7 +5909,8 @@ function readBackupJobs() {
 async function renderCachedControlCenter(context, params) {
   const section = params.get("section") || "projects";
   if (section === "secrets" || !context?.cacheIdentity) return renderControlCenter(context, params);
-  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}`)}`;
+  const assetVersions = `${controlCenterStylesheetLinks()}\0${controlCenterScriptTags()}`;
+  const key = `html:${sha256(`${context.cacheIdentity}\0${params.toString()}\0${assetVersions}`)}`;
   const cached = await redisOperations.cacheGetJson(key);
   if (typeof cached === "string" && cached.startsWith("<!doctype html>")) return cached;
   const rendered = renderControlCenter(context, params);
@@ -6185,7 +5927,7 @@ function renderControlCenter(context, params) {
   const activeProject = section === "projects" && params.has("project") ? currentProject : null;
   const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
-  const hidePageHead = Boolean(activeProject) || section === "server-ai";
+  const hidePageHead = Boolean(activeProject);
   const pageHint = operationPageHint(section, context);
   const pageLabel = hidePageHead ? `aria-label="${escapeHtml(title)}"` : 'aria-labelledby="control-page-title"';
   const pageHead = hidePageHead ? "" : `<div class="ops-page-head">
@@ -6235,7 +5977,7 @@ ${controlCenterScriptTags()}
 
 function renderOperationsNav(sections, section, context, activeProject, params = new URLSearchParams()) {
   const visibleSections = sections.filter((item) => !item.hidden);
-  return `<nav class="ops-nav" aria-label="Sezioni portal">
+  return `<nav id="platform-portal-navigation" class="ops-nav" aria-label="Sezioni portal">
     <span class="ops-nav-pill" aria-hidden="true"></span>
     ${visibleSections.map((item) => renderOperationsNavGroup(item, section, context, activeProject, params)).join("")}
   </nav>`;
@@ -6327,7 +6069,6 @@ function statusNavChildren(context, params = new URLSearchParams(), currentSecti
 function operationsPortalSections() {
   return [
     { id: "projects", label: "Applicazioni", icon: "projects" },
-    { id: "server-ai", label: "Server AI", icon: "terminal" },
     { id: "secrets", label: "Secret", icon: "shield" },
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
@@ -6336,7 +6077,6 @@ function operationsPortalSections() {
 
 function operationPageHint(section, context) {
   const hints = {
-    "server-ai": "GPT-6 Luna tramite OpenAI API, strumenti del server in sola lettura e fonti web controllate.",
     projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
     secrets: "Vault cifrato e inventario centralizzato dei secret.",
     files: "Inventario file applicazione in sola lettura.",
@@ -6346,12 +6086,27 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
-  if (section === "server-ai") return renderServerAi();
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
   return renderOpsProjects(context, params);
+}
+
+function renderVpsProductionRestore(projectId = "") {
+  return `<section class="ops-card" data-vps-restore${projectId ? ` data-project-id="${escapeHtml(projectId)}"` : ""}>
+    <h2>${projectId ? "Ripristina Scripta" : "Ripristino manuale dei dati runtime"}</h2>
+    <p>${projectId ? "Ripristina i dati e/o la copia consultabile dei sorgenti di Scripta dal punto scelto. Il codice in esecuzione resta corrente; per il database serve la stessa struttura delle tabelle. Cache e sessioni dell’app vengono azzerate, gli altri servizi restano attivi." : "Ripristina database, volumi persistenti e configurazioni runtime sullo stesso server. SSH, rete, sistema operativo e credenziali di gestione restano correnti."}</p>
+    <p>${projectId ? "Scripta sarà temporaneamente indisponibile. Gli appunti e gli altri dati torneranno allo stato del backup scelto." : "Il portale e i servizi saranno temporaneamente indisponibili. Dati e passkey torneranno allo stato del punto scelto; conserva una passkey valida a quella data."}</p>
+    <p data-restore-status role="status" aria-live="polite">Caricamento punti verificati…</p>
+    <label>Punto di ripristino <select data-restore-point></select></label>
+    <button type="button" class="ops-button secondary compact" data-restore-plan>Prepara piano</button>
+    <section data-restore-review hidden><pre data-restore-details></pre>
+      <label>Riscrivi l’identificativo del punto <input data-restore-typed autocomplete="off"></label>
+      <label><input type="checkbox" data-restore-confirm> Confermo sovrascrittura dei dati ${projectId ? "di Scripta" : "runtime"} e interruzione temporanea ${projectId ? "dell’app" : "dei servizi"}.</label>
+      <button type="button" class="ops-button primary compact" data-restore-apply disabled>Ripristina il punto selezionato</button>
+    </section>
+  </section>`;
 }
 
 function renderOpsRedis(context) {
@@ -6601,7 +6356,22 @@ function selectedStatusGroup(groups, params = new URLSearchParams()) {
     || { meta: statusCategoryMeta("operational-evidence"), rows: [] };
 }
 
+function observedApplications(strict = false) {
+  const root = process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT;
+  if (!root) return [];
+  try {
+    const catalog = readVpsBackupCatalog(root);
+    return readObservedApplications(root, catalog?.restoreProfileDigest);
+  } catch (error) {
+    if (strict) throw error;
+    return []; // Metadata refresh must not break managed application pages.
+  }
+}
+
 function renderOpsProjects(context, params = new URLSearchParams()) {
+  const observed = observedApplications().filter(app => !context.projects.some(project => project.slug === app.id || project.aliases?.includes(app.id)));
+  const selectedObserved = observed.find(app => app.id === params.get("observed"));
+  if (selectedObserved) return renderObservedApplicationDetail(selectedObserved, controlIcon);
   const resourcesByProject = projectResourceRowsByProject(context);
   const selectedSlug = sanitizeIdentifier(params.get("project") || "");
   const selectedProject = context.projects.find((project) => project.slug === selectedSlug || project.id === selectedSlug);
@@ -6609,7 +6379,7 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
 
   const rows = sortedOpsProjects(context.projects)
     .map((project) => renderOpsProjectRow(project))
-    .join("");
+    .join("") + observed.map(app => renderObservedApplicationRow(app, controlIcon)).join("");
   return `<section class="ops-section ops-projects-redesign">
     <div class="ops-project-list" aria-label="Applicazioni">
       ${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}
@@ -7013,6 +6783,10 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
 }
 
 function renderProjectDetailDatabaseList(context, project, databases, params = new URLSearchParams()) {
+  if (project.slug === "workcalendar") {
+    const panel = workcalendarDatabasePanel(readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT), project.slug, { escapeHtml, controlIcon });
+    if (panel) return panel;
+  }
   const databaseItems = databases.map((database) => renderProjectDetailDatabaseRow(context, project, database, params)).join("");
   return `<div class="ops-project-detail-panel" id="project-databases">
     <div class="ops-project-detail-panel-head">
@@ -7020,12 +6794,15 @@ function renderProjectDetailDatabaseList(context, project, databases, params = n
       <span class="ops-state ${databases.length ? "good" : "warn"}">${escapeHtml(databases.length ? `${databases.length} collegati` : "Nessuno")}</span>
     </div>
     <div class="ops-project-database-list">${databaseItems || empty("Nessun database", "Crea metadata database per questa applicazione.")}</div>
-    ${renderProjectDetailDatabaseCreateForm(project)}
+    ${project.slug === trustedExternalDatabase?.projectId ? "" : renderProjectDetailDatabaseCreateForm(project)}
   </div>`;
 }
 
 function renderProjectDetailDatabaseRow(context, project, database, params = new URLSearchParams()) {
   const adminAction = databaseAdminAction(database);
+  if (database.id === trustedExternalDatabase?.id) {
+    return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}"><div class="ops-project-database-main"><span class="ops-project-detail-item-icon">${controlIcon("databases")}</span><span><strong>${escapeHtml(databaseDisplayName(database))}</strong><small>${escapeHtml(database.name)} · PostgreSQL · utente dedicato ${escapeHtml(database.ownerRole)}</small><small>Database in uso · connessione TLS verificata · credenziali protette</small></span><a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a></div></div>`;
+  }
   const updateConfirm = `UPDATE-DATABASE:${database.id}`;
   const credentialConfirm = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
   const credentialLabel = databaseCredentialDisplayLabel(database, project);
@@ -7158,8 +6935,10 @@ function renderProjectDetailBackups(context, project, params = new URLSearchPara
   const inventory = applicationBackupInventory(context, project);
   const restoreOptions = inventory.restoreOptions || [];
   const backupRows = restoreOptions.slice(0, 18).map((option) => renderProjectDetailBackupRow(option, project)).join("");
-  const optionRows = restoreOptions.map((option) => `<option value="${escapeHtml(option.path)}">${escapeHtml(option.label)}</option>`).join("");
+  const optionRows = restoreOptions.map((option) => `<option value="${escapeHtml(option.path)}" data-manifest-id="${escapeHtml(option.manifest.id)}">${escapeHtml(option.label)}</option>`).join("");
   const restoreDisabled = restoreOptions.length ? "" : " disabled";
+  const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const nativeApplication = native?.applications?.some(app => app.id === project.slug);
   return `<div class="ops-project-detail-panel" id="project-backups">
     <div class="ops-project-detail-panel-head">
       <h3>Backup</h3>
@@ -7169,9 +6948,10 @@ function renderProjectDetailBackups(context, project, params = new URLSearchPara
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="returnTo" value="project-detail">
         <input type="hidden" name="backupMode" value="all">
-        <button class="ops-button secondary" type="submit">${controlIcon("backups")} Avvia backup</button>
+        <button class="ops-button secondary" type="submit"${inventory.backupAvailable ? "" : " disabled"}>${controlIcon("backups")} Avvia backup</button>
       </form>
     </div>
+    ${inventory.availabilityMessage ? `<p class="ops-muted" role="status">${escapeHtml(inventory.availabilityMessage)}</p>` : ""}
     <div class="ops-project-backup-list" aria-label="Backup disponibili per ${escapeHtml(project.name)}">
       ${backupRows || empty("Nessun backup", "Avvia il primo backup dell'applicazione.")}
     </div>
@@ -7183,14 +6963,16 @@ function renderProjectDetailBackups(context, project, params = new URLSearchPara
         <input type="hidden" name="returnTo" value="project-detail">
         ${renderProjectSelect("backupRef", "Backup da ripristinare", optionRows || '<option value="">Nessun backup disponibile</option>', restoreDisabled)}
         ${renderProjectSelect("restoreMode", "Contenuto restore", '<option value="all">Tutto</option><option value="database">Solo database</option><option value="source">Solo sorgenti</option>', restoreDisabled)}
-        <button class="ops-button danger" type="submit"${restoreDisabled}>${controlIcon("refresh")} Avvia restore drill</button>
+        ${nativeApplication ? `<button class="ops-button danger" type="button" data-project-restore-open${restoreDisabled}>${controlIcon("refresh")} Ripristina backup</button>` : ""}
+        <button class="ops-button secondary" type="submit"${restoreDisabled}>${controlIcon("check")} Verifica ripristino isolato</button>
       </form>
     </div>
+    ${nativeApplication ? `<dialog class="cc-restore-dialog" data-project-restore-dialog aria-label="Conferma ripristino backup"><div class="cc-dialog-head"><h2>Conferma ripristino backup</h2><button type="button" data-project-restore-close aria-label="Chiudi ripristino">${controlIcon("close")}</button></div>${renderVpsProductionRestore(project.slug)}</dialog>` : ""}
   </div>`;
 }
 
 function renderProjectDetailBackupRow(option, project) {
-  const deleteControl = `<form method="post" action="/actions/backup-delete-command" class="ops-project-backup-delete-form" data-passkey-submit data-passkey-success-url="/?section=projects&amp;project=${encodeURIComponent(project.slug)}#project-backups">
+  const deleteControl = option.manifest.encrypted ? '<span class="ops-state good">Cifrato · verificato</span>' : `<form method="post" action="/actions/backup-delete-command" class="ops-project-backup-delete-form" data-passkey-submit data-passkey-success-url="/?section=projects&amp;project=${encodeURIComponent(project.slug)}#project-backups">
         <input type="hidden" name="action" value="delete-application">
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="path" value="${escapeHtml(option.path)}">
@@ -7220,11 +7002,11 @@ function renderProjectFileBreadcrumb(snapshot, projectHref) {
 }
 
 function renderProjectFileExplorerEntry(entry, projectHref) {
-  const href = entry.browsable ? projectHref(entry.path) : "";
+  const href = entry.browsable ? projectHref(entry.path) : entry.type === "file" ? projectHref(entry.path, true) : "";
   const type = entry.type || "file";
   const icon = type === "directory" ? "folder" : type === "symlink" ? "external" : "file";
-  const tag = entry.browsable ? "a" : "button";
-  const tagAttributes = entry.browsable ? `href="${href}"` : 'type="button"';
+  const tag = href ? "a" : "button";
+  const tagAttributes = href ? `href="${href}"${entry.browsable ? "" : ' target="_blank" rel="noopener noreferrer"'}` : 'type="button"';
   return `<${tag} class="ops-file-tile ${escapeHtml(type)}" ${tagAttributes}
     role="option"
     aria-selected="false"
@@ -7255,7 +7037,9 @@ function renderProjectDetailFileManager(context, project, params) {
   } catch (error) {
     snapshot = { available: false, path: "", parentPath: "", entries: [], message: error instanceof ValidationError ? error.message : "File applicazione non disponibili." };
   }
-  const projectHref = (pathValue = "") => `/?section=projects&project=${escapeHtml(project.slug)}${pathValue ? `&path=${encodeURIComponent(pathValue)}` : ""}`;
+  const projectHref = (pathValue = "", viewFile = false) => viewFile
+    ? `/actions/project-file-view?projectId=${encodeURIComponent(project.slug)}&path=${encodeURIComponent(pathValue)}`
+    : `/?section=projects&project=${escapeHtml(project.slug)}${pathValue ? `&path=${encodeURIComponent(pathValue)}` : ""}`;
   const entries = (snapshot.entries || []).map((entry) => renderProjectFileExplorerEntry(entry, projectHref)).join("");
   const parentHref = snapshot.parentPath || snapshot.path ? projectHref(snapshot.parentPath || "") : "";
   const entryCount = `${(snapshot.entries || []).length} elementi`;
@@ -7564,7 +7348,16 @@ function resolvePostgresCredential(database, project) {
   return null;
 }
 
+function assertExternalDatabaseOperation(id, action) {
+  if (slugify(id) !== trustedExternalDatabase?.id) return;
+  try { assertExternalDatabaseAction(trustedExternalDatabase, action); }
+  catch { throw new RejectedOperationError("Il database Scripta usa un collegamento dedicato: questa operazione non è disponibile nel gestore dei principal della piattaforma."); }
+}
+
 function databaseAdminCredentials(database, project) {
+  if (database.id === trustedExternalDatabase?.id) {
+    return externalDatabaseAdminCredentials(trustedExternalDatabase, file => readCredentialPasswordFile(file, null));
+  }
   const primary = database.engine === "postgres"
     ? resolvePostgresCredential(database, project)
     : resolveMariaDbCredential(database, project);
@@ -7788,12 +7581,12 @@ function phpMyAdminPageToken(htmlText) {
 }
 
 async function phpPgAdminLogin(database, credential) {
-  const server = phpPgAdminServerId();
+  const server = phpPgAdminServerId(database);
   const loginPath = `/phppgadmin/redirect.php?subject=server&server=${encodeURIComponent(server)}`;
   const start = await phpPgAdminInternalRequest("GET", loginPath);
   const startCookies = mergeSetCookieHeaders(start.cookies.map(rewritePhpPgAdminCookie).filter(Boolean));
   const passwordField = htmlPasswordInputName(start.body);
-  if (!passwordField) return { ok: false, cookies: startCookies, location: phpPgAdminDatabaseLocation(database.name) };
+  if (!passwordField) return { ok: false, cookies: startCookies, location: phpPgAdminDatabaseLocation(database.name, database) };
   const body = new URLSearchParams({
     subject: "server",
     server,
@@ -7810,15 +7603,15 @@ async function phpPgAdminLogin(database, credential) {
     ...startCookies,
     ...login.cookies.map(rewritePhpPgAdminCookie).filter(Boolean),
   ]);
-  if (!cookies.length) return { ok: false, cookies: [], location: phpPgAdminDatabaseLocation(database.name) };
-  const verify = await phpPgAdminInternalRequest("GET", phpPgAdminDatabaseLocation(database.name), "", {
+  if (!cookies.length) return { ok: false, cookies: [], location: phpPgAdminDatabaseLocation(database.name, database) };
+  const verify = await phpPgAdminInternalRequest("GET", phpPgAdminDatabaseLocation(database.name, database), "", {
     cookie: cookieHeaderFromSetCookies(cookies),
   });
   const loggedIn = phpPgAdminSessionLooksAuthenticated(verify, database.name);
   return {
     ok: loggedIn,
     cookies,
-    location: phpPgAdminDatabaseLocation(database.name),
+    location: phpPgAdminDatabaseLocation(database.name, database),
   };
 }
 
@@ -7832,14 +7625,15 @@ function phpPgAdminSessionLooksAuthenticated(response, databaseName) {
     && /You are logged in as user|Schemas|SQL History|Logout/i.test(body);
 }
 
-function phpPgAdminServerId() {
+function phpPgAdminServerId(database) {
+  if (database?.id === trustedExternalDatabase?.id && trustedExternalDatabase) return externalDatabaseAdminTarget(trustedExternalDatabase).serverId;
   return `${postgresHost}:${postgresPort}:allow`;
 }
 
-function phpPgAdminDatabaseLocation(databaseName) {
+function phpPgAdminDatabaseLocation(databaseName, database) {
   const params = new URLSearchParams({
     subject: "database",
-    server: phpPgAdminServerId(),
+    server: phpPgAdminServerId(database),
     database: String(databaseName || ""),
   });
   return `/phppgadmin/redirect.php?${params.toString()}`;
@@ -9587,6 +9381,7 @@ async function readPrometheusResourceSnapshot() {
   attachPrometheusContainerLimit(platformContainers, results.platformContainerPidsLimit, "pidsLimit");
   const containers = platformContainers;
   const snapshot = sanitizeEvent({
+    capturedAt: new Date().toISOString(),
     available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
     cpu: {
       available: results.cpuPercent.length > 0 || results.cpuCores.length > 0,
@@ -9821,6 +9616,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
   "use strict";
   const button = document.getElementById("app-passkey-register");
   const status = document.getElementById("app-passkey-status");
+  const bootstrapInput = document.getElementById("app-passkey-bootstrap-token");
   const b64 = (value) => {
     const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/") + "===";
     const raw = atob(normalized.slice(0, normalized.length - (normalized.length % 4)));
@@ -9855,11 +9651,13 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     body: JSON.stringify(body || {}),
   });
   button.addEventListener("click", async () => {
+    if (bootstrapInput && !bootstrapInput.reportValidity()) return;
+    const bootstrapToken = bootstrapInput ? bootstrapInput.value : undefined;
     button.disabled = true;
     status.textContent = "Preparazione della passkey…";
     try {
       if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Questo browser non supporta le passkey.");
-      const optionsResponse = await request("/auth/passkey/register/options", {});
+      const optionsResponse = await request("/auth/passkey/register/options", { bootstrapToken });
       const optionsPayload = await optionsResponse.json();
       if (!optionsResponse.ok) throw new Error(optionsPayload.message || "Registrazione non disponibile.");
       const options = optionsPayload.options;
@@ -9872,6 +9670,7 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
       const credential = await navigator.credentials.create({ publicKey });
       if (!credential) throw new Error("Registrazione annullata.");
       const verifyResponse = await request("/auth/passkey/register/verify", {
+        bootstrapToken,
         challenge: options.challenge,
         credential: serialize(credential),
       });
@@ -9881,6 +9680,8 @@ const APP_PASSKEY_REGISTRATION_SCRIPT = `(() => {
     } catch (error) {
       button.disabled = false;
       status.textContent = error?.message || "Registrazione passkey non riuscita.";
+    } finally {
+      if (bootstrapInput) bootstrapInput.value = "";
     }
   });
 })();`;
@@ -9970,6 +9771,7 @@ function safeAppPasskeyReturnTo(value) {
 }
 
 function renderAppPasskeyFirstConfiguration(state) {
+  const requiresBootstrapToken = Boolean(process.env.CONTROL_CENTER_FIRST_CONFIGURATION_TOKEN_FILE);
   return `<!doctype html>
 <html lang="it">
 <head>
@@ -9986,11 +9788,12 @@ ${controlCenterStylesheetLinks()}
     <div class="first-configuration-brand"><span class="brand-mark">P</span><span>Platform Control Center</span></div>
     <p class="eyebrow">LOCAL_PRIVATE / PRIMA CONFIGURAZIONE</p>
     <h1 id="app-passkey-title">Configura l’accesso amministrativo</h1>
-    <p class="first-configuration-lead">Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno.</p>
+    <p class="first-configuration-lead">${requiresBootstrapToken ? "Inserisci il codice di configurazione ricevuto e registra la tua passkey. Il codice serve solo per questa prima registrazione." : "Registra una passkey direttamente nel Control Center. Non servono password, codici temporanei o un servizio di identità esterno."}</p>
     <section class="first-configuration-card">
       <p class="eyebrow">UNA PASSKEY</p>
       <h2>Registra la passkey</h2>
       <p>La credenziale pubblica resta registrata nel PostgreSQL del Control Center. La sessione termina automaticamente dopo 24 ore.</p>
+      ${requiresBootstrapToken ? '<label for="app-passkey-bootstrap-token">Codice di configurazione</label><input id="app-passkey-bootstrap-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="256">' : ""}
       <button id="app-passkey-register" class="button open" type="button">Registra la passkey</button>
       <p id="app-passkey-status" class="first-configuration-note" role="status"></p>
     </section>
@@ -10587,7 +10390,8 @@ function planWebspaceQuota(id, payload, context) {
 function planDatabaseCreate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
-  findById(context.projects, projectId, "Project");
+  const project = findById(context.projects, projectId, "Project");
+  if (trustedExternalDatabase && [projectId, project.slug, ...(project.aliases || [])].includes(trustedExternalDatabase.projectId)) throw new RejectedOperationError("Il database Scripta è già collegato; la creazione di un principal parallelo non è disponibile.");
   const engine = choice(String(payload.engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
   const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
   ownershipPolicy(() => assertManagedDatabaseName(engine, name));
@@ -11042,6 +10846,7 @@ function ownershipPolicy(operation, ErrorType = ValidationError) {
 
 function planDatabaseUpdate(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "update");
   const displayName = sanitizeOptionalDescription(payload.displayName || database.displayName || "");
   if (String(payload.ownerRole || "").trim() && validateDatabaseName(payload.ownerRole) !== database.ownerRole) {
     throw new ValidationError("Database principal ownership is immutable; use the controlled migration workflow.");
@@ -11079,6 +10884,7 @@ function planDatabaseUpdate(id, payload, context) {
 
 function planDatabaseCredentialUpdate(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "credential");
   const credentialRef = databaseCredentialRef(database.id);
   const credential = prepareDatabaseCredentialUpdate(database.id, payload);
   const confirmation = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
@@ -11120,6 +10926,7 @@ function planDatabaseCredentialUpdate(id, payload, context) {
 
 function planDatabaseDelete(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "delete");
   const confirmation = databaseDeleteConfirmation(database, "REQUEST");
   if (payload.confirm !== confirmation) {
     appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; a fresh passkey is required and backup evidence is optional by operator policy." });
@@ -11311,6 +11118,7 @@ function findDatabaseDeleteOperation(state, operationId) {
 
 function planDatabaseBackup(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "backup");
   const scope = `database:${database.id}`;
   const resource = {
     id: backupResourceId("database", database.id),
@@ -11354,6 +11162,7 @@ function planDatabaseBackup(id, payload, context) {
 
 function planDatabaseRestore(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "restore");
   const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
   appendAudit({ action: "database.restore.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database restore drill plan generated; no live data changed." });
   const operation = operationPlan("database.restore.plan", context.environment, true, ["validate database record", "validate backup reference", "create disposable restore target", "run restore drill through DatabaseAdapter", "generate evidence"], {

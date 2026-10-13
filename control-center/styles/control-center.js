@@ -94,6 +94,7 @@
 
   function storeCache(url, html, etag) {
     htmlCache.delete(url);
+    if (isSensitivePortalUrl(sameOriginUrl(url))) return;
     htmlCache.set(url, { etag: etag || "", html: String(html || ""), storedAt: Date.now() });
     while (htmlCache.size > cacheLimit) {
       htmlCache.delete(htmlCache.keys().next().value);
@@ -1632,6 +1633,10 @@
     var payload = fileEntryPayload(entry);
     var url = payload && payload.openUrl ? sameOriginUrl(payload.openUrl) : null;
     if (!url) return false;
+    if (payload.type === "file") {
+      window.open(url.href, "_blank", "noopener,noreferrer");
+      return true;
+    }
     return navigate(url, { history: "push" });
   }
 
@@ -1662,6 +1667,81 @@
     next.focus({ preventScroll: true });
   }
 
+  var readyVpsRestores = new WeakSet();
+
+  function openProjectRestore(event) {
+    var close = event.target.closest('[data-project-restore-close]');
+    if (close) { close.closest('dialog').close(); return; }
+    var button = event.target.closest('[data-project-restore-open]');
+    if (!button) return;
+    var form = button.closest('form'), dialog = button.closest('#project-backups').querySelector('[data-project-restore-dialog]');
+    if (!form || !dialog) return;
+    var previous = dialog.querySelector('[data-vps-restore]'), root = previous.cloneNode(true);
+    previous.replaceWith(root);
+    root.dataset.initialPoint = form.elements.backupRef.selectedOptions[0]?.dataset.manifestId || '';
+    root.dataset.restoreMode = form.elements.restoreMode.value;
+    root.querySelector('[data-restore-point]').closest('label').hidden = true;
+    dialog.showModal(); startVpsRestore(root);
+  }
+
+  function startVpsRestore(target) {
+    var root = target && target.matches && target.matches('[data-vps-restore]') ? target : document.querySelector('dialog[open] [data-vps-restore]');
+    if (!root || readyVpsRestores.has(root)) return;
+    readyVpsRestores.add(root);
+    var projectId = root.getAttribute('data-project-id') || '';
+    var status = root.querySelector('[data-restore-status]');
+    var select = root.querySelector('[data-restore-point]');
+    var review = root.querySelector('[data-restore-review]');
+    var typed = root.querySelector('[data-restore-typed]');
+    var confirmed = root.querySelector('[data-restore-confirm]');
+    var apply = root.querySelector('[data-restore-apply]');
+    var plan = null, busy = false;
+    async function api(payload) {
+      var headers = new Headers({ Accept: 'application/json' });
+      if (payload) { headers.set('Content-Type', 'application/json'); addMutationHeaders(headers, 'POST'); }
+      var response = await fetch(payload ? '/control/backups/production-restore' : '/control/backups/vps' + (projectId ? '?projectId=' + encodeURIComponent(projectId) : ''), { method: payload ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store', headers: headers, ...(payload ? { body: JSON.stringify(projectId ? Object.assign({}, payload, { projectId: projectId }) : payload) } : {}) });
+      var value = await response.json();
+      if (!root.isConnected) throw Error('Pannello sostituito.');
+      if (redirectForReauthentication(response, value)) throw Error('Conferma la passkey prima del ripristino.');
+      if (!response.ok) throw Error('Punto non disponibile o ripristino non attivato. Aggiorna il piano prima di riprovare.');
+      return value;
+    }
+    function invalidate() { plan = null; review.hidden = true; confirmed.checked = false; typed.value = ''; apply.disabled = true; }
+    select.addEventListener('change', invalidate);
+    function enable() { apply.disabled = busy || !plan || !plan.enabled || !confirmed.checked || typed.value !== plan.manifestId; }
+    typed.addEventListener('input', enable); confirmed.addEventListener('change', enable);
+    root.querySelector('[data-restore-plan]').addEventListener('click', async function () {
+      if (busy || !select.value) return; busy = true; invalidate();
+      try {
+        plan = (await api({ manifestId: select.value, restoreMode: root.dataset.restoreMode || 'all' })).details;
+        root.querySelector('[data-restore-details]').textContent = JSON.stringify({ punto: plan.manifestId, data: plan.createdAt, contenuto: plan.resources, ripristina: plan.scope, preserva: plan.preserves, downtime: plan.downtimeRequired, rollbackLocale: plan.originalStateRetainedForRollback }, null, 2);
+        review.hidden = false;
+        status.textContent = plan.enabled ? 'Piano pronto. Verifica punto, portata e disponibilità della passkey prima di confermare.' : 'Piano disponibile; attivazione operativa del ripristino ancora disabilitata.';
+      } catch (error) { status.textContent = error.message; } finally { busy = false; enable(); }
+    });
+    apply.addEventListener('click', async function () {
+      if (busy || !plan || !confirmed.checked || typed.value !== plan.manifestId) return;
+      busy = true; apply.disabled = true;
+      var selected = plan; invalidate();
+      try {
+        var result = await api({ manifestId: selected.manifestId, restoreMode: selected.restoreMode, apply: true, reviewedManifestId: selected.manifestId, confirm: selected.confirmationRequired });
+        status.textContent = 'Ripristino accodato (' + result.job.id + '). Il risultato non è ancora verificato. ' + (projectId ? 'Scripta sarà temporaneamente indisponibile.' : 'Il portale può disconnettersi durante il ripristino.');
+      } catch (error) { status.textContent = error.message; } finally { busy = false; }
+    });
+    api().then(function (value) {
+      var catalog = value.catalog;
+      if (!catalog) throw Error('Catalogo VPS non configurato.');
+      select.replaceChildren();
+      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.disabled = point.restoreCompatible === false; option.textContent = point.createdAt + ' · ' + point.id + (point.restoreCompatible === false ? ' · precedente a Scripta' : ''); select.append(option); });
+      var compatible = catalog.manifests.find(function (point) { return point.restoreCompatible !== false; });
+      if (compatible) select.value = compatible.id;
+      if (root.dataset.initialPoint && catalog.manifests.some(function (point) { return point.id === root.dataset.initialPoint && point.restoreCompatible !== false; })) select.value = root.dataset.initialPoint;
+      status.textContent = catalog.manifests.length ? catalog.manifests.length + ' punti remoti verificati. Scegli un punto per il piano manuale.' : 'Nessun backup remoto verificato: ripristino non disponibile.';
+      if (root.dataset.initialPoint) root.querySelector('[data-restore-plan]').click();
+    }).catch(function (error) { if (root.isConnected) status.textContent = error.message; });
+  }
+
+
   function init() {
     if (initialized) return;
     initialized = true;
@@ -1671,6 +1751,7 @@
     restoreSidebarState({ instantOpsNav: true });
     positionOpsNavPill({ instant: true });
     startStatusTabs();
+    document.addEventListener("click", openProjectRestore);
     startFileManagers();
     fitSingleLineText();
     storeCache(window.location.href, document.documentElement.outerHTML, "");

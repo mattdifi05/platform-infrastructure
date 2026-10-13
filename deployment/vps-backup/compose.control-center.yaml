@@ -1,0 +1,16 @@
+# Optional new-VPS-only overlay; apply only with the matching source catalog patch.
+services:
+  control-center:
+    environment:
+      CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: /run/platform-vps-backup/public
+      PROJECT_BACKUP_JOBS_DIR: /run/platform-vps-backup/queue
+      BACKUP_QUEUE_SHARED_UID: '1000'
+      BACKUP_QUEUE_SHARED_GID: '1000'
+    volumes:
+      - type: bind
+        source: /var/lib/platform-vps-backup/public
+        target: /run/platform-vps-backup/public
+        read_only: true
+      - type: bind
+        source: /var/lib/platform-vps-backup/queue
+        target: /run/platform-vps-backup/queue

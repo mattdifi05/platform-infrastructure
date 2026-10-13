@@ -1,0 +1,27 @@
+# Layer AFTER compose.server-ai-control-center.yaml on the core stack.
+# AI lifecycle containers are a separate project named platform_server_ai.
+services:
+  control-center:
+    volumes:
+      - type: bind
+        source: ${SERVER_AI_CONTROLLER_SOCKET_DIR:?Set the private host controller socket directory}
+        target: /run/server-ai-controller
+        read_only: true
+      - type: bind
+        source: ${SERVER_AI_OBSERVER_TOKEN_FILE:?Set the operator-generated observer HMAC token file}
+        target: /run/secrets/server_ai_observer_token
+        read_only: true
+    networks:
+      server-ai-observer: {}
+      server-ai-search: {}
+      server-ai-api-egress: {}
+networks:
+  server-ai-observer:
+    external: true
+    name: platform_server_ai_observer
+  server-ai-search:
+    external: true
+    name: platform_server_ai_search
+  server-ai-api-egress:
+    external: true
+    name: platform_server_ai_egress

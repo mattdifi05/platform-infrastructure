@@ -5,7 +5,23 @@ export const BACKUP_MANIFEST_SCHEMA = "platform.backup-manifest/v1";
 
 const resourceKinds = new Set(["source", "database", "storage", "platform-state"]);
 const databaseEngines = new Set(["postgres", "mariadb"]);
-const operations = new Set(["backup", "restore-drill"]);
+const operations = new Set(["backup", "restore-drill", "restore-production"]);
+
+function nativeApplicationResources(resources, projectId) {
+  const expected = [
+    { id: 'source:scriptastudents', externalId: 'scriptastudents', kind: 'source', projectId: 'scriptastudents', name: 'scriptastudents', sourceDirectory: 'scriptastudents' },
+    { id: 'database:scriptastudents-postgres-students-beta-app', externalId: 'scriptastudents-postgres-students-beta-app', kind: 'database', projectId: 'scriptastudents', name: 'students_beta_app', engine: 'postgres' },
+    { id: 'platform-state:scriptastudents-state', externalId: 'scriptastudents-state', kind: 'platform-state', projectId: 'scriptastudents', name: 'scriptastudents-state' },
+  ];
+  const selectedResources=projectId==='scriptastudents'?expected:projectId==='workcalendar'?[
+    {id:'source:workcalendar',externalId:'workcalendar',kind:'source',projectId:'workcalendar',name:'workcalendar',sourceDirectory:'workcalendar'},
+    {id:'database:workcalendar-postgres-workcalendar-app',externalId:'workcalendar-postgres-workcalendar-app',kind:'database',projectId:'workcalendar',name:'workcalendar_app',engine:'postgres'},
+    {id:'platform-state:workcalendar-state',externalId:'workcalendar-state',kind:'platform-state',projectId:'workcalendar',name:'workcalendar-state'},
+  ]:null;
+  if(!selectedResources)return false;
+  const sorted = value => JSON.stringify([...value].sort((a, b) => a.id.localeCompare(b.id)));
+  return [selectedResources, selectedResources.slice(0, 1), selectedResources.slice(1, 2)].some(selected => sorted(resources) === sorted(selected));
+}
 
 function requiredText(value, label, pattern, maxLength = 160) {
   const clean = String(value ?? "").trim();
@@ -45,8 +61,12 @@ export function normalizeBackupResource(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const kind = requiredText(source.kind, "resource kind", /^[a-z-]+$/, 32);
   if (!resourceKinds.has(kind)) throw new Error("Unsupported backup resource kind.");
-  const projectId = kind === "platform-state" ? "platform" : projectIdentifier(source.projectId);
   const externalId = identifier(source.externalId ?? source.id?.split(":").slice(1).join(":"), "resource identity");
+  // This single native application state resource is root-profile admitted;
+  // arbitrary platform resources retain their original platform ownership.
+  const scriptaState = kind === "platform-state" && externalId === "scriptastudents-state" && source.projectId === "scriptastudents" && source.name === "scriptastudents-state";
+  const workcalendarState = kind === "platform-state" && externalId === "workcalendar-state" && source.projectId === "workcalendar" && source.name === "workcalendar-state";
+  const projectId = kind === "platform-state" && !scriptaState && !workcalendarState ? "platform" : projectIdentifier(source.projectId);
   const id = backupResourceId(kind, externalId);
   if (source.id && source.id !== id) throw new Error("Backup resource ID does not match its kind and external identity.");
   const resource = {
@@ -98,6 +118,8 @@ export function createBackupJobDocument({
   environment,
   createdAt = new Date().toISOString(),
   sourceManifestPath = "",
+  sourceManifestDigest = "",
+  restoreProfileDigest = "",
 }) {
   const normalizedOperation = requiredText(operation, "backup operation", /^[a-z-]+$/, 32);
   if (!operations.has(normalizedOperation)) throw new Error("Unsupported backup operation.");
@@ -122,9 +144,16 @@ export function createBackupJobDocument({
     resultSummary: "Queued for typed backup executor.",
     reportPaths: [],
   };
-  if (normalizedOperation === "restore-drill") {
+  if (["restore-drill", "restore-production"].includes(normalizedOperation)) {
     document.sourceManifestPath = relativeBackupPath(sourceManifestPath, "source manifest path");
     if (!document.sourceManifestPath.startsWith("manifests/")) throw new Error("Restore source manifest must be under manifests/.");
+  }
+  const nativeApplication = normalizedScope.kind === 'application' && ['scriptastudents','workcalendar'].includes(normalizedScope.id);
+  if (normalizedOperation === "restore-production" || (normalizedOperation === 'restore-drill' && nativeApplication)) {
+    const platformRecovery = normalizedScope.kind === 'platform' && normalizedResources.every(resource => resource.kind === 'platform-state');
+    if (!(nativeApplication ? nativeApplicationResources(normalizedResources,normalizedScope.id) : platformRecovery)) throw new Error("Production recovery is restricted to enrolled platform state or exact admitted native application resources.");
+    document.sourceManifestDigest = requiredText(sourceManifestDigest, "restore manifest digest", /^[a-f0-9]{64}$/, 64);
+    document.restoreProfileDigest = requiredText(restoreProfileDigest, "restore profile digest", /^[a-f0-9]{64}$/, 64);
   }
   return document;
 }

@@ -1,6 +1,6 @@
 # Control Center Core
 
-Status: V1 live architecture, protected-main source of truth.
+Status: shared platform source synchronized with the running online Control Center.
 
 ## Boundaries
 
@@ -65,3 +65,21 @@ The application-owned passkey schema is installed by
 `migrations/001_app_passkey.sql`. State migration remains a separate operation
 and follows `STATE-STORE-MIGRATION.md`; a Control Center image rollout must not
 implicitly migrate metadata or remove PostgreSQL tables.
+
+The running online Control Center is the source for shared runtime code. The
+installed VPS backup bundle is authoritative for active backup adapters; exported
+deploy directories can lag behind the running image and installed tools.
+
+Home and VPS retain separate origins, passkeys, catalogs, database volumes, Vault
+keys, credentials, application source and backup admission/replay state. An image
+rollout updates the platform code only and preserves each host's existing mounts,
+environment and networks. It does not seed, import or delete applications.
+
+`CONTROL_CENTER_REQUIRE_MANAGEMENT_CIDR=true` preserves the home server's network
+restriction for login and authenticated requests. The default `false` keeps the
+online passkey behavior; initial enrollment remains independently restricted.
+
+Legacy Server AI tables and credentials are retained as host state. The current
+online operations UI does not expose the retired Server AI surface, and image
+rollouts do not create or drop its tables. Backup profile pin changes must follow
+the existing forward admission chain and preserve application runtime records.

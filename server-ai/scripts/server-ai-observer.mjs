@@ -7,6 +7,9 @@ const MAX_LOG_BYTES = 32 * 1024;
 const REQUEST_TIMEOUT_MS = 3000;
 const ID_RE = /^[a-f0-9]{64}$/i;
 const SINCE = { "15m": 15 * 60, "1h": 60 * 60, "24h": 24 * 60 * 60 };
+// These application resources belong to manual Control Center management only.
+const MANUAL_ONLY_CONTAINERS = new Set(["node-scriptastudents", "scripta-postgres", "students-beta-redis", "scriptastudents-ingress", "phppgadmin"]);
+const manualOnly = value => typeof value === "string" && MANUAL_ONLY_CONTAINERS.has(value.replace(/^\/+/, ""));
 
 export function redactText(value) {
   return redactSensitive(value);
@@ -70,6 +73,7 @@ function healthLog(entries) {
   return (Array.isArray(entries) ? entries.slice(-3) : []).map((entry) => ({ start: string(entry.Start, 64), end: string(entry.End, 64), exitCode: Number(entry.ExitCode) || 0, output: redactSensitive(String(entry.Output || "")).slice(0, 2048) }));
 }
 function inspectView(value) {
+  if (manualOnly(value.Name)) { const error = new Error("Container not found."); error.status = 404; throw error; }
   const state = value.State || {};
   const host = value.HostConfig || {};
   return {
@@ -119,7 +123,9 @@ export function createObserverServer(options = {}) {
     if (!result || result.statusCode < 200 || result.statusCode >= 300) throw dockerError();
     const body = Buffer.from(result.body || ""); body.truncated = result.truncated === true; return body;
   }
-  async function list(signal) { return parseJson(await docker("/containers/json?all=1&limit=100", signal)).slice(0, 100).map(normalizedContainer).filter((item) => ID_RE.test(item.id)); }
+  async function list(signal) { return parseJson(await docker("/containers/json?all=1&limit=100", signal)).slice(0, 100)
+    .filter(item => !Array.isArray(item.Names) || !item.Names.some(manualOnly))
+    .map(normalizedContainer).filter(item => ID_RE.test(item.id) && !manualOnly(item.name)); }
   async function known(id, signal) { const rows = await list(signal); if (!rows.some((row) => row.id.toLowerCase() === id.toLowerCase())) { const error = new Error("Container not found."); error.status = 404; throw error; } }
   const server = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req, res) => {
     if (inFlight >= maxConcurrent) return apiError(res, 503, "observer_busy", "Observer busy.");

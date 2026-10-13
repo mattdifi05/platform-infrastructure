@@ -1,0 +1,8 @@
+[Unit]
+Description=Poll owner-authenticated VPS backup queue
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=30
+Unit=platform-vps-backup-queue.service
+[Install]
+WantedBy=timers.target
