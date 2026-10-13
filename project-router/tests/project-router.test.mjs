@@ -380,7 +380,7 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
   mkdirSync(path.join(projects, "stexor", ".platform"), { recursive: true });
   mkdirSync(path.join(projects, "opstudents"), { recursive: true });
   mkdirSync(path.join(projects, "fiplatform", ".platform"), { recursive: true });
-  for (const slug of ["anniversary", "fiplatform", "matthewdifilippo", "stream", "workcalendar"]) {
+  for (const slug of ["anniversary", "fiplatform", "matthewdifilippo", "stream"]) {
     mkdirSync(path.join(projects, slug, "public"), { recursive: true });
     writeFileSync(path.join(projects, slug, "public", "index.php"), "<?php\n");
   }
@@ -408,9 +408,7 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
   chmodSync(lockFile, 0o600);
 
   const routerPort = await freePort();
-  const child = spawn(process.execPath, [routerScript], {
-    cwd: infraRoot,
-    env: {
+  const routerEnv = {
       ...process.env,
       NODE_ENV: "production",
       PROJECT_ROUTER_PORT: String(routerPort),
@@ -424,13 +422,16 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
       CONTROL_CENTER_HOST: "portal.platform-infrastructure.com",
       CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
       PROJECT_HOST_SUFFIX: ".platform-infrastructure.com",
-      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80,php-workcalendar:80",
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,node-account:3000,node-opstudents:3000,node-ui:3000,php-anniversary:80,php-fiplatform:80,php-matthewdifilippo:80,php-stream:80",
       NODE_PROJECT_HOSTS: "",
       PROJECT_UPSTREAMS: "",
       STATIC_PROJECT_UPSTREAMS: "",
       NODE_PROJECT_UPSTREAMS: "account=http://node-account:3000,opstudents=http://node-opstudents:3000,ui=http://node-ui:3000",
-      PHP_PROJECT_UPSTREAMS: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80,workcalendar=http://php-workcalendar:80",
-    },
+      PHP_PROJECT_UPSTREAMS: "anniversary=http://php-anniversary:80,fiplatform=http://php-fiplatform:80,fireport=http://php-fiplatform:80,matthewdifilippo=http://php-matthewdifilippo:80,stream=http://php-stream:80",
+  };
+  const child = spawn(process.execPath, [routerScript], {
+    cwd: infraRoot,
+    env: routerEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
@@ -450,7 +451,6 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
     "fireport.platform-infrastructure.com",
     "matthewdifilippo.platform-infrastructure.com",
     "stream.platform-infrastructure.com",
-    "workcalendar.platform-infrastructure.com",
   ]) {
     const response = await httpGet(routerPort, host, "/");
     assert.equal(response.statusCode, 502, `${host} did not select its closed preserved upstream: ${stderr}`);
@@ -464,6 +464,34 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
   assert.equal(wildcardHost.statusCode, 404, "LOCAL_PRIVATE accepted a non-canonical wildcard Host");
   const unknown = await httpGet(routerPort, "unknown.platform-infrastructure.com", "/");
   assert.equal(unknown.statusCode, 404);
+
+  // A stale folder and enabled state cannot reacquire the retired app's authority.
+  mkdirSync(path.join(projects, "workcalendar", "public"), { recursive: true });
+  writeFileSync(path.join(projects, "workcalendar", "public", "index.php"), "<?php\n");
+  writeFileSync(path.join(state, "projects.json"), JSON.stringify({ projects: { workcalendar: { enabled: true } } }));
+  const retired = await httpGet(routerPort, "workcalendar.platform-infrastructure.com", "/");
+  assert.equal(retired.statusCode, 404, "retired app source/state reacquired route authority");
+
+  for (const stale of [
+    { PHP_PROJECT_UPSTREAMS: `${routerEnv.PHP_PROJECT_UPSTREAMS},workcalendar=http://php-workcalendar:80` },
+    { PROJECT_ROUTER_ALLOWED_UPSTREAMS: `${routerEnv.PROJECT_ROUTER_ALLOWED_UPSTREAMS},php-workcalendar:80` },
+  ]) {
+    const rejected = spawn(process.execPath, [routerScript], {
+      cwd: infraRoot,
+      env: { ...routerEnv, ...stale, PROJECT_ROUTER_PORT: String(await freePort()) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let failure = "";
+    rejected.stderr.on("data", (chunk) => { failure += chunk.toString("utf8"); });
+    t.after(async () => { await stopChild(rejected); });
+    const result = await Promise.race([
+      new Promise((resolve) => rejected.once("exit", (code) => resolve({ code }))),
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5000)),
+    ]);
+    assert.equal(result.timedOut, undefined, "retired authority did not fail at startup");
+    assert.notEqual(result.code, 0);
+    assert.match(failure, /route authority differs from the closed V1 map/);
+  }
 
   const stexorMetadata = path.join(projects, "stexor", ".platform", "project.json");
   writeFileSync(stexorMetadata, `${JSON.stringify({
@@ -490,7 +518,7 @@ test("LOCAL_PRIVATE zero-workload compatibility keeps the exact preserved applic
   const overlay = readFileSync(path.join(infraRoot, "compose.local-private.yaml"), "utf8");
   assert.match(overlay, /PROJECT_ROUTER_LOCAL_PRIVATE_COMPATIBILITY_MODE:\s+"true"/);
   assert.match(overlay, /node-opstudents:3000/);
-  assert.match(overlay, /php-workcalendar:80/);
+  assert.doesNotMatch(overlay, /php-workcalendar:80/);
   assert.match(overlay, /\/var\/www\/projects:ro/);
   const routerOverlay = /\n  project-router:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:|\nsecrets:)/.exec(overlay)?.[0] || "";
   assert.doesNotMatch(routerOverlay, /PLATFORM_STATE_DIR[^\n]*:\/var\/www\/project-state/);

@@ -74,12 +74,6 @@
           "sourceSubdirectory": "apps/stream",
           "materializedDirectory": "stream",
           "runtimeServices": ["php-stream"]
-        },
-        {
-          "id": "workcalendar",
-          "sourceSubdirectory": "apps/workcalendar",
-          "materializedDirectory": "workcalendar",
-          "runtimeServices": ["php-workcalendar"]
         }
       ]
     }
