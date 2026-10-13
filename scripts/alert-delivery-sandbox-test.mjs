@@ -185,6 +185,8 @@ try {
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
     "platform-alert-dispatcher/server.mjs",
+    "control-center/host-extension.mjs",
+    "control-center/backup/core-contracts.mjs",
     "control-center/backup/contracts.mjs",
   ]) cpSync(path.join(repositoryRoot, relative), path.join(replicaRoot, relative));
 

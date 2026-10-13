@@ -977,8 +977,8 @@ if [[ -n "$workload_lock" ]]; then
 else
   if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
-    canonical_no_hosted_lock_sha256=4c5f848ba40f55ba46f9c2a24bf30823e3d7dc6c6e8fe38ef8989912e8bc77fe
-    canonical_no_hosted_policy_sha256=885e81bf1b95fac35f892c490fd5ca329f69f573842ef3971d0d3a8741833903
+    canonical_no_hosted_lock_sha256=e1c25f06bd2967d66376812e83686e1d4193ef97b3fad539baac580cd4af8662
+    canonical_no_hosted_policy_sha256=4cf23287d1e4b88cf500cb28db267d8484e1d832d42386314f4992d9a0bbd2a3
     canonical_no_hosted_secret_count=22
     canonical_no_hosted_service_count=23
   else

@@ -46,6 +46,7 @@ COPY governance/ /opt/platform-infrastructure/governance/
 COPY vendor/json-schema/ /opt/platform-infrastructure/vendor/json-schema/
 COPY policy/local-private-backup-admission.pub.pem /opt/platform-infrastructure/policy/local-private-backup-admission.pub.pem
 COPY control-center/backup/ /opt/platform-infrastructure/control-center/backup/
+COPY control-center/host-extension.mjs /opt/platform-infrastructure/control-center/host-extension.mjs
 RUN node --input-type=module -e 'import { createRequire } from "node:module"; const require = createRequire("/opt/platform-infrastructure/vendor/json-schema/package.json"); require("ajv"); require("ajv-formats");'
 RUN chmod -R a-w /opt/platform-infrastructure \
     && chmod 0555 /opt/platform-infrastructure \
