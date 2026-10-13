@@ -288,7 +288,8 @@ const CORE_SEMANTIC_POLICY = {
             "fallback": "true"
           },
           "CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS": {
-            "literal": "true"
+            "variable": "CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS",
+            "fallback": "false"
           },
           "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS": {
             "variable": "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS",
