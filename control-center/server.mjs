@@ -9597,6 +9597,13 @@ function matchApplicationContainers(app, project, containers) {
 }
 
 function dedicatedRuntimeName(project) {
+  const configured = hostExtension.dedicatedRuntimeName?.(project);
+  if (configured != null) {
+    if (typeof configured !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(configured)) {
+      throw new Error("Host extension returned an invalid dedicated runtime name");
+    }
+    return configured;
+  }
   const prefix = project.runtime === "static" ? "static" : project.runtime === "node" ? "node" : "php";
   return `${prefix}-${project.slug}`;
 }

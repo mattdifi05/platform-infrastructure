@@ -213,14 +213,6 @@ const typedEvidenceActionToOperation = Object.freeze({
   RESTORE_KEYCLOAK: "restore-test-keycloak",
 });
 const typedEvidenceApplicationSlugs = Object.freeze([
-  "anniversary",
-  "fiplatform",
-  "matthewdifilippo",
-  "opstudents",
-  "public",
-  "stexor",
-  "stream",
-  "workcalendar",
 ]);
 const typedEvidenceRunIdPattern = /^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$/;
 const typedEvidenceImageIdPattern = /^sha256:[a-f0-9]{64}$/;
@@ -272,7 +264,6 @@ function sameStringArray(left, right) {
 function assertTypedEvidenceArtifactArgument(filePath, action, artifactRoot) {
   const expected = {
     RESTORE_POSTGRES: [
-      ["09-pg-stexor", /^stexor-[0-9]{8}-[0-9]{6}\.dump$/],
       ["10-pg-keycloak", /^keycloak-[0-9]{8}-[0-9]{6}\.dump$/],
     ],
     RESTORE_MARIADB: [["11-mariadb", /^mariadb-all-[0-9]{8}-[0-9]{6}\.sql\.gz$/]],
@@ -295,8 +286,8 @@ function expectedTypedEvidenceCli(action, artifactRoot) {
   const base = [typedEvidenceActionToOperation[action], "--skipEvidence", "true"];
   if (action === "BACKUP_APPLICATIONS" || action === "BACKUP_SECRET_METADATA") return base;
   if (action === "BACKUP_POSTGRES") {
-    if (!['stexor', 'keycloak'].includes(String(argv.database ?? ""))) {
-      fail("Typed PostgreSQL backup database is outside the fixed pair.");
+    if (String(argv.database ?? "") !== "keycloak") {
+      fail("Typed PostgreSQL backup database is outside the clean-base Keycloak database.");
     }
     return [...base, "--container", "enterprise-postgres", "--database", argv.database, "--user", "postgres"];
   }
@@ -307,10 +298,9 @@ function expectedTypedEvidenceCli(action, artifactRoot) {
   const artifact = assertTypedEvidenceArtifactArgument(backupFile, action, artifactRoot);
   const restoreBase = [...base, "--backupFile", artifact.filePath, "--v1EvidenceReceipt", "true"];
   if (action === "RESTORE_POSTGRES") {
-    const database = artifact.family === "09-pg-stexor" ? "stexor" : "keycloak";
     return [
       ...restoreBase,
-      "--container", "enterprise-postgres", "--database", database,
+      "--container", "enterprise-postgres", "--database", "keycloak",
       "--countAllUserTables", "true", "--minimumTables", "1",
     ];
   }
@@ -2298,7 +2288,7 @@ function applicationSourceDirectories(options = {}) {
         || !sameStringArray(names, typedEvidenceApplicationSlugs)
         || entries.some((entry) => entry.name !== entry.slug)
         || new Set(slugs).size !== slugs.length) {
-      fail("Typed V1 application backup source set differs from the exact closed eight applications.");
+      fail("Typed V1 application backup source set differs from the exact clean-base empty inventory.");
     }
     const byName = new Map(entries.map((entry) => [entry.name, entry]));
     return typedEvidenceApplicationSlugs.map((slug) => byName.get(slug));
@@ -2345,7 +2335,9 @@ async function backupApplications(options = {}) {
       });
     }
     const finishedAt = new Date();
-    const status = artifacts.length ? "success" : "failed";
+    const emptyTypedInventory = typedEvidenceInvocation?.action === "BACKUP_APPLICATIONS"
+      && applications.length === 0;
+    const status = artifacts.length || emptyTypedInventory ? "success" : "failed";
     const payload = {
       generatedAt: finishedAt.toISOString(),
       startedAt: startedAt.toISOString(),
@@ -2360,10 +2352,12 @@ async function backupApplications(options = {}) {
       artifactSha256: artifacts[0]?.artifactSha256 ?? null,
       signaturePath: artifacts[0]?.signaturePath ?? null,
       signatureKeyId: artifacts[0]?.signatureKeyId ?? null,
-      integrityVerified: artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
+      integrityVerified: artifacts.length > 0
+        && artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
       metadata: {
         sourceRoot,
         applicationCount: artifacts.length,
+        emptyTypedInventory,
         excluded: applicationSourceBackupExcludes(),
         artifacts,
         secretsExcluded: true,

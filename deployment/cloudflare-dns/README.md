@@ -6,9 +6,12 @@ protected FILE reference directly, without copying a token into portal state,
 process environment values, audit logs or Vault reveal routes.
 
 Use the user-approved permanent API token (no expiration), with Zone DNS Edit
-restricted to exactly `stexor.com`, `scriptastudents.com` and
-`matthewdifilippo.com`. Fireport is excluded. No account, Access, tunnel, WAF or
-NAS credential is accepted or required. The adapter supports DNS inventory and explicitly reviewed record changes.
+restricted to the explicitly enrolled zones. The names `example.com`,
+`example.net` and `example.org` below are placeholders; replace them with the
+operator-approved zones before provisioning. Other zones are excluded unless
+explicitly configured. No account, Access, tunnel, WAF or unrelated service
+credential is accepted or required. The adapter supports DNS inventory and
+explicitly reviewed record changes.
 No bulk import, zone creation, or provider policy change is implemented.
 
 Root provisioning after review:
@@ -16,7 +19,7 @@ Root provisioning after review:
 - `/etc/platform-infrastructure/cloudflare-dns` root-owned mode 0700.
 - `api-token` owner UID 1000, mode 0400; deliver only through the approved protected
   channel, never a command-line value or committed environment file.
-- `zones.json` root-owned mode 0444, containing `{"zones":[{"name":"stexor.com",
+- `zones.json` root-owned mode 0444, containing `{"zones":[{"name":"example.com",
   "id":"<actual-zone-id>"}, ...]}` with all three exact names and distinct actual
   32-character zone IDs. Obtain IDs from the authorized dashboard; no Zone Read
   permission is needed when IDs are configured explicitly.
@@ -84,7 +87,7 @@ GETs. Do not fabricate an owner session or submit any DNS mutation for this test
 docker exec -i --user 1000:1000 enterprise-control-center node --input-type=module - <<'JS'
 import { readCloudflareDnsStatus } from '/app/providers/cloudflare-dns.mjs';
 const result = await readCloudflareDnsStatus();
-const expected = ['matthewdifilippo.com', 'scriptastudents.com', 'stexor.com'];
+const expected = ['example.org', 'example.net', 'example.com'].sort();
 const names = result?.zones?.map(zone => zone.name).sort();
 const ok = result?.status === 'verified-dns-read'
   && JSON.stringify(names) === JSON.stringify(expected);

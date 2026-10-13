@@ -107,6 +107,11 @@ try {
     "command-safety.mjs",
     "restic-secret-transport.mjs",
     "safe-tar-path.mjs",
+    "rustfs-native-checkpoint.mjs",
+    "local-private-backup-docker-policy.mjs",
+    "local-private-backup-admission.mjs",
+    "backup-native-v2-contract.mjs",
+    "docker-action-contract.mjs",
     "secret-store-metadata.mjs",
     "backup-import-policy.mjs",
     "postgres-restore-sandbox.mjs",
@@ -133,7 +138,10 @@ try {
     "runtime-intent-policy.mjs",
     "cyclonedx-schema-policy.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
-  cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
+  for (const moduleName of ["core-contracts.mjs", "contracts.mjs"]) {
+    cpSync(path.join(repositoryRoot, "control-center", "backup", moduleName), path.join(replicaRoot, "control-center", "backup", moduleName));
+  }
+  cpSync(path.join(repositoryRoot, "control-center", "host-extension.mjs"), path.join(replicaRoot, "control-center", "host-extension.mjs"));
   cpSync(path.join(repositoryRoot, "governance", "backup-data-policy.json"), path.join(replicaRoot, "governance", "backup-data-policy.json"));
 
   for (const application of ["alpha", "beta", "docs", ".hidden"]) {

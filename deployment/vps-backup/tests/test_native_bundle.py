@@ -37,6 +37,7 @@ class BundleTests(unittest.TestCase):
    target=stage/relative
    target.mkdir(parents=True,exist_ok=True)
    for name in names.split():shutil.copy2(source/name,target/name)
+  shutil.copy2(ROOT/'control-center/host-extension.mjs',stage/'control-center/host-extension.mjs')
   control=stage/'scripts/backup-queue-control.mjs'
   control.parent.mkdir(parents=True,exist_ok=True)
   shutil.copy2(ROOT/'scripts/backup-queue-control.mjs',control)

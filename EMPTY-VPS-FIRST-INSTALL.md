@@ -15,18 +15,20 @@ services for healthy/running state before reporting success.
 Before running it, install Docker with `vps-bootstrap-ubuntu.sh` and create a
 non-root deployment user with working Docker access. Create a mode-0600 `.env`
 from `.env.example` plus the VPS values in `.env.vps.example`. Fill every
-placeholder with the new VPS's configuration. At minimum set:
+placeholder with the new VPS's configuration. The sample hostnames below use
+reserved example domains; replace them with a domain owned by the operator. At
+minimum set:
 
 ```dotenv
-DOMAIN=stexor.com
-LOCAL_DOMAIN=stexor.com
-ADMIN_HOST=portal.stexor.com
-CONTROL_CENTER_HOST=portal.stexor.com
-CONTROL_CENTER_AUTH_RP_ID=portal.stexor.com
-CONTROL_CENTER_PUBLIC_ORIGIN=https://portal.stexor.com
-CONTROL_CENTER_PUBLIC_URL=https://portal.stexor.com
-DOCS_HOST=docs.stexor.com
-DOCS_PUBLIC_URL=https://docs.stexor.com
+DOMAIN=example.com
+LOCAL_DOMAIN=example.com
+ADMIN_HOST=portal.example.com
+CONTROL_CENTER_HOST=portal.example.com
+CONTROL_CENTER_AUTH_RP_ID=portal.example.com
+CONTROL_CENTER_PUBLIC_ORIGIN=https://portal.example.com
+CONTROL_CENTER_PUBLIC_URL=https://portal.example.com
+DOCS_HOST=docs.example.com
+DOCS_PUBLIC_URL=https://docs.example.com
 HOSTED_WORKLOAD_MODE=no-hosted
 HOSTED_WORKLOAD_LOCK=
 CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS=false
@@ -68,7 +70,7 @@ they are not published registry digests or portable release artifacts.
 The WAF stays on an internal Docker network. A separate unprivileged Nginx
 proxy binds only `127.0.0.1:8080` on the host and forwards to WAF. Its
 self-signed certificate only supports local WAF startup checks. With a
-Cloudflare Tunnel, route `portal.stexor.com` and `docs.stexor.com` to
+Cloudflare Tunnel, route `portal.example.com` and `docs.example.com` to
 `http://127.0.0.1:8080`; the overlay disables the local HTTP redirect and the
 WAF forwards the HTTPS scheme from the Cloudflare edge. For the selected
 direct-login mode, the portal authenticates with its own passkey and session;
@@ -81,7 +83,7 @@ protections, and unrelated Access applications in place. Check the effective
 `X-Forwarded-For` chain, then set the allowed client CIDR and exact trusted
 Docker/Cloudflare proxy CIDRs so registration from the Mac passes without
 accepting a client-supplied address. The WebAuthn RP and browser origin must
-stay exactly `portal.stexor.com` and `https://portal.stexor.com`. The client
+stay exactly `portal.example.com` and `https://portal.example.com`. The client
 CIDR restricts first enrollment; later login still requires the registered
 passkey, exact host and origin, a valid session, and CSRF checks.
 
@@ -105,7 +107,7 @@ closes first enrollment independently of token expiry.
 For a new VPS, first confirm with the owner which Cloudflare account owns this
 infrastructure. The same Cloudflare account can also host NAS or other
 projects; keep this platform's Tunnel, route, and any temporary Access change
-scoped to `portal.stexor.com`, without changing those other applications.
+scoped to `portal.example.com`, without changing those other applications.
 The account choice is an operator prerequisite, not a property established by
 this repository. Create the Tunnel in the selected account and
 write its new token only to `/etc/cloudflared/tunnel-token` on the VPS (root
@@ -138,7 +140,7 @@ both Control Center AI overlays. Its source/query reader profile remains
 disabled because this host has no application sources. No old API key is used.
 
 `cloudflare/from-zero.example.json` must not be applied as-is to the existing
-`stexor.com` zone: it contains an apex A record and requires an empty zone.
+`example.com` zone: it contains an apex A record and requires an empty zone.
 Create only new `portal` and `docs` records, keep existing hosting records,
 omit zone settings, and review any existing WAF ruleset before applying an
 additive change. The Tunnel needs no public origin port; keep UFW inbound limited to SSH.

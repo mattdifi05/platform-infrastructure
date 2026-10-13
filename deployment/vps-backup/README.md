@@ -135,11 +135,12 @@ admission integration have not yet been tested live.
 
 `enroll.py` creates an independent signed root-owned capture profile from actual
 Docker IDs/images/mounts, with all execution gates false. Existing enrollment is
-never overwritten. `install.sh` copies runtime and the pure product backup contract
-into root-owned paths, preventing platform-user code substitution. The installed
-manifest and queue entrypoints import `core-contracts.mjs` directly, so a clean
-backup installation needs no Control Center host extension. Existing signed
-application profiles continue through the separate host-only legacy bundle.
+never overwritten. `install.sh` copies runtime, the pure product backup contract,
+its host-aware wrapper, and the fixed-path extension loader into root-owned paths,
+preventing platform-user code substitution. The installed manifest imports
+`core-contracts.mjs` directly; queue admission uses the wrapper, which falls back
+to the pure contract on a clean installation. Existing signed application profiles
+continue through the separate host-only legacy bundle.
 
 `platform-vps-backup-runner.py capture` exports online PostgreSQL/MariaDB logical
 backups, snapshots the other volume filesystems and encrypted host configuration,

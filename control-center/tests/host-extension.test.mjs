@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { hostExtension, HOST_EXTENSION_FILE, validateHostExtensionPath } from '../host-extension.mjs';
 import { readVpsBackupCatalog } from '../backup/vps-catalog.mjs';
 import { normalizeBackupResource, createBackupJobDocument } from '../backup/contracts.mjs';
@@ -27,4 +28,22 @@ test('host extension cannot select project code or bypass the fixed path', () =>
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /fixed protected deployment path/);
+});
+
+
+test('dedicated runtime naming preserves generic defaults and bounds explicit host mappings', () => {
+  const source = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('function dedicatedRuntimeName(project) {');
+  const end = source.indexOf('\nfunction resourceToken(', start);
+  assert.ok(start >= 0 && end > start);
+  const runtimeName = extension => new Function('hostExtension', `${source.slice(start, end)};return dedicatedRuntimeName;`)(extension);
+  for (const [runtime, prefix] of [['static', 'static'], ['node', 'node'], ['php', 'php']]) {
+    assert.equal(runtimeName({})({ runtime, slug: 'example-app' }), `${prefix}-example-app`);
+  }
+  const project = { runtime: 'node', slug: 'example-app' };
+  assert.equal(runtimeName({ dedicatedRuntimeName: value => value === project ? 'existing-api' : undefined })(project), 'existing-api');
+  assert.equal(runtimeName({ dedicatedRuntimeName: () => undefined })(project), 'node-example-app');
+  for (const value of ['', '../other', '/container', 'has spaces', 'a'.repeat(129), 42]) {
+    assert.throws(() => runtimeName({ dedicatedRuntimeName: () => value })(project), /invalid dedicated runtime name/);
+  }
 });
