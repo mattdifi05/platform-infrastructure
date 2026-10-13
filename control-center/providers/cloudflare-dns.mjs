@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-const DOMAINS = ['matthewdifilippo.com', 'scriptastudents.com', 'stexor.com'];
+const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const ID = /^[a-f0-9]{32}$/;
 
 function protectedText(file, { secret = false } = {}) {
@@ -20,9 +20,9 @@ function protectedText(file, { secret = false } = {}) {
 
 export function parseCloudflareDnsZones(text) {
   const value = JSON.parse(text);
-  if (!Array.isArray(value.zones) || value.zones.length !== DOMAINS.length) throw Error('Invalid Cloudflare DNS zone scope');
+  if (!Array.isArray(value.zones) || value.zones.length > 32) throw Error('Invalid Cloudflare DNS zone scope');
   const zones = value.zones.map(({ name, id }) => ({ name, id }));
-  if (JSON.stringify(zones.map(z => z.name).sort()) !== JSON.stringify(DOMAINS)
+  if (zones.some(z => typeof z.name !== 'string' || !DOMAIN.test(z.name)) || new Set(zones.map(z => z.name)).size !== zones.length
     || zones.some(z => !ID.test(z.id)) || new Set(zones.map(z => z.id)).size !== zones.length) throw Error('Invalid Cloudflare DNS zone scope');
   return zones;
 }

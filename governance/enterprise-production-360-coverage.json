@@ -36,7 +36,7 @@
           "title": "VPS preflight and postdeploy runtime checks",
           "mode": "protected-runtime",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["command:vps-preflight", "command:vps-postdeploy", "file:config/v1-local-private-source-lock.json"]
+          "evidenceRefs": ["command:vps-preflight", "command:vps-postdeploy", "file:config/v1-local-private-core-profile.lock.json"]
         }
       ]
     },
@@ -299,7 +299,7 @@
           "title": "LOCAL_PRIVATE activation boundary",
           "mode": "protected-runtime",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["file:config/v1-local-private-source-lock.json", "file:compose.local-private.yaml", "file:compose.greenfield.yaml", "file:scripts/deploy-vps.sh"]
+          "evidenceRefs": ["file:config/v1-local-private-core-profile.lock.json", "file:compose.local-private.yaml", "file:compose.greenfield.yaml", "file:scripts/deploy-vps.sh"]
         }
       ]
     },

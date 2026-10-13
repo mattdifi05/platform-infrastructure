@@ -1,4 +1,4 @@
-import copy,importlib.util,io,json,os,pathlib,shutil,tarfile,tempfile,unittest
+import hashlib,importlib.util,io,json,os,pathlib,shutil,tarfile,tempfile,unittest
 from unittest.mock import patch
 HERE=pathlib.Path(__file__).resolve().parents[1]
 s=importlib.util.spec_from_file_location('restore',HERE/'production-restore.py');r=importlib.util.module_from_spec(s);s.loader.exec_module(r)
@@ -51,6 +51,16 @@ class RuntimeRestoreTests(unittest.TestCase):
    with self.assertRaisesRegex(RuntimeError,'gate is closed'):r.restore('manifest-vps-example','a'*64,'b'*64,'vps-restore-example-12345')
  def test_database_owner_is_resolved_from_enrolled_volume(self):
   self.assertEqual(r.b.database_container([{'Name':'/mariadb','Mounts':[{'Type':'volume','Name':'enterprise_mariadb_data'}]}],'enterprise_mariadb_data'),'mariadb')
+ def test_signed_admission_chain_keeps_predecessor_and_generation(self):
+  old={'hostname':'platform-server-public','machineId':'unit-machine','generation':1,'previousAdmissionSha256':'0'*64}
+  data=json.dumps(old).encode();digest=hashlib.sha256(data).hexdigest()
+  history=self.root/'admission-history'/digest;history.mkdir(parents=True)
+  (history/'profile.json').write_bytes(data);(history/'profile.sig').write_bytes(b'signature')
+  current={**old,'generation':2,'previousAdmissionSha256':digest}
+  with patch.object(r.b,'CONFIG',self.root),patch.object(r.b,'private',side_effect=lambda path,*args:path),patch.object(r.b,'run',return_value=b''):
+   r.b.validate_admission_chain(current)
+   (history/'profile.json').write_bytes(b'changed')
+   with self.assertRaisesRegex(RuntimeError,'predecessor bytes differ'):r.b.validate_admission_chain(current)
  def test_stopped_enrolled_container_is_covered_but_missing_or_extra_is_denied(self):
   ids=['a'*64,'b'*64];rows=[{'Id':x,'Name':'/'+str(i),'Config':{'Labels':{'com.docker.compose.project':'platform_server_ai'}},'State':{'Running':i==0}} for i,x in enumerate(ids)]
   def commands(args):
@@ -80,46 +90,6 @@ class RuntimeRestoreTests(unittest.TestCase):
   self.assertEqual(r.persistent_env(base),r.persistent_env(changed))
   changed['Config']['Env'][0]='PGDATABASE=other';self.assertNotEqual(r.persistent_env(base),r.persistent_env(changed))
   changed['Name']='/other';self.assertIn('CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS=new',r.persistent_env(changed))
- def image_compatibility_fixture(self):
-  source='sha256:'+'a'*64;current_image='sha256:'+'b'*64
-  rows=[{'Name':name,'Image':source,'Mounts':[],'Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps'},'Cmd':['run'],'Entrypoint':['entrypoint'],'User':'1000','Env':['PERSISTENT=original']}} for name in sorted(r.b.BASE_CONTAINER_NAMES)]
-  rows.append({'Name':'/enterprise-node-exporter','Image':source,'Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps','com.docker.compose.service':'node-exporter'}},'Mounts':[{'Type':'bind','Source':path,'Destination':target,'RW':False} for path,target in r.b.NODE_EXPORTER_BINDS.items()]})
-  snapshot=copy.deepcopy(rows)
-  next(row for row in rows if row['Name']=='/enterprise-control-center')['Image']=current_image
-  profile={'pins':[{'name':row['Name']} for row in rows],'controlCenterImageCompatibility':[{'sourceImage':source,'currentImage':current_image}]}
-  return snapshot,rows,profile
- def test_exact_signed_cc_image_pair_admits_without_modifying_current_runtime(self):
-  snapshot,current,profile=self.image_compatibility_fixture();original=copy.deepcopy((snapshot,current,profile))
-  r.compatible(snapshot,current,profile)
-  self.assertEqual((snapshot,current,profile),original)
-  with self.assertRaises(RuntimeError):r.compatible(snapshot,current,{'pins':profile['pins']})
-  r.compatible(current,current,{'pins':profile['pins']})
- def test_cc_image_approval_is_directional_exact_and_not_transitive_or_cross_container(self):
-  for case in ['other-destination','reverse','transitive','other-container']:
-   with self.subTest(case=case):
-    snapshot,current,profile=self.image_compatibility_fixture()
-    old_cc=next(row for row in snapshot if row['Name']=='/enterprise-control-center');new_cc=next(row for row in current if row['Name']=='/enterprise-control-center')
-    if case=='reverse':old_cc['Image'],new_cc['Image']=new_cc['Image'],old_cc['Image']
-    elif case=='other-container':
-     other=next(row for row in current if row['Name']!='/enterprise-control-center');other['Image']=new_cc['Image'];new_cc['Image']=old_cc['Image']
-    else:
-     destination='sha256:'+'c'*64
-     if case=='transitive':profile['controlCenterImageCompatibility'].append({'sourceImage':new_cc['Image'],'currentImage':destination})
-     new_cc['Image']=destination
-    with self.assertRaises(RuntimeError):r.compatible(snapshot,current,profile)
- def test_cc_image_approval_preserves_mount_config_environment_and_membership_checks(self):
-  for field in ['Mounts','Cmd','Entrypoint','User','Env','membership']:
-   with self.subTest(field=field):
-    snapshot,current,profile=self.image_compatibility_fixture();cc=next(row for row in current if row['Name']=='/enterprise-control-center')
-    if field=='Mounts':cc['Mounts']=[{'Type':'volume','Name':'different-volume','Destination':'/data'}]
-    elif field=='membership':snapshot=[row for row in snapshot if row['Name']!='/enterprise-node-exporter']
-    else:cc['Config'][field]='other' if field=='User' else ['other']
-    with self.assertRaises(RuntimeError):r.compatible(snapshot,current,profile)
- def test_cc_image_approval_schema_rejects_unbounded_or_nonexact_entries(self):
-  snapshot,current,profile=self.image_compatibility_fixture();edge=profile['controlCenterImageCompatibility'][0]
-  for invalid in [None,{},[edge]*5,[None],[{}],[{**edge,'container':'/other'}],[{**edge,'sourceImage':'latest'}],[{**edge,'currentImage':'sha256:'+'A'*64}],[{**edge,'currentImage':None}]]:
-   with self.subTest(invalid=invalid):
-    with self.assertRaisesRegex(RuntimeError,'Invalid signed Control Center'):r.compatible(snapshot,current,{**profile,'controlCenterImageCompatibility':invalid})
  def test_database_configuration_uses_captured_numeric_ownership_and_file_mode(self):
   file=self.root/'tls.key';file.write_text('fixture')
   with patch.object(r.os,'chown') as ownership:
@@ -196,56 +166,4 @@ class RuntimeRestoreTests(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'membership'):r.b.reviewed_membership([*base,{'Name':'/unreviewed'}])
   node['Mounts'][0]['RW']=True
   with self.assertRaisesRegex(RuntimeError,'Metrics mounts'):r.b.reviewed_membership([*base,node])
- def test_database_acl_diagnostic_checks_defaults_and_effective_grant_attributes(self):
-  before=json.dumps([{'datname':'private-db','owner':'private-owner','datacl':None}]);after=json.dumps([{'datname':'private-db','owner':'private-owner','datacl':'{}'}]);queries=[]
-  def query(pg,sql):queries.append(sql);return '[]'
-  with patch.object(r,'pg_sql',side_effect=query):details=r.database_grant_diagnostics('isolated',before,after)
-  self.assertEqual(details['ownerChangedCount'],0);self.assertEqual(details['dataclChangedCount'],1);self.assertTrue(details['effectiveACLsame'])
-  self.assertTrue(any('aclexplode' in q and 'acldefault' in q and 'is_grantable' in q for q in queries))
-  self.assertNotIn('private-owner',json.dumps(details));self.assertNotIn('private-db',json.dumps(details))
-class DatabaseAclReplayTests(unittest.TestCase):
- def grant(self,**overrides):
-  return dict({'datname':'db"quote','grantor':'owner"quote','grantee':'reader"quote','public':False,'privilege_type':'CONNECT','is_grantable':False},**overrides)
- def test_pg_error_exposes_only_phase_and_sqlstate(self):
-  result=type('Result',(),{'returncode':1,'stdout':b'','stderr':b'ERROR: 42601: private-identifier secret-data'})()
-  with patch.object(r.subprocess,'run',return_value=result):
-   with self.assertRaisesRegex(RuntimeError,'acl-expansion failed: exit 1 SQLSTATE 42601') as caught:r.pg_sql('isolated','SELECT aclexplode(NULL)')
-  self.assertNotIn('private-identifier',str(caught.exception));self.assertNotIn('secret-data',str(caught.exception))
- def test_quotes_public_and_grant_options(self):
-  commands=[]
-  r.replay_database_acl([self.grant(is_grantable=True),self.grant(public=True,grantee=None),self.grant(grantee='PUBLIC')],lambda g:True,commands.append)
-  self.assertIn('SET LOCAL ROLE "owner""quote"',commands[0]);self.assertIn('DATABASE "db""quote"',commands[0]);self.assertIn('TO "reader""quote" WITH GRANT OPTION',commands[0])
-  self.assertIn(' TO PUBLIC;',commands[1]);self.assertIn(' TO "PUBLIC";',commands[2])
- def test_dependency_replay_and_unresolvable_chain(self):
-  commands=[];ready_roles={'owner'}
-  grants=[self.grant(grantor='intermediate',grantee='leaf'),self.grant(grantor='owner',grantee='intermediate',is_grantable=True)]
-  def apply(sql):commands.append(sql);ready_roles.add('intermediate')
-  r.replay_database_acl(grants,lambda g:g['grantor'] in ready_roles,apply)
-  self.assertIn('ROLE "owner"',commands[0]);self.assertIn('ROLE "intermediate"',commands[1])
-  with self.assertRaisesRegex(RuntimeError,'Unresolvable'):r.replay_database_acl(grants,lambda g:False,lambda sql:self.fail('No SQL expected'))
- def test_invalid_public_grant_option_is_rejected(self):
-  with self.assertRaisesRegex(RuntimeError,'Invalid authenticated'):r.replay_database_acl([self.grant(public=True,grantee=None,is_grantable=True)],lambda g:True,lambda sql:self.fail('No SQL expected'))
- def test_role_or_owner_mismatch_prevents_any_mutation(self):
-  before={'databaseGrants':json.dumps([{'datname':'db','owner':'owner','datacl':None}]),'roles':'[]','membership':'[]'}
-  after={**before,'databaseGrants':json.dumps([{'datname':'db','owner':'different','datacl':None}])}
-  with patch.object(r,'pg_sql') as query:
-   with self.assertRaisesRegex(RuntimeError,'identity'):r.restore_database_acl('isolated',before,after)
-   query.assert_not_called()
- def test_reset_and_final_exact_tuple_guard(self):
-  record=[{'datname':'db','owner':'owner','datacl':'{}'}]
-  state={'databaseGrants':json.dumps(record),'roles':'[]','membership':'[]'}
-  wanted=[self.grant(datname='db',grantor='owner',grantee='reader')];current=[self.grant(datname='db',grantor='owner',grantee=None,public=True)]
-  commands=[]
-  def query(pg,sql):commands.append(sql);return json.dumps(record) if sql.startswith('SELECT coalesce') else ''
-  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,[],wanted]):r.restore_database_acl('isolated',state,state)
-  self.assertTrue(any('REVOKE ALL PRIVILEGES ON DATABASE "db" FROM PUBLIC CASCADE' in sql for sql in commands))
-  self.assertTrue(any('GRANT CONNECT ON DATABASE "db" TO "reader"' in sql for sql in commands))
-  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,[],current]):
-   with self.assertRaisesRegex(RuntimeError,'effective ACL differs'):r.restore_database_acl('isolated',state,state)
-  with patch.object(r,'pg_sql',side_effect=query),patch.object(r,'database_acl_tuples',side_effect=[wanted,current,current]):
-   with self.assertRaisesRegex(RuntimeError,'reset incomplete'):r.restore_database_acl('isolated',state,state)
- def test_effective_tuple_query_preserves_public_grantor_and_defaults(self):
-  with patch.object(r,'pg_sql',return_value='[]') as query:r.database_acl_tuples('isolated',[{'datname':'db','owner':'owner','datacl':None}])
-  sql=query.call_args.args[1]
-  for clause in ('aclexplode','acldefault','pg_get_userbyid(a.grantor)','a.grantee=0','a.is_grantable','JOIN pg_roles o ON o.rolname=d.owner','cardinality(coalesce','ELSE NULL::aclitem[] END'):self.assertIn(clause,sql)
 if __name__=='__main__':unittest.main()

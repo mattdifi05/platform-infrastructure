@@ -31,12 +31,23 @@ else
 fi
 
 env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
-[[ $(env_value DOMAIN) = stexor.com \
-   && $(env_value CONTROL_CENTER_HOST) = portal.stexor.com \
-   && $(env_value CONTROL_CENTER_AUTH_RP_ID) = portal.stexor.com \
-   && $(env_value CONTROL_CENTER_PUBLIC_ORIGIN) = https://portal.stexor.com \
-   && $(env_value CONTROL_CENTER_PUBLIC_URL) = https://portal.stexor.com \
-   && $(env_value DOCS_HOST) = docs.stexor.com \
+domain=$(env_value DOMAIN)
+control_center_host=$(env_value CONTROL_CENTER_HOST)
+auth_rp_id=$(env_value CONTROL_CENTER_AUTH_RP_ID)
+public_origin=$(env_value CONTROL_CENTER_PUBLIC_ORIGIN)
+public_url=$(env_value CONTROL_CENTER_PUBLIC_URL)
+docs_host=$(env_value DOCS_HOST)
+host_extension_dir=$(env_value PLATFORM_HOST_EXTENSION_DIR)
+dns_name_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+[[ "$domain" =~ $dns_name_re \
+   && "$control_center_host" = "portal.$domain" \
+   && "$auth_rp_id" = "portal.$domain" \
+   && "$public_origin" = "https://portal.$domain" \
+   && "$public_url" = "https://portal.$domain" \
+   && "$docs_host" = "docs.$domain" \
+   && "$host_extension_dir" = /* \
+   && "$host_extension_dir" != "$ROOT" \
+   && "$host_extension_dir" != "$ROOT/"* \
    && $(env_value CONTROL_CENTER_AUTH_MODE) = app-passkey \
    && $(env_value HOSTED_WORKLOAD_MODE) = no-hosted \
    && -z $(env_value HOSTED_WORKLOAD_LOCK) \
@@ -132,8 +143,8 @@ fi
 install -d -m 0700 "$ROOT/traefik/certs"
 if [[ ! -e "$ROOT/traefik/certs/local-key.pem" && ! -e "$ROOT/traefik/certs/local-cert.pem" ]]; then
   openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 2 \
-    -subj '/CN=portal.stexor.com' \
-    -addext 'subjectAltName=DNS:portal.stexor.com,DNS:docs.stexor.com' \
+    -subj "/CN=$control_center_host" \
+    -addext "subjectAltName=DNS:$control_center_host,DNS:$docs_host" \
     -keyout "$ROOT/traefik/certs/local-key.pem" \
     -out "$ROOT/traefik/certs/local-cert.pem" >/dev/null 2>&1
   chmod 0755 "$ROOT/traefik/certs"

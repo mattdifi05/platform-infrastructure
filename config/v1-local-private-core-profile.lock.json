@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "scope": "Generic LOCAL_PRIVATE platform core",
+  "runtime": {
+    "composeProject": "platform_infra_greenfield",
+    "sourceRootVariable": "PHP_PROJECTS_DIR",
+    "environmentFileClass": "external-state"
+  },
+  "compose": {
+    "renderer": {
+      "name": "docker-compose-linux-x86_64",
+      "version": "5.3.1",
+      "sha256": "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959"
+    },
+    "activeProfiles": ["admin"],
+    "runtimeFilesInOrder": [
+      "compose.yaml",
+      "compose.secrets.yaml",
+      "compose.waf.yaml",
+      "compose.vps.yaml",
+      "compose.vps-waf.yaml",
+      "compose.backup-scheduler.yaml",
+      "compose.runtime.yaml",
+      "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
+      "compose.local-private.yaml",
+      "compose.local-private-backup.yaml",
+      "compose.greenfield.yaml"
+    ]
+  },
+  "localBuilds": [
+    {"image": "platform/control-center:local", "context": ".", "dockerfile": "docker/control-center.Dockerfile"},
+    {"image": "platform/project-router:local", "context": ".", "dockerfile": "docker/project-router.Dockerfile"},
+    {"image": "platform/alert-dispatcher:local", "context": ".", "dockerfile": "docker/alert-dispatcher.Dockerfile"},
+    {"image": "platform/docker-action-broker:local", "context": ".", "dockerfile": "docker/ops.Dockerfile"},
+    {"image": "platform/backup-scheduler:local", "context": ".", "dockerfile": "docker/backup-scheduler.Dockerfile"},
+    {"image": "platform/restic-rclone:local", "context": ".", "dockerfile": "docker/restic-rclone.Dockerfile"},
+    {"image": "platform/php-apache:local", "context": ".", "dockerfile": "docker/php-apache.Dockerfile"}
+  ],
+  "externalState": {
+    "neverCommit": [
+      ".env",
+      "secrets/",
+      "state/",
+      "certificates/",
+      "database volumes and dumps",
+      "optional host-only extension files",
+      "uploaded files, logs, queues and caches",
+      "generated build output and dependency directories"
+    ]
+  }
+}

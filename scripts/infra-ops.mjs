@@ -3529,6 +3529,8 @@ function infraTestingHygiene() {
     "scripts/backup-artifact-publication.mjs",
     "scripts/backup-artifact-publication.test.mjs",
     "scripts/database-restore-semantic-comparator.test.mjs",
+    "project-router/host-extension.mjs",
+    "project-router/host-extension.test.mjs",
     "scripts/local-private-compatibility-source-boundary.mjs",
     "scripts/local-private-compatibility-source-boundary.test.mjs",
     "scripts/command-safety.mjs",
@@ -3570,7 +3572,7 @@ function infraTestingHygiene() {
     ...dockerActionBrokerTestFiles,
   ], { cwd: infraRoot });
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
-  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs", "project-router/host-extension.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-admin-profile-safety.test.mjs"], { cwd: infraRoot });
   run("ruby", ["scripts/hosted-workload-source-policy.test.rb"], { cwd: infraRoot });
@@ -3631,7 +3633,7 @@ function controlCenterTestFiles() {
 async function projectRouterTests() {
   await withLocalCheckReport("project-router-tests", async () => {
     log("==> Project Router tests");
-    run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+    run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs", "project-router/host-extension.test.mjs"], { cwd: infraRoot });
     log("Project Router tests passed.");
   });
 }

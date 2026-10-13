@@ -4,6 +4,8 @@ import http.client
 import http.server
 import json
 import os
+import pathlib
+import stat
 import re
 import socket
 import socketserver
@@ -14,11 +16,30 @@ import urllib.parse
 SOCKET = os.environ.get('OBSERVER_PROXY_SOCKET', '/run/platform-docker-observer/docker.sock')
 UPSTREAM = os.environ.get('OBSERVER_PROXY_UPSTREAM', '/run/docker.sock')
 MAX_BODY = 8 * 1024 * 1024
-MANUAL_ONLY_CONTAINERS = frozenset(['node-scriptastudents', 'scripta-postgres', 'students-beta-redis', 'scriptastudents-ingress', 'phppgadmin'])
+INVENTORY = pathlib.Path('/etc/platform-infrastructure/server-ai/infrastructure-inventory.json')
+
+
+def registered_names():
+    for parent in INVENTORY.parents:
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Observer inventory parent is not protected')
+    fd = os.open(INVENTORY, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > MAX_BODY:
+            raise ValueError('Observer inventory is not protected')
+        with os.fdopen(fd, 'r', closefd=False) as source:
+            records = json.load(source)
+        if not isinstance(records, dict) or len(records) > 100 or any(not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', name) for name in records):
+            raise ValueError('Invalid observer inventory names')
+        return frozenset(records)
+    finally:
+        os.close(fd)
 
 
 def manual_only_name(value):
-    return isinstance(value, str) and value.lstrip('/') in MANUAL_ONLY_CONTAINERS
+    return not isinstance(value, str) or value.lstrip('/') not in registered_names()
 
 
 def infrastructure_rows(rows):

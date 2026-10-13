@@ -7,9 +7,9 @@ class ConfigTests(unittest.TestCase):
  def setUp(self):
   self.a=load();self.identity='a'*64
   self.cfg={'version':1,'machineId':self.identity,'containers':['gf-postgres','gf-control-center'],'services':['docker.service'],'jobs':{},'inventoryFile':'/etc/platform-infrastructure/server-ai/infrastructure-inventory.json','backupRoot':None,'runtimeRoot':None}
- def test_home_defaults_preserved_without_config(self):
+ def test_default_distribution_has_no_hosted_applications(self):
   a=self.a
-  self.assertFalse(a.PORTABLE);self.assertIn('php-anniversary',a.CONTAINERS)
+  self.assertFalse(a.PORTABLE);self.assertEqual(a.HOSTING,frozenset());self.assertEqual(a.CONTAINERS,a.CORE_CONTAINERS)
   self.assertEqual(str(a.BACKUP),'/home/platform_infrastructure/v1-fresh-runtime/local-private-backup')
   self.assertEqual(a.JOBS['backup'],'platform-backup-schedule.service')
  def test_empty_host_valid_with_no_home_paths_or_jobs(self):

@@ -15,6 +15,11 @@ import {
 import { isIP } from "node:net";
 import path from "node:path";
 import { createProjectMetadataReader, ProjectMetadataError } from "./project-metadata.mjs";
+import {
+  emptyProjectRouterHostExtension,
+  loadProjectRouterHostExtension,
+  PROJECT_ROUTER_HOST_EXTENSION_FILE,
+} from "./host-extension.mjs";
 import { validateVerifiedWorkloadLock } from "./verified-workload-lock.mjs";
 import { parseHostedRouteLock } from "./workload-route-lock.mjs";
 
@@ -36,6 +41,20 @@ const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const hostSuffix = process.env.PROJECT_HOST_SUFFIX || ".localhost.com";
+const projectRouterHostExtensionFile = String(process.env.PROJECT_ROUTER_HOST_EXTENSION_FILE || "");
+if (projectRouterHostExtensionFile
+    && process.env.NODE_ENV !== "test"
+    && projectRouterHostExtensionFile !== PROJECT_ROUTER_HOST_EXTENSION_FILE) {
+  throw new Error("Project router host extension must use the fixed external host-config path.");
+}
+const projectRouterHostExtension = localPrivateCompatibilityRequested
+  ? loadProjectRouterHostExtension({
+    filePath: projectRouterHostExtensionFile,
+    expectedSha256: process.env.PROJECT_ROUTER_HOST_EXTENSION_SHA256,
+    hostSuffix,
+    testMode: process.env.NODE_ENV === "test",
+  })
+  : emptyProjectRouterHostExtension(hostSuffix);
 const legacyDiscoveryRequested = testLegacyDiscoveryAllowed || localPrivateCompatibilityRequested;
 const nodeHosts = parsePairs(legacyDiscoveryRequested ? process.env.NODE_PROJECT_HOSTS || "" : "");
 const projectUpstreams = parsePairs(legacyDiscoveryRequested ? process.env.PROJECT_UPSTREAMS || "" : "");
@@ -53,60 +72,6 @@ const projectMetadataReader = createProjectMetadataReader({
   parseTimeoutMs: boundedEnvironmentInteger("PROJECT_METADATA_PARSE_TIMEOUT_MS", 500, 1, 5000),
   maxCacheEntries: boundedEnvironmentInteger("PROJECT_METADATA_CACHE_ENTRIES", 256, 1, 4096),
 });
-const localPrivateCompatibilityContract = Object.freeze({
-  hostSuffix: ".platform-infrastructure.com",
-  nodeUpstreams: Object.freeze([
-    ["account", "http://node-account:3000"],
-    ["opstudents", "http://node-opstudents:3000"],
-    ["ui", "http://node-ui:3000"],
-  ]),
-  phpUpstreams: Object.freeze([
-    ["anniversary", "http://php-anniversary:80"],
-    ["fiplatform", "http://php-fiplatform:80"],
-    ["fireport", "http://php-fiplatform:80"],
-    ["matthewdifilippo", "http://php-matthewdifilippo:80"],
-    ["stream", "http://php-stream:80"],
-    ["workcalendar", "http://php-workcalendar:80"],
-  ]),
-  allowedUpstreams: Object.freeze([
-    "control-center:8080",
-    "node-account:3000",
-    "node-opstudents:3000",
-    "node-ui:3000",
-    "php-anniversary:80",
-    "php-fiplatform:80",
-    "php-matthewdifilippo:80",
-    "php-stream:80",
-    "php-workcalendar:80",
-  ]),
-  routeOwnership: Object.freeze([
-    Object.freeze(["account", "stexor", "account", "node"]),
-    Object.freeze(["anniversary", "anniversary", "anniversary", "php"]),
-    Object.freeze(["fiplatform", "fiplatform", "fiplatform", "php"]),
-    Object.freeze(["fireport", "fiplatform", "fiplatform", "php"]),
-    Object.freeze(["matthewdifilippo", "matthewdifilippo", "matthewdifilippo", "php"]),
-    Object.freeze(["opstudents", "opstudents", "opstudents", "node"]),
-    Object.freeze(["stream", "stream", "stream", "php"]),
-    Object.freeze(["ui", "stexor", "ui", "node"]),
-    Object.freeze(["workcalendar", "workcalendar", "workcalendar", "php"]),
-  ]),
-  reservedPlatformSlugs: Object.freeze([
-    "admin",
-    "api",
-    "auth",
-    "docs",
-    "portal",
-    "projects",
-  ]),
-});
-const localPrivateRouteOwnership = new Map(
-  localPrivateCompatibilityContract.routeOwnership.map(
-    ([routeSlug, sourceSlug, projectSlug, type]) => [
-      routeSlug,
-      Object.freeze({ sourceSlug, projectSlug, type }),
-    ],
-  ),
-);
 let workloadRouteCache = {
   key: "",
   byHost: new Map(),
@@ -244,8 +209,13 @@ function proxy(clientReq, clientRes, upstream) {
 function dedicatedUpstreamFor(project, workloadRoutes) {
   const compatibilityMapped = mappedProjectValue(projectUpstreams, project)
     || mappedProjectValue(upstreamMapForType(project.type), project);
+  const sourceSlug = slugify(project.parentSlug);
+  const projectSlug = slugify(project.slug);
+  const compatibilityOwner = projectRouterHostExtension.projectUpstreams.get(
+    `${sourceSlug}/${projectSlug}/${project.type}`,
+  );
   const mapped = workloadRoutes.localPrivateCompatibilityAllowed
-    ? compatibilityMapped
+    ? compatibilityOwner?.upstream
     : project.upstream || compatibilityMapped;
   if (!mapped) return null;
   try {
@@ -254,7 +224,12 @@ function dedicatedUpstreamFor(project, workloadRoutes) {
     if (workloadRoutes.allowed.has(`${candidate.hostname.toLowerCase()}:${Number(candidate.port || 80)}`)) {
       throw new Error("Unsigned project metadata cannot claim a hosted workload endpoint.");
     }
-    return validateUpstream(expanded, project.slug);
+    return validateUpstream(
+      expanded,
+      project.slug,
+      workloadRoutes.allowed,
+      workloadRoutes.localPrivateCompatibilityAllowed ? projectRouterHostExtension.services : new Set(),
+    );
   } catch {
     console.error(`rejected project upstream for ${project.slug}: service allowlist policy violation`);
     return null;
@@ -316,29 +291,21 @@ function validateLocalPrivateCompatibility(lock) {
     throw new Error("LOCAL_PRIVATE compatibility requires the exact pinned zero-workload lock.");
   }
 
-  const exactPairs = (map) => [...map.entries()].sort(([left], [right]) => left.localeCompare(right));
-  const fixedRouteSlugs = [...new Set([
-    ...localPrivateCompatibilityContract.nodeUpstreams.map(([slug]) => slug),
-    ...localPrivateCompatibilityContract.phpUpstreams.map(([slug]) => slug),
-  ])].sort();
-  if (hostSuffix !== localPrivateCompatibilityContract.hostSuffix
+  if (hostSuffix !== projectRouterHostExtension.hostSuffix
       || nodeHosts.size !== 0
       || projectUpstreams.size !== 0
+      || nodeUpstreams.size !== 0
+      || phpProjectUpstreams.size !== 0
       || staticUpstreams.size !== 0
-      || JSON.stringify(exactPairs(nodeUpstreams)) !== JSON.stringify(localPrivateCompatibilityContract.nodeUpstreams)
-      || JSON.stringify(exactPairs(phpProjectUpstreams)) !== JSON.stringify(localPrivateCompatibilityContract.phpUpstreams)
-      || JSON.stringify([...allowedUpstreams].sort()) !== JSON.stringify(localPrivateCompatibilityContract.allowedUpstreams)
-      || JSON.stringify([...localPrivateRouteOwnership.keys()].sort()) !== JSON.stringify(fixedRouteSlugs)
-      || localPrivateCompatibilityContract.reservedPlatformSlugs.some((slug) =>
-        localPrivateRouteOwnership.has(slug))
+      || JSON.stringify([...allowedUpstreams].sort()) !== JSON.stringify(["control-center:8080"])
       || controlCenterUpstream.hostname !== "control-center"
       || Number(controlCenterUpstream.port || 80) !== 8080) {
-    throw new Error("LOCAL_PRIVATE compatibility route authority differs from the closed V1 map.");
+    throw new Error("LOCAL_PRIVATE compatibility route authority must come from the external host extension.");
   }
   return true;
 }
 
-function validateUpstream(value, label, additionalAllowed = new Set()) {
+function validateUpstream(value, label, additionalAllowed = new Set(), hostExtensionAllowed = new Set()) {
   let upstream;
   try {
     upstream = new URL(String(value || ""));
@@ -351,7 +318,8 @@ function validateUpstream(value, label, additionalAllowed = new Set()) {
   if (upstream.username || upstream.password || upstream.search || upstream.hash) throw new Error(`Upstream credentials, query and fragment are forbidden for ${label}.`);
   if (upstream.pathname !== "/") throw new Error(`Upstream base paths are forbidden for ${label}.`);
   if (!validUpstreamHost(hostname) || !validPort(port)) throw new Error(`Invalid upstream service for ${label}.`);
-  if (!allowedUpstreams.has(`${hostname}:${port}`) && !additionalAllowed.has(`${hostname}:${port}`)) throw new Error(`Upstream service is not allowlisted for ${label}.`);
+  const identity = `${hostname}:${port}`;
+  if (!allowedUpstreams.has(identity) && !additionalAllowed.has(identity) && !hostExtensionAllowed.has(identity)) throw new Error(`Upstream service is not allowlisted for ${label}.`);
   return new URL(`http://${hostname}:${port}/`);
 }
 
@@ -616,12 +584,11 @@ function localPrivateProjectOwnershipAllowed(project, workloadRoutes) {
   const routeSlugs = projectSlugs(project);
   const parentSlug = slugify(project.parentSlug);
   if (routeSlugs.length === 0
-      || normalizeHost(project.host) !== `${project.slug}${localPrivateCompatibilityContract.hostSuffix}`) {
+      || normalizeHost(project.host) !== `${project.slug}${projectRouterHostExtension.hostSuffix}`) {
     return false;
   }
   return routeSlugs.every((routeSlug) => {
-    if (localPrivateCompatibilityContract.reservedPlatformSlugs.includes(routeSlug)) return false;
-    const owner = localPrivateRouteOwnership.get(routeSlug);
+    const owner = projectRouterHostExtension.routes.get(routeSlug);
     return owner !== undefined
       && owner.sourceSlug === parentSlug
       && owner.projectSlug === project.slug
@@ -818,10 +785,10 @@ function slugFromHost(host) {
 }
 
 function localPrivateRouteSlugFromHost(host) {
-  const suffix = localPrivateCompatibilityContract.hostSuffix;
+  const suffix = projectRouterHostExtension.hostSuffix;
   if (!host.endsWith(suffix)) return "";
   const slug = host.slice(0, -suffix.length);
-  if (!slug || slug.includes(".") || !localPrivateRouteOwnership.has(slug)) return "";
+  if (!slug || slug.includes(".") || !projectRouterHostExtension.routes.has(slug)) return "";
   return slug;
 }
 

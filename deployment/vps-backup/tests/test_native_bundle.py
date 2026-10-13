@@ -1,5 +1,6 @@
-import importlib.util,json,os,pathlib,shutil,tarfile,tempfile,unittest
+import importlib.util,json,os,pathlib,re,shutil,subprocess,tarfile,tempfile,unittest
 HERE=pathlib.Path(__file__).resolve().parents[1]
+ROOT=HERE.parents[1]
 s=importlib.util.spec_from_file_location('runner',HERE/'platform-vps-backup-runner.py');b=importlib.util.module_from_spec(s);s.loader.exec_module(b)
 class BundleTests(unittest.TestCase):
  def setUp(self):
@@ -25,4 +26,32 @@ class BundleTests(unittest.TestCase):
   bundle=self.temp/'tampered.tar'
   with tarfile.open(bundle,'w:') as t:t.add(self.temp/'manifest.json',arcname='manifest.json');t.add(self.art,arcname='artifacts')
   with self.assertRaises(RuntimeError):b.verify_bundle(bundle)
+ def test_clean_installed_node_bundle_has_all_imports(self):
+  # Stage exactly the file sets named by install.sh, without a host extension.
+  script=(HERE/'install.sh').read_text()
+  groups=re.findall(r'^for name in (.+); do$',script,re.M)
+  self.assertEqual(len(groups),2)
+  stage=self.temp/'installed'
+  for source,names in ((HERE,groups[0]),(ROOT/'control-center/backup',groups[1])):
+   relative=source.relative_to(ROOT)
+   target=stage/relative
+   target.mkdir(parents=True,exist_ok=True)
+   for name in names.split():shutil.copy2(source/name,target/name)
+  control=stage/'scripts/backup-queue-control.mjs'
+  control.parent.mkdir(parents=True,exist_ok=True)
+  shutil.copy2(ROOT/'scripts/backup-queue-control.mjs',control)
+  env={**os.environ}
+  env.pop('CONTROL_CENTER_HOST_EXTENSION_FILE',None)
+  manifest=stage/'deployment/vps-backup/native-manifest.mjs'
+  seed={'jobId':'vps-clean-install-20261013','createdAt':b.now(),
+        'resources':[{'id':'platform-state:state','externalId':'state','kind':'platform-state','projectId':'platform','name':'state'}],
+        'artifacts':[{'id':'artifact-state','resourceId':'platform-state:state','path':'artifacts/state.tar','sha256':'a'*64,'sizeBytes':1,'signatureKeyId':'vps-genesis-1'}]}
+  input_file=self.temp/'clean-input.json';input_file.write_text(json.dumps(seed))
+  signed=self.temp/'clean-manifest.json'
+  subprocess.run(['node',str(manifest),'sign',str(input_file),str(b.SIGNING),str(signed)],env=env,check=True,capture_output=True,text=True)
+  verified=subprocess.run(['node',str(manifest),'verify',str(signed),str(b.SIGNING)],env=env,check=True,capture_output=True,text=True)
+  self.assertTrue(json.loads(verified.stdout)['coverageComplete'])
+  queue=subprocess.run(['node',str(control),'invalid'],env=env,capture_output=True,text=True)
+  self.assertNotIn('ERR_MODULE_NOT_FOUND',queue.stderr)
+  self.assertIn('Missing required option: --jobsDir',queue.stderr)
 if __name__=='__main__':unittest.main()

@@ -211,11 +211,11 @@ jobs:
             -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml -f compose.runtime.yaml \
             -f compose.networks.yaml -f compose.runtime-isolation.yaml \
             --profile backup config --quiet
-      - name: Render exact current V1 source lock
+      - name: Render generic LOCAL_PRIVATE core profile
         run: |
-          mapfile -t current_files < <(jq -r '.compose.runtimeFilesInOrder[]' config/v1-local-private-source-lock.json)
-          mapfile -t current_profiles < <(jq -r '.compose.activeProfiles[]' config/v1-local-private-source-lock.json)
-          test "${#current_files[@]}" -eq 13
+          mapfile -t current_files < <(jq -r '.compose.runtimeFilesInOrder[]' config/v1-local-private-core-profile.lock.json)
+          mapfile -t current_profiles < <(jq -r '.compose.activeProfiles[]' config/v1-local-private-core-profile.lock.json)
+          test "${#current_files[@]}" -eq 12
           test "${#current_profiles[@]}" -eq 1
           test "${current_profiles[0]}" = admin
           compose_args=()
@@ -224,7 +224,7 @@ jobs:
             compose_args+=( -f "$file" )
           done
           docker compose --env-file .env -p platform_infra_greenfield \
-            "${compose_args[@]}" --profile admin config --format json > "${RUNNER_TEMP}/v1-current-render.json"
+            "${compose_args[@]}" --profile admin config --format json > "${RUNNER_TEMP}/v1-core-render.json"
           jq -e '
             def path_contains($parent; $child):
               ($parent == $child) or ($child | startswith($parent + "/"));
@@ -235,8 +235,6 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/local-private-input/combined-render.yaml")][0].source) as $brokerRenderSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/run/platform/control-center-state")][0].source) as $controlStateSource |
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
-            (.services | length) == 34 and
-            (.services["php-workcalendar"] == null) and
             (.secrets | length) == 20 and
             (.networks | length) == 11 and
             (.volumes | length) == 12 and
@@ -244,6 +242,10 @@ jobs:
             (.services["docker-action-broker"].user == "1000:1000") and
             (.services["backup-scheduler"].user == "1000:1000") and
             (.services["control-center"].user == "1000:1000") and
+            (.services["project-router"].environment.PROJECT_ROUTER_ALLOWED_UPSTREAMS == "control-center:8080") and
+            (.services["project-router"].environment.PROJECT_ROUTER_HOST_EXTENSION_FILE == "/run/platform-host-extension/project-router.json") and
+            (.services["project-router"].environment.PROJECT_ROUTER_HOST_EXTENSION_SHA256 == "") and
+            ([$root.services["project-router"].volumes[] | select(.target == "/run/platform-host-extension")][0].source == "/var/lib/platform/host-only-extensions") and
             ((.services["docker-action-broker"].profiles // []) == []) and
             ((.services["backup-scheduler"].profiles // []) == []) and
             (.services["docker-action-broker"].entrypoint == ["node", "/opt/platform-infrastructure/scripts/local-private-docker-action-broker.mjs"]) and
@@ -279,11 +281,8 @@ jobs:
             ([.services | to_entries[] | select(.key != "backup-scheduler" and .key != "docker-action-broker") | .value.volumes[]? | select(.type == "bind") | .source as $source | select(path_contains($source; $brokerStateSource) or path_contains($source; $brokerRuntimeSource) or path_contains($source; $brokerTrustSource) or path_contains($source; $brokerRenderSource))] | length == 0) and
             (.services["node-exporter"] != null) and
             (.services["cadvisor"] == null) and
-            (.services["docker-action-activation-sidecar"] == null) and
-            (["backend", "web", "worker-jobs", "worker-notifications", "node-account", "node-ui", "node-opstudents", "php-anniversary", "php-fiplatform", "php-matthewdifilippo", "php-stream"] | all(. as $service | $root.services | has($service))) and
-            (["backend", "web", "worker-jobs", "worker-notifications"] | all(. as $service | [$root.services[$service].volumes[]? | select(.type == "bind")] | length == 0)) and
-            ({"node-account": 2, "node-ui": 2, "node-opstudents": 2, "php-anniversary": 7, "php-fiplatform": 8, "php-matthewdifilippo": 7, "php-stream": 7} | to_entries | all(. as $expected | [$root.services[$expected.key].volumes[]? | select(.type == "bind")] | length == $expected.value))
-          ' "${RUNNER_TEMP}/v1-current-render.json"
+            (.services["docker-action-activation-sidecar"] == null)
+          ' "${RUNNER_TEMP}/v1-core-render.json"
       - name: Render staging and backup compose
         run: |
           docker compose --env-file .env -p platform_infra_staging_ci \

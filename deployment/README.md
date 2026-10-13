@@ -1,23 +1,23 @@
-# Host deployment code
+# Clean host deployment
 
-`host/libexec/` and `host/systemd/` contain the current host-side Python, MJS, and shell programs and systemd units exported from the home server. These are the deployed host code paths represented in this repository.
+A fresh VPS uses `host/empty-vps/` for core infrastructure and `vps-backup/` for its configured backup and restore service. Application catalogs, credentials, historical manifests and recovery state are not distributed with the repository. Generate and review the new host's configuration before installation.
 
-Operator-generated JSON catalogs and configuration pairs are intentionally kept out of this source tree. Runtime secrets, admissions, keys, proofs, and data are also excluded. Reconstruct those values through the operator's reviewed generation and authorization workflow; this repository is not a source for copying credentials or live state.
+`host/libexec/` retains the infrastructure administration bridge, scoped Docker observer proxy, GPU snapshot, DNS probe and database TLS metrics helpers. Their systemd units require explicit host paths, identities and credentials. The first-install and enrollment scripts install only the helpers they name; the directory is not a bulk-install recipe.
 
-The systemd units preserve absolute paths and service assumptions from the current home-server installation. Treat them as installation snapshots: configure paths, identities, dependencies, and credentials for a new VPS before installing or enabling units. A future VPS with no applications, a new VPN, and a new Cloudflare domain has not been deployed or validated by these files.
+## Optional existing-host native backup compatibility
 
-The current backup policy has generation-18 readers, a four-hour cadence, a Monday/Wednesday/Friday 70 GB schedule, and 14-day native retention. These are concise policy parameters for operator review, not proof that a new full backup has completed or can be restored. Verify the generated catalogs, schedule state, and restore evidence independently on the target host.
+The LOCAL_PRIVATE broker, scheduler and signed backup contracts remain available. Their native-v2 socket adapter is optional: the admission CLI selects it only when the operator explicitly supplies `--nativeResources`. The default LOCAL_PRIVATE backup overlay does not mount the native operator socket.
 
-## Pinned historical configuration assets
+Native-v2 requires a separately maintained, reviewed host backend at `/run/platform-backup-operator/operator.sock`, with the exact identities and helper pins required by its signed admission. The historical home-server FTPS, recovery, completeness and generation-specific helper chain and its systemd units are not part of the clean distribution. This repository does not install or reconstruct that backend. Its contract is retained to communicate with an existing authorized backend; it is not a generic new-host deployment configuration.
 
-The G17/G18 namespace catalogs, source maps, mount plans and pins are included as historical infrastructure contracts. They preserve the validated canonical Scripta Redis startup binding and the generation-18 source count; they are not a default workload configuration for a new VPS. Their digests must remain consistent with the matching readers. Install operational catalogs with the root-private permissions required by those readers.
+Keep any required existing-host code outside Git, separately from credentials, catalogs and application data. Removing its source snapshots from this distribution does not uninstall or update the running host. Preserve installed helpers, signing custody, admissions, generation/predecessor continuity, replay journals, recovery catalogs, service policies and application data. Do not reset or regenerate live state to match a clean installation.
 
-The signed `g16-historical-parent-manifest.json`, the application-derived `stream-expired-cache-descriptor-actual.json`, live admissions, replay ledgers and host `paths.json` remain private runtime inputs. Existing native readers refer to them; provision them from the operator-controlled backup configuration rather than inventing replacements or downloading user data from GitHub.
+`vps-backup/home-pin-inventory.py` is an existing-host inspection helper. It requires the installed historical backend on that host and is not part of the fresh-VPS backend installation.
 
-## Home migration compatibility reference
+The phpMyAdmin image consumes the dependency graph in `phpmyadmin/composer.lock` through `composer install`; platform checks and dependency auditing remain enabled.
 
-`reference/home-server/50-completeness-g17.conf.txt` preserves the exact installed home-only generation-18 compatibility wrapper for traceability. It is deliberately outside the installable systemd tree and is not an installation recipe for a new VPS. It rewrites legacy verification functions, uses the pre-existing UID/GID 1000 GPG custody contract, and omits a legacy mounted-tree check. A new deployment must use its own approved root-private input and verifier configuration, rather than activating this migration wrapper.
+## Optional DNS probe
 
-On the home server the UID-1000 account has full Docker authority; the ownership replacement is not proof of a newly crossed privilege boundary. The current post-success rotation hook verifies GPG success, ciphertext/plaintext digests, the three extra-tree members, nine trees/two fixtures, and stable current bindings before retiring the previous snapshot. Those checks do not cover exactly the same historical/staging records as the omitted legacy verifier. No key ownership, verification modules, data or running services were changed by this source publication.
+The DNS probe is disabled until `PLATFORM_DNS_PROBE_HOST`, `PLATFORM_DNS_PROBE_ADDRESS` (IPv4) and `PLATFORM_DNS_PROBE_OUTPUT` are explicitly configured. With no target configuration it prints `notconfigured` and exits before network or write operations. The service optionally reads `/etc/platform-infrastructure/dns-probe.env`; keep that file root-owned, mode 0600, and its ancestors root-owned without group/world write access.
 
-The phpMyAdmin build now consumes the reviewed dependency graph copied from the deployed image in `phpmyadmin/composer.lock` using `composer install`. The platform requirement and vulnerability audit steps remain enabled.
+Output must be a `.prom` file in `/var/lib/platform-infrastructure/node-exporter-textfile`, a protected root-owned directory that the operator creates and exposes to the metrics collector. TLS uses only `/etc/platform-infrastructure/tls/portal-root.pem`, or an explicit `PLATFORM_DNS_PROBE_CA` file in that same protected directory. CA files must be regular, root-owned and not writable by group/others. There is no default hostname, address or metrics output file. Existing installed home-server probes are unaffected by these distribution changes.

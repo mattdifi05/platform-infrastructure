@@ -5,11 +5,10 @@ set -eu
 src=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 dest=/usr/local/libexec/platform-vps-backup
 install -d -o root -g root -m 0755 "$dest/deployment/vps-backup" "$dest/control-center/backup" "$dest/scripts"
-for name in platform-vps-backup-runner.py ftps-sync.py platform_ftps_shared_quota.py native-manifest.mjs enroll.py panel-queue.py production-restore.py scripta-application.py workcalendar-application.py; do
+for name in platform-vps-backup-runner.py ftps-sync.py platform_ftps_shared_quota.py native-manifest.mjs enroll.py panel-queue.py production-restore.py extension-dispatch.py; do
  install -o root -g root -m 0755 "$src/deployment/vps-backup/$name" "$dest/deployment/vps-backup/$name"
 done
-install -o root -g root -m 0755 "$src/deployment/vps-backup/publish-observed.py" "$dest/publish-observed.py"
-for name in contracts.mjs queue-admission.mjs queue-operation-adapter.mjs; do
+for name in core-contracts.mjs queue-admission.mjs queue-operation-adapter.mjs; do
  install -o root -g root -m 0644 "$src/control-center/backup/$name" "$dest/control-center/backup/$name"
 done
 install -o root -g root -m 0644 "$src/scripts/backup-queue-control.mjs" "$dest/scripts/backup-queue-control.mjs"

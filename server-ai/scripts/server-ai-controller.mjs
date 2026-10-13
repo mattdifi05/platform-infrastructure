@@ -83,12 +83,6 @@ const SERVICE_POLICIES = Object.freeze({
     mounts: Object.freeze([
       Object.freeze({ target: "/run/platform-db-tls", type: "bind", readOnly: true, source: "/home/platform_infrastructure/v1-fresh-runtime/maintenance/20260927/db-tls/clients" }),
       Object.freeze({ target: "/run/secrets/server_ai_project_readers_token", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/project-readers-token" }),
-      Object.freeze({ target: "/run/secrets/server_ai_fiplatform_mariadb_fiplatform_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-fiplatform-fiplatform-ro.json" }),
-      Object.freeze({ target: "/run/secrets/server_ai_fiplatform_mariadb_u778675014_fip_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-fiplatform-u778675014-fip-ro.json" }),
-      Object.freeze({ target: "/run/secrets/server_ai_workcalendar_mariadb_workcalendar_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-workcalendar-workcalendar-ro.json" }),
-      Object.freeze({ target: "/run/secrets/server_ai_anniversary_mariadb_anniversary_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-anniversary-anniversary-ro.json" }),
-      Object.freeze({ target: "/run/secrets/server_ai_stream_mariadb_stream_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-stream-stream-ro.json" }),
-      Object.freeze({ target: "/run/secrets/server_ai_account_postgres_stexor_ro", type: "bind", readOnly: true, source: "/etc/platform-infrastructure/server-ai/db-stexor-postgres-stexor-ro.json" }),
     ]),
     tmpfs: Object.freeze({ "/tmp": "size=64m,uid=1000,gid=1000,mode=0700" }),
     memory: 256 * 1024 ** 2,
@@ -251,12 +245,7 @@ function projectMount(mount) {
     || result.target === "/run/secrets/searxng-settings.yml"
     || result.target === "/run/platform-db-tls"
     || result.target === "/projects" || result.target === "/platform"
-    || result.target === "/run/secrets/server_ai_project_readers_token"
-    || result.target.startsWith("/run/secrets/server_ai_fiplatform_mariadb_")
-    || result.target === "/run/secrets/server_ai_workcalendar_mariadb_workcalendar_ro"
-    || result.target === "/run/secrets/server_ai_anniversary_mariadb_anniversary_ro"
-    || result.target === "/run/secrets/server_ai_stream_mariadb_stream_ro"
-    || result.target === "/run/secrets/server_ai_account_postgres_stexor_ro") {
+    || result.target === "/run/secrets/server_ai_project_readers_token") {
     result.source = String(mount?.Source ?? "");
   }
   return result;

@@ -133,7 +133,7 @@ test("manifest import rejects undeclared artifacts and tampered metadata", () =>
   assert.throws(() => createBackupManifestDocument({
     id: "manifest-stream-foreign",
     job: document,
-    artifacts: [artifact("database:workcalendar", "foreign")],
+    artifacts: [artifact("database:foreign-project", "foreign")],
   }), /undeclared resource/);
 
   const manifest = createBackupManifestDocument({

@@ -68,12 +68,12 @@ test("readRedisWorkloadBindings exposes bindings but never policy secrets", (t) 
   t.after(() => rmSync(root, { force: true, recursive: true }));
   writeFileSync(file, JSON.stringify({
     workloads: [
-      { id: "stexor-account", brokers: { redis: { username: "app_account", keyPrefix: "account:", commands: ["GET", "SET"], password: "must-not-leak" } } },
+      { id: "example-account", brokers: { redis: { username: "app_account", keyPrefix: "account:", commands: ["GET", "SET"], password: "must-not-leak" } } },
       { id: "invalid id", brokers: { redis: { username: "ignored", keyPrefix: "ignored:" } } },
     ],
   }));
   const result = readRedisWorkloadBindings(file);
-  assert.deepEqual(result, [{ id: "stexor-account", username: "app_account", keyPrefix: "account:", commandCount: 2 }]);
+  assert.deepEqual(result, [{ id: "example-account", username: "app_account", keyPrefix: "account:", commandCount: 2 }]);
   assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
 });
 

@@ -38,23 +38,12 @@ def main():
   if record.exists():
    queue_command('mark-unknown','--jobId',ident,'--summary','Operation already has a persistent root outcome; reconcile before replay','--exitCode','74');return
   try:
-   is_workcalendar=job.get('scope')=={'kind':'application','id':b.WORKCALENDAR_PROJECT}
-   app=job.get('scope')=={'kind':'application','id':b.SCRIPTA_PROJECT} or is_workcalendar
-   if job.get('schema')!='platform.backup-job/v1' or job.get('status')!='running' or not(job.get('scope')=={'kind':'platform','id':'platform'}or app) or not job.get('requestedBy'):raise RuntimeError('Only authenticated admitted native queue jobs are supported')
-   if app:(b.workcalendar_mode if is_workcalendar else b.scripta_mode)(p,job.get('resources',[]))
-   elif sorted(job.get('resources',[]),key=lambda r:r['id'])!=sorted(b.enrolled_resources(p),key=lambda r:r['id']):raise RuntimeError('Queue resource set differs from signed VPS profile')
+   if job.get('schema')!='platform.backup-job/v1' or job.get('status')!='running' or job.get('scope')!={'kind':'platform','id':'platform'} or not job.get('requestedBy'):raise RuntimeError('Only authenticated full platform queue jobs are supported')
+   wanted=sorted(b.enrolled_resources(p),key=lambda r:r['id'])
+   if sorted(job.get('resources',[]),key=lambda r:r['id'])!=wanted:raise RuntimeError('Queue resource set differs from signed VPS profile')
    b.save(record,{'jobId':ident,'requestSha256':__import__('hashlib').sha256(b.canonical(job)).hexdigest(),'status':'running','startedAt':b.now(),'profileSha256':b.sha(b.PROFILE)})
    spec=importlib.util.spec_from_file_location('ftps',HERE/'ftps-sync.py');f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
-   if app:
-    spec=importlib.util.spec_from_file_location('scripta_application',HERE/('workcalendar-application.py' if is_workcalendar else 'scripta-application.py'));application=importlib.util.module_from_spec(spec);spec.loader.exec_module(application)
-    if job['operation']=='backup':application.capture(job['resources']);f.sync()
-    elif job['operation']in('restore-drill','restore-production'):
-     reference=job.get('sourceManifestPath','')
-     if not re.fullmatch('manifests/manifest-vps-[a-z0-9-]+\\.json',reference):raise RuntimeError('Application restore requires immutable native manifest')
-     proof=application.restore(pathlib.PurePosixPath(reference).stem,job.get('sourceManifestDigest',''),job.get('restoreProfileDigest',''),ident,job['resources'],apply=job['operation']=='restore-production')
-     b.save(b.WORK/('application-proof-'+ident+'.json'),proof)
-    else:raise RuntimeError('Unsupported application queue operation')
-   elif job['operation']=='backup':b.capture();f.sync()
+   if job['operation']=='backup':b.capture();f.sync()
    elif job['operation'] in ('restore-drill','restore-production'):
     reference=job.get('sourceManifestPath','')
     if not re.fullmatch('manifests/manifest-vps-[a-z0-9-]+\\.json',reference):raise RuntimeError('Restore requires immutable native VPS manifest')
@@ -75,5 +64,8 @@ def main():
    queue_command('finish','--jobId',ident,'--status','failed','--summary','Native VPS operation failed; protected root evidence retained','--exitCode','1')
    raise
 if __name__=='__main__':
- try:main()
+ try:
+  spec=importlib.util.spec_from_file_location('extension_dispatch',HERE/'extension-dispatch.py');extension=importlib.util.module_from_spec(spec);spec.loader.exec_module(extension)
+  extension.dispatch_if_needed('panel-queue.py')
+  main()
  except Exception as e:print(json.dumps({'status':'failed','error':str(e)[:200]}));sys.exit(1)

@@ -10,21 +10,11 @@ OWNER='.platform-backup-owner.json'
 PART=1_000_000_000
 POINT=re.compile(r'backup-manifest-vps-[a-z0-9-]+\.tar\.gpg')
 
-def point_scope(point):
- scope=point.get('scope',{'kind':'platform','id':'platform'})
- if scope not in ({'kind':'platform','id':'platform'},{'kind':'application','id':b.SCRIPTA_PROJECT},{'kind':'application','id':b.WORKCALENDAR_PROJECT}):raise RuntimeError('Foreign recovery scope')
- return scope
-
 def sign(payload):return {'payload':payload,'hmacSha256':hmac.new(b.KEY.read_bytes(),b'platform-ftps-receipt-v1\n'+b.canonical(payload),hashlib.sha256).hexdigest()}
 def authenticate(record):
  if set(record)!={'payload','hmacSha256'} or not hmac.compare_digest(sign(record['payload'])['hmacSha256'],record['hmacSha256']):raise RuntimeError('VPS receipt authentication failed')
  p=record['payload']
  if p.get('remoteFolder')!=FOLDER or p.get('host')!=b.HOST or not POINT.fullmatch(p.get('bundle','')):raise RuntimeError('Foreign recovery receipt')
- point_scope(p)
- if 'profileSha256'in p and not re.fullmatch('[a-f0-9]{64}',p['profileSha256']):raise RuntimeError('Invalid captured profile identity')
- if 'containerCount'in p and (type(p['containerCount'])is not int or not 1<=p['containerCount']<=64):raise RuntimeError('Invalid captured membership count')
- if 'applicationMode'in p and (point_scope(p)['kind']!='application'or p['applicationMode']not in('source','database','all')):raise RuntimeError('Invalid application backup mode')
- if 'applicationStructureSchema'in p and (point_scope(p)['kind']!='application'or p['applicationStructureSchema']!=('workcalendar-database-structure/v2' if point_scope(p)['id']==b.WORKCALENDAR_PROJECT else 'scripta-database-structure/v2')or p.get('applicationMode')not in('database','all')):raise RuntimeError('Invalid application structure marker')
  return p
 
 def connect():
@@ -78,38 +68,19 @@ def points(f,listing):
  if set(listing)-owned:raise RuntimeError('Uncommitted or foreign VPS objects require reconciliation; none deleted')
  return result
 
-def retained_point_names(points,newest,cutoff):
- if newest not in {p['bundle']for p in points}:raise RuntimeError('Retention requires a verified replacement point')
- for point in points:
-  point_scope(point)
-  captured=datetime.datetime.fromisoformat(point['backupAt'])
-  if captured.tzinfo is None:raise RuntimeError('Recovery point time lacks a timezone')
- ordered=sorted(points,key=lambda p:p['backupAt'],reverse=True)
- full=next((p for p in ordered if point_scope(p)=={'kind':'platform','id':'platform'}),None)
- if not full:raise RuntimeError('Scoped retention requires an existing verified full platform point')
- keep={newest,full['bundle']}
- for point in ordered:
-  if len(keep)>=2:break
-  if datetime.datetime.fromisoformat(point['backupAt']).timestamp()>=cutoff:keep.add(point['bundle'])
- return keep
-
 def sync_once():
  profile,_=b.profile()
  if profile.get('offsiteAuthorized') is not True:raise RuntimeError('FTPS activation gate is not open')
  proof=json.loads(b.private(b.WORK/'latest-local.json').read_text());bundle=b.WORK/'points'/proof['bundle'];b.private(bundle)
- scope=point_scope(proof)
  if not POINT.fullmatch(bundle.name) or b.sha(bundle)!=proof['encryptedSha256'] or proof.get('encryptedRoundtripVerified') is not True:raise RuntimeError('Latest local encrypted point differs')
  with q.writer_budget(CONFIG,FOLDER) as cap:
   f=connect();tmp=pathlib.Path(tempfile.mkdtemp(prefix='ftps-',dir=b.WORK))
   try:
    listing=inventory(f);ownership(f,listing,create=True);listing=inventory(f);prior=points(f,listing)
-   if scope['kind']=='application'and not any(point_scope(p)['kind']=='platform'for p in prior):raise RuntimeError('Publish a verified full platform point before an application point')
    for p in prior:
     if p['manifestId']==proof['manifestId']:
      if p['encryptedSha256']!=proof['encryptedSha256']:raise RuntimeError('Remote manifest identity conflict')
-     b.save(b.WORK/'latest-offsite.json',p)
-     if point_scope(p)['kind']=='platform':b.save(b.WORK/'latest-full-offsite.json',p)
-     b.publish_catalog(prior);print(json.dumps({'status':'unchanged','manifestId':p['manifestId']}));return
+     b.save(b.WORK/'latest-offsite.json',p);print(json.dumps({'status':'unchanged','manifestId':p['manifestId']}));return
    if sum(listing.values())+bundle.stat().st_size+131072>cap:raise RuntimeError('Combined quota cannot fit new point while preserving all verified points')
    parts=[]
    with bundle.open('rb') as src:
@@ -139,21 +110,16 @@ def sync_once():
    plain=tmp/'downloaded.tar';b.gpg(['--decrypt','--output',str(plain),str(restored)]);b.verify_bundle(plain)
    if b.sha(plain)!=proof['plaintextSha256']:raise RuntimeError('Downloaded plaintext differs')
    point={'schema':'platform.ftps-recovery-point/v2','host':b.HOST,'status':'passed','verifiedAt':b.now(),'backupAt':proof['createdAt'],'manifestId':proof['manifestId'],'manifestDigest':proof['manifestDigest'],'bundle':bundle.name,'encryptedBytes':proof['encryptedBytes'],'encryptedSha256':proof['encryptedSha256'],'parts':parts,'maximumPartBytes':PART,'remoteFolder':FOLDER,'maximumRemoteBytes':q.LIMIT,'maximumPoints':2,'retentionDays':14,'artifactCount':proof['artifactCount'],'tlsVerified':True,'tlsName':'hstgr.io','endpoint':'92.113.28.106:21','outsidePublicHtml':True,'actualDownloadVerified':True,'decryptVerified':True,'manifestHmacVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False}
-   point['scope']=scope
-   for field in ('profileSha256','containerCount','applicationMode','applicationStructureSchema'):
-    if field in proof:point[field]=proof[field]
    # Reconnect after potentially slow decrypt; remote exclusion lease still held.
    f.close();f=connect();name=bundle.name+'.receipt.json';write_json(f,name+'.partial',sign(point));f.rename(name+'.partial',name)
    if authenticate(read_json(f,name))!=point:raise RuntimeError('Published receipt differs')
    b.save(b.WORK/'latest-offsite.json',point)
-   if point['scope']=={'kind':'platform','id':'platform'}:b.save(b.WORK/'latest-full-offsite.json',point)
    # Only authenticated older points, only own namespace, only after verified replacement.
    existing=points(f,inventory(f));existing.sort(key=lambda p:p['backupAt'],reverse=True)
    cutoff=time.time()-14*86400
-   keep=retained_point_names(existing,point['bundle'],cutoff)
    for i,old in enumerate(existing):
     if old['bundle']==point['bundle']:continue
-    if old['bundle']in keep:continue
+    if i<2 and datetime.datetime.fromisoformat(old['backupAt']).timestamp()>=cutoff:continue
     for part in old['parts']:f.delete(part['name'])
     f.delete(old['bundle']+'.receipt.json')
    remaining_points=points(f,inventory(f))
@@ -165,10 +131,9 @@ def sync_once():
     if not POINT.fullmatch(item.get('bundle','')) or item.get('host')!=b.HOST:raise RuntimeError('Unexpected local retention record')
     local.append((item,meta))
    local.sort(key=lambda pair:pair[0]['createdAt'],reverse=True)
-   keep_local=retained_point_names([{**old,'backupAt':old['createdAt']}for old,_ in local],point['bundle'],cutoff)
    for index,(old,meta) in enumerate(local):
     if old['bundle']==point['bundle']:continue
-    if old['bundle']in keep_local:continue
+    if index<2 and datetime.datetime.fromisoformat(old['createdAt']).timestamp()>=cutoff:continue
     target=b.private(b.WORK/'points'/old['bundle'])
     if b.sha(target)!=old['encryptedSha256']:raise RuntimeError('Local retention ciphertext identity differs')
     target.unlink();meta.unlink()
@@ -218,7 +183,6 @@ def downloaded_restore(manifest_id,expected_digest=None,scratch=None,prefer_loca
    import tarfile
    with tarfile.open(plain,'r:') as archive:manifest=json.load(archive.extractfile('manifest.json'))
    if manifest.get('id')!=manifest_id or manifest.get('signature',{}).get('digest')!=point['manifestDigest'] or (expected_digest and point['manifestDigest']!=expected_digest):raise RuntimeError('Downloaded manifest identity differs from selected point')
-   if manifest.get('scope')!=point_scope(point):raise RuntimeError('Recovery receipt and signed manifest scopes differ')
    proof={'status':'passed','manifestId':manifest_id,'manifestDigest':point['manifestDigest'],'receiptSha256':hashlib.sha256(b.canonical(sign(point))).hexdigest(),'actualDownloadVerified':not reused,'previousReceiptDownloadVerified':point['actualDownloadVerified'],'ciphertextSource':'retained-verified-local' if reused else 'fresh-ftps-download','decryptVerified':True,'everyArtifactShaAndHmacVerified':True,'productionModified':False,'isolatedScratchRemoved':True,'verifiedAt':b.now()}
    f.close()
    yield plain,point,proof
@@ -230,6 +194,8 @@ def restore_proof(manifest_id):
 
 if __name__=='__main__':
  try:
+  spec=importlib.util.spec_from_file_location('extension_dispatch',HERE/'extension-dispatch.py');extension=importlib.util.module_from_spec(spec);spec.loader.exec_module(extension)
+  extension.dispatch_if_needed('ftps-sync.py')
   if os.geteuid()!=0 or not(len(sys.argv)==1 or (len(sys.argv)==3 and sys.argv[1]=='--restore-manifest-id')):raise RuntimeError('Root native FTPS typed operation required')
   import fcntl
   os.umask(0o077)

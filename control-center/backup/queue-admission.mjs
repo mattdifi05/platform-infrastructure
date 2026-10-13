@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { parseBackupJobDocument } from "./contracts.mjs";
+import { parseBackupJobDocument } from "./core-contracts.mjs";
 import { requireCanonicalBackupQueueOperation } from "./queue-operation-adapter.mjs";
 
 const STATUS_NAMES = Object.freeze(["queued", "running", "done", "failed"]);

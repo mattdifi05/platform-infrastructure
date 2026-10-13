@@ -12,7 +12,8 @@ import { createFirstConfiguration } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
-import { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, assertExternalDatabaseAction } from "./database/trusted-external.mjs";
+import { hostExtension } from "./host-extension.mjs";
+const { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, assertExternalDatabaseAction } = hostExtension;
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -45,8 +46,7 @@ import {
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
-import { workcalendarDatabasePanel } from "./database/workcalendar-panel.mjs";
-import { readObservedApplications, renderObservedApplicationRow, renderObservedApplicationDetail } from "./observed-applications.mjs";
+const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
 import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
@@ -87,6 +87,7 @@ const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-st
 const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
 const databaseDeleteOperationsFile = process.env.PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE || "/var/www/project-state/database-destructive-operations.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
+if (process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE && !readTrustedExternalDatabase) throw new Error("Trusted database configuration requires the reviewed host extension");
 const trustedExternalDatabase = process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE
   ? readTrustedExternalDatabase(process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE, { approvedDigest: process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_SHA256 })
   : null;
@@ -5824,7 +5825,7 @@ function planVpsProductionRestore(payload, context) {
   if (projectId && (!application || !resolveContextProject(context, projectId))) throw new ValidationError("Applicazione non ammessa nel catalogo backup VPS.");
   const selected = (application ? application.manifests : native?.manifests)?.find(manifest => manifest.id === payload.manifestId);
   if (!selected || !native.restoreProfileDigest) throw new ValidationError("Seleziona un punto VPS verificato e immutabile.");
-  if (selected.restoreCompatible === false) throw new ValidationError("Questo punto precede l’inclusione di Scripta e non ripristina il runtime corrente. Seleziona un backup recente.");
+  if (selected.restoreCompatible === false) throw new ValidationError("Questo punto precede l’inclusione dell’applicazione e non ripristina il runtime corrente. Seleziona un backup recente.");
   const mode = application ? applicationRestoreMode(payload.restoreMode || "all") : "all";
   const resources = selected.resources.filter(resource => mode === "all" || resource.kind === (mode === "source" ? "source" : "database"));
   if (!resources.length) throw new ValidationError("Il punto selezionato non contiene il contenuto richiesto.");
@@ -5836,7 +5837,7 @@ function planVpsProductionRestore(payload, context) {
     manifestId: selected.id, createdAt: selected.createdAt, manifestDigest: selected.signature.digest,
     resources: resources.map(resource => ({ kind: resource.kind, name: resource.name })), restoreMode: mode,
     profileDigest: native.restoreProfileDigest, confirmationRequired: confirmation,
-    scope: application ? (restoresDatabase ? "Solo le risorse di Scripta elencate nel piano. Per il database viene richiesta la stessa struttura delle tabelle; cache Redis e sessioni dell’app vengono azzerate." : "Solo la copia consultabile dei sorgenti elencata nel piano. Database, cache Redis e sessioni restano correnti. Il codice in esecuzione non viene sostituito.") : "Database, 13 volumi persistenti e configurazioni runtime montate; stesso host e stesse immagini.",
+    scope: application ? (restoresDatabase ? "Solo le risorse dell’applicazione elencate nel piano. Per il database viene richiesta la stessa struttura delle tabelle; cache Redis e sessioni dell’app vengono azzerate." : "Solo la copia consultabile dei sorgenti elencata nel piano. Database, cache Redis e sessioni restano correnti. Il codice in esecuzione non viene sostituito.") : "Database, volumi persistenti e configurazioni runtime elencati nel piano; stesso host e stesse immagini.",
     preserves: application ? "Altri servizi, account del Control Center, configurazioni, credenziali e immagini correnti. Il codice in esecuzione non viene sostituito dalla copia dei sorgenti." : "SSH, rete, sistema operativo, credenziali di gestione, authority e coda corrente.",
     downtimeRequired: true, originalStateRetainedForRollback: true,
     ownerAccessReturnsToBackupState: !application,
@@ -6095,15 +6096,15 @@ function renderOperationsSection(section, context, params, currentProject) {
 
 function renderVpsProductionRestore(projectId = "") {
   return `<section class="ops-card" data-vps-restore${projectId ? ` data-project-id="${escapeHtml(projectId)}"` : ""}>
-    <h2>${projectId ? "Ripristina Scripta" : "Ripristino manuale dei dati runtime"}</h2>
-    <p>${projectId ? "Ripristina i dati e/o la copia consultabile dei sorgenti di Scripta dal punto scelto. Il codice in esecuzione resta corrente; per il database serve la stessa struttura delle tabelle. Cache e sessioni dell’app vengono azzerate, gli altri servizi restano attivi." : "Ripristina database, volumi persistenti e configurazioni runtime sullo stesso server. SSH, rete, sistema operativo e credenziali di gestione restano correnti."}</p>
-    <p>${projectId ? "Scripta sarà temporaneamente indisponibile. Gli appunti e gli altri dati torneranno allo stato del backup scelto." : "Il portale e i servizi saranno temporaneamente indisponibili. Dati e passkey torneranno allo stato del punto scelto; conserva una passkey valida a quella data."}</p>
+    <h2>${projectId ? "Ripristina applicazione selezionata" : "Ripristino manuale dei dati runtime"}</h2>
+    <p>${projectId ? "Ripristina i dati e/o la copia consultabile dei sorgenti dell’applicazione dal punto scelto. Il codice in esecuzione resta corrente; per il database serve la stessa struttura delle tabelle. Cache e sessioni dell’app vengono azzerate, gli altri servizi restano attivi." : "Ripristina database, volumi persistenti e configurazioni runtime sullo stesso server. SSH, rete, sistema operativo e credenziali di gestione restano correnti."}</p>
+    <p>${projectId ? "L’applicazione sarà temporaneamente indisponibile. Gli appunti e gli altri dati torneranno allo stato del backup scelto." : "Il portale e i servizi saranno temporaneamente indisponibili. Dati e passkey torneranno allo stato del punto scelto; conserva una passkey valida a quella data."}</p>
     <p data-restore-status role="status" aria-live="polite">Caricamento punti verificati…</p>
     <label>Punto di ripristino <select data-restore-point></select></label>
     <button type="button" class="ops-button secondary compact" data-restore-plan>Prepara piano</button>
     <section data-restore-review hidden><pre data-restore-details></pre>
       <label>Riscrivi l’identificativo del punto <input data-restore-typed autocomplete="off"></label>
-      <label><input type="checkbox" data-restore-confirm> Confermo sovrascrittura dei dati ${projectId ? "di Scripta" : "runtime"} e interruzione temporanea ${projectId ? "dell’app" : "dei servizi"}.</label>
+      <label><input type="checkbox" data-restore-confirm> Confermo sovrascrittura dei dati ${projectId ? "dell’applicazione" : "runtime"} e interruzione temporanea ${projectId ? "dell’app" : "dei servizi"}.</label>
       <button type="button" class="ops-button primary compact" data-restore-apply disabled>Ripristina il punto selezionato</button>
     </section>
   </section>`;
@@ -6783,8 +6784,8 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
 }
 
 function renderProjectDetailDatabaseList(context, project, databases, params = new URLSearchParams()) {
-  if (project.slug === "workcalendar") {
-    const panel = workcalendarDatabasePanel(readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT), project.slug, { escapeHtml, controlIcon });
+  if (hostExtension.renderDatabasePanel) {
+    const panel = hostExtension.renderDatabasePanel(readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT), project.slug, { escapeHtml, controlIcon });
     if (panel) return panel;
   }
   const databaseItems = databases.map((database) => renderProjectDetailDatabaseRow(context, project, database, params)).join("");
@@ -7351,7 +7352,7 @@ function resolvePostgresCredential(database, project) {
 function assertExternalDatabaseOperation(id, action) {
   if (slugify(id) !== trustedExternalDatabase?.id) return;
   try { assertExternalDatabaseAction(trustedExternalDatabase, action); }
-  catch { throw new RejectedOperationError("Il database Scripta usa un collegamento dedicato: questa operazione non è disponibile nel gestore dei principal della piattaforma."); }
+  catch { throw new RejectedOperationError("Il database dell’applicazione usa un collegamento dedicato: questa operazione non è disponibile nel gestore dei principal della piattaforma."); }
 }
 
 function databaseAdminCredentials(database, project) {
@@ -10391,7 +10392,7 @@ function planDatabaseCreate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
   const project = findById(context.projects, projectId, "Project");
-  if (trustedExternalDatabase && [projectId, project.slug, ...(project.aliases || [])].includes(trustedExternalDatabase.projectId)) throw new RejectedOperationError("Il database Scripta è già collegato; la creazione di un principal parallelo non è disponibile.");
+  if (trustedExternalDatabase && [projectId, project.slug, ...(project.aliases || [])].includes(trustedExternalDatabase.projectId)) throw new RejectedOperationError("Il database dell’applicazione è già collegato; la creazione di un principal parallelo non è disponibile.");
   const engine = choice(String(payload.engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
   const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
   ownershipPolicy(() => assertManagedDatabaseName(engine, name));

@@ -659,8 +659,10 @@ Production go/no-go requires a real remote Restic restore. The accepted report m
 ### Dell V1.1 LOCAL_PRIVATE
 
 Sul Dell la configurazione canonica e' `compose.local-private-backup.yaml`,
-caricata nell'ordine fissato da `config/v1-local-private-source-lock.json` con
-il solo profilo `admin`. Non attivare il vecchio profilo provider `backup`.
+caricata nell'ordine fissato dalla configurazione host-only approvata con il
+solo profilo `admin`. La configurazione generica e' in
+`config/v1-local-private-core-profile.lock.json`; le estensioni host restano
+fuori dal checkout. Non attivare il vecchio profilo provider `backup`.
 Prima dell'avvio verificare che:
 
 - il trust directory esterno contenga admission canonica e le sole capability

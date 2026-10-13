@@ -44,6 +44,6 @@ if grep -F -- '--ports "80"' "$ROOT_DIR/VPS-PREDEPLOY-CHECKLIST.md" >/dev/null; 
   exit 1
 fi
 grep -F -- 'Fresh-host bootstrap only' "$ROOT_DIR/VPS-PREDEPLOY-CHECKLIST.md" >/dev/null
-grep -F -- 'config/v1-local-private-source-lock.json' "$ROOT_DIR/README.md" "$ROOT_DIR/RUNBOOK.md" "$ROOT_DIR/VPS-PREDEPLOY-CHECKLIST.md" >/dev/null
+grep -F -- 'config/v1-local-private-core-profile.lock.json' "$ROOT_DIR/README.md" "$ROOT_DIR/RUNBOOK.md" "$ROOT_DIR/VPS-PREDEPLOY-CHECKLIST.md" >/dev/null
 printf 'PASS\tproduction-docs-keep-current-operator-boundary\n'
 printf 'VPS activation boundary tests passed 4/4\n'

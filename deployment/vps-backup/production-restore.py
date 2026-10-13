@@ -2,10 +2,6 @@
 """Manual same-host runtime recovery. No OS/network/authority restoration.
 All selected artifacts authenticate before staging; native DB engines qualify the
 staged state before stopping production. A root journal retains rollback paths.
-The signed profile may approve up to eight exact, directional Control Center image
-pairs in controlCenterImageCompatibility [{sourceImage,currentImage}]. These only
-admit reviewed data compatibility; current management images remain in place and
-an approval never constitutes a verified restore or bypasses other restore gates.
 """
 import base64,importlib.util,json,os,pathlib,re,shutil,signal,stat,subprocess,tarfile,tempfile,time
 HERE=pathlib.Path(__file__).resolve().parent
@@ -17,25 +13,12 @@ PRESERVE_PREFIXES=('/run','/var/run','/var/lib/docker/containers','/var/lib/plat
 PRESERVE_EXACT={'/etc/machine-id','/srv/platform-infrastructure','/srv/platform-infrastructure/first-install','/srv/platform-infrastructure/src','/etc/platform-infrastructure/server-ai/infrastructure-token','/etc/platform-infrastructure/server-ai/observer-token','/etc/platform-infrastructure/server-ai/openai-api-key'}
 
 def within(value,root):return value==root or value.startswith(root+'/')
-def bind_scope(source,management=None,workcalendar_management=None):
+def bind_scope(source):
  if source in PRESERVE_EXACT or any(within(source,x) for x in PRESERVE_PREFIXES):return False
- admitted_source=False
- if management is not None:
-  b.validate_scripta_management(management);admitted_source=within(source,b.SCRIPTA_SOURCE)
- if workcalendar_management is not None:
-  b.validate_workcalendar_management(workcalendar_management);admitted_source=admitted_source or within(source,b.WORKCALENDAR_SOURCE)
- return within(source,'/srv/platform-infrastructure/first-install') or within(source,b.SCRIPTA_ROOT) or within(source,b.WORKCALENDAR_ROOT) or admitted_source or source in ('/etc/platform-infrastructure/server-ai/searxng','/etc/platform-infrastructure/server-ai/settings.yml')
+ return within(source,'/srv/platform-infrastructure/first-install') or source in ('/etc/platform-infrastructure/server-ai/searxng','/etc/platform-infrastructure/server-ai/settings.yml')
 
-def selected_bind_roots(rows,management=None,workcalendar_management=None):
- sources=sorted({m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='bind' and bind_scope(m['Source'],management,workcalendar_management)},key=lambda x:(len(x),x))
- if management is not None:
-  b.validate_scripta_management(management)
-  if not any(m['Type']=='bind'and within(b.SCRIPTA_SOURCE,m['Source'])for r in rows for m in r['Mounts']):raise RuntimeError('Admitted application source is not covered by captured bind mounts')
-  sources.append(b.SCRIPTA_SOURCE)
- if workcalendar_management is not None:
-  b.validate_workcalendar_management(workcalendar_management)
-  if not any(m['Type']=='bind'and within(b.WORKCALENDAR_SOURCE,m['Source'])for r in rows for m in r['Mounts']):raise RuntimeError('WorkCalendar source not covered by admitted mount')
-  sources.append(b.WORKCALENDAR_SOURCE)
+def selected_bind_roots(rows):
+ sources=sorted({m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='bind' and bind_scope(m['Source'])},key=lambda x:(len(x),x))
  return [p for p in sources if not any(p!=q and within(p,q) for q in sources)]
 
 def extract_subset(archive,destination,prefix):
@@ -92,7 +75,7 @@ def compatible(snapshot,current,profile):
  image_pairs={(edge['sourceImage'],edge['currentImage']) for edge in approvals}
  if len(image_pairs)!=len(approvals):raise RuntimeError('Invalid signed Control Center image compatibility')
  old={r['Name']:r for r in snapshot};now={r['Name']:r for r in current}
- b.reviewed_membership(current,profile.get('scriptaRuntime'),profile.get('scriptaManagement'),profile.get('workcalendarRuntime'),profile.get('workcalendarManagement'))
+ b.reviewed_membership(current)
  expected={pin['name'] for pin in profile['pins']}
  if set(old)!=set(now) or set(now)!=expected or len(old)!=len(snapshot) or len(now)!=len(current):raise RuntimeError('Restore runtime membership differs from signed profile')
  for name,r in old.items():
@@ -132,90 +115,6 @@ def semantic_inventory(pg,maria,isolated=False):
   tables=maria_sql(maria,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='"+db.replace("'","''")+"' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",isolated).splitlines()
   result['mariadb']['databases'][db]={t:maria_sql(maria,'SELECT count(*) FROM '+identifier(db,'mariadb')+'.'+identifier(t,'mariadb'),isolated) for t in tables}
  return result
-
-def postgres_semantic_inventory(pg):
- result={'databases':{},'roles':pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY rolname),'[]') FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls FROM pg_roles WHERE rolname !~ '^pg_') r")}
- result['membership']=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY role,member),'[]') FROM (SELECT roleid::regrole::text AS role,member::regrole::text AS member,admin_option FROM pg_auth_members) r")
- result['databaseGrants']=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY datname),'[]') FROM (SELECT datname,pg_get_userbyid(datdba) AS owner,datacl::text FROM pg_database WHERE datallowconn AND NOT datistemplate) r")
- for db in json.loads(pg_sql(pg,"SELECT coalesce(json_agg(datname ORDER BY datname),'[]') FROM pg_database WHERE datallowconn AND NOT datistemplate")):
-  tables=json.loads(pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY schemaname,tablename),'[]') FROM (SELECT schemaname,tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) r",db))
-  result['databases'][db]={r['schemaname']+'.'+r['tablename']:pg_sql(pg,'SELECT count(*) FROM '+identifier(r['schemaname'],'postgres')+'.'+identifier(r['tablename'],'postgres'),db) for r in tables}
-  result.setdefault('tableGrants',{})[db]=pg_sql(pg,"SELECT coalesce(json_agg(r ORDER BY schema,name),'[]') FROM (SELECT n.nspname AS schema,c.relname AS name,pg_get_userbyid(c.relowner) AS owner,c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND c.relkind IN ('r','p','S','v','m')) r",db)
- return result
-
-def stage_scripta_postgres(directory,runtime,rows,profile,operation,journal):
- row=next(r for r in rows if r['Name']=='/scripta-postgres')
- target=profile['scriptaRuntime']['postgresData'];mount=next(m for m in row['Mounts'] if m['Type']=='bind' and m['Source']==target and m['Destination']=='/var/lib/postgresql' and m['RW'])
- stage=directory/'scripta-postgres-data';prepare_database_directory(target,stage)
- name='platform-restore-scripta-postgres-'+operation[-12:]
- planned={'name':name,'image':row['Image'],'source':str(stage),'destination':mount['Destination'],'id':None}
- journal['stagingContainers'].append(planned);b.save(JOURNAL,journal)
- args=['docker','create','--label','platform.vps.restore.operation='+operation,'--name',name,'--network','none','--restart','no','--no-healthcheck','--mount','type=bind,src='+str(stage)+',dst='+mount['Destination'],'--entrypoint','/usr/local/bin/docker-entrypoint.sh','-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_USER=postgres']
- args += [part for e in row['Config']['Env'] if e.startswith('PGDATA=') for part in ['-e',e]]
- args += [row['Image'],'postgres','-c','listen_addresses=','-c','ssl=off']
- try:
-  ident=b.run(args).decode().strip()
-  if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged application PostgreSQL identity')
-  planned['id']=ident;b.save(JOURNAL,journal);b.run(['docker','start',name]);wait_database(name,'postgres')
-  filtered=directory/'scripta-postgres-restore.sql';skipped=0
-  with (runtime/'scripta-postgres-all.sql').open('rb') as src,filtered.open('xb') as dst:
-   for line in src:
-    if line.rstrip() in (b'CREATE ROLE postgres;',b'CREATE ROLE "postgres";'):skipped+=1;continue
-    dst.write(line)
-  if skipped!=1:raise RuntimeError('Unexpected application PostgreSQL bootstrap role declaration')
-  pipe_file(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'],filtered)
-  expected=json.loads((runtime/'scripta-database-semantics.json').read_text());actual=postgres_semantic_inventory(name)
-  if actual.get('databaseGrants')!=expected.get('databaseGrants'):
-   restore_database_acl(name,expected,actual);actual=postgres_semantic_inventory(name)
-   if database_acl_tuples(name,json.loads(actual['databaseGrants']))==database_acl_tuples(name,json.loads(expected['databaseGrants'])):actual['databaseGrants']=expected['databaseGrants']
-  if actual!=expected:raise RuntimeError('Isolated application PostgreSQL semantics differ from captured state')
-  b.run(['docker','stop','--time','60',name],timeout=90)
-  mapping=json.loads((runtime/'scripta-postgres-live-config-paths.json').read_text());metadata=json.loads((runtime/'scripta-postgres-file-metadata.json').read_text())
-  for file,path in mapping.items():
-   if not within(path,mount['Destination']):continue
-   dest=stage/pathlib.PurePosixPath(path).relative_to(mount['Destination']);dest.parent.mkdir(parents=True,exist_ok=True)
-   if file not in metadata:raise RuntimeError('Missing application PostgreSQL configuration ownership')
-   shutil.copyfile(runtime/('scripta-'+file),dest);restore_file_metadata(dest,metadata[file])
-  return stage
- finally:
-  if planned['id']:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=90)
-
-def stage_workcalendar_postgres(directory,runtime,rows,profile,operation,journal):
- row=next(r for r in rows if r['Name']=='/workcalendar-postgres')
- target=profile['workcalendarRuntime']['postgresData'];mount=next(m for m in row['Mounts'] if m['Type']=='bind' and m['Source']==target and m['Destination']=='/var/lib/postgresql' and m['RW'])
- stage=directory/'workcalendar-postgres-data';prepare_database_directory(target,stage)
- name='platform-restore-workcalendar-postgres-'+operation[-12:]
- planned={'name':name,'image':row['Image'],'source':str(stage),'destination':mount['Destination'],'id':None}
- journal['stagingContainers'].append(planned);b.save(JOURNAL,journal)
- args=['docker','create','--label','platform.vps.restore.operation='+operation,'--name',name,'--network','none','--restart','no','--no-healthcheck','--mount','type=bind,src='+str(stage)+',dst='+mount['Destination'],'--entrypoint','/usr/local/bin/docker-entrypoint.sh','-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_USER=postgres']
- args += [part for e in row['Config']['Env'] if e.startswith('PGDATA=') for part in ['-e',e]]
- args += [row['Image'],'postgres','-c','listen_addresses=','-c','ssl=off']
- try:
-  ident=b.run(args).decode().strip()
-  if not re.fullmatch('[a-f0-9]{64}',ident):raise RuntimeError('Unexpected staged application PostgreSQL identity')
-  planned['id']=ident;b.save(JOURNAL,journal);b.run(['docker','start',name]);wait_database(name,'postgres')
-  filtered=directory/'workcalendar-postgres-restore.sql';skipped=0
-  with (runtime/'workcalendar-postgres-all.sql').open('rb') as src,filtered.open('xb') as dst:
-   for line in src:
-    if line.rstrip() in (b'CREATE ROLE postgres;',b'CREATE ROLE "postgres";'):skipped+=1;continue
-    dst.write(line)
-  if skipped!=1:raise RuntimeError('Unexpected application PostgreSQL bootstrap role declaration')
-  pipe_file(['docker','exec','-i',name,'psql','-X','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'],filtered)
-  expected=json.loads((runtime/'workcalendar-database-semantics.json').read_text());actual=postgres_semantic_inventory(name)
-  if actual.get('databaseGrants')!=expected.get('databaseGrants'):
-   restore_database_acl(name,expected,actual);actual=postgres_semantic_inventory(name)
-   if database_acl_tuples(name,json.loads(actual['databaseGrants']))==database_acl_tuples(name,json.loads(expected['databaseGrants'])):actual['databaseGrants']=expected['databaseGrants']
-  if actual!=expected:raise RuntimeError('Isolated application PostgreSQL semantics differ from captured state')
-  b.run(['docker','stop','--time','60',name],timeout=90)
-  mapping=json.loads((runtime/'workcalendar-postgres-live-config-paths.json').read_text());metadata=json.loads((runtime/'workcalendar-postgres-file-metadata.json').read_text())
-  for file,path in mapping.items():
-   if not within(path,mount['Destination']):continue
-   dest=stage/pathlib.PurePosixPath(path).relative_to(mount['Destination']);dest.parent.mkdir(parents=True,exist_ok=True)
-   if file not in metadata:raise RuntimeError('Missing application PostgreSQL configuration ownership')
-   shutil.copyfile(runtime/('workcalendar-'+file),dest);restore_file_metadata(dest,metadata[file])
-  return stage
- finally:
-  if planned['id']:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=90)
 
 def sql_text(value):
  return "convert_from(decode('"+base64.b64encode(value.encode()).decode()+"','base64'),'UTF8')"
@@ -373,8 +272,6 @@ def stage_databases(directory,runtime,rows,volumes,operation,journal):
   if actual.get('postgres',{}).get('databaseGrants')!=expected.get('postgres',{}).get('databaseGrants'):
    restore_database_acl(names['postgres'],expected['postgres'],actual['postgres'])
    actual=semantic_inventory(names['postgres'],names['mariadb'],True)
-   # Physical ACL array ordering/NULL defaults may differ; the native tuple
-   # guard above preserves every effective grant and database owner exactly.
    if database_acl_tuples(names['postgres'],json.loads(actual['postgres']['databaseGrants']))==database_acl_tuples(names['postgres'],json.loads(expected['postgres']['databaseGrants'])):actual['postgres']['databaseGrants']=expected['postgres']['databaseGrants']
   if actual!=expected:
    grants=None
@@ -411,8 +308,6 @@ def health(rows,timeout=180):
 def boot(rows):
  active=[r for r in rows if r['State'].get('Running')]
  first=[b.database_container(rows,v) for v in DB_VOLUMES]
- if any(r['Name']=='/scripta-postgres' for r in rows):first+=['scripta-postgres']
- if any(r['Name']=='/workcalendar-postgres' for r in rows):first+=['workcalendar-postgres']
  if any(name not in {r['Name'].lstrip('/') for r in active} for name in first):raise RuntimeError('Database must be running before recovery')
  for name in first:b.run(['docker','start',name])
  for r in active:
@@ -455,7 +350,7 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
  spec=importlib.util.spec_from_file_location('ftps',HERE/'ftps-sync.py');f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
  scratch=b.WORK/('production-stage-'+operation);items=[];stopped=False
  if scratch.exists() or scratch.is_symlink():raise RuntimeError('Restore staging path already exists')
- journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'preparing','productionStopped':False,'startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'paths':items,'scratch':str(scratch),'stagingContainers':[],'scriptaManagement':p.get('scriptaManagement'),'workcalendarManagement':p.get('workcalendarManagement')}
+ journal={'operation':operation,'manifestId':manifest_id,'manifestDigest':digest,'status':'preparing','productionStopped':False,'startedAt':b.now(),'containers':[r['Id'] for r in rows],'runningContainers':[r['Id'] for r in rows if r['State'].get('Running')],'paths':items,'scratch':str(scratch),'stagingContainers':[]}
  b.save(JOURNAL,journal) # Durable intent precedes decrypt, filesystem staging and Docker create.
  try:
   scratch.mkdir(mode=0o700);b.fsync_directory(scratch.parent)
@@ -468,17 +363,11 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    metadata=json.loads(b.run(['docker','volume','inspect',*sorted(volume_sources)]))
    if len(volume_sources)!=13 or any(v['Driver']!='local' or v.get('Options') for v in metadata):raise RuntimeError('Only enrolled local persistent volumes can switch')
    dbstages=stage_databases(scratch,runtime,snapshot,volume_sources,operation,journal)
-   scripta_stage=stage_scripta_postgres(scratch,runtime,snapshot,p,operation,journal) if p.get('scriptaRuntime') else None
-   workcalendar_stage=stage_workcalendar_postgres(scratch,runtime,snapshot,p,operation,journal) if p.get('workcalendarRuntime') else None
    for name,target in sorted(volume_sources.items()):
     source=dbstages.get(name) or extract_subset(scratch/(name+'.tar'),scratch/('unpack-'+name),'data')
     items.append({'target':target,'source':str(source)})
-   for target in selected_bind_roots(rows,p.get('scriptaManagement'),p.get('workcalendarManagement')):
-    if p.get('scriptaRuntime') and target==p['scriptaRuntime']['postgresData']:source=scripta_stage
-    elif p.get('workcalendarRuntime') and target==p['workcalendarRuntime']['postgresData']:source=workcalendar_stage
-    else:
-     artifact='scriptastudents-persistent.tar' if p.get('scriptaRuntime') and target in p['scriptaRuntime']['persistentRoots'] else 'workcalendar-persistent.tar' if p.get('workcalendarRuntime') and target in p['workcalendarRuntime']['persistentRoots'] else 'host-config.tar'
-     source=extract_subset(scratch/artifact,scratch/('bind-'+str(len(items))),'host'+target)
+   for target in selected_bind_roots(rows):
+    source=extract_subset(scratch/'host-config.tar',scratch/('bind-'+str(len(items))),'host'+target)
     items.append({'target':target,'source':str(source)})
    proof={'manifestId':manifest_id,'manifestDigest':digest,'ciphertextSource':download_proof['ciphertextSource'],'freshDownloadVerified':download_proof['actualDownloadVerified'],'previousReceiptDownloadVerified':download_proof['previousReceiptDownloadVerified'],'databaseSemanticsVerified':True,'productionModified':False,'scope':'enrolled-runtime-data-and-bind-configs','preserved':'OS-network-SSH-management-authority-and-current-queue','verifiedAt':b.now()}
    if qualify_only:
@@ -512,8 +401,6 @@ def restore(manifest_id,digest,profile_digest,operation,qualify_only=False):
    journal.update(status='stopping',productionStopped=True,selectedRunningContainers=[r['Id'] for r in desired_rows if r['State'].get('Running')],paths=items);b.save(JOURNAL,journal)
    # All clients stop before databases; cloudflared/SSH/network host plane remains up.
    dbnames={b.database_container(rows,v) for v in DB_VOLUMES}
-   if p.get('scriptaRuntime'):dbnames.add('scripta-postgres')
-   if p.get('workcalendarRuntime'):dbnames.add('workcalendar-postgres')
    for r in sorted(rows,key=lambda r:r['Name'].lstrip('/') in dbnames):
     if not r['State'].get('Running'):continue
     stopped=True;b.run(['docker','stop','--time','60',r['Id']],timeout=90)
@@ -546,12 +433,12 @@ def cleanup_staging(journal,rows):
   if {row['Id'] for row in stages}!=set(ids) or len(stages)!=len(ids):raise RuntimeError('Incomplete staged identity lookup')
   for row in stages:
    name=row['Name'].lstrip('/');planned=expected.get(name)
-   if not planned or name not in {'platform-restore-'+engine+'-'+operation[-12:] for engine in DB_VOLUMES.values()}|{'platform-restore-scripta-postgres-'+operation[-12:],'platform-restore-workcalendar-postgres-'+operation[-12:]}:raise RuntimeError('Unexpected staged container name')
+   if not planned or name not in {'platform-restore-'+engine+'-'+operation[-12:] for engine in DB_VOLUMES.values()}:raise RuntimeError('Unexpected staged container name')
    mounts=row['Mounts'];source=pathlib.Path(planned['source'])
-   if source.parent!=scratch or source.name not in set(DB_VOLUMES)|{'scripta-postgres-data','workcalendar-postgres-data'} or planned.get('id') not in (None,row['Id']) or row['Image']!=planned['image'] or row['HostConfig']['NetworkMode']!='none' or row['Config'].get('Labels',{}).get('platform.vps.restore.operation')!=operation:raise RuntimeError('Staging identity differs from journal')
+   if source.parent!=scratch or source.name not in DB_VOLUMES or planned.get('id') not in (None,row['Id']) or row['Image']!=planned['image'] or row['HostConfig']['NetworkMode']!='none' or row['Config'].get('Labels',{}).get('platform.vps.restore.operation')!=operation:raise RuntimeError('Staging identity differs from journal')
    if not any(m['Type']=='bind' and m['Source']==str(source) and m['Destination']==planned['destination'] for m in mounts) or any(m['Type']=='bind' and m['Source']!=str(source) for m in mounts):raise RuntimeError('Unexpected staged container mount')
   b.run(['docker','rm','-f',*ids])
- allowed={m['Source'] for row in rows for m in row['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows,journal.get('scriptaManagement'),journal.get('workcalendarManagement')))
+ allowed={m['Source'] for row in rows for m in row['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows))
  for item in journal.get('paths',[]):
   if not item.get('staged'):continue
   target=item.get('target','');expected_path=target+'.platform-restore-'+operation[-12:]
@@ -576,7 +463,7 @@ def recover_rollback():
   for row in rows:row['State']['Running']=row['Id'] in original
   health(rows);journal.update(status='rolled-back',runtimeHealthVerified=True,finishedAt=b.now());b.save(JOURNAL,journal)
   print(json.dumps({'status':'staging-reconciled','productionModified':False}));return
- allowed={m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows,p.get('scriptaManagement'),p.get('workcalendarManagement')))
+ allowed={m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='volume'}|set(selected_bind_roots(rows))
  operation=journal.get('operation','')
  if not re.fullmatch('[a-z0-9][a-z0-9-]{15,127}',operation):raise RuntimeError('Malformed rollback operation')
  for item in journal['paths']:
@@ -591,6 +478,8 @@ def recover_rollback():
 if __name__=='__main__':
  import sys,fcntl
  try:
+  spec=importlib.util.spec_from_file_location('extension_dispatch',HERE/'extension-dispatch.py');extension=importlib.util.module_from_spec(spec);spec.loader.exec_module(extension)
+  extension.dispatch_if_needed('production-restore.py')
   if os.geteuid()!=0 or sys.argv[1:]!=['--recover-rollback']:raise RuntimeError('Production restore only accepts an owner-admitted job; root may reconcile interrupted rollback')
   with (b.WORK/'operation.lock').open('a') as lock:
    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);recover_rollback()

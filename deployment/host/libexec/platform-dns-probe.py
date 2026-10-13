@@ -1,15 +1,50 @@
 #!/usr/bin/python3
 """Bounded DNS/DoH response checks for the local hosting infrastructure."""
-import http.client, os, pathlib, secrets, socket, ssl, struct, tempfile, time
+import http.client, ipaddress, os, pathlib, re, secrets, socket, ssl, stat, struct, tempfile, time
 
-HOST='scriptastudents.platform-infrastructure.com'
-ADDRESS='192.168.1.202'
-CA='/home/platform_infrastructure/v1-fresh-runtime/certs/local-cert.pem'
-DEST='/home/platform_infrastructure/v1-fresh-runtime/local-private-backup/data/runtime-state/node-exporter-textfile/platform_dns_probe.prom'
+HOST=None
+ADDRESS=None
+DEST=None
+CA='/etc/platform-infrastructure/tls/portal-root.pem'
+CONFIG='/etc/platform-infrastructure/dns-probe.env'
+OUTPUT_ROOT=pathlib.Path('/var/lib/platform-infrastructure/node-exporter-textfile')
+
+def protected_path(path, directory=False):
+    for item in [path, *path.parents]:
+        info=item.lstat()
+        expected_dir=directory or item != path
+        if (not (stat.S_ISDIR(info.st_mode) if expected_dir else stat.S_ISREG(info.st_mode))
+                or info.st_uid != 0 or info.st_mode & 0o022):
+            raise ValueError('DNS probe path must be root-owned and protected')
+
+def configure():
+    global HOST,ADDRESS,DEST,CA
+    HOST=os.environ.get('PLATFORM_DNS_PROBE_HOST','')
+    ADDRESS=os.environ.get('PLATFORM_DNS_PROBE_ADDRESS','')
+    DEST=os.environ.get('PLATFORM_DNS_PROBE_OUTPUT','')
+    if not HOST and not ADDRESS and not DEST:
+        return False
+    config=pathlib.Path(CONFIG)
+    if config.exists() or config.is_symlink():protected_path(config)
+    if len(HOST)>253 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+',HOST):
+        raise ValueError('Explicit valid DNS hostname required')
+    ADDRESS=str(ipaddress.IPv4Address(ADDRESS))
+    target=pathlib.Path(DEST)
+    if (target.parent != OUTPUT_ROOT or not re.fullmatch(r'[a-zA-Z0-9_-]+\.prom',target.name)
+            or str(target) != DEST):
+        raise ValueError('Output must be a .prom file in the protected metrics directory')
+    protected_path(target.parent, directory=True)
+    if target.exists() or target.is_symlink():protected_path(target)
+    CA=os.environ.get('PLATFORM_DNS_PROBE_CA',CA)
+    ca=pathlib.Path(CA)
+    if ca.parent != pathlib.Path('/etc/platform-infrastructure/tls') or str(ca) != CA:
+        raise ValueError('CA must be in the dedicated infrastructure TLS directory')
+    protected_path(ca)
+    return True
 
 def portal_tls_context():
     # Explicit dedicated trust store: never add ambient system roots here.
-    ca=pathlib.Path('/etc/platform-infrastructure/tls/portal-new-root.pem')
+    ca=pathlib.Path(CA)
     info=ca.lstat()
     if ca.is_symlink() or not ca.is_file() or info.st_uid!=0 or info.st_mode & 0o022:
         raise ValueError('Invalid dedicated Portal CA ownership or permissions')
@@ -75,6 +110,9 @@ def probe(protocol):
     validate(answer,ident)
 
 def main():
+    if not configure():
+        print('notconfigured')
+        return
     lines=['# TYPE platform_dns_probe_success gauge','# TYPE platform_dns_probe_duration_seconds gauge']
     for protocol in ('udp','tcp','doh'):
         start=time.monotonic()

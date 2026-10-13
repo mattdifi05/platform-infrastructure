@@ -97,12 +97,14 @@ I container usano prefisso `enterprise-`, network `enterprise_net` e volumi `ent
 Il core si renderizza e passa i gate con zero applicazioni. Per collegare un
 workload, la repository applicativa fornisce un manifest, un overlay Compose
 image-only, un environment non-secret ignorato da Git e le proprie migrazioni.
-La preparazione non e' un comando portabile da eseguire con `.env.vps`. La V1
-LOCAL_PRIVATE corrente usa l'ordine Compose e i profili fissati in
-`config/v1-local-private-source-lock.json`; le applicazioni vengono costruite da
-checkout immutabili e il render finale deve rispettare lock, isolamento,
-network e secret dichiarati. I percorsi di release VPS restano separati e
-fail-closed: questo checkout non autorizza una mutazione production remota.
+La preparazione non e' un comando portabile da eseguire con `.env.vps`. Il
+profilo generico LOCAL_PRIVATE usa l'ordine Compose e i profili fissati in
+`config/v1-local-private-core-profile.lock.json`. Una nuova installazione
+parte senza route o sorgenti applicative. Un host esistente puo' aggiungere
+un'estensione esplicita montata in sola lettura da una directory host-only
+esterna al checkout; i dati e i profili host non vengono dedotti dal repository
+generico. I percorsi di release VPS restano separati e fail-closed: questo
+checkout non autorizza una mutazione production remota.
 
 La preparazione valida digest immutabili, nomi, route, secret dichiarati,
 network e budget, confronta render core e combinato e scrive un lock `0600` con
@@ -1025,20 +1027,21 @@ La piattaforma hosting deve esporre runtime, database, Redis, proxy, WAF,
 backup, observability e deployment sicuri. I flussi utente specifici restano
 fuori dal GO/NO-GO infra.
 
-## V1.1 LOCAL_PRIVATE corrente
+## LOCAL_PRIVATE host profile
 
-La V1.1 attiva non e' descritta dal solo core. Il contratto riproducibile
-e' composto da questa repository, dal lock
-`config/v1-local-private-source-lock.json` e dalle tre revisioni applicative
-immutabili indicate nel lock. Le sorgenti vengono materializzate sotto
-`PHP_PROJECTS_DIR` con le directory `fiplatform`, `stexor`, `anniversary`,
-`matthewdifilippo`, `opstudents`, `stream` e `workcalendar`; dati, `.env`,
-upload, log e cache restano esterni a Git.
+Il profilo generico LOCAL_PRIVATE comprende solo i servizi infrastrutturali,
+l'overlay backup e `config/v1-local-private-core-profile.lock.json`. Una nuova
+installazione parte con zero route applicative e non materializza sorgenti
+applicative. Gli host esistenti possono caricare un'estensione router esplicita
+da una directory host-only esterna al checkout. Il router usa l'estensione solo
+quando il file root-owned, read-only e con digest atteso e' presente; se manca,
+non attiva route di progetto.
 
 Il runtime si rende caricando, nell'ordine registrato nel lock, il core, gli
 overlay VPS/WAF, `compose.backup-scheduler.yaml`, gli overlay runtime/network,
-`compose.local-private.yaml`, `compose.local-private-backup.yaml`, gli overlay
-applicativi e per ultimo `compose.greenfield.yaml`. Il vecchio profilo provider
+`compose.local-private.yaml`, `compose.local-private-backup.yaml` e per ultimo
+`compose.greenfield.yaml`. I profili host-only aggiuntivi restano esterni al
+checkout. Il vecchio profilo provider
 `backup` resta inattivo. L'overlay LOCAL_PRIVATE rende invece canonici
 `docker-action-broker` e `backup-scheduler`: il broker e' l'unico owner di
 `docker.sock`; lo scheduler usa soltanto il suo UDS ed e' ammesso alle quattro
@@ -1084,12 +1087,11 @@ metriche per-container nel textfile collector. cAdvisor resta nel profilo
 inattivo `raw-host-metrics-disabled`; Prometheus, alert e dashboard non devono
 dipendere da quel target nel render Dell.
 
-Le quattro immagini Stexor vengono costruite dalla revisione bloccata con
-`compose.local-private-applications-build.yaml`; le altre applicazioni usano
-runtime PHP/Node con sorgenti bind-mounted. `runtime.env`, certificati,
+I servizi workload opzionali e i relativi overlay Compose appartengono a profili
+host-only e non sono inclusi nel lock generico. `runtime.env`, certificati,
 segreti, stato Control Center e volumi database non appartengono a Git e
-devono essere ripristinati separatamente. Inventario, eccezioni intenzionali
-e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
+devono essere ripristinati separatamente. L'inventario del singolo host resta
+documentazione esterna e non e' un input della prima installazione.
 
 ## File principali
 
@@ -1104,9 +1106,8 @@ e prova di parita' sono in `V1.0-LIVE-PARITY.md`.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
 - `compose.local-private-backup.yaml`: attivazione backup V1.1 Dell con capability firmate per catalogo, job, sync off-site e prova restore off-site isolata; credenziali off-site esterne.
-- `compose.local-private-applications.yaml`: topologia applicativa esatta della V1.1 LOCAL_PRIVATE.
-- `compose.local-private-applications-build.yaml`: build riproducibile delle immagini Stexor bloccate.
-- `config/v1-local-private-source-lock.json`: repository, commit, tree, layout sorgenti e ordine Compose della V1.1.
+- `config/v1-local-private-core-profile.lock.json`: ordine Compose e renderer del profilo infrastrutturale generico.
+- `project-router/HOST-EXTENSION.md`: contratto per un'estensione router host-only facoltativa.
 - `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
 - `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo sul target, dentro l'image ID ops autenticato. Un env non-default deve essere l'esatto `/srv/platform-infrastructure/release-states/<releaseId>-<envSha256>/environment.env`, root-owned, group-readable dal deployment e mode `0640`; il bind nel runner e' file-only/read-only. Il lock risultante e' target-local, non portabile. Con la policy inclusa il percorso termina `EXTERNAL-PENDING`.
 - `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.

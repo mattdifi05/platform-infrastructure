@@ -1,14 +1,31 @@
 # Fresh VPS backup preparation
 
-Status observed on 2026-10-06: encrypted capture and FTPS publication are enabled
-and two remotely verified VPS recovery points are retained. The home shared-quota
-writer is qualified under its existing generation-19 authority. The VPS has an
-independent signed root profile and protected recovery-key custody on the Mac.
-Manual production recovery uses an independent signed-profile gate. Activation
-requires native PostgreSQL/MariaDB staging qualification of captured data and
-permissions; the live catalog reports the current gate and queue/timer state.
-Owner passkey enrollment is complete. Server AI is active through the official
-OpenAI API; the empty VPS has 22 enrolled infrastructure containers and no hosted apps.
+This repository installs infrastructure-only backup code. Enrollment starts with
+the reviewed platform services and zero application resources. A host may retain
+an existing signed profile with additional application fields. The four backup
+entrypoints verify that profile's public-key signature and dispatch those
+operations to the exact host-only bundle at
+`/etc/platform-vps-backup/extensions/legacy-vps-backup`. The bundle is separate
+from Git and is never installed by `install.sh`. Its `manifest.json` uses schema
+`platform.vps-backup-code-extension/v1` and lists the SHA-256 of every code file.
+The dispatcher requires root-owned, non-symlink, non-writable-by-others paths and
+verifies every listed file before execution. Missing or changed code fails closed;
+the generic runner cannot silently drop legacy profile fields or restore scope.
+
+The extension is a host-specific compatibility boundary for existing signed
+profiles and persistent manifests. Do not edit an enrolled profile, replace its
+backup authority, or install a new bundle as a substitute for the native signed
+admission and recovery qualification procedures. Clean installations require no
+extension. Application resources are supplied by separate host-specific code and
+signed admission; this repository defines no application catalog defaults.
+
+Status: **capture and production recovery gates remain closed pending qualification**.
+The dedicated remote namespace and shared writer quota admission are prepared; see
+`HOME-FORWARD-QUOTA.md`. Namespace preparation is not a verified recovery point.
+The runner implements capture and authenticated encrypted verification. The signed
+root profile currently denies capture and offsite publication. Timer is not enabled.
+AI admin continues to announce zero backup jobs. Human first-owner/passkey setup must precede
+the first full server backup.
 
 ## Destination and quota
 
@@ -29,9 +46,8 @@ peer deletion is performed. Lost sessions leave an abandoned lock; an operator m
 first reconcile both writers before removing it. No age-based lock theft is allowed.
 A local configuration flag alone is **not** evidence the other host cooperates.
 
-`home-shared-quota.patch` is a historical review artifact, not a replacement for
-the installed home helper. The actual home forward change is qualified at generation
-19; see `HOME-FORWARD-QUOTA.md`. It preserves owner marker and public receipt quota at 70 GB while reserving
+`home-shared-quota.patch` is a review artifact, not applied to the source helper or
+home. It preserves owner marker and public receipt quota at 70 GB while reserving
 peer bytes in the existing helper's working capacity. All home mutation CLI paths
 are wrapped, including generation supplements. Read-only latest selection remains
 unchanged. Existing retention/point verification is unchanged. The module SHA is
@@ -39,6 +55,10 @@ transitively bound by the patched helper. Applying this patch changes the helper
 admission hash and requires the existing signed admission/source qualification
 workflow; do not substitute hashes in an active document, reuse a home private key,
 or claim a new generation from stale proof.
+`home-pin-inventory.py` observes the existing host-only helper at
+`/usr/local/libexec/platform-ftps-backup.py`; the generic VPS installer does not
+install or replace that home backend. Its admission chain and algorithm remain
+under the existing host's authority.
 
 Qualification before activation:
 
@@ -62,9 +82,7 @@ Qualification before activation:
 mounts and volume names from projects `platform_infra_vps` and `platform_server_ai`.
 It refuses unclassified running containers and omits environment/command values.
 This is a capture plan, **not** a signed backup manifest or successful proof.
-Observed 2026-10-06 after restricted host metrics activation: 22 containers and
-13 named volumes. The four additional collector binds contain regenerable kernel
-statistics and an empty filesystem metadata directory.
+Observed 2026-10-06: 21 containers, 13 named volumes, 54 distinct bind sources.
 Regenerate after any core/container change. No source/project reader is admitted.
 
 Capture all persistent volumes or explicitly justify their reconstruction; do not
@@ -84,45 +102,44 @@ be parameterized for this host. Existing native catalog covers keycloak DB,
 RustFS/Control Center/Secret Manager; it does **not** currently cover all above
 volumes. Do not label its existing catalog a complete VPS backup.
 
-## Authority, custody and portal contracts
+## Remaining native integration (blocking activation)
 
-- The installed VPS helpers consume a root-owned signed VPS profile and only the
-  exact authorized FTPS JSON. They do not copy rclone/OneDrive credentials or
-  replace the home backup authority.
-- VPS encryption, manifest HMAC and Ed25519 profile keys are independent. Protected
-  custody exists on the Mac at
-  `$HOME/.local/share/platform-recovery/platform-server-public-genesis-20261006`
-  (directory 0700, files 0600). The existing home private authority was not read,
-  copied or hashed. The VPS root profile is distinct from the home v2 broker admission.
-- The portal uses its existing authenticated queue and immutable manual-restore
-  contracts. Restore requires a fresh owner passkey session, CSRF, a reviewed
-  manifest/profile binding and explicit typed confirmation of the selected point.
-  Queue replay state and the management authority are preserved during recovery.
-- Capture and verified FTPS publication have run. Activating the queue, weekly VPS
-  timer and independent manual restore gate requires successful native staging
-  qualification of persisted database data, permissions and necessary configuration.
-  Read the live signed profile and catalog rather than inferring activation from source.
+- Parameterize the existing capture/dedup/restore helpers with a root-owned VPS
+  profile; preserve default home behavior. Read FTP credentials only from the exact
+  authorized native FTPS config; no complete rclone config or OneDrive OAuth copy.
+- Native v2 admission currently fixes the home folder, host paths, broker identity
+  and previous FTPS activation proof. Add an explicit fresh-host genesis flow whose
+  genuine generation-1 authority and first local manifest precede the first remote
+  receipt. Do not synthesize activation evidence or repurpose home generation 18.
+- Generate new VPS encryption/HMAC/repository credentials using native CSPRNG and a
+  fresh admission authority under protected custody. Mac recovery custody must be
+  an explicitly protected dedicated location containing the recovery material and
+  public inventory; do not read/copy/hash the existing Mac private authority leaf.
+  Fresh VPS-only encryption and manifest keys and Ed25519 root-profile authority were generated on the VPS. Protected independent custody exists on the Mac at `$HOME/.local/share/platform-recovery/platform-server-public-genesis-20261006` (directory 0700, files 0600). No home key was read or copied.
+- Reuse existing authenticated backup queue/manual-restore portal contracts and
+  immutable operation bindings; a shell backup command is not panel integration.
+  Manual restoration must preserve owner freshness/passkey checks and persistent
+  operation/replay state, with first restore isolated before any production action.
+- Complete product owner-authenticated queue wiring and native v2 admission integration before announcing panel restore capability. The root capture profile is a distinct signed configuration and must not be presented as the existing v2 broker admission.
+- Backup runtime/service/timer files are installed but no timer is enabled; no capture or upload has run.
 
-The VPS timer is weekly Friday 06:05 Europe/Rome with Persistent=true. This is
-provisional while Hostinger has weekly backup enabled but no available point or
-exposed weekday. The server-owned systemd timer remains the backup scheduler;
-when the first provider backup timestamp becomes available, choose a VPS timer
-slot about 3.5 days from the observed provider backup and verify the next fire
-time on the server. Until then, retain Friday 06:05. The home timer keeps its
-existing Monday/Wednesday/Friday schedule. The VPS timer runs capture followed by
-FTPS publication; its capture/offsite gates are enabled. ExecStopPost
+Timer is M/W/F 04:05 Europe/Rome with Persistent=true. It runs capture followed by
+FTPS publication; both signed profile gates are currently false. ExecStopPost
 recovers only writer container IDs in the protected pause journal. Targeted local
 quota tests cover traversal, unsupported objects, missing sizes, two-folder totals,
-contention, unqualified peer and capacity failure; provider MKD exclusivity was verified with two TLS sessions, and both installed
-writers were qualified through their existing native authority mechanisms.
+contention, unqualified peer and capacity failure; provider MKD semantics and native
+admission integration have not yet been tested live.
 
 
 ## Implemented native runner
 
 `enroll.py` creates an independent signed root-owned capture profile from actual
 Docker IDs/images/mounts, with all execution gates false. Existing enrollment is
-never overwritten. `install.sh` copies runtime and the existing product manifest
-contract into root-owned paths, preventing platform-user code substitution.
+never overwritten. `install.sh` copies runtime and the pure product backup contract
+into root-owned paths, preventing platform-user code substitution. The installed
+manifest and queue entrypoints import `core-contracts.mjs` directly, so a clean
+backup installation needs no Control Center host extension. Existing signed
+application profiles continue through the separate host-only legacy bundle.
 
 `platform-vps-backup-runner.py capture` exports online PostgreSQL/MariaDB logical
 backups, snapshots the other volume filesystems and encrypted host configuration,
@@ -145,10 +162,11 @@ Interrupted remote uploads require reconciliation; unknown objects are never
 silently deleted. `--restore-manifest-id` verifies one immutable authenticated point
 in protected temporary storage and never restores over production.
 
-Initial prequalification FTPS observation on 2026-10-06: certificate verified, home namespace 38
-files / 26,209,164,424 bytes, VPS namespace absent (550). That initial observation was not a backup. Shared quota, passkey enrollment and
-subsequent encrypted capture/upload/download verification are now complete; the
-activation condition is native recovery qualification as described above.
+Read-only FTPS observation on 2026-10-06: certificate verified, home namespace 38
+files / 26,209,164,424 bytes, VPS namespace absent (550). This was not an upload or
+proof of backup. Root must qualify HOME shared quota before creating the VPS folder
+or opening offsite execution. Root must also confirm user passkey setup before
+opening the full-capture gate.
 
 
 ## Existing owner-authenticated panel queue
@@ -168,14 +186,14 @@ The separately gated `restore-production` operation implements same-host runtime
 recovery as described below. It remains disabled until native semantic recovery
 of a real selected point has passed and root explicitly authorizes activation.
 
-The queue timer and periodic backup timer were enabled on 2026-10-06 after root
-activation. Catalog output records their actual states; manual requests are rejected
-while the queue worker is inactive. `compose.control-center.yaml` supplies only the read-only
+The queue timer and periodic backup timer stay disabled until root activation.
+Catalog output records actual timer states; manual requests are rejected while the
+queue worker is inactive. `compose.control-center.yaml` supplies only the read-only
 catalog and existing typed queue mounts, not Docker or arbitrary host file access.
 Applying that overlay recreates Control Center and requires refreshing both AI and
 backup pins from the actual new container before enabling the native worker.
 
-The VPS schedule is weekly Friday 06:05 Europe/Rome, provisionally staggered from home. Align the server-owned systemd timer about halfway between provider backups only after an actual Hostinger weekly recovery timestamp is visible. Hostinger frequency alone does not establish an existing recovery point. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
+The VPS schedule is weekly Friday 06:05 Europe/Rome, provisionally staggered from home. Align it with the first actual Hostinger weekly recovery point when its timing is known. Hostinger frequency alone does not establish an existing recovery point. A proven existing shared lease triggers up to 30 minutes of bounded retries in the existing FTPS runner; other failures do not retry blindly. No lock stealing or successful-skip result is used.
 
 
 ## Manual production runtime recovery (activation gate closed)
@@ -273,56 +291,3 @@ binds for `/proc/stat`, `/proc/meminfo`, `/proc/1/mountinfo`, and the empty
 regenerable; they are not captured or traversed. Recreate the empty metadata directory
 with the metrics deployment procedure for cold recovery. No procfs/sysfs/runtime
 capture root is accepted, and no host root or Docker socket mount is admitted here.
-
-## Finite Scripta Students runtime extension
-
-The native capture and production-restore source now preserves the reviewed
-`scriptaRuntime` extension across future installations. It admits only the exact
-four application names under Compose project `scriptastudents_vps`:
-`node-scriptastudents`, `scripta-postgres`, `students-beta-redis`, and
-`scriptastudents-ingress`. Their real IDs, immutable image identities, labels and
-mounts come from the operator-reviewed signed profile; no runtime ID, credential,
-authority key or provider receipt is embedded in these helpers. Core membership,
-the thirteen named volumes, generation/predecessor and management/replay boundaries
-remain unchanged. Without that signed extension the original core-only scope
-continues to work and arbitrary extra application containers are refused.
-
-Capture pauses only the application writer and Redis under the existing bounded
-pause. It first drains submitted Scripta SQL, verifies a real local Redis AOF
-`WAITAOF` acknowledgement through one authenticated TLS connection, and records
-that receipt before freezing Redis. Mutable application binds receive their own
-consistent artifact; live PostgreSQL data directories are not copied in the later
-unpaused host archive. The dedicated application cluster uses its native logical
-dump, count/role/membership/ownership/ACL semantics and numeric config metadata.
-
-Restoration is same-host, with the exact captured image/mount topology. The
-dedicated PostgreSQL stage uses `network=none`, no published ports, the official
-entrypoint and native logical import/semantic comparison. `ssl=off` applies only
-inside that isolated staging engine; production TLS and private configuration
-remain preserved. Existing same-host authority and operation gates, protected
-journals, rollback paths and explicit production-restore confirmation are not
-relaxed. Source installation does not itself create an admission or prove capture,
-offsite download, isolated boot qualification or a production restore.
-
-The coordinator's separate qualification procedure also validates Docker 29 OCI
-index/manifest/config/layer identity chains and legacy image archives, rejects
-missing native or ambiguous unknown/attestation blobs, and records explicitly
-foreign uncaptured variants as a same-host limitation. A missing unknown/unknown
-attestation is excluded only when valid Docker annotations reference exactly one
-explicitly foreign sibling manifest in the same hash-verified parent and both
-blobs are absent. Duplicate/native/unknown/missing-subject references and any
-present-but-corrupt blob fail; omitted foreign attestations have a separate
-counter and receive no trust or cross-platform restore claim. It checks private staging capacity
-before decryption. Neither capture nor qualification fetches unreviewed image
-blobs, replaces existing keys or relabels old core-only points as containing
-Scripta. A Scripta point adds exactly one persistent resource (16 instead of 15);
-retained preceding points remain visible but cannot restore the current extended
-runtime.
-
-Local regressions cover exact finite membership, pin drift, unchanged resource
-scope, authenticated Redis durability and pause ordering, application PostgreSQL
-staging and protected management bind boundaries. These are synthetic tests;
-coordinator evidence remains required for actual host/backup completion claims.
-Use Python 3.12 or newer, as the existing restore boundary requires tarfile's
-safe `data` extraction filter. The legacy Python 3.9 bundled with macOS cannot
-execute that boundary and must not be worked around by removing the filter.

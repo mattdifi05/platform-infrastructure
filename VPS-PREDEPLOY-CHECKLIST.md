@@ -1,10 +1,11 @@
 # Platform VPS Pre-Deploy Checklist
 
 Never apply the fresh-host commands to the existing V1 host. LOCAL_PRIVATE
-maintenance uses the exact order and profiles in
-`config/v1-local-private-source-lock.json`, protected `main`, a verified backup
-and an explicit rollback point. Do not teardown, prune, reinstall or rebuild the
-current runtime outside that bounded operator procedure.
+maintenance uses that host's externally managed profile and runtime manifest,
+protected `main`, a verified backup and an explicit rollback point. The generic
+repository does not contain the existing host's application profile. Do not
+teardown, prune, reinstall or rebuild the current runtime outside that bounded
+operator procedure.
 
 ## Fresh-host bootstrap only
 
@@ -35,22 +36,20 @@ They are not recovery or admission instructions for the existing V1 server.
 
 ## Repository And Environment
 
-- [ ] App repository and `platform-infrastructure` cloned under the reviewed
-      server path. Recommended generic path is `/opt/platform`; the current
-      reference server uses `/home/platform_infrastructure/platform-infrastructure`
-      for the infra repo and `/home/platform_infrastructure/src` for external
-      application sources. The external `src` path is not part of this
-      repository.
+- [ ] `platform-infrastructure` cloned under the reviewed server path. The
+      recommended generic path is `/opt/platform`; the application source root
+      remains an empty, external directory until an independently reviewed
+      workload profile is activated.
 - [ ] `.env` created from `.env.example` and `.env.vps.example`.
-- [ ] `config/v1-local-private-source-lock.json` reviewed and its ordered Compose
-      render reproduced from protected `main` before touching the current V1.
+- [ ] `config/v1-local-private-core-profile.lock.json` reviewed and its
+      app-free ordered Compose render reproduced from protected `main`.
 - [ ] No `localhost`, `example.com`, `change_me` or placeholder production values remain.
 - [ ] `sh ./scripts/infra-secret-manager.sh init` executed.
 - [ ] `sh ./scripts/infra-secret-manager.sh verify` passed.
 - [ ] `sh ./scripts/secret-rotation-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/secret-rotation/` were archived outside Git.
 - [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the canonical VPS+WAF stack, including `compose.runtime.yaml` and `compose.networks.yaml` loaded last.
 - [ ] The zero-workload core render passed independently and contains no application backend, frontend, worker, schema migration or application secret requirement.
-- [ ] Each attached application has an external catalog entry, application-owned manifest and Compose overlay, digest-pinned images, ignored non-secret runtime environment and application-owned migration/rollback procedure.
+- [ ] Each attached workload has an external catalog entry, workload-owned manifest and Compose overlay, digest-pinned images, ignored non-secret runtime environment and workload-owned migration/rollback procedure.
 - [ ] The configured trusted ops producer delivered a `verified` lock with mode `0600`; repository-local preparation is `EXTERNAL-PENDING`, and core/combined render diffs contain only the declared workload services, routes, networks and secrets.
 - [ ] `sh ./scripts/hosted-workload-lock.sh <lock-file> verify` passed immediately before the approved workload activation window.
 - [ ] `sh ./scripts/network-segmentation-check.sh --envFile .env` passed and its non-secret report under `reports/network-segmentation/` was archived outside Git.

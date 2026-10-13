@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { executeCloudflareDnsChange, listCloudflareDns, parseCloudflareDnsZones, readCloudflareDnsStatus } from '../providers/cloudflare-dns.mjs';
-const zones = ['matthewdifilippo.com', 'scriptastudents.com', 'stexor.com'].map((name, i) => ({ name, id: String(i + 1).repeat(32) }));
+const zones = ['alpha.example', 'beta.example', 'gamma.example'].map((name, i) => ({ name, id: String(i + 1).repeat(32) }));
 
-test('DNS integration is absent unless explicitly mounted; exact three-zone scope only', async () => {
+test('DNS integration is absent unless explicitly mounted; protected configurable zone scope only', async () => {
   assert.equal(await readCloudflareDnsStatus({}), null);
   assert.deepEqual(parseCloudflareDnsZones(JSON.stringify({ zones })), zones);
-  assert.throws(() => parseCloudflareDnsZones(JSON.stringify({ zones: [...zones.slice(0, 2), { name: 'fireport.example', id: '4'.repeat(32) }] })));
+  assert.throws(() => parseCloudflareDnsZones(JSON.stringify({ zones: [...zones.slice(0, 2), { name: '../invalid', id: '4'.repeat(32) }] })));
   assert.throws(() => parseCloudflareDnsZones(JSON.stringify({ zones: zones.map(z => ({ ...z, id: '../accounts' })) })));
   assert.throws(() => parseCloudflareDnsZones(JSON.stringify({ zones: zones.map(z => ({ ...z, id: zones[0].id })) })));
 });

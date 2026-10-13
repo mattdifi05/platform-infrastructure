@@ -2,14 +2,14 @@
 // Uses the product's existing manifest contract and HMAC signature domain.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import {createBackupJobDocument,createBackupManifestDocument,parseBackupManifestDocument,backupDocumentDigest} from '../../control-center/backup/contracts.mjs';
+import {createBackupJobDocument,createBackupManifestDocument,parseBackupManifestDocument,backupDocumentDigest} from '../../control-center/backup/core-contracts.mjs';
 const [action,input,keyFile,output]=process.argv.slice(2);
 const key=fs.readFileSync(keyFile);
 if(key.length!==64) throw Error('Dedicated native manifest key must contain 64 bytes');
 const mac=(id,digest)=>crypto.createHmac('sha256',key).update(`platform-backup-manifest-v1\n${id}\n${digest}\n`).digest('base64url');
 const x=JSON.parse(fs.readFileSync(input,'utf8'));
 if(action==='sign') {
- const job=createBackupJobDocument({id:x.jobId,operation:'backup',scope:x.scope || {kind:'platform',id:'platform'},resources:x.resources,requestedBy:'vps-native-operator',environment:'production',createdAt:x.createdAt});
+ const job=createBackupJobDocument({id:x.jobId,operation:'backup',scope:{kind:'platform',id:'platform'},resources:x.resources,requestedBy:'vps-native-operator',environment:'production',createdAt:x.createdAt});
  const manifest=createBackupManifestDocument({id:`manifest-${x.jobId}`,job,artifacts:x.artifacts,createdAt:x.createdAt});
  if(!manifest.coverage.complete)throw Error('Incomplete manifest');
  const digest=backupDocumentDigest(manifest);

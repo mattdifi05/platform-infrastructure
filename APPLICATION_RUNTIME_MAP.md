@@ -1,67 +1,53 @@
-# Application Runtime Map
+# Application Runtime Boundary
 
-Snapshot UTC: 2026-08-30T13:51:06Z
+This repository describes the generic platform runtime. A clean installation
+starts with an empty application catalog: no application source, application
+repository, application database, app-specific hostname, or route is seeded by
+the platform repository.
 
-Source of truth: effective live Compose, running containers, Control Center
-state, database catalogs, source manifests and functional host probes. The
-immutable source coordinates are in `config/v1-local-private-source-lock.json`.
+The VPS provides the shared platform base. Existing home and VPS installations
+keep their own application sources, catalogs, credentials, data and route
+profiles. Host-specific routes and service mappings live in a read-only,
+digest-pinned extension outside Git at
+`/run/platform-host-extension/project-router.json`. An absent extension means
+that the project router exposes no application routes. Keep the home and VPS
+extensions and their secrets independent.
 
 ## Platform boundary
 
-The platform repository owns Compose, networks, routers, WAF, common runtime
-images and Control Center. Application source is versioned in its owning
-private repository and materialized on the host under
-`/home/platform_infrastructure/v1-fresh-data/src`. Application `.env` files,
-uploads, logs, caches and persistent data are external state.
+The platform repository owns Compose, networks, the generic project router,
+WAF, shared runtime images and Control Center. Application source remains in
+its owning repository and is materialized on the relevant host. Application
+environment files, uploads, logs, caches, databases, catalogs and credentials
+are external host state. None of these host-specific inputs belongs in the
+generic installation profile.
 
-## Published host matrix
+## Generic runtime contract
 
-| Host | Runtime target | Source owner | Persistent dependency |
-| --- | --- | --- | --- |
-| `portal.platform-infrastructure.com` | `control-center:8080` | platform repository | PostgreSQL `control_auth` schema and Control Center state |
-| `auth.platform-infrastructure.com` | `keycloak:8080` | pinned Keycloak image plus platform config | PostgreSQL `keycloak` |
-| `api.platform-infrastructure.com` | `backend:3000` | `mattdifi05/Stexor-account` | PostgreSQL `stexor`, Redis and NATS |
-| `account.platform-infrastructure.com` | `node-account:3000` | `mattdifi05/Stexor-account` | Stexor backend/PostgreSQL `stexor` |
-| `ui.platform-infrastructure.com` | `node-ui:3000` | `mattdifi05/Stexor-account` | Stexor backend/PostgreSQL `stexor` |
-| `opstudents.platform-infrastructure.com` | `node-opstudents:3000` | `mattdifi05/Platform-hosted-applications` | no application database |
-| `anniversary.platform-infrastructure.com` | `php-anniversary:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `anniversary` |
-| `fiplatform.platform-infrastructure.com` | `php-fiplatform:80` | `mattdifi05/FeI-Platform` | MariaDB `fiplatform` |
-| `fireport.platform-infrastructure.com` | alias of `php-fiplatform:80` | `mattdifi05/FeI-Platform` | MariaDB `fiplatform` |
-| `matthewdifilippo.platform-infrastructure.com` | `php-matthewdifilippo:80` | `mattdifi05/Platform-hosted-applications` | no application database |
-| `stream.platform-infrastructure.com` | `php-stream:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `stream` |
-| `workcalendar.platform-infrastructure.com` | `php-workcalendar:80` | `mattdifi05/Platform-hosted-applications` | MariaDB `workcalendar` |
+The project router starts with only the Control Center upstream allowlisted.
+Local compatibility mode accepts application routes only from the pinned
+external host extension. The extension binds each route to its owning source,
+project, runtime type and service. Compose defaults, CI fixtures and the clean
+install profile contain no concrete application service or repository.
 
-The 2026-08-30 live probe passed all 12 hosts. CoreDNS is authoritative for
-`platform-infrastructure.com` on the LAN and maps the apex and wildcard to
-`192.168.1.164`; Traefik routes the explicit portal/auth/API surfaces and the
-project-router resolves registered application hosts.
-
-## Workload components
-
-| Source | Runtime services | Build/runtime contract |
-| --- | --- | --- |
-| FeI Platform | `php-fiplatform` (`fireport` is an alias) | common pinned PHP-Apache image, bind-mounted locked source |
-| Stexor | `backend`, `web`, `worker-jobs`, `worker-notifications`, `node-account`, `node-ui` | four local images built by `compose.local-private-applications-build.yaml`; account/UI bind-mounted from the same locked checkout |
-| Hosted applications | `node-opstudents`, `php-anniversary`, `php-matthewdifilippo`, `php-stream`, `php-workcalendar` | pinned Node or common pinned PHP-Apache runtime, bind-mounted locked source |
-
-The broad shared `php-apache` service is disabled by the current application
-overlay. No application source is recovered from a mutable image alone.
+The shared PHP runtime is generic. Optional host workloads can use pinned Node,
+PHP or static runtime services when that host's external profile authorizes
+them. Application runtimes and their data remain independently managed on each
+host; the platform base does not copy or synchronize application catalogs
+between home and VPS.
 
 ## Persistent state boundary
 
-PostgreSQL persistent databases are `keycloak` and `stexor`; Control Center
-authentication lives in its PostgreSQL `control_auth` schema. MariaDB
-application databases are `anniversary`, `fiplatform`, `stream` and
-`workcalendar`. Redis/NATS operational state, certificates, Docker volumes,
-Control Center catalog/Vault/backup metadata, application uploads and every
-secret remain outside Git and must be restored from the recovery material.
+Platform databases, Control Center state, certificates, Docker volumes,
+backup metadata and platform credentials remain external to Git. Each host
+retains its own application databases, uploaded files, queues and secrets.
+Recovery and synchronization must preserve those host boundaries and must not
+replace an existing host catalog with the empty clean-install catalog.
 
-No user MinIO object set is required by the current application inventory.
-MinIO configuration and any required empty bucket/policy are runtime state,
-not application source.
+## Clean-install gate
 
-## Reproduction gate
-
-No application, source directory, database, alias, route or external-state
-class in this map may be removed during V1.1 cleanup until the clean-checkout
-proof in `V1.0-LIVE-PARITY.md` is PASS. This map authorizes no deletion.
+A fresh installation must render and start with an empty application catalog
+and zero project routes when no host extension is mounted. Existing host routes
+become available only after that host's separately maintained extension has
+been validated and pinned. A successful platform-only installation does not
+claim that any application has been installed or synchronized.

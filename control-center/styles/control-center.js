@@ -1725,14 +1725,14 @@
       var selected = plan; invalidate();
       try {
         var result = await api({ manifestId: selected.manifestId, restoreMode: selected.restoreMode, apply: true, reviewedManifestId: selected.manifestId, confirm: selected.confirmationRequired });
-        status.textContent = 'Ripristino accodato (' + result.job.id + '). Il risultato non è ancora verificato. ' + (projectId ? 'Scripta sarà temporaneamente indisponibile.' : 'Il portale può disconnettersi durante il ripristino.');
+        status.textContent = 'Ripristino accodato (' + result.job.id + '). Il risultato non è ancora verificato. ' + (projectId ? 'L’applicazione sarà temporaneamente indisponibile.' : 'Il portale può disconnettersi durante il ripristino.');
       } catch (error) { status.textContent = error.message; } finally { busy = false; }
     });
     api().then(function (value) {
       var catalog = value.catalog;
       if (!catalog) throw Error('Catalogo VPS non configurato.');
       select.replaceChildren();
-      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.disabled = point.restoreCompatible === false; option.textContent = point.createdAt + ' · ' + point.id + (point.restoreCompatible === false ? ' · precedente a Scripta' : ''); select.append(option); });
+      catalog.manifests.forEach(function (point) { var option = document.createElement('option'); option.value = point.id; option.disabled = point.restoreCompatible === false; option.textContent = point.createdAt + ' · ' + point.id + (point.restoreCompatible === false ? ' · incompatibile con il profilo corrente' : ''); select.append(option); });
       var compatible = catalog.manifests.find(function (point) { return point.restoreCompatible !== false; });
       if (compatible) select.value = compatible.id;
       if (root.dataset.initialPoint && catalog.manifests.some(function (point) { return point.id === root.dataset.initialPoint && point.restoreCompatible !== false; })) select.value = root.dataset.initialPoint;
