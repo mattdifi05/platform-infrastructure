@@ -1,8 +1,8 @@
-const SERIES = ["cpu", "memory", "swap", "networkRx", "networkTx", "diskRead", "diskWrite"];
-export const HISTORY_LIMIT = 60;
+export const HISTORY_LIMIT = 64;
 export const HISTORY_WINDOW_MS = 120_000;
 export const MAX_SAMPLE_GAP_MS = 6_000;
-export const SAMPLE_TRANSITION_MS = 1_700;
+export const PRESENTATION_DELAY_MS = 3_000;
+export const HISTORY_RETENTION_MS = HISTORY_WINDOW_MS + 8_000;
 
 const number = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const reading = (metric, key) => metric?.available === true && number(metric[key]) ? metric[key] : null;
@@ -31,7 +31,7 @@ export function appendHostSample(history, sample) {
   if (!number(sample?.observedAt)) return history;
   const last = history.at(-1);
   if (last && sample.observedAt <= last.observedAt) return history;
-  return [...history.filter((item) => sample.observedAt - item.observedAt <= HISTORY_WINDOW_MS), sample].slice(-HISTORY_LIMIT);
+  return [...history.filter((item) => sample.observedAt - item.observedAt <= HISTORY_RETENTION_MS), sample].slice(-HISTORY_LIMIT);
 }
 
 // Split on missing readings and on unobserved intervals (hidden tabs, slow requests).
@@ -52,42 +52,53 @@ export function seriesSegments(history, key, maxGapMs = MAX_SAMPLE_GAP_MS) {
   return segments;
 }
 
+// Clip only inside real contiguous segments. Boundary interpolation is a
+// presentation point, never an added measurement, and cannot cross a gap.
+export function visibleSeriesSegments(history, key, renderTime) {
+  const left = renderTime - HISTORY_WINDOW_MS;
+  const right = renderTime;
+  const interpolate = (a, b, at) => ({ at, value: a.value + (b.value - a.value) * ((at - a.at) / (b.at - a.at)) });
+  const visible = [];
+  for (const segment of seriesSegments(history, key)) {
+    if (segment.length === 1) {
+      if (segment[0].at >= left && segment[0].at <= right) visible.push(segment);
+      continue;
+    }
+    const clipped = [];
+    for (let i = 1; i < segment.length; i++) {
+      const a = segment[i - 1], b = segment[i];
+      if (b.at < left || a.at > right) continue;
+      const start = a.at < left ? interpolate(a, b, left) : a;
+      const end = b.at > right ? interpolate(a, b, right) : b;
+      if (!clipped.length || clipped.at(-1).at !== start.at) clipped.push(start);
+      if (clipped.at(-1).at !== end.at) clipped.push(end);
+    }
+    if (clipped.length) visible.push(clipped);
+  }
+  return visible;
+}
+
 export function chartGeometry(history, keys, { ceiling = null, width = 600, height = 160, renderTime = history.at(-1)?.observedAt ?? 0 } = {}) {
-  const now = renderTime;
-  history = history.filter((sample) => now - sample.observedAt <= HISTORY_WINDOW_MS);
-  const values = history.flatMap((sample) => keys.map((key) => sample[key]).filter(number));
+  const visible = keys.map((key) => ({ key, segments: visibleSeriesSegments(history, key, renderTime) }));
+  const values = visible.flatMap(({ segments }) => segments.flatMap((segment) => segment.map((point) => point.value)));
+  // Autoscaling uses only the visible curve, so a new buffered future sample
+  // cannot move an existing curve or its endpoints when the poll arrives.
   const maximum = number(ceiling) ? ceiling : Math.max(0, ...values);
   const point = ({ at, value }) => ({
-    x: Math.max(0, Math.min(width, width * (1 - (now - at) / HISTORY_WINDOW_MS))),
+    x: Math.max(0, Math.min(width, width * (1 - (renderTime - at) / HISTORY_WINDOW_MS))),
     y: height - 20 - (maximum > 0 ? Math.min(1, value / maximum) * (height - 40) : 0),
   });
   const coord = (value) => value.toFixed(2);
   return {
     maximum,
     hasData: values.length > 0,
-    series: keys.map((key) => {
-      const segments = seriesSegments(history, key).map((segment) => segment.map(point));
+    series: visible.map(({ key, segments: measured }) => {
+      const segments = measured.map((segment) => segment.map(point));
       const line = segments.map((segment) => segment.map((p, i) => `${i ? "L" : "M"}${coord(p.x)},${coord(p.y)}`).join(" ")).join(" ");
       const area = segments.filter((segment) => segment.length > 1).map((segment) => `M${coord(segment[0].x)},${height - 20} ${segment.map((p) => `L${coord(p.x)},${coord(p.y)}`).join(" ")} L${coord(segment.at(-1).x)},${height - 20} Z`).join(" ");
-      const latest = history.at(-1);
-      return { key, line, area, point: latest && number(latest[key]) ? point({ at: latest.observedAt, value: latest[key] }) : null };
+      return { key, line, area, point: segments.at(-1)?.at(-1) ?? null };
     }),
   };
-}
-
-// Only the newest visual point eases to its measured value. The recorded
-// history and timestamps remain untouched; missing readings are never tweened.
-export function displayHistory(history, transition, renderTime) {
-  const latest = history.at(-1);
-  if (!latest || !transition) return history;
-  const progress = Math.max(0, Math.min(1, (renderTime - transition.startedAt) / SAMPLE_TRANSITION_MS));
-  if (progress >= 1) return history;
-  const eased = progress * progress * (3 - 2 * progress);
-  const display = { ...latest };
-  for (const key of SERIES) {
-    if (number(latest[key]) && number(transition.from[key])) display[key] = transition.from[key] + (latest[key] - transition.from[key]) * eased;
-  }
-  return [...history.slice(0, -1), display];
 }
 
 // One animation frame for every chart, with no collector, timer or hidden loop.
@@ -142,7 +153,7 @@ function animationLoop() {
   });
   document.addEventListener("visibilitychange", () => frameLoop.refresh());
   motionPreference.addEventListener("change", () => {
-    document.querySelectorAll("[data-overview-page] [data-host-metrics]").forEach((root) => panels.get(root)?.draw(Date.now(), true));
+    document.querySelectorAll("[data-overview-page] [data-host-metrics]").forEach((root) => panels.get(root)?.draw(Date.now()));
     frameLoop.refresh();
   });
   return frameLoop;
@@ -167,18 +178,21 @@ export function mountOverview(root) {
   }));
   const set = (selector, text) => { const node = root.querySelector(selector); if (node) node.textContent = text; };
   const panel = {
-    history: [], lastObservedAt: null, transition: null, update, draw,
+    history: [], lastObservedAt: null, update, draw,
     connected: () => root.isConnected,
     visible: () => root.getClientRects().length > 0,
   };
   panels.set(root, panel);
   const loop = animationLoop();
 
-  function draw(renderTime, exact = motionPreference.matches) {
-    const displayed = exact ? panel.history : displayHistory(panel.history, panel.transition, renderTime);
+  function draw(renderTime) {
+    const cursor = renderTime - PRESENTATION_DELAY_MS;
     for (const chart of charts) {
       const keys = chart.series.map((series) => series.key);
-      const geometry = chartGeometry(displayed, keys, { ceiling: chart.ceiling, renderTime: exact ? panel.lastObservedAt : renderTime });
+      const geometry = chartGeometry(panel.history, keys, { ceiling: chart.percent ? 100 : null, renderTime: cursor });
+      const scaleText = geometry.hasData ? chart.percent ? "100%" : chart.root.dataset.overviewUnit === "bytes/s" ? speed(geometry.maximum) : bytes(geometry.maximum) : "—";
+      if (chart.scale && chart.scale.textContent !== scaleText) chart.scale.textContent = scaleText;
+      if (chart.empty) { chart.empty.hidden = geometry.hasData; if (!geometry.hasData) chart.empty.textContent = "Dati non disponibili"; }
       for (const series of geometry.series) {
         const nodes = chart.series.find((item) => item.key === series.key);
         nodes.line.setAttribute("d", series.line);
@@ -198,9 +212,6 @@ export function mountOverview(root) {
     const next = appendHostSample(panel.history, sample);
     if (next === panel.history) return;
     const renderTime = Date.now();
-    const previous = displayHistory(panel.history, panel.transition, renderTime).at(-1);
-    panel.transition = previous && sample.observedAt - previous.observedAt <= MAX_SAMPLE_GAP_MS
-      ? { from: previous, startedAt: renderTime } : null;
     panel.lastObservedAt = eventSample.observedAt;
     panel.history = next;
     const fresh = sample.capturedAt !== null;
@@ -217,10 +228,7 @@ export function mountOverview(root) {
 
     for (const chart of charts) {
       const geometry = chartGeometry(panel.history, chart.series.map((series) => series.key), { ceiling: chart.percent ? 100 : null });
-      chart.ceiling = geometry.maximum;
-      if (chart.scale) chart.scale.textContent = geometry.hasData ? chart.percent ? "100%" : chart.root.dataset.overviewUnit === "bytes/s" ? speed(geometry.maximum) : bytes(geometry.maximum) : "—";
-      if (chart.empty) { chart.empty.hidden = geometry.hasData; chart.empty.textContent = "Dati non disponibili"; }
-      const elapsed = Math.max(0, sample.observedAt - panel.history[0].observedAt);
+      const elapsed = Math.min(HISTORY_WINDOW_MS, Math.max(0, sample.observedAt - panel.history[0].observedAt));
       if (chart.start) chart.start.textContent = `Ultimi ${Math.floor(elapsed / 1000)} s raccolti`;
       if (chart.svg) chart.svg.setAttribute("aria-label", `${chart.id === "diskIo" ? "Attività disco" : chart.id === "network" ? "Connessione" : chart.id === "memory" ? "RAM" : chart.id.toUpperCase()}: ${geometry.hasData ? "campioni raccolti da apertura pagina, interruzioni per dati mancanti" : "dati non disponibili"}`);
     }
