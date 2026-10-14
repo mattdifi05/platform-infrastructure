@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Local root enrollment of existing VPS infrastructure. Does not read secrets."""
 import importlib.util,json,os,pathlib,sys
-repo=pathlib.Path(__file__).resolve().parents[2]
-spec=importlib.util.spec_from_file_location('infra_admin',repo/'deployment/host/libexec/platform-server-ai-admin.py')
+repo=pathlib.Path(__file__).resolve().parents[3]
+spec=importlib.util.spec_from_file_location('infra_admin',repo/'deployment/host/libexec/platform-admin.py')
 a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a)
 def main():
  if os.geteuid()!=0 or len(sys.argv)!=1:raise RuntimeError('Run as root on the intended VPS, without arguments')
- directory=pathlib.Path('/etc/platform-infrastructure/server-ai')
+ directory=pathlib.Path('/etc/platform-infrastructure/admin')
  # Existing, root-owned protected directory; never create inside an unreviewed parent.
  for parent in [directory,*directory.parents]:
   info=parent.lstat()
@@ -15,7 +15,7 @@ def main():
  if any(p.exists() or p.is_symlink() for p in paths):raise RuntimeError('Existing enrollment preserved; review before replacement')
  if not a.MACHINE:raise RuntimeError('Host machine identity unavailable')
  names=set(a.command(['docker','ps','--all','--format','{{.Names}}']).splitlines())
- if names & (a.HOSTING|{'gf-server-ai-project-source-reader','gf-server-ai-project-query-reader','gf-php-apache','php-apache'}):raise RuntimeError('Project containers present; empty-host enrollment refused')
+ if names & (a.HOSTING|{'gf-php-apache','php-apache'}):raise RuntimeError('Project containers present; empty-host enrollment refused')
  containers=sorted(names & a.VPS_CONTAINERS)
  if not containers:raise RuntimeError('No reviewed infrastructure containers found')
  pins={}
@@ -26,7 +26,7 @@ def main():
  config={'version':1,'machineId':a.MACHINE,'containers':containers,'services':sorted(n for n in a.VPS_SERVICES if a.loaded_unit(n)),'jobs':{},'inventoryFile':str(paths[1]),'backupRoot':None,'runtimeRoot':None}
  a.validate_host_config(config,a.MACHINE)
  # No backup/DNS jobs inferred from repository presence or home manifests.
- for p,body in [(paths[1],a.encode(pins)+b'\n'),(paths[0],a.encode(config)+b'\n'),(paths[2],b'SERVER_AI_ADMIN_CONFIG=/etc/platform-infrastructure/server-ai/admin-host.json\n')]:
+ for p,body in [(paths[1],a.encode(pins)+b'\n'),(paths[0],a.encode(config)+b'\n'),(paths[2],b'PLATFORM_ADMIN_CONFIG=/etc/platform-infrastructure/admin/admin-host.json\n')]:
   fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
   with os.fdopen(fd,'wb') as out:out.write(body);out.flush();os.fsync(out.fileno())
  print('Enrolled '+str(len(containers))+' actual infrastructure containers; '+str(len(config['services']))+' loaded services; no maintenance jobs. No credentials read.')

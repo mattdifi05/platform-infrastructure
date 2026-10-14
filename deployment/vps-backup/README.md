@@ -93,7 +93,7 @@ Qualification before activation:
 ## Live inventory and completeness
 
 `inventory.py` is read-only and emits actual running Docker image/container IDs,
-mounts and volume names from projects `platform_infra_vps` and `platform_server_ai`.
+mounts and volume names from project `platform_infra_vps`.
 It refuses unclassified running containers and omits environment/command values.
 This is a capture plan, **not** a signed backup manifest or successful proof.
 Observed 2026-10-06: 21 containers, 13 named volumes, 54 distinct bind sources.
@@ -107,7 +107,7 @@ volumes include persistent/auth state; Grafana/Prometheus/Loki/Alertmanager volu
 are real state even on an empty-app host. Keycloak persistent state and PostgreSQL
 must be coherent. Runtime sockets under `/run` and Docker sockets are recreated,
 never archived. Bind-mounted config, TLS, auth, first-owner/passkeys, Vault/Secret
-Manager and AI file secrets belong only in the encrypted host capsule; no plaintext
+Manager and infrastructure file secrets belong only in the encrypted host capsule; no plaintext
 Git or report output. SQLite state requires its native online-backup API.
 
 The existing `platform-host-recovery.py` already handles encrypted capsules and

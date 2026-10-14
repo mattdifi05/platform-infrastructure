@@ -127,7 +127,7 @@ test("registry adapter accepts canonical aliases by operation identity and fails
   assert.equal(requireCanonicalBackupQueueOperation(operation("legacy.database", false), "backup").jobOperation, "backup");
   assert.equal(requireCanonicalBackupQueueOperation(operation("backup.production-restore", true), "restore-production").jobOperation, "restore-production");
   rejectedCode(() => requireCanonicalBackupQueueOperation(operation("legacy.backup", false), "restore-production"), "job_operation_mismatch", BackupQueueOperationError);
-  rejectedCode(() => requireCanonicalBackupQueueOperation(operation("server-ai.action", true), "restore-production"), "operation_not_admitted", BackupQueueOperationError);
+  rejectedCode(() => requireCanonicalBackupQueueOperation(operation("unregistered.action", true), "restore-production"), "operation_not_admitted", BackupQueueOperationError);
 
   rejectedCode(() => requireCanonicalBackupQueueOperation({ ...operation() }, "backup"), "operation_not_canonical", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(Object.freeze({ ...operation(), classified: false }), "backup"), "operation_not_privileged", BackupQueueOperationError);

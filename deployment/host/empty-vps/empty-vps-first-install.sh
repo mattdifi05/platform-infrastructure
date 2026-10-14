@@ -192,23 +192,11 @@ docker run --rm --network none --user 0:0 \
   sh -ec 'chgrp 999 /certs/mariadb.key /certs/mariadb.fullchain.crt /certs/ca.pem; chmod 0640 /certs/mariadb.key /certs/mariadb.fullchain.crt /certs/ca.pem'
 
 COMPOSE=(docker compose --env-file "$ENV_FILE")
-AI_ENV=/etc/platform-infrastructure/server-ai/.env.server-ai
-AI_ACTIVE=$(docker ps -aq --filter label=com.docker.compose.project=platform_server_ai)
-if [[ -n "$AI_ACTIVE" ]]; then
-  [[ -f "$AI_ENV" && ! -L "$AI_ENV" && -r "$AI_ENV" ]] || {
-    echo 'Server AI is active but its private Compose environment is unreadable.' >&2
-    exit 1
-  }
-  COMPOSE+=(--env-file "$AI_ENV")
-fi
 COMPOSE+=(-p platform_infra_vps
   -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml
   -f compose.vps.yaml -f compose.vps-waf.yaml
   -f compose.empty-vps-networks.yaml -f compose.empty-vps-first-install.yaml
   -f compose.empty-vps-qualified-databases.yaml)
-if [[ -n "$AI_ACTIVE" ]]; then
-  COMPOSE+=(-f compose.server-ai-control-center.yaml -f compose.server-ai-empty-host-control-center.yaml)
-fi
 CC_CONFIG_FILES=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' enterprise-control-center 2>/dev/null || true)
 for overlay in \
   deployment/vps-backup/compose.control-center.yaml \
@@ -257,17 +245,6 @@ done
   printf 'GRANT USAGE ON SCHEMA control_auth TO control_center_auth;\n'
   printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA control_auth TO control_center_auth;\n'
 } | "${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 >/dev/null
-
-# Initialize the additive Server AI schema before the Control Center starts.
-# Each reviewed migration owns its transaction; the login used by the
-# Control Center receives only Server AI runtime DML/sequence privileges.
-for migration in control-center/migrations/00[2-9]_server_ai_*.sql control-center/migrations/01[0-3]_server_ai_*.sql; do
-  [[ -f "$migration" ]] || { echo "Required Server AI migration is missing: $migration" >&2; exit 1; }
-  "${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-    < "$migration" >/dev/null
-done
-"${COMPOSE[@]}" exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-  -c 'GRANT USAGE ON SCHEMA server_ai TO control_center_auth; GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA server_ai TO control_center_auth; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA server_ai TO control_center_auth;' >/dev/null
 
 "${COMPOSE[@]}" up -d --build control-center traefik waf waf-loopback-proxy
 "${COMPOSE[@]}" ps

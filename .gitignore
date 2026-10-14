@@ -43,8 +43,6 @@ secrets/*
 .DS_Store
 Thumbs.db
 
-!.env.server-ai.example
-
 # Python runtime cache
 **/__pycache__/
 *.py[cod]

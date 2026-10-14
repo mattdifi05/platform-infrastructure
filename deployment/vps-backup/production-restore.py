@@ -9,13 +9,13 @@ s=importlib.util.spec_from_file_location('runner',HERE/'platform-vps-backup-runn
 JOURNAL=b.WORK/'production-restore.json'
 DB_VOLUMES={'enterprise_postgres_data':'postgres','enterprise_mariadb_data':'mariadb'}
 # Preserve the management plane, mounted host context and anti-replay state.
-PRESERVE_PREFIXES=('/run','/var/run','/var/lib/docker/containers','/var/lib/platform-vps-backup','/etc/platform-infrastructure/cloudflare-dns','/etc/platform-infrastructure/first-enrollment','/etc/platform-infrastructure/server-ai/enrollment-vps')
-PRESERVE_EXACT={'/etc/machine-id','/srv/platform-infrastructure','/srv/platform-infrastructure/first-install','/srv/platform-infrastructure/src','/etc/platform-infrastructure/server-ai/infrastructure-token','/etc/platform-infrastructure/server-ai/observer-token','/etc/platform-infrastructure/server-ai/openai-api-key'}
+PRESERVE_PREFIXES=('/run','/var/run','/var/lib/docker/containers','/var/lib/platform-vps-backup','/etc/platform-infrastructure/cloudflare-dns','/etc/platform-infrastructure/first-enrollment')
+PRESERVE_EXACT={'/etc/machine-id','/srv/platform-infrastructure','/srv/platform-infrastructure/first-install','/srv/platform-infrastructure/src','/etc/platform-infrastructure/admin/infrastructure-token'}
 
 def within(value,root):return value==root or value.startswith(root+'/')
 def bind_scope(source):
  if source in PRESERVE_EXACT or any(within(source,x) for x in PRESERVE_PREFIXES):return False
- return within(source,'/srv/platform-infrastructure/first-install') or source in ('/etc/platform-infrastructure/server-ai/searxng','/etc/platform-infrastructure/server-ai/settings.yml')
+ return within(source,'/srv/platform-infrastructure/first-install')
 
 def selected_bind_roots(rows):
  sources=sorted({m['Source'] for r in rows for m in r['Mounts'] if m['Type']=='bind' and bind_scope(m['Source'])},key=lambda x:(len(x),x))

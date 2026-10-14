@@ -10,15 +10,14 @@ REPO=pathlib.Path('/srv/platform-infrastructure/first-install')
 KEY=CONFIG/'encryption-key'
 SIGNING=CONFIG/'manifest-key'
 PROFILE=CONFIG/'profile.json'
-ALLOW_PROJECTS={'platform_infra_vps','platform_server_ai'}
+ALLOW_PROJECTS={'platform_infra_vps'}
 HOST='platform-server-public'
 MAX_BYTES=70_000_000_000
 
 BASE_CONTAINER_NAMES=frozenset('/'+name for name in (
  'enterprise-postgres','enterprise-redis','enterprise-control-center','enterprise-traefik','enterprise-waf','platform-waf-loopback-proxy',
  'mariadb','enterprise-nats','enterprise-keycloak','enterprise-project-router','gf-rustfs','gf-minio-gateway',
- 'enterprise-platform-alert-dispatcher','enterprise-alertmanager','enterprise-prometheus','enterprise-grafana','enterprise-loki','enterprise-promtail',
- 'gf-searxng','gf-server-ai-controller','gf-server-ai-observer'))
+ 'enterprise-platform-alert-dispatcher','enterprise-alertmanager','enterprise-prometheus','enterprise-grafana','enterprise-loki','enterprise-promtail'))
 NODE_EXPORTER_BINDS={'/proc/stat':'/proc-host/stat','/proc/meminfo':'/proc-host/meminfo','/proc/1/mountinfo':'/proc-host/1/mountinfo','/var/lib/platform-host-metrics/rootfs':'/host'}
 
 def reviewed_membership(rows):
@@ -244,7 +243,7 @@ def capture():
    for ident in reversed(paused):run(['docker','unpause',ident],timeout=30)
    paused.clear();(WORK/'paused.json').unlink(missing_ok=True)
    # Native SQLite backup avoids relying on copying an active host database.
-   db=pathlib.Path('/var/lib/platform-server-ai-admin/operations.sqlite')
+   db=pathlib.Path('/var/lib/platform-admin/operations.sqlite')
    if db.exists():
     with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as src,sqlite3.connect(runtime/'admin-operations.sqlite') as dst:
      src.backup(dst)
@@ -253,7 +252,7 @@ def capture():
    with tarfile.open(target,'w:',dereference=False) as t:
     def filter_host(info):
      if any('.platform-restore-' in part for part in pathlib.PurePosixPath(info.name).parts):return None
-     if info.name.startswith('host/var/lib/platform-server-ai-admin/operations.sqlite'):return None
+     if info.name.startswith('host/var/lib/platform-admin/operations.sqlite'):return None
      if not(info.isfile() or info.isdir() or info.issym() or info.islnk()):return None
      return info
     for source in p['captureRoots']:t.add(source,arcname='host/'+source.lstrip('/'),filter=filter_host)

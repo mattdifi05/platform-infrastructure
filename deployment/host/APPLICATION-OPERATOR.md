@@ -154,8 +154,7 @@ showing an end-to-end availability claim.
 
 ## Validation
 
-Run `python3 server-ai/tests/application-operator.test.py` (the inherited
-`scripts/application-operator.test.py` runner also works). Tests use real local files and
+Run `python3 scripts/application-operator.test.py`. Tests use real local files and
 SQLite WAL backup, plus mocked Docker/SQL tools for destination scope, durable
 idempotency, secret exclusions, staging, private receipt checks, health-gated
 activation and generated nginx reload. They do not prove live Docker, database

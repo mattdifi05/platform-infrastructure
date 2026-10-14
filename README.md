@@ -1132,7 +1132,7 @@ documentazione esterna e non e' un input della prima installazione.
 
 ### Server remediation source synchronization (October 2026)
 
-The current Control Center, OpenAI-only Server AI, native FTPS/RustFS backup integration and infrastructure host helpers are versioned in this repository. See [deployment/README.md](deployment/README.md) for the installed host source snapshot and [server-ai/README.md](server-ai/README.md) for the optional AI stack. Live credentials, signed admissions, replay state, backups and application data stay outside Git. OpenAI credentials are supplied exclusively through a protected runtime file; examples contain file references only.
+The current Control Center, native FTPS/RustFS backup integration and infrastructure host helpers are versioned in this repository. See [deployment/README.md](deployment/README.md) for the installed host source snapshot and [deployment/host/PLATFORM-ADMIN.md](deployment/host/PLATFORM-ADMIN.md) for the typed administration bridge. Live credentials, signed admissions, replay state, backups and application data stay outside Git.
 
 The source synchronization does not deploy or migrate a server. A new Hostinger instance is intended to start with no hosted applications or VPN and a separately configured domain/Cloudflare origin. Historical home-specific backup catalogs are not a workload seed for that instance.
 

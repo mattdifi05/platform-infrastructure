@@ -1,25 +1,25 @@
 [Unit]
-Description=Typed Server AI infrastructure administration bridge
-After=docker.service network-online.target
+Description=Typed VPS infrastructure administration bridge
+After=network-online.target docker.service ufw.service
 Requires=docker.service
 
 [Service]
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/bin/python3 /usr/local/libexec/platform-server-ai-admin.py
+EnvironmentFile=/etc/platform-infrastructure/admin/admin-host.env
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-admin.py
 Restart=on-failure
 RestartSec=3
-RuntimeDirectory=platform-server-ai-admin
+RuntimeDirectory=platform-admin
 RuntimeDirectoryMode=0750
-StateDirectory=platform-server-ai-admin
+RuntimeDirectoryPreserve=restart
+StateDirectory=platform-admin
 StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
-ReadWritePaths=/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/dns
-ReadOnlyPaths=-/home/platform_infrastructure/v1-fresh-data -/var/lib/docker/volumes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

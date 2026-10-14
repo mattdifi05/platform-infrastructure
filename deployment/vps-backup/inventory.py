@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Read-only real VPS capture inventory. This is not a backup or restore proof."""
 import datetime, hashlib, json, os, subprocess
-PROJECTS={'platform_infra_vps','platform_server_ai'}
+PROJECTS={'platform_infra_vps'}
 def docker(*args):return subprocess.check_output(['docker',*args],timeout=30)
 def main():
  if os.geteuid()!=0:raise RuntimeError('Host root is required')
