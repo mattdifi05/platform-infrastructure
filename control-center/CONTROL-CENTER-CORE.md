@@ -83,3 +83,21 @@ The Control Center provides infrastructure operations and passkey authentication
 Its native host extension remains separate from the dashboard runtime. Backup
 profile pin changes must follow the existing forward admission chain and preserve
 application runtime records.
+
+Vault runtime delivery uses `vault/store.mjs` as the single encrypted store shared
+with the native worker. V2 ciphertext is retained as `legacy-v2`; subsequent
+versions have immutable IDs and version-bound authenticated encryption. The
+shared 0600 lock and opaque encrypted-state revision prevent lost updates. The
+native root process sets `ownerUid` and `ownerGid` to the Control Center identity.
+
+`hostExtension.vaultRuntime` is optional and accepts reference-only actions:
+`catalog`, `adopt`, `plan`, `apply`, `rollback`, and `status`. Fixed root bindings
+own destination paths, reload and credential policies; no caller may submit a
+path, command or value to this operator. Coupled database and Redis credential
+changes remain unsupported until the native adapter can update both peers.
+Adoption imports the existing approved credential without changing its runtime.
+Binding receipts distinguish delivery readback, application health and provider
+verification. A source reference is never proof that a Vault version was used.
+Signing, admission, certificate and master-key files are excluded before the
+legacy file importer reads or fingerprints anything. Bound items cannot be
+deleted, and an unavailable configured native registry blocks deletion.

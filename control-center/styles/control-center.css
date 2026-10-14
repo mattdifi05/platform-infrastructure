@@ -6919,3 +6919,39 @@ pre {
 .cc-host-pressure > div { flex-direction: column; }
 @media (max-width: 1120px) { .cc-host-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 680px) { .cc-host-metric-grid, .cc-host-detail-grid { grid-template-columns: 1fr; } .cc-host-pressure { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Vault delivery uses the full card width and keeps review actions readable. */
+.ops-vault-runtime-item { display: block; }
+.ops-vault-runtime-item form, .ops-vault-version-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.ops-vault-runtime-item label { display: grid; gap: 6px; min-width: min(260px, 100%); }
+.ops-vault-runtime-item select, .ops-vault-version-form input { box-sizing: border-box; max-width: 100%; padding: 9px 12px; border: 1px solid var(--line, #d9dfeb); border-radius: 10px; background: var(--surface, #fff); color: inherit; font: inherit; }
+.ops-vault-runtime-item [data-vault-runtime-result] { margin-top: 12px; }
+.ops-vault-runtime-item small { display: block; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .ops-vault-runtime-item form > * { max-width: 100%; } .ops-vault-version-form input { width: 100%; } }
+
+.ops-vault-version-value { -webkit-text-security: disc; width: min(100%, 320px); padding: 9px 12px; border: 1px solid var(--line, #d9dfeb); border-radius: 10px; font: inherit; resize: vertical; }
+
+/* Vault management stays within the viewport, including large inventories. */
+.ops-vault-saved-scroll { max-height: min(680px, 70vh); min-height: 180px; }
+.ops-vault-runtime-panel { margin-bottom: 18px; }
+.ops-vault-runtime-panel > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.ops-vault-runtime-panel > summary strong { font-size: 18px; }
+.ops-vault-runtime-panel > summary span, .ops-vault-technical { color: #667085; font-size: 12px; }
+.ops-vault-runtime-scroll { max-height: min(600px, 65vh); margin-top: 14px; }
+.ops-vault-runtime-item:target { outline: 2px solid #4f46e5; outline-offset: -2px; }
+.ops-vault-saved-scroll > .ops-vault-item { grid-template-columns: 44px minmax(0, 1fr); }
+.ops-vault-management { display: flex; flex-wrap: wrap; align-items: start; gap: 10px; }
+.ops-vault-management details { min-width: 0; }
+.ops-vault-management summary { cursor: pointer; list-style: none; }
+.ops-vault-management summary::-webkit-details-marker, .ops-vault-runtime-panel > summary::-webkit-details-marker { display: none; }
+.ops-vault-management details[open] { flex: 1 0 100%; }
+.ops-vault-management details p { max-width: 65ch; font-size: 12px; color: #667085; line-height: 1.5; }
+.ops-vault-delete-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.ops-vault-delete-form label { display: grid; gap: 6px; font-size: 12px; }
+.ops-vault-delete-form input { box-sizing: border-box; width: min(220px, 100%); padding: 9px 12px; border: 1px solid #d9dfeb; border-radius: 10px; font: inherit; }
+.ops-vault-management .ops-vault-reveal { min-width: 0; flex: 1 1 220px; }
+.ops-vault-management .ops-vault-reveal input { min-width: 0; width: 100%; }
+@media (max-width: 600px) { .ops-vault-saved-scroll > .ops-vault-item { grid-template-columns: minmax(0, 1fr); } .ops-vault-saved-scroll > .ops-vault-item > .ops-project-row-icon { display: none; } .ops-vault-management .ops-vault-reveal { flex-basis: 100%; } }
+
+.ops-vault-secret-value { box-sizing: border-box; min-width: 0; width: 100%; min-height: 34px; max-height: 120px; resize: vertical; border: 1px solid #d9dfeb; border-radius: 10px; padding: 8px 10px; background: #fff; color: inherit; font: inherit; -webkit-text-security: disc; }
+.ops-vault-secret-value[data-vault-visible="true"] { -webkit-text-security: none; }

@@ -17,10 +17,12 @@ export const controlCenterComponents = [
 
 export const controlCenterCssEntrypoints = [
   "/assets/control-center/control-center.css",
+  "/assets/control-center/overview.css",
 ];
 
 export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
+  "/assets/control-center/overview.js",
 ];
 
 // Derive each cache token from the exact asset bytes. A stale environment
@@ -29,6 +31,8 @@ export const controlCenterScriptEntrypoints = [
 const assetVersionByHref = new Map([
   ["/assets/control-center/control-center.css", "../../styles/control-center.css"],
   ["/assets/control-center/control-center.js", "../../styles/control-center.js"],
+  ["/assets/control-center/overview.css", "../../styles/overview.css"],
+  ["/assets/control-center/overview.js", "../../styles/overview.js"],
 ].map(([href, relativePath]) => [
   href,
   createHash("sha256").update(readFileSync(new URL(relativePath, import.meta.url))).digest("hex").slice(0, 20),
@@ -45,7 +49,7 @@ export function controlCenterStylesheetLinks() {
 }
 
 export function controlCenterScriptTags() {
-  return controlCenterScriptEntrypoints.map((src) => `<script defer src="${versionedAssetHref(src)}"></script>`).join("\n");
+  return controlCenterScriptEntrypoints.map((src) => `<script ${src.endsWith("/overview.js") ? 'type="module"' : "defer"} src="${versionedAssetHref(src)}"></script>`).join("\n");
 }
 
 export function controlCenterUiContract(controlCenterPackage = {}) {

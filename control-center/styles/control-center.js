@@ -1193,12 +1193,108 @@
     }
   }
 
+  async function submitVaultManagement(form) {
+    if (formSubmissions.has(form)) return;
+    formSubmissions.add(form);
+    var button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    try {
+      await hostingRequest(form.getAttribute("action"), Object.fromEntries(new FormData(form).entries()));
+      clearCache(); window.location.reload();
+    } catch (error) { if (error.name !== "ReauthenticationRedirect") showError(error.message || "Modifica Vault non riuscita."); }
+    finally { formSubmissions.delete(form); if (button && button.isConnected) button.disabled = false; }
+  }
+
+  async function submitVaultRuntime(form) {
+    var box = form.closest("[data-vault-binding]");
+    var resultBox = box ? box.querySelector("[data-vault-runtime-result]") : null;
+    var button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    try {
+      var result = await hostingRequest(form.getAttribute("action"), Object.fromEntries(new FormData(form).entries()));
+      if (resultBox) resultBox.replaceChildren();
+      if (result.planId) {
+        var explanation = document.createElement("p");
+        explanation.textContent = "Piano verificato per " + (result.consumers || []).map(function (consumer) { return consumer.name; }).join(", ") + (result.requiresRestart ? ". Richiede riavvio controllato." : ".") + " Il provider " + (result.providerVerification === "available" ? "sarà verificato." : "non dispone di verifica automatica.");
+        var apply = document.createElement("button"); apply.type = "button"; apply.className = "ops-button primary"; apply.textContent = "Applica piano verificato";
+        apply.addEventListener("click", async function () {
+          apply.disabled = true;
+          try {
+            var queued = await hostingRequest("/control/vault/runtime/apply", { bindingId: result.bindingId, planId: result.planId, confirmation: result.confirmation, expectedVaultRevision: result.expectedVaultRevision, expectedBindingRevision: result.expectedBindingRevision });
+            resultBox.replaceChildren();
+            addVaultStatusButton(resultBox, queued.operationId);
+          } catch (error) { explanation.textContent = error.message || "Piano non più valido: ripeti la verifica."; apply.disabled = false; }
+        });
+        if (resultBox) resultBox.append(explanation, apply);
+      } else if (result.operationId && result.phase === "queued") {
+        if (resultBox) addVaultStatusButton(resultBox, result.operationId);
+      } else if (/\/adopt$/.test(form.getAttribute("action"))) {
+        refreshVaultPanel(box);
+      } else if (resultBox) {
+        var operation = result.operation || result;
+        if (["verified", "rolled-back"].includes(operation.phase)) refreshVaultPanel(box);
+        else if (["queued", "applying", "verifying", "rolling-back"].includes(operation.phase)) addVaultStatusButton(resultBox, operation.operationId);
+        else resultBox.textContent = vaultPhaseLabel(operation.phase);
+      }
+    } catch (error) { if (resultBox) resultBox.textContent = error.message || "Operazione Vault non disponibile."; }
+    finally { if (button && button.isConnected) button.disabled = false; }
+  }
+
+  function vaultPhaseLabel(phase) {
+    return { queued: "Operazione in attesa", applying: "Consegna in corso", verifying: "Verifica in corso", "rolling-back": "Ripristino in corso", verified: "Completato: consegna verificata", "rolled-back": "Ripristino completato", failed: "Operazione non riuscita", "requires-reconciliation": "È necessario verificare lo stato del servizio" }[phase] || "Stato non disponibile";
+  }
+
+  function refreshVaultPanel(bindingBox) {
+    clearCache();
+    if (bindingBox && bindingBox.id) window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + "#" + bindingBox.id);
+    window.location.reload();
+  }
+
+  function openVaultBinding(bindingId) {
+    var target = document.getElementById(bindingId);
+    if (!target) return;
+    var panel = target.closest("[data-vault-runtime-panel]");
+    if (panel) panel.open = true;
+    target.scrollIntoView({ block: "nearest" });
+  }
+
+  function addVaultStatusButton(box, operationId) {
+    if (!box || !operationId) return;
+    var generation = (Number(box.dataset.vaultPollGeneration) || 0) + 1;
+    box.dataset.vaultPollGeneration = String(generation);
+    var message = document.createElement("p"); message.textContent = vaultPhaseLabel("queued");
+    var button = document.createElement("button"); button.type = "button"; button.className = "ops-button secondary"; button.textContent = "Aggiorna risultato";
+    box.replaceChildren(message, button);
+    var deadline = Date.now() + 90000;
+    var timer = null, busy = false, finished = false;
+    async function checkStatus() {
+      if (busy || finished || !box.isConnected || Number(box.dataset.vaultPollGeneration) !== generation) return;
+      busy = true; button.disabled = true;
+      if (timer) window.clearTimeout(timer);
+      try {
+        var result = await hostingRequest("/control/vault/runtime/status", { operationId: operationId });
+        if (!box.isConnected || Number(box.dataset.vaultPollGeneration) !== generation) return;
+        var operation = result.operation || result;
+        message.textContent = vaultPhaseLabel(operation.phase);
+        if (["verified", "rolled-back"].includes(operation.phase)) { finished = true; refreshVaultPanel(box.closest("[data-vault-binding]")); return; }
+        if (["failed", "requires-reconciliation"].includes(operation.phase)) { finished = true; button.remove(); return; }
+      } catch (error) { message.textContent = error.message || "Stato non disponibile. Aggiorna il risultato."; }
+      finally {
+        busy = false; if (button.isConnected) button.disabled = false;
+        if (!finished && box.isConnected && Number(box.dataset.vaultPollGeneration) === generation && Date.now() < deadline) timer = window.setTimeout(checkStatus, 2000);
+        else if (!finished && box.isConnected) message.textContent += " Controllo automatico terminato: puoi aggiornare il risultato.";
+      }
+    }
+    button.addEventListener("click", checkStatus);
+    timer = window.setTimeout(checkStatus, 2000);
+  }
+
   function hideVaultSecret(box, button) {
     var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
     var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
     if (input) {
       input.value = "";
-      input.type = "password";
+      if (input.tagName === "INPUT") input.type = "password";
       input.dataset.vaultVisible = "false";
     }
     if (copyButton) copyButton.disabled = true;
@@ -1238,7 +1334,7 @@
         await authenticateWithSystemPasskey();
       }
       if (!response.ok) throw new Error(payload.message || payload.error || "Reveal failed.");
-      input.type = "text";
+      if (input.tagName === "INPUT") input.type = "text";
       input.value = payload.value || "";
       input.dataset.vaultVisible = "true";
       button.textContent = "Nascondi";
@@ -2243,7 +2339,7 @@
     var timer = null, loading = false;
     var button = root.querySelector("[data-host-metrics-refresh]");
     var status = root.querySelector("[data-host-metrics-status]");
-    function active() { return root.isConnected && !document.hidden && Boolean(root.closest("[data-settings-page]")); }
+    function active() { return root.isConnected && !document.hidden && Boolean(root.closest("[data-overview-page]")); }
     function numeric(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
     function percent(value) { return new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 }).format(value) + "%"; }
     function bytes(value) {
@@ -2257,11 +2353,12 @@
     function pair(left, right, formatter) { return formatter(left) + " / " + formatter(right); }
     function table(id, rows, columns, cells) {
       var body = root.querySelector('[data-host-table="' + id + '"]');
+      if (!body) return;
       body.replaceChildren();
       if (!rows.length) { var row = document.createElement("tr"), cell = document.createElement("td"); cell.colSpan = columns; cell.textContent = "Dati non disponibili dal collector host."; row.append(cell); body.append(row); return; }
       rows.forEach(function (item) { var row = document.createElement("tr"); cells(item).forEach(function (text) { var cell = document.createElement("td"); cell.textContent = text; row.append(cell); }); body.append(row); });
     }
-    function detail(id, text) { root.querySelector('[data-host-detail="' + id + '"]').textContent = text; }
+    function detail(id, text) { var cell = root.querySelector('[data-host-detail="' + id + '"]'); if (cell) cell.textContent = text; }
     function render(value) {
       ["cpu", "memory", "disk"].forEach(function (id) {
         var metric = value[id] || {};
@@ -2291,32 +2388,34 @@
       table("diskIo", io.available && Array.isArray(io.devices) ? io.devices : [], 6, function (row) { return [String(row.name || "—"), speed(row.readBytesPerSecond), speed(row.writeBytesPerSecond), amount(row.readsPerSecond), amount(row.writesPerSecond), numeric(row.busyPercent) ? percent(row.busyPercent) : "—"]; });
       var pressure = value.pressure || {};
       root.querySelectorAll("[data-host-pressure]").forEach(function (cell) { var value = pressure[cell.dataset.hostPressure]; cell.textContent = pressure.available && numeric(value) ? percent(value) : "Non disponibile"; });
+      root.ccHostMetricsSample = { metrics: value, observedAt: Date.now() };
+      root.dispatchEvent(new CustomEvent("cc-host-metrics-sample", { detail: root.ccHostMetricsSample, bubbles: true }));
     }
     async function load() {
       clearTimeout(timer);
       if (!active() || loading) return;
-      loading = true; button.disabled = true; root.setAttribute("aria-busy", "true");
+      loading = true; if (button) button.disabled = true; root.setAttribute("aria-busy", "true");
       try {
         var value = await hostingRequest("/control/resources/host");
         if (!active()) return;
         if (value.scope !== "host" || value.source !== "prometheus-node-exporter") throw Error("Fonte host non verificata.");
         var age = Date.now() - Date.parse(value.capturedAt || "");
         if (!Number.isFinite(age) || age > 60000 || age < -5000) {
-          render({}); status.textContent = "Metriche host non disponibili o non aggiornate. Il filesystem del Control Center non viene usato come sostituto.";
+          render({}); if (status) status.textContent = "Metriche host non disponibili o non aggiornate. Il filesystem del Control Center non viene usato come sostituto.";
         } else {
           render(value);
           var any = [value.cpu, value.memory, value.disk, value.network, value.diskIo, value.load, value.swap, value.inodes, value.processes, value.pressure].some(function (metric) { return metric && metric.available === true; });
-          status.textContent = any ? "Ultimo campione: " + new Date(value.capturedAt).toLocaleTimeString("it-IT") + " · Fonte host: node_exporter" : "Metriche host non disponibili. Riprova tra pochi secondi.";
+          if (status) status.textContent = any ? "Ultimo campione: " + new Date(value.capturedAt).toLocaleTimeString("it-IT") + " · Fonte host: node_exporter" : "Metriche host non disponibili. Riprova tra pochi secondi.";
         }
       } catch (error) {
-        if (active() && error.name !== "ReauthenticationRedirect") { render({}); status.textContent = "Metriche host non disponibili. Aggiorna per riprovare."; }
+        if (active() && error.name !== "ReauthenticationRedirect") { render({}); if (status) status.textContent = "Metriche host non disponibili. Aggiorna per riprovare."; }
       } finally {
-        loading = false; button.disabled = false; root.setAttribute("aria-busy", "false");
+        loading = false; if (button) button.disabled = false; root.setAttribute("aria-busy", "false");
         if (active()) timer = setTimeout(load, 2000);
       }
     }
     hostMetricPanels.set(root, { refresh: load });
-    button.addEventListener("click", load);
+    if (button) button.addEventListener("click", load);
     load();
   }
   function initHostMetrics() {
@@ -2338,6 +2437,7 @@
     initProjectHosting();
     initGlobalBackupControls();
     initHostMetrics();
+    if (window.location.hash.indexOf("#vault-runtime-") === 0) openVaultBinding(window.location.hash.slice(1));
     window.history.replaceState({ ccDynamic: true }, "", window.location.pathname + window.location.search + window.location.hash);
     restoreSidebarState({ instantOpsNav: true });
     positionOpsNavPill({ instant: true });
@@ -2385,6 +2485,14 @@
       if (copyButton) {
         event.preventDefault();
         copyCommand(copyButton);
+        return;
+      }
+      var vaultBindingLink = event.target.closest ? event.target.closest("[data-vault-binding-link]") : null;
+      if (vaultBindingLink) {
+        event.preventDefault();
+        var bindingTarget = "vault-runtime-" + vaultBindingLink.getAttribute("data-vault-binding-link");
+        openVaultBinding(bindingTarget);
+        window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + "#" + bindingTarget);
         return;
       }
       var vaultRevealButton = event.target.closest ? event.target.closest("[data-vault-reveal-action]") : null;
@@ -2499,6 +2607,8 @@
       if (event.defaultPrevented) return;
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-vault-manage-form")) { event.preventDefault(); submitVaultManagement(form); return; }
+      if (form.hasAttribute("data-vault-runtime-form")) { event.preventDefault(); submitVaultRuntime(form); return; }
       if (form.hasAttribute("data-app-folder-form")) {
         event.preventDefault();
         var button = event.submitter || form.querySelector("button[type=submit]");

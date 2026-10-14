@@ -104,6 +104,7 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
   // New adapters dispatch only by the authorized operation, without a duplicate
   // legacy pathname branch. Each still needs exactly one direct case below.
   const directOnly = new Set([
+    "vault.runtime.catalog", "vault.runtime.adopt", "vault.runtime.plan", "vault.runtime.apply", "vault.runtime.rollback", "vault.runtime.status", "vault.secret.version",
     "resources.host.read", "cloudflare.dns.change", "backup.vps.catalog", "backup.production-restore",
     "projects.hosting.status", "projects.hosting.plan", "projects.hosting.visibility",
     "projects.hosting.clone", "projects.hosting.cancel",

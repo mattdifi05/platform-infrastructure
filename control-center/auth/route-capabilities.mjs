@@ -85,6 +85,13 @@ const CONTROL_ROUTES = Object.freeze([
   admin("secrets.material.usage", "control", "secrets", "materials", parameter("materialId"), "usage"),
   admin("secrets.material.access", "control", "secrets", "materials", parameter("materialId"), "access"),
 
+  ownerFresh("GET", "vault.runtime.catalog", "control", "vault", "runtime"),
+  ownerFresh("POST", "vault.runtime.adopt", "control", "vault", "runtime", "adopt"),
+  ownerFresh("POST", "vault.runtime.plan", "control", "vault", "runtime", "plan"),
+  ownerFresh("POST", "vault.runtime.apply", "control", "vault", "runtime", "apply"),
+  ownerFresh("POST", "vault.runtime.rollback", "control", "vault", "runtime", "rollback"),
+  ownerFresh("POST", "vault.runtime.status", "control", "vault", "runtime", "status"),
+  ownerFresh("POST", "vault.secret.version", "control", "vault", "secrets", parameter("vaultItemId"), "versions"),
   ownerFresh("GET", "vault.inventory.read", "control", "vault"),
   ownerFresh("POST", "vault.secret.store", "control", "vault", "secrets"),
   ownerFresh("POST", "vault.import-existing", "control", "vault", "import-existing"),
