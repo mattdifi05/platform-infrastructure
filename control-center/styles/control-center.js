@@ -2212,6 +2212,22 @@
       if (event.defaultPrevented) return;
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-app-folder-form")) {
+        event.preventDefault();
+        var button = event.submitter || form.querySelector("button[type=submit]");
+        var payload = Object.fromEntries(new FormData(form).entries());
+        if (button) button.disabled = true;
+        hostingRequest(form.getAttribute("action"), payload).then(function (result) {
+          var url = new URL(window.location.href);
+          url.searchParams.set("section", "projects");
+          if (form.hasAttribute("data-folder-create") || form.hasAttribute("data-folder-delete")) url.searchParams.set("folder", result.folderId);
+          clearCache();
+          return navigate(url, { history: "replace" });
+        }).catch(function (error) {
+          if (error.name !== "ReauthenticationRedirect") showError(error.message || "Impossibile aggiornare la cartella.");
+        }).finally(function () { if (button && button.isConnected) button.disabled = false; });
+        return;
+      }
       if (form.hasAttribute("data-passkey-submit")) {
         event.preventDefault();
         submitPasskeyForm(form, event.submitter || null);

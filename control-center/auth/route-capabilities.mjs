@@ -21,6 +21,12 @@ const CONTROL_ROUTES = Object.freeze([
   viewer("status.read", "control", "status"),
   viewer("go-no-go.read", "control", "go-no-go"),
 
+  viewer("project-folders.list", "control", "project-folders"),
+  admin("project-folders.create", "control", "project-folders"),
+  admin("project-folders.membership", "control", "project-folders", "membership"),
+  admin("project-folders.rename", "control", "project-folders", parameter("folderId"), "rename"),
+  admin("project-folders.delete", "control", "project-folders", parameter("folderId"), "delete"),
+
   viewer("projects.list", "control", "projects"),
   admin("projects.create", "control", "projects"),
   viewer("projects.hosting.status", "control", "projects", parameter("projectId"), "hosting-status"),

@@ -6792,3 +6792,52 @@ pre {
   .cc-hosting-dialog-actions { display: grid; grid-template-columns: 1fr; }
   .cc-hosting-dialog-actions .ops-button { width: 100%; }
 }
+
+/* Manual application folders are catalog metadata, independent of hosting. */
+.cc-app-folders-toolbar,
+.cc-app-folder-management,
+.cc-app-folder-management form,
+.cc-app-folder-create,
+.cc-app-folder-placement,
+.cc-app-folder-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.cc-app-folders-toolbar { justify-content: space-between; margin-bottom: 18px; }
+.cc-app-folders-toolbar h2,
+.cc-app-folder-group h2 { margin: 0; font-size: 17px; }
+.cc-app-folders-toolbar p,
+.cc-app-folder-management small { color: var(--cc-text-muted, #657184); font-size: 13px; }
+.cc-app-folders-toolbar p { margin: 6px 0 0; }
+.cc-app-folder-filters { margin-bottom: 18px; }
+.cc-app-folder-filters a { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.cc-app-folder-filters a span,
+.cc-app-folder-group h2 small { opacity: .7; font-size: 12px; margin-left: 5px; }
+.cc-app-folder-management { padding: 14px; margin-bottom: 20px; border: var(--ops-project-border); border-radius: var(--ops-project-radius); background: white; justify-content: space-between; }
+.cc-app-folder-groups { display: grid; gap: 25px; }
+.cc-app-folder-group { min-width: 0; }
+.cc-app-folder-group h2 { margin-bottom: 10px; overflow-wrap: anywhere; }
+.cc-app-folder-entry { min-width: 0; }
+.cc-app-folder-create label,
+.cc-app-folder-management label,
+.cc-app-folder-placement label { display: grid; gap: 5px; color: var(--cc-text-muted, #657184); font-size: 12px; min-width: 0; }
+.cc-app-folder-create input,
+.cc-app-folder-management input,
+.cc-app-folder-placement select { border: 1px solid #dbe1e8; background: white; border-radius: 8px; padding: 9px 10px; font: inherit; color: #24334a; min-width: 0; width: 100%; max-width: 280px; }
+.cc-app-folder-create,
+.cc-app-folder-management form { align-items: end; }
+.cc-app-folder-placement { justify-content: flex-end; margin: 7px 4px 3px; align-items: end; }
+.cc-app-folder-placement label { width: 230px; }
+@media (max-width: 640px) {
+  .cc-app-folder-create,
+  .cc-app-folder-management,
+  .cc-app-folder-management form { width: 100%; }
+  .cc-app-folder-create label,
+  .cc-app-folder-management label { flex: 1; }
+  .cc-app-folder-placement label { flex: 1; width: auto; }
+  .cc-app-folder-placement select,
+  .cc-app-folder-create input,
+  .cc-app-folder-management input { max-width: 100%; }
+}
