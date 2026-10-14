@@ -47,6 +47,9 @@ import {
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
+import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
+import { createApplicationOperator } from "./hosting/application-operator.mjs";
+import { createHostingLifecycle } from "./hosting/lifecycle.mjs";
 import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
@@ -65,6 +68,7 @@ import {
 } from "./vault/keyring.mjs";
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
+import { applicationFolderCatalog, updateApplicationFolders, ApplicationFolderError } from "./state/application-folders.mjs";
 import { executeStatusChecks } from "./status/executor.mjs";
 import {
   createStatusEventBroker,
@@ -205,6 +209,20 @@ const statusEventBroker = createStatusEventBroker({
   maxQueueBytes: clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_QUEUE_BYTES || 1024 * 1024), 1024, 64 * 1024 * 1024),
 });
 const controlState = createControlStateStore(process.env);
+let hostingProvider = null;
+try { hostingProvider = createCloudflareVisibilityProviderFromEnv({ env: process.env }); } catch { /* Protected configuration unavailable: hosting operations stay disabled. */ }
+const hostingLifecycle = createHostingLifecycle({
+  provider: hostingProvider, native: createApplicationOperator(), store: controlState,
+  audit: (action, target) => appendAudit({ action, target, environment, risk: "high", result: "accepted", dryRun: false, summary: "Owner-authorized hosting lifecycle operation." }),
+  registerProject: job => {
+    const state = readState(); const existing = state.projects[job.targetId];
+    if (existing && existing.sourceProjectId !== job.sourceId) throw Error("Clone catalog ownership conflict");
+    state.projects[job.targetId] = { ...existing, declaredProject: true, sourceProjectId: job.sourceId, host: job.hostname, runtime: job.result?.runtime || "node", enabled: job.status === "available", cloneStatus: job.status, cloneRequestId: job.requestId, updatedAt: new Date().toISOString() };
+    writeState(state);
+  },
+});
+const hostingWorker = hostingProvider ? setInterval(() => { void hostingLifecycle.tick().catch(() => {}); }, 3000) : null;
+hostingWorker?.unref();
 const controlAuth = await createControlCenterAuth();
 const firstConfiguration = await createFirstConfiguration({ auth: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
@@ -696,6 +714,7 @@ function rawRequestPathname(requestTarget) {
 }
 
 async function shutdown() {
+  clearInterval(hostingWorker);
   statusEventBroker.close();
   setTimeout(() => process.exit(1), 10_000).unref();
   const closed = new Promise(resolve => server.close(resolve));
@@ -721,6 +740,21 @@ async function handleApi(req, res, url, context, operation) {
     // identity used by authorization. The legacy comparisons below consume
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
+      case "projects.hosting.status":
+      case "projects.hosting.plan":
+      case "projects.hosting.visibility":
+      case "projects.hosting.clone":
+      case "projects.hosting.cancel": {
+        const id = operation.parameters.projectId;
+        if (!resolveContextProject(context, id)) throw new ValidationError("Project is not admitted in this Control Center context.");
+        try {
+          if (operation.operationId === "projects.hosting.status") return json(res, await hostingLifecycle.status(id));
+          if (operation.operationId === "projects.hosting.plan") return json(res, { ok: true, plan: await hostingLifecycle.plan(id, url.searchParams.get("mode")) });
+          if (operation.operationId === "projects.hosting.visibility") return json(res, { ok: true, result: await hostingLifecycle.visibility(id, payload) });
+          if (operation.operationId === "projects.hosting.clone") return json(res, { ok: true, job: await hostingLifecycle.clone(id, payload) }, 202);
+          return json(res, { ok: true, job: await hostingLifecycle.cancel(id, operation.parameters.jobId, payload) }, 202);
+        } catch { return json(res, { ok: false, error: "hosting_operation_rejected", message: "Hosting operation unavailable, unsupported, or changed since review." }, 409); }
+      }
       case "overview.read": return json(res, context.overview);
       case "backup.vps.catalog": {
         const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
@@ -798,6 +832,11 @@ async function handleApi(req, res, url, context, operation) {
       });
     }
     if (method === "GET" && route(parts, "control", "go-no-go")) return json(res, context.goNoGo);
+    if (method === "GET" && route(parts, "control", "project-folders")) return json(res, applicationFolderCatalog(context, folderApplications(context)));
+    if (method === "POST" && route(parts, "control", "project-folders")) return json(res, changeApplicationFolder("create", payload, context));
+    if (method === "POST" && route(parts, "control", "project-folders", "membership")) return json(res, changeApplicationFolder("membership", payload, context));
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "project-folders", "rename")) return json(res, changeApplicationFolder("rename", { ...payload, folderId: parts[2] }, context));
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "project-folders", "delete")) return json(res, changeApplicationFolder("delete", { ...payload, folderId: parts[2] }, context));
     if (method === "GET" && route(parts, "control", "projects")) return json(res, { projects: context.projects });
     if (method === "POST" && route(parts, "control", "projects")) return json(res, planProjectCreate(payload, context), 202);
     if (method === "GET" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "projects", "files")) {
@@ -2092,6 +2131,7 @@ async function buildContext({ projects, state }) {
   };
   const context = {
     overview,
+    applicationFolders: state.applicationFolders,
     projects,
     applications,
     domains,
@@ -6369,22 +6409,59 @@ function observedApplications(strict = false) {
   }
 }
 
+function folderApplications(context, observed = observedApplications()) {
+  return [
+    ...sortedOpsProjects(context.projects).map(record => ({ key: `project:${record.slug}`, source: "project", record })),
+    ...observed.filter(app => !context.projects.some(project => project.slug === app.id || project.aliases?.includes(app.id))).map(record => ({ key: `observed:${record.id}`, source: "observed", record })),
+  ];
+}
+
+function changeApplicationFolder(action, payload, context) {
+  try {
+    const result = updateApplicationFolders(controlState, action, payload, folderApplications(context));
+    appendAudit({ action: `application-folder.${action}`, target: result.applicationKey || result.folderId, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Application catalog folder metadata updated." });
+    return { ok: true, ...result };
+  } catch (error) {
+    if (error instanceof ApplicationFolderError) throw new ValidationError(error.message);
+    throw error;
+  }
+}
+
 function renderOpsProjects(context, params = new URLSearchParams()) {
   const observed = observedApplications().filter(app => !context.projects.some(project => project.slug === app.id || project.aliases?.includes(app.id)));
   const selectedObserved = observed.find(app => app.id === params.get("observed"));
-  if (selectedObserved) return renderObservedApplicationDetail(selectedObserved, controlIcon);
+  if (selectedObserved) {
+    const detail = renderObservedApplicationDetail(selectedObserved, controlIcon);
+    if (detail.includes("ops-project-detail-screen")) return detail;
+    return `<section class="ops-project-detail-screen" id="project-${escapeHtml(selectedObserved.id)}">${detail}</section>`;
+  }
   const resourcesByProject = projectResourceRowsByProject(context);
   const selectedSlug = sanitizeIdentifier(params.get("project") || "");
   const selectedProject = context.projects.find((project) => project.slug === selectedSlug || project.id === selectedSlug);
   if (selectedProject) return renderOpsProjectDetailScreen(selectedProject, context, resourcesByProject.get(selectedProject.slug), params);
 
-  const rows = sortedOpsProjects(context.projects)
-    .map((project) => renderOpsProjectRow(project))
-    .join("") + observed.map(app => renderObservedApplicationRow(app, controlIcon)).join("");
-  return `<section class="ops-section ops-projects-redesign">
-    <div class="ops-project-list" aria-label="Applicazioni">
-      ${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}
+  const apps = folderApplications(context, observed);
+  const catalog = applicationFolderCatalog(context, apps);
+  const requested = params.get("folder") || "all";
+  const selected = ["all", "unfiled", ...catalog.folders.map(folder => folder.id)].includes(requested) ? requested : "unfiled";
+  const activeFolder = catalog.folders.find(folder => folder.id === selected);
+  const folderLink = (id, name, count) => `<a class="ops-button ${selected === id ? "primary" : "secondary"} compact" href="/?section=projects&folder=${encodeURIComponent(id)}" ${selected === id ? 'aria-current="page"' : ""}>${escapeHtml(name)} <span>${count}</span></a>`;
+  const groups = [...catalog.folders, { id: "unfiled", name: "Senza cartella" }];
+  const rows = groups.filter(folder => selected === "all" || folder.id === selected).map(folder => {
+    const members = apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id);
+    if (!members.length && selected === "all") return "";
+    return `<section class="cc-app-folder-group" aria-label="${escapeHtml(folder.name)}"><h2>${escapeHtml(folder.name)} <small>${members.length}</small></h2><div class="ops-project-list">${members.map(app => {
+      const options = `<option value="">Senza cartella</option>` + catalog.folders.map(item => `<option value="${escapeHtml(item.id)}" ${catalog.memberships[app.key] === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
+      return `<div class="cc-app-folder-entry">${app.source === "project" ? renderOpsProjectRow(app.record) : renderObservedApplicationRow(app.record, controlIcon)}<form class="cc-app-folder-placement" data-app-folder-form action="/control/project-folders/membership"><input type="hidden" name="applicationKey" value="${escapeHtml(app.key)}"><label>Cartella di ${escapeHtml(app.record.name || app.record.id)}<select name="folderId">${options}</select></label><button type="submit" class="ops-button secondary compact">Sposta</button></form></div>`;
+    }).join("") || empty("Cartella vuota", "Sposta qui le applicazioni usando il menu Cartella nella vista Tutte.")}</div></section>`;
+  }).join("");
+  return `<section class="ops-section ops-projects-redesign" data-app-folders>
+    <div class="cc-app-folders-toolbar"><div><h2>Cartelle applicazioni</h2><p>Organizza le app nei gruppi che preferisci.</p></div>
+      <form class="cc-app-folder-create" data-app-folder-form data-folder-create action="/control/project-folders"><label>Nuova cartella<input name="name" maxlength="80" required placeholder="Nome cartella" autocomplete="off"></label><button type="submit" class="ops-button primary compact">Crea cartella</button></form>
     </div>
+    <nav class="cc-app-folder-filters" aria-label="Cartelle applicazioni">${folderLink("all", "Tutte", apps.length)}${groups.map(folder => folderLink(folder.id, folder.name, apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id).length)).join("")}</nav>
+    ${activeFolder ? `<div class="cc-app-folder-management"><form data-app-folder-form action="/control/project-folders/${escapeHtml(activeFolder.id)}/rename"><label>Nome cartella<input name="name" maxlength="80" required value="${escapeHtml(activeFolder.name)}"></label><button type="submit" class="ops-button secondary compact">Rinomina</button></form><form data-app-folder-form data-folder-delete action="/control/project-folders/${escapeHtml(activeFolder.id)}/delete"><button type="submit" class="ops-button danger compact">Elimina cartella</button><small>Le app torneranno in Senza cartella.</small></form></div>` : ""}
+    <div class="cc-app-folder-groups" aria-label="Applicazioni">${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}</div>
   </section>`;
 }
 
@@ -8932,7 +9009,12 @@ function projectStorage(context, projectOrId) {
 function resolveContextProject(context, projectOrId) {
   if (projectOrId && typeof projectOrId === "object") return projectOrId;
   const id = sanitizeIdentifier(projectOrId);
-  return context.projects.find((project) => project.slug === id || project.id === id || projectIdentitySet(project).has(id)) || null;
+  const managed = context.projects.find((project) => project.slug === id || project.id === id || projectIdentitySet(project).has(id));
+  if (managed) return managed;
+  // Reviewed host extension observations can admit a source that is mounted
+  // outside the ordinary projects tree; provider/native admission still applies.
+  const observed = observedApplications().find(application => application.id === id);
+  return observed ? { ...observed, slug: observed.id } : null;
 }
 
 function databaseMatchesProject(context, database, project) {

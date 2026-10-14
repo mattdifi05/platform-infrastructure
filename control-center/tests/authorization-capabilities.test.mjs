@@ -102,7 +102,11 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
   const dispatcher = source.slice(start, end);
   // New adapters dispatch only by the authorized operation, without a duplicate
   // legacy pathname branch. Each still needs exactly one direct case below.
-  const directOnly = new Set(["cloudflare.dns.change", "backup.vps.catalog", "backup.production-restore"]);
+  const directOnly = new Set([
+    "cloudflare.dns.change", "backup.vps.catalog", "backup.production-restore",
+    "projects.hosting.status", "projects.hosting.plan", "projects.hosting.visibility",
+    "projects.hosting.clone", "projects.hosting.cancel",
+  ]);
   for (const id of directOnly) assert.equal([...dispatcher.matchAll(new RegExp(`case "${id}":`, "g"))].length, 1);
 
   for (const method of ["GET", "POST"]) {

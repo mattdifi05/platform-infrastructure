@@ -1,0 +1,9 @@
+services:
+  control-center:
+    environment:
+      CONTROL_CENTER_CLOUDFLARE_VISIBILITY_CONFIG_FILE: /run/cloudflare-visibility/projects.json
+      CONTROL_CENTER_CLOUDFLARE_VISIBILITY_TOKEN_FILE: /run/secrets/cloudflare_visibility_api_token
+      CONTROL_CENTER_CLOUDFLARE_VISIBILITY_STATE_FILE: /var/www/project-state/cloudflare-visibility.json
+    volumes:
+      - /etc/platform-infrastructure/cloudflare-visibility/projects.json:/run/cloudflare-visibility/projects.json:ro
+      - /etc/platform-infrastructure/cloudflare-visibility/api-token:/run/secrets/cloudflare_visibility_api_token:ro

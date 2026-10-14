@@ -1,0 +1,34 @@
+[Unit]
+Description=Opt-in private application clone staging operator
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/etc/platform-infrastructure/application-operator.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform-application-operator.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=platform-application-operator
+RuntimeDirectoryMode=0755
+StateDirectory=platform-application-operator
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/platform-application-operator /run/platform-application-operator
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=768M
+TasksMax=64
+TimeoutStopSec=20
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

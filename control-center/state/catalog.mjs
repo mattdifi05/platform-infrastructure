@@ -19,6 +19,7 @@ export function controlStateDatasets(env = process.env) {
     webspaces: json(env.PROJECT_WEBSPACES_FILE, "webspaces.json"),
     storageBuckets: json(env.PROJECT_STORAGE_BUCKETS_FILE, "storage-buckets.json"),
     sensitiveMaterials: json(env.PROJECT_SENSITIVE_MATERIALS_FILE, "sensitive-materials.json"),
+    hostingJobs: json(env.PROJECT_HOSTING_JOBS_FILE, "hosting-jobs.json", { jobs: {} }),
     workerJobs: json(env.PROJECT_WORKER_JOBS_FILE, "worker-jobs.json", { workers: {}, queues: {}, jobs: {}, schedules: {} }),
     identityAccess: json(env.PROJECT_IDENTITY_ACCESS_FILE, "identity-access.json", { users: {}, teams: {}, roles: {}, sessions: {}, accessReviews: {} }),
     deployments: jsonl(env.PROJECT_DEPLOYMENTS_FILE, "deployments.jsonl"),

@@ -29,6 +29,8 @@
   var pendingSidebarScrollAt = 0;
   var selectedFileEntry = null;
   var passkeyActionInFlight = false;
+  var projectHostingLoads = new WeakMap();
+  var projectHostingPolls = new WeakMap();
 
   function sameOriginUrl(value) {
     try {
@@ -1741,12 +1743,314 @@
     }).catch(function (error) { if (root.isConnected) status.textContent = error.message; });
   }
 
+  // Hosting controls are mounted into the existing generic application detail
+  // screen. The server remains the source of truth for visibility and hosts.
+  function hostingProjectFromDetail(detail) {
+    var match = String(detail && detail.id || "").match(/^project-([a-z0-9][a-z0-9._-]{0,127})$/i);
+    return match ? match[1] : "";
+  }
+
+  function hostingText(value, fallback) {
+    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  }
+
+  function hostingRequest(path, payload) {
+    var headers = new Headers({ Accept: "application/json" });
+    if (payload) {
+      headers.set("Content-Type", "application/json");
+      addMutationHeaders(headers, "POST");
+    }
+    return fetch(path, {
+      method: payload ? "POST" : "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: headers,
+      ...(payload ? { body: JSON.stringify(payload) } : {}),
+    }).then(async function (response) {
+      var value = await response.json().catch(function () { return {}; });
+      if (redirectForReauthentication(response, value)) throw reauthenticationRedirectError();
+      if (!response.ok || value.ok === false) throw Error(value.message || value.error || "Richiesta non riuscita.");
+      return value;
+    });
+  }
+
+  function hostingModeLabel(mode) {
+    return ({ public: "Pubblico", private: "Privato", offline: "Offline" })[mode] || "Da verificare";
+  }
+
+  function hostingJobLabel(state) {
+    return ({ queued: "In coda", pending: "In coda", staged: "Preparazione", publishing: "Pubblicazione", activating: "Attivazione", running: "In corso", succeeded: "Completata", completed: "Completata", failed: "Non riuscita", cancelled: "Annullata", canceled: "Annullata" })[String(state || "").toLowerCase()] || hostingText(state, "Stato non disponibile");
+  }
+
+  function mountProjectHosting(detail) {
+    if (!detail || !detail.isConnected) return;
+    var projectId = hostingProjectFromDetail(detail);
+    var focus = detail.querySelector(".ops-project-detail-focus");
+    if (!projectId || !focus) return;
+    var existing = detail.querySelector("[data-project-hosting]");
+    if (existing && existing.dataset.projectId === projectId) return;
+    var panel = document.createElement("section");
+    panel.className = "ops-project-detail-panel cc-project-hosting";
+    panel.dataset.projectHosting = "";
+    panel.dataset.projectId = projectId;
+    panel.setAttribute("aria-labelledby", "cc-hosting-title-" + projectId);
+    panel.innerHTML = '<div class="ops-project-detail-panel-head"><div><h3 id="cc-hosting-title-' + projectId + '">Visibilità e copia privata</h3><p class="cc-hosting-description">La visibilità effettiva viene riletta dal servizio dopo ogni modifica.</p></div><button type="button" class="ops-button secondary compact" data-hosting-refresh>Aggiorna</button></div>' +
+      '<div class="cc-hosting-current" data-hosting-current role="status">Lettura dello stato verificato…</div>' +
+      '<div class="cc-hosting-actions" role="group" aria-label="Imposta visibilità"><button type="button" class="ops-button secondary" data-hosting-mode="public">Pubblico</button><button type="button" class="ops-button secondary" data-hosting-mode="private">Privato</button><button type="button" class="ops-button secondary" data-hosting-mode="offline">Offline</button></div>' +
+      '<div class="cc-hosting-copy"><div><strong>Copia privata</strong><p>Accesso con Cloudflare Access per il solo account owner. Dati isolati dalla produzione; email e pianificazioni disattivate.</p><p data-hosting-clone-unavailable hidden></p></div><button type="button" class="ops-button open" data-hosting-clone disabled>Crea copia privata</button></div>' +
+      '<div class="cc-hosting-job" data-hosting-job hidden></div><p class="cc-hosting-message" data-hosting-message role="status" aria-live="polite"></p>';
+    focus.prepend(panel);
+    refreshProjectHosting(panel);
+  }
+
+  function refreshProjectHosting(panel) {
+    if (!panel || !panel.isConnected || projectHostingLoads.has(panel)) return;
+    var projectId = panel.dataset.projectId;
+    if (!projectId) return;
+    var request = hostingRequest("/control/projects/" + encodeURIComponent(projectId) + "/hosting-status");
+    projectHostingLoads.set(panel, request);
+    var current = panel.querySelector("[data-hosting-current]");
+    request.then(function (value) {
+      if (!panel.isConnected) return;
+      var project = value.project || {};
+      var visibility = project.visibility || {};
+      var effective = visibility.effective;
+      var verified = visibility.verified === true;
+      current.replaceChildren();
+      var label = document.createElement("strong");
+      label.textContent = verified && effective ? "Visibilità attiva: " + hostingModeLabel(effective) : "Visibilità effettiva non verificata";
+      current.append(label);
+      if (visibility.desired && visibility.desired !== effective) {
+        var pending = document.createElement("span");
+        pending.textContent = "Richiesta: " + hostingModeLabel(visibility.desired) + " · in attesa di verifica";
+        current.append(pending);
+      }
+      var productionHost = hostingText(project.productionHostname || (project.production && project.production.hostname), "Host produzione non disponibile");
+      var production = document.createElement("span");
+      production.textContent = "Produzione: " + productionHost;
+      current.append(production);
+      var relatedHosts = Array.isArray(visibility.hosts) ? visibility.hosts : [];
+      if (relatedHosts.length > 1) {
+        var hosts = document.createElement("span");
+        hosts.textContent = "Host verificati: " + relatedHosts.map(function (host) { return hostingText(host && host.hostname, ""); }).filter(Boolean).join(", ");
+        current.append(hosts);
+      }
+      current.dataset.verified = verified ? "true" : "false";
+      panel.querySelectorAll("[data-hosting-mode]").forEach(function (button) {
+        button.setAttribute("aria-pressed", verified && effective === button.dataset.hostingMode ? "true" : "false");
+        button.disabled = !verified;
+      });
+      var clone = value.privateCopy || {};
+      panel.dataset.targetHostname = hostingText(clone.hostname || clone.targetHostname, "");
+      panel.dataset.cloneState = hostingText(clone.status, "");
+      panel.dataset.cloneJobId = hostingText(clone.jobId || clone.requestId, "");
+      panel.dataset.cloneCancellable = clone.cancellable === true ? "true" : "false";
+      panel.dataset.cloneEligible = clone.eligible === true ? "true" : "false";
+      renderProjectHostingJob(panel, clone);
+      panel.querySelector("[data-hosting-clone]").disabled = clone.eligible !== true;
+      var unavailable = panel.querySelector("[data-hosting-clone-unavailable]");
+      unavailable.hidden = clone.eligible === true;
+      unavailable.textContent = clone.eligible === true ? "" : privateCopyUnavailableReason(clone.reason);
+      var previousPoll = projectHostingPolls.get(panel);
+      if (previousPoll) window.clearTimeout(previousPoll);
+      if (["queued", "pending", "staged", "publishing", "activating", "running"].includes(String(clone.status || "").toLowerCase())) {
+        projectHostingPolls.set(panel, window.setTimeout(function () { projectHostingPolls.delete(panel); refreshProjectHosting(panel); }, 2500));
+      } else {
+        projectHostingPolls.delete(panel);
+      }
+    }).catch(function (error) {
+      if (panel.isConnected && error.name !== "ReauthenticationRedirect") {
+        current.textContent = "Stato non disponibile. Aggiorna per riprovare.";
+        panel.querySelector("[data-hosting-clone]").disabled = true;
+        panel.querySelector("[data-hosting-message]").textContent = error.message;
+      }
+    }).finally(function () { projectHostingLoads.delete(panel); });
+  }
+
+  function privateCopyUnavailableReason(reason) {
+    var normalized = String(reason || "").trim().toLowerCase();
+    var known = {
+      already_exists: "Esiste già una copia privata per questa applicazione.",
+      host_conflict: "L’host previsto per la copia è già in uso.",
+      source_unverified: "Prima di creare la copia, verifica l’host e la sorgente dell’applicazione.",
+      unsupported: "La configurazione attuale non consente di creare una copia privata.",
+      "source not admitted by native application operator": "Questa applicazione non è ancora stata verificata per la copia privata.",
+    };
+    if (known[normalized]) return known[normalized];
+    return "La copia privata non è disponibile per questa applicazione.";
+  }
+
+  function renderProjectHostingJob(panel, copy) {
+    var box = panel.querySelector("[data-hosting-job]");
+    var status = String(copy && copy.status || "").toLowerCase();
+    var jobId = hostingText(copy && (copy.jobId || copy.requestId), "");
+    if (!status || status === "absent") { box.hidden = true; box.replaceChildren(); return; }
+    box.hidden = false;
+    box.replaceChildren();
+    var heading = document.createElement("strong");
+    heading.textContent = "Copia privata · " + hostingJobLabel(status);
+    box.append(heading);
+    var host = document.createElement("span");
+    host.textContent = "Host: " + hostingText(copy.hostname || copy.targetHostname, "In attesa del nome host verificato");
+    box.append(host);
+    if (jobId) {
+      var id = document.createElement("small");
+      id.textContent = "Operazione " + jobId;
+      box.append(id);
+    }
+    if (copy.cancellable === true && jobId) {
+      var cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "ops-button danger compact";
+      cancel.dataset.hostingCancel = jobId;
+      cancel.textContent = "Annulla creazione";
+      box.append(cancel);
+    }
+  }
+
+  function openHostingConfirm(panel, operation, mode) {
+    var projectId = panel.dataset.projectId;
+    var target = panel.dataset.targetHostname;
+    var dialog = document.createElement("dialog");
+    dialog.className = "cc-restore-dialog cc-hosting-dialog";
+    var title = operation === "clone" ? "Crea copia privata" : "Cambia visibilità";
+    var actionLabel = operation === "clone" ? "CLONE" : String(mode || "").toUpperCase();
+    dialog.innerHTML = '<div class="cc-dialog-head"><h2>' + title + '</h2><button type="button" data-hosting-close aria-label="Chiudi">×</button></div>' +
+      (operation === "clone"
+        ? '<dl class="cc-hosting-review"><dt>Host previsto</dt><dd data-hosting-target></dd><dt>Origine</dt><dd>La produzione resta separata dalla copia.</dd><dt>Dati</dt><dd>Archivio e credenziali isolati dalla produzione.</dd><dt>Invio email</dt><dd>Disattivato</dd><dt>Pianificazioni</dt><dd>Disattivate</dd><dt>Accesso</dt><dd>Cloudflare Access · solo account owner</dd></dl>'
+        : '<p>La visibilità attuale rimane quella verificata finché il servizio non conferma il nuovo stato.</p><p class="cc-hosting-review-value">Nuovo stato richiesto: <strong>' + hostingModeLabel(mode) + '</strong></p><div class="cc-hosting-plan" data-hosting-plan hidden><strong>Piano per <span data-hosting-plan-host></span></strong><div class="cc-hosting-plan-hosts" data-hosting-plan-hosts></div><small data-hosting-plan-revision></small></div>') +
+      '<label>Per confermare, scrivi <strong>' + actionLabel + '</strong><input type="text" data-hosting-typed autocomplete="off" spellcheck="false"></label><p data-hosting-dialog-message role="status" aria-live="polite"></p><div class="cc-hosting-dialog-actions"><button type="button" class="ops-button secondary" data-hosting-close>Annulla</button><button type="button" class="ops-button open" data-hosting-apply disabled>' + (operation === "clone" ? "Crea copia privata" : "Richiedi modifica") + '</button></div>';
+    if (operation === "clone") dialog.querySelector("[data-hosting-target]").textContent = target || "Host in attesa dei dati verificati";
+    document.body.append(dialog);
+    var input = dialog.querySelector("[data-hosting-typed]");
+    var apply = dialog.querySelector("[data-hosting-apply]");
+    var message = dialog.querySelector("[data-hosting-dialog-message]");
+    var reviewedPlan = null;
+    var busy = false;
+    var updateApply = function () { apply.disabled = busy || (operation === "visibility" && !reviewedPlan) || input.value.trim() !== actionLabel; };
+    input.addEventListener("input", updateApply);
+    dialog.querySelectorAll("[data-hosting-close]").forEach(function (button) { button.addEventListener("click", function () { dialog.close(); dialog.remove(); }); });
+    apply.addEventListener("click", async function () {
+      if (apply.disabled || busy) return;
+      busy = true;
+      apply.disabled = true;
+      try {
+        await authenticateWithSystemPasskey();
+        var path = "/control/projects/" + encodeURIComponent(projectId) + (operation === "clone" ? "/clone" : "/visibility");
+        var payload = operation === "clone"
+          ? { confirm: "CLONE-PRIVATE:" + projectId }
+          : { mode: mode, expectedRevision: reviewedPlan.revision, confirm: reviewedPlan.confirmationRequired };
+        var result = await hostingRequest(path, payload);
+        message.textContent = operation === "clone" ? "Richiesta accodata. Leggo lo stato aggiornato…" : "Modifica richiesta. Verifico lo stato effettivo…";
+        if (operation === "clone") {
+          var copy = result.privateCopy || result.job || {};
+          if (copy.hostname || copy.targetHostname) panel.dataset.targetHostname = copy.hostname || copy.targetHostname;
+          if (copy.jobId || copy.requestId) panel.dataset.cloneJobId = copy.jobId || copy.requestId;
+        }
+        refreshProjectHosting(panel);
+        window.setTimeout(function () { refreshProjectHosting(panel); }, 1200);
+        window.setTimeout(function () { refreshProjectHosting(panel); }, 3500);
+        window.setTimeout(function () { if (dialog.isConnected) { dialog.close(); dialog.remove(); } }, 1000);
+      } catch (error) {
+        message.textContent = error.name === "ReauthenticationRedirect" ? "Conferma la passkey per continuare." : (error.message || "Richiesta non riuscita.");
+      } finally {
+        busy = false;
+        updateApply();
+      }
+    });
+    dialog.addEventListener("close", function () { if (dialog.isConnected) dialog.remove(); }, { once: true });
+    dialog.showModal();
+    input.focus();
+    if (operation === "visibility") {
+      message.textContent = "Carico il piano aggiornato per questa modifica…";
+      hostingRequest("/control/projects/" + encodeURIComponent(projectId) + "/hosting-plan?mode=" + encodeURIComponent(mode)).then(function (value) {
+        if (!dialog.isConnected) return;
+        var plan = value.plan || {};
+        if ((typeof plan.revision !== "string" && typeof plan.revision !== "number") || !plan.confirmationRequired) throw Error("Il piano non include revisione e conferma valide.");
+        reviewedPlan = plan;
+        var planBox = dialog.querySelector("[data-hosting-plan]");
+        var hostPlans = Array.isArray(plan.hostPlans) ? plan.hostPlans : [];
+        var hostnames = Array.isArray(plan.hostnames) ? plan.hostnames : [];
+        if (!hostnames.length) hostnames = hostPlans.map(function (hostPlan) { return hostPlan.hostname; });
+        if (!hostnames.length && plan.hostname) hostnames = [plan.hostname];
+        hostnames = hostnames.filter(function (hostname, index, list) { return typeof hostname === "string" && hostname.trim() && list.indexOf(hostname) === index; });
+        dialog.querySelector("[data-hosting-plan-host]").textContent = hostnames.length > 1 ? hostnames.length + " host" : (hostnames[0] || "Host non disponibile");
+        dialog.querySelector("[data-hosting-plan-revision]").textContent = "Revisione " + String(plan.revision);
+        var hostList = dialog.querySelector("[data-hosting-plan-hosts]");
+        hostList.replaceChildren();
+        hostnames.forEach(function (hostname) {
+          var hostPlan = hostPlans.find(function (candidate) { return candidate && candidate.hostname === hostname; });
+          var section = document.createElement("section");
+          section.className = "cc-hosting-plan-host";
+          var hostHeading = document.createElement("strong");
+          hostHeading.textContent = hostname;
+          section.append(hostHeading);
+          var actions = document.createElement("ul");
+          (Array.isArray(hostPlan && hostPlan.actions) ? hostPlan.actions : []).forEach(function (item) {
+            var row = document.createElement("li");
+            row.textContent = typeof item === "string" ? item : hostingText(item && (item.description || item.label), "Modifica prevista");
+            actions.append(row);
+          });
+          if (!actions.childElementCount) {
+            var fallback = document.createElement("li");
+            fallback.textContent = "Applica lo stato " + hostingModeLabel(plan.requestedMode || mode) + " secondo il piano verificato.";
+            actions.append(fallback);
+          }
+          section.append(actions);
+          hostList.append(section);
+        });
+        if (!hostnames.length) {
+          var actions = document.createElement("ul");
+          (Array.isArray(plan.actions) ? plan.actions : []).forEach(function (item) {
+            var row = document.createElement("li");
+            row.textContent = typeof item === "string" ? item : hostingText(item && (item.description || item.label), "Modifica prevista");
+            actions.append(row);
+          });
+          hostList.append(actions);
+        }
+        planBox.hidden = false;
+        message.textContent = "Controlla host, modifiche e revisione prima di confermare.";
+        updateApply();
+      }).catch(function (error) {
+        if (!dialog.isConnected) return;
+        reviewedPlan = null;
+        message.textContent = error.name === "ReauthenticationRedirect" ? "Accedi di nuovo per caricare il piano." : "Piano non disponibile: " + (error.message || "aggiorna e riprova.");
+        updateApply();
+      });
+    }
+  }
+
+  function initProjectHosting() {
+    function scan() { document.querySelectorAll(".ops-project-detail-screen[id^='project-']").forEach(mountProjectHosting); }
+    scan();
+    if (window.MutationObserver) new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("click", function (event) {
+      var refresh = event.target.closest("[data-hosting-refresh]");
+      if (refresh) { refreshProjectHosting(refresh.closest("[data-project-hosting]")); return; }
+      var mode = event.target.closest("[data-hosting-mode]");
+      if (mode) { openHostingConfirm(mode.closest("[data-project-hosting]"), "visibility", mode.dataset.hostingMode); return; }
+      var clone = event.target.closest("[data-hosting-clone]");
+      if (clone) { var panel = clone.closest("[data-project-hosting]"); if (panel.dataset.cloneEligible !== "true") return; openHostingConfirm(panel, "clone"); return; }
+      var cancel = event.target.closest("[data-hosting-cancel]");
+      if (cancel) {
+        var hostPanel = cancel.closest("[data-project-hosting]");
+        if (cancel.disabled) return;
+        cancel.disabled = true;
+        authenticateWithSystemPasskey().then(function () {
+          var id = cancel.dataset.hostingCancel;
+          return hostingRequest("/control/projects/" + encodeURIComponent(hostPanel.dataset.projectId) + "/clone/" + encodeURIComponent(id) + "/cancel", { confirm: "CANCEL-CLONE:" + id });
+        }).then(function () { refreshProjectHosting(hostPanel); }).catch(function (error) { if (error.name !== "ReauthenticationRedirect") showError(error.message || "Annullamento non riuscito."); }).finally(function () { if (cancel.isConnected) cancel.disabled = false; });
+      }
+    });
+  }
+
 
   function init() {
     if (initialized) return;
     initialized = true;
     document.body.dataset.ccEnhanced = "true";
     document.body.dataset.ccBootId = bootId;
+    initProjectHosting();
     window.history.replaceState({ ccDynamic: true }, "", window.location.pathname + window.location.search + window.location.hash);
     restoreSidebarState({ instantOpsNav: true });
     positionOpsNavPill({ instant: true });
@@ -1908,6 +2212,22 @@
       if (event.defaultPrevented) return;
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-app-folder-form")) {
+        event.preventDefault();
+        var button = event.submitter || form.querySelector("button[type=submit]");
+        var payload = Object.fromEntries(new FormData(form).entries());
+        if (button) button.disabled = true;
+        hostingRequest(form.getAttribute("action"), payload).then(function (result) {
+          var url = new URL(window.location.href);
+          url.searchParams.set("section", "projects");
+          if (form.hasAttribute("data-folder-create") || form.hasAttribute("data-folder-delete")) url.searchParams.set("folder", result.folderId);
+          clearCache();
+          return navigate(url, { history: "replace" });
+        }).catch(function (error) {
+          if (error.name !== "ReauthenticationRedirect") showError(error.message || "Impossibile aggiornare la cartella.");
+        }).finally(function () { if (button && button.isConnected) button.disabled = false; });
+        return;
+      }
       if (form.hasAttribute("data-passkey-submit")) {
         event.preventDefault();
         submitPasskeyForm(form, event.submitter || null);

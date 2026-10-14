@@ -1,0 +1,11 @@
+[Unit]
+Description=Loopback-only listener for private application ingress
+
+[Socket]
+ListenStream=127.0.0.1:18181
+Accept=no
+NoDelay=yes
+Service=platform-private-apps-proxy.service
+
+[Install]
+WantedBy=sockets.target

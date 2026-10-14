@@ -6745,3 +6745,99 @@ pre {
 .cc-restore-dialog select, .cc-restore-dialog input:not([type=checkbox]) { border: 1px solid #cdd3df; border-radius: 8px; display: block; font: inherit; max-width: 100%; min-height: 44px; padding: 9px; width: 100%; margin-top: 8px; }
 .cc-restore-dialog pre { background: var(--cc-surface-soft); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; padding: 12px; white-space: pre-wrap; }
 @media (max-width: 860px) { .cc-restore-dialog { padding: 17px; max-height: calc(100dvh - 24px); } }
+
+/* Application hosting controls mounted into the existing project detail page. */
+.cc-project-hosting { display: grid; gap: 16px; }
+.cc-project-hosting .ops-project-detail-panel-head > div { min-width: 0; }
+.cc-project-hosting .cc-hosting-description,
+.cc-project-hosting .cc-hosting-copy p { color: var(--cc-muted); font-size: 13px; line-height: 1.55; margin: 5px 0 0; }
+.cc-hosting-current,
+.cc-hosting-job { align-items: flex-start; background: var(--cc-surface-soft); border: 1px solid var(--cc-border-soft); border-radius: 10px; display: grid; gap: 7px; padding: 14px; }
+.cc-hosting-current[data-verified="false"] { border-color: #edcf92; }
+.cc-hosting-current span,
+.cc-hosting-job span,
+.cc-hosting-job small { color: var(--cc-muted); font-size: 13px; overflow-wrap: anywhere; }
+.cc-hosting-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cc-hosting-actions [aria-pressed="true"] { background: var(--cc-accent-soft); border-color: var(--cc-accent); color: var(--cc-accent-strong); }
+.cc-hosting-copy { align-items: center; border-top: 1px solid var(--cc-border-soft); display: flex; gap: 18px; justify-content: space-between; padding-top: 15px; }
+.cc-hosting-copy strong { display: block; }
+.cc-hosting-copy .ops-button { flex: 0 0 auto; }
+.cc-hosting-job { align-items: center; grid-template-columns: minmax(0, 1fr) auto; }
+.cc-hosting-job[hidden] { display: none; }
+.cc-hosting-job strong { grid-column: 1 / -1; }
+.cc-hosting-job [data-hosting-cancel] { grid-column: 2; grid-row: 2 / span 2; }
+.cc-hosting-message { color: var(--cc-muted); font-size: 13px; margin: 0; min-height: 1em; }
+.cc-hosting-dialog { width: min(640px, calc(100vw - 32px)); }
+.cc-hosting-review { background: var(--cc-surface-soft); border: 1px solid var(--cc-border-soft); border-radius: 10px; display: grid; gap: 9px 16px; grid-template-columns: minmax(120px, .7fr) minmax(0, 1.3fr); margin: 15px 0; padding: 14px; }
+.cc-hosting-review dt { color: var(--cc-muted); font-size: 13px; }
+.cc-hosting-review dd { font-size: 13px; margin: 0; overflow-wrap: anywhere; }
+.cc-hosting-dialog label { display: grid; gap: 6px; }
+.cc-hosting-dialog label strong { font-family: var(--cc-font-mono); }
+.cc-hosting-plan { background: var(--cc-surface-soft); border: 1px solid var(--cc-border-soft); border-radius: 10px; margin: 12px 0; padding: 13px 15px; }
+.cc-hosting-plan strong { display: block; overflow-wrap: anywhere; }
+.cc-hosting-plan ul { color: var(--cc-soft-text); font-size: 13px; line-height: 1.55; margin: 8px 0; padding-left: 20px; }
+.cc-hosting-plan-hosts { display: grid; gap: 10px; margin-top: 10px; }
+.cc-hosting-plan-host { border-top: 1px solid var(--cc-border-soft); min-width: 0; padding-top: 9px; }
+.cc-hosting-plan-host > strong { overflow-wrap: anywhere; }
+.cc-hosting-plan small { color: var(--cc-muted); font-size: 12px; }
+.cc-hosting-copy [data-hosting-clone-unavailable] { color: var(--cc-amber); }
+.cc-hosting-dialog-actions { display: flex; flex-wrap: wrap; gap: 9px; justify-content: flex-end; margin-top: 16px; }
+@media (max-width: 680px) {
+  .cc-hosting-copy { align-items: stretch; flex-direction: column; }
+  .cc-hosting-copy .ops-button { width: 100%; }
+  .cc-hosting-job { align-items: start; grid-template-columns: 1fr; }
+  .cc-hosting-job [data-hosting-cancel] { grid-column: auto; grid-row: auto; width: 100%; }
+  .cc-hosting-review { grid-template-columns: 1fr; gap: 4px; }
+  .cc-hosting-review dd { margin-bottom: 7px; }
+  .cc-hosting-dialog-actions { display: grid; grid-template-columns: 1fr; }
+  .cc-hosting-dialog-actions .ops-button { width: 100%; }
+}
+
+/* Manual application folders are catalog metadata, independent of hosting. */
+.cc-app-folders-toolbar,
+.cc-app-folder-management,
+.cc-app-folder-management form,
+.cc-app-folder-create,
+.cc-app-folder-placement,
+.cc-app-folder-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.cc-app-folders-toolbar { justify-content: space-between; margin-bottom: 18px; }
+.cc-app-folders-toolbar h2,
+.cc-app-folder-group h2 { margin: 0; font-size: 17px; }
+.cc-app-folders-toolbar p,
+.cc-app-folder-management small { color: var(--cc-text-muted, #657184); font-size: 13px; }
+.cc-app-folders-toolbar p { margin: 6px 0 0; }
+.cc-app-folder-filters { margin-bottom: 18px; }
+.cc-app-folder-filters a { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.cc-app-folder-filters a span,
+.cc-app-folder-group h2 small { opacity: .7; font-size: 12px; margin-left: 5px; }
+.cc-app-folder-management { padding: 14px; margin-bottom: 20px; border: var(--ops-project-border); border-radius: var(--ops-project-radius); background: white; justify-content: space-between; }
+.cc-app-folder-groups { display: grid; gap: 25px; }
+.cc-app-folder-group { min-width: 0; }
+.cc-app-folder-group h2 { margin-bottom: 10px; overflow-wrap: anywhere; }
+.cc-app-folder-entry { min-width: 0; }
+.cc-app-folder-create label,
+.cc-app-folder-management label,
+.cc-app-folder-placement label { display: grid; gap: 5px; color: var(--cc-text-muted, #657184); font-size: 12px; min-width: 0; }
+.cc-app-folder-create input,
+.cc-app-folder-management input,
+.cc-app-folder-placement select { border: 1px solid #dbe1e8; background: white; border-radius: 8px; padding: 9px 10px; font: inherit; color: #24334a; min-width: 0; width: 100%; max-width: 280px; }
+.cc-app-folder-create,
+.cc-app-folder-management form { align-items: end; }
+.cc-app-folder-placement { justify-content: flex-end; margin: 7px 4px 3px; align-items: end; }
+.cc-app-folder-placement label { width: 230px; }
+@media (max-width: 640px) {
+  .cc-app-folder-create,
+  .cc-app-folder-management,
+  .cc-app-folder-management form { width: 100%; }
+  .cc-app-folder-create label,
+  .cc-app-folder-management label { flex: 1; }
+  .cc-app-folder-placement label { flex: 1; width: auto; }
+  .cc-app-folder-placement select,
+  .cc-app-folder-create input,
+  .cc-app-folder-management input { max-width: 100%; }
+}
