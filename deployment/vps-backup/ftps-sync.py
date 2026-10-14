@@ -69,6 +69,7 @@ def points(f,listing):
  return result
 
 def sync_once():
+ b.assert_backup_enabled()
  profile,_=b.profile()
  if profile.get('offsiteAuthorized') is not True:raise RuntimeError('FTPS activation gate is not open')
  proof=json.loads(b.private(b.WORK/'latest-local.json').read_text());bundle=b.WORK/'points'/proof['bundle'];b.private(bundle)

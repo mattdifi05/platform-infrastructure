@@ -49,6 +49,8 @@ const CONTROL_ROUTES = Object.freeze([
   admin("applications.lifecycle", "control", "applications", parameter("applicationId"), parameter("action")),
 
   viewer("domains.list", "control", "domains"),
+  viewer("backup.control.read", "control", "backups", "control"),
+  ownerFresh("POST", "backup.control.update", "control", "backups", "control"),
   ownerFresh("GET", "backup.vps.catalog", "control", "backups", "vps"),
   ownerFresh("POST", "backup.production-restore", "control", "backups", "production-restore"),
   ownerFresh("POST", "cloudflare.dns.change", "control", "cloudflare", "dns", "change"),
@@ -104,6 +106,7 @@ const CONTROL_ROUTES = Object.freeze([
   admin("identity.session-policy.plan", "control", "identity", "sessions"),
   admin("identity.access-review.plan", "control", "identity", "access-reviews"),
 
+  viewer("resources.host.read", "control", "resources", "host"),
   viewer("resources.summary.read", "control", "resources", "summary"),
   admin("resources.limits.plan", "control", "resources", "limits"),
   viewer("monitoring.read", "control", "monitoring"),

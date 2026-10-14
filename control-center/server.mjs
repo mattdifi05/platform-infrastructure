@@ -46,6 +46,8 @@ import {
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
+import { normalizeBackupControl } from "./backup/global-control.mjs";
+import { createHostMetricsReader } from "./resources/host-metrics.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
 import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
 import { createApplicationOperator } from "./hosting/application-operator.mjs";
@@ -125,6 +127,7 @@ const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOU
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
+const readHostMetrics = createHostMetricsReader({ readSnapshot: readPrometheusResourceSnapshot, query: prometheusQuery, ttlMs: resourceMetricsTtlMs });
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsagePartialTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000);
 const projectDiskUsageReader = createProjectDiskUsageReader({
@@ -481,7 +484,7 @@ const server = createServer(async (req, res) => {
       requestId: rid(),
       operation: requestOperation,
     }, async () => {
-      if (requestOperation.operationId?.startsWith("ai.")) {
+      if (requestOperation.operationId?.startsWith("ai.") || requestOperation.operationId === "resources.host.read") {
         return handleApi(req, res, url, null, requestOperation);
       }
       if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
@@ -755,6 +758,7 @@ async function handleApi(req, res, url, context, operation) {
           return json(res, { ok: true, job: await hostingLifecycle.cancel(id, operation.parameters.jobId, payload) }, 202);
         } catch { return json(res, { ok: false, error: "hosting_operation_rejected", message: "Hosting operation unavailable, unsupported, or changed since review." }, 409); }
       }
+      case "resources.host.read": return json(res, await readHostMetrics());
       case "overview.read": return json(res, context.overview);
       case "backup.vps.catalog": {
         const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
@@ -831,6 +835,8 @@ async function handleApi(req, res, url, context, operation) {
         statusEventsTruncated: statusEventPage.truncated,
       });
     }
+    if (method === "GET" && route(parts, "control", "backups", "control")) return json(res, readGlobalBackupControl(url.searchParams.get("requestId") || ""));
+    if (method === "POST" && route(parts, "control", "backups", "control")) return json(res, queueGlobalBackupControl(payload, context), 202);
     if (method === "GET" && route(parts, "control", "go-no-go")) return json(res, context.goNoGo);
     if (method === "GET" && route(parts, "control", "project-folders")) return json(res, applicationFolderCatalog(context, folderApplications(context)));
     if (method === "POST" && route(parts, "control", "project-folders")) return json(res, changeApplicationFolder("create", payload, context));
@@ -5391,7 +5397,7 @@ function resolveBackupRunRequest(payload, context) {
 
 function resolveBackupRestoreRequest(payload, context) {
   const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
-  if (native && (!native.enabled || !native.queueActive)) throw new ValidationError("Ripristino VPS non ancora attivato.");
+  if (native && (!native.enrollmentEnabled || !native.queueActive)) throw new ValidationError("Ripristino VPS non ancora attivato.");
   const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
   if (requestedScope === "application" || requestedScope.startsWith("app-")) {
     const projectId = requestedScope.startsWith("app-")
@@ -5881,7 +5887,7 @@ function planVpsProductionRestore(payload, context) {
     preserves: application ? "Altri servizi, account del Control Center, configurazioni, credenziali e immagini correnti. Il codice in esecuzione non viene sostituito dalla copia dei sorgenti." : "SSH, rete, sistema operativo, credenziali di gestione, authority e coda corrente.",
     downtimeRequired: true, originalStateRetainedForRollback: true,
     ownerAccessReturnsToBackupState: !application,
-    enabled: native.enabled && native.queueActive && (application ? application.productionRestoreEnabled : native.productionRestoreEnabled),
+    enabled: native.enrollmentEnabled && native.queueActive && (application ? application.productionRestoreEnabled : native.productionRestoreEnabled),
   };
   if (payload.apply !== true) return { dryRun: true, details };
   if (!details.enabled || payload.confirm !== confirmation || payload.reviewedManifestId !== selected.id) throw new ValidationError("Ripristino non attivato o conferma del punto non valida.");
@@ -5890,7 +5896,31 @@ function planVpsProductionRestore(payload, context) {
   return { dryRun: false, job, details };
 }
 
-function createBackupJob({ operation, scope, sourceManifestPath = "", sourceManifestDigest = "", restoreProfileDigest = "", resources, context }) {
+function readGlobalBackupControl(requestId = "") {
+  const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const control = normalizeBackupControl(catalog);
+  const requests = readBackupJobs().filter(job => job.operation === "backup-control");
+  const request = requestId ? requests.find(job => job.id === requestId)
+    : requests.find(job => ["queued", "running"].includes(job.status));
+  return { control, controlQueueActive: catalog?.queueActive === true, request: request ? { id: request.id, status: request.status, enabled: request.backupEnabled } : null };
+}
+
+function queueGlobalBackupControl(payload, context) {
+  const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+  const control = normalizeBackupControl(catalog);
+  if (!catalog || !control.available || !catalog.queueActive) throw new RejectedOperationError("Il controllo dei backup VPS non è disponibile. Nessuno stato è stato modificato.");
+  if (typeof payload.enabled !== "boolean" || payload.expectedRevision !== control.revision) throw new RejectedOperationError("Stato dei backup cambiato. Aggiorna prima di riprovare.");
+  const job = createBackupJob({ operation: "backup-control", scope: { kind: "platform", id: "platform" }, resources: catalog.resources,
+    backupEnabled: payload.enabled, expectedControlRevision: control.revision, context });
+  appendAudit({ action: "backup.control.queue", target: job.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Global VPS backup control requested; effective state requires protected root readback." });
+  return { accepted: true, control, request: { id: job.id, status: job.status, enabled: job.backupEnabled } };
+}
+
+function createBackupJob({ operation, scope, sourceManifestPath = "", sourceManifestDigest = "", restoreProfileDigest = "", backupEnabled, expectedControlRevision = "", resources, context }) {
+  if (operation === "backup" && process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT) {
+    const native = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
+    if (!native?.enabled) throw new RejectedOperationError("I backup globali VPS sono disattivati o non disponibili.");
+  }
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
   const principal = String(identity?.subject || "").trim();
@@ -5911,6 +5941,8 @@ function createBackupJob({ operation, scope, sourceManifestPath = "", sourceMani
     sourceManifestPath,
     sourceManifestDigest,
     restoreProfileDigest,
+    backupEnabled,
+    expectedControlRevision,
   });
   return admitBackupJob({
     jobsDir: backupJobsDir,
@@ -6111,6 +6143,7 @@ function operationsPortalSections() {
   return [
     { id: "projects", label: "Applicazioni", icon: "projects" },
     { id: "secrets", label: "Secret", icon: "shield" },
+    { id: "settings", label: "Impostazioni", icon: "settings" },
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
   ];
@@ -6120,6 +6153,7 @@ function operationPageHint(section, context) {
   const hints = {
     projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
     secrets: "Vault cifrato e inventario centralizzato dei secret.",
+    settings: "Risorse generali della VPS e impostazioni del server.",
     files: "Inventario file applicazione in sola lettura.",
     databases: "Database collegati alle applicazioni e azioni metadata.",
   };
@@ -6129,9 +6163,30 @@ function operationPageHint(section, context) {
 function renderOperationsSection(section, context, params, currentProject) {
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
+  if (section === "settings") return renderOpsSettings();
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
   return renderOpsProjects(context, params);
+}
+
+function renderOpsSettings() {
+  return `<section class="cc-settings" data-settings-page>
+    <section class="ops-project-detail-panel cc-settings-resources" data-host-metrics aria-labelledby="cc-host-metrics-title">
+      <div class="ops-project-detail-panel-head"><div><h2 id="cc-host-metrics-title">Risorse della VPS</h2><p class="cc-settings-note">Intero server · node_exporter · aggiornamento ogni 10 secondi</p></div><button class="ops-button secondary compact" type="button" data-host-metrics-refresh>Aggiorna</button></div>
+      <div class="cc-host-metric-grid">${[["cpu", "CPU", "Media degli ultimi 2 minuti"], ["memory", "RAM", "Memoria usata / totale"], ["disk", "Disco", "Spazio usato / totale"], ["network", "Connessione", "Ricezione ↓ / invio ↑ · media 2 minuti"]].map(([id, label, detail]) => `<article class="cc-host-metric" aria-label="${label}"><span>${label}</span><strong data-host-metric="${id}">—</strong><small data-host-metric-detail="${id}">${detail}</small>${id === "network" ? "" : `<meter min="0" max="100" value="0" data-host-metric-meter="${id}" aria-label="Utilizzo ${label}" hidden></meter>`}</article>`).join("")}</div>
+      <div class="cc-host-detail-grid">
+        <section class="cc-host-detail"><h3>Sistema</h3><dl>${[["load", "Carico · 1 / 5 / 15 minuti"], ["uptime", "Tempo di attività"], ["processes", "Task eseguibili / bloccati"], ["fileDescriptors", "File descriptor allocati / limite"]].map(([id,label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
+        <section class="cc-host-detail"><h3>Memoria e filesystem</h3><dl>${[["swap", "Swap usata / totale"], ["inodes", "Inode usati / totali"], ["ioTotals", "Letture / scritture disco"], ["ioOperations", "Operazioni lettura / scrittura al secondo"]].map(([id,label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
+      </div>
+      <section class="cc-host-detail"><h3>Connessione per interfaccia</h3><p class="cc-settings-note">Velocità medie su 2 minuti. Contatori cumulativi, azzerabili al riavvio dell’interfaccia.</p><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr><th scope="col">Interfaccia</th><th scope="col">Ricezione</th><th scope="col">Invio</th><th scope="col">Ricevuti</th><th scope="col">Inviati</th><th scope="col">Errori RX / TX</th><th scope="col">Scarti RX / TX</th></tr></thead><tbody data-host-table="network"><tr><td colspan="7">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
+      <section class="cc-host-detail"><h3>Attività dei dischi</h3><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr><th scope="col">Dispositivo</th><th scope="col">Lettura</th><th scope="col">Scrittura</th><th scope="col">Letture / s</th><th scope="col">Scritture / s</th><th scope="col">Tempo occupato</th></tr></thead><tbody data-host-table="diskIo"><tr><td colspan="6">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
+      <section class="cc-host-detail"><h3>Pressione sulle risorse · PSI</h3><p class="cc-settings-note">Percentuale del tempo di attesa o stallo negli ultimi 2 minuti.</p><dl class="cc-host-pressure">${[["cpuWaitingPercent", "CPU · attesa"], ["memoryWaitingPercent", "RAM · attesa"], ["memoryStalledPercent", "RAM · stallo"], ["ioWaitingPercent", "I/O · attesa"], ["ioStalledPercent", "I/O · stallo"]].map(([id,label])=>`<div><dt>${label}</dt><dd data-host-pressure="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
+      <p class="cc-settings-note" data-host-metrics-status role="status" aria-live="polite">Lettura delle metriche host…</p>
+    </section>
+    <section class="ops-project-detail-panel cc-settings-backups" aria-labelledby="cc-backup-settings-title"><h2 id="cc-backup-settings-title">Backup</h2>
+      <aside class="cc-global-backup-control" data-global-backup-control aria-label="Controllo backup del server"><div><strong>Backup del server</strong><small>Copie locali e FTP</small><p data-backup-control-status role="status" aria-live="polite">Verifica dello stato…</p></div><button class="cc-backup-switch" type="button" role="switch" aria-label="Backup del server" aria-checked="false" data-backup-control-toggle disabled hidden><span class="cc-backup-switch-track" aria-hidden="true"><span></span></span><span data-backup-control-label>Verifica…</span></button><button class="ops-button secondary compact" type="button" data-backup-control-refresh hidden>Ricontrolla</button></aside>
+    </section>
+  </section>`;
 }
 
 function renderVpsProductionRestore(projectId = "") {
@@ -6457,6 +6512,7 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
   }).join("");
   return `<section class="ops-section ops-projects-redesign" data-app-folders>
     <div class="cc-app-folders-toolbar"><div><h2>Cartelle applicazioni</h2><p>Organizza le app nei gruppi che preferisci.</p></div>
+
       <form class="cc-app-folder-create" data-app-folder-form data-folder-create action="/control/project-folders"><label>Nuova cartella<input name="name" maxlength="80" required placeholder="Nome cartella" autocomplete="off"></label><button type="submit" class="ops-button primary compact">Crea cartella</button></form>
     </div>
     <nav class="cc-app-folder-filters" aria-label="Cartelle applicazioni">${folderLink("all", "Tutte", apps.length)}${groups.map(folder => folderLink(folder.id, folder.name, apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id).length)).join("")}</nav>
@@ -6827,7 +6883,6 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
   const fileManager = renderProjectDetailFileManager(context, project, params);
   const databaseList = renderProjectDetailDatabaseList(context, project, databases, params);
   const resourcePanel = renderProjectDetailResources(summary, project);
-  const backupPanel = renderProjectDetailBackups(context, project, params);
   const removeConfirm = `REMOVE-FROM-LIST:${project.slug}`;
   return `<section class="ops-section ops-projects-redesign ops-project-detail-screen" id="project-${escapeHtml(project.slug)}">
     <div class="ops-project-detail-hero">
@@ -6853,7 +6908,7 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
 
     <div class="ops-project-detail-focus">
       ${fileManager}
-      ${backupPanel}
+      <section class="ops-project-detail-panel" id="project-hosting" data-project-hosting-slot aria-busy="true"><h3>Visibilità e copia privata</h3><p>Caricamento dei controlli hosting…</p></section>
       ${databaseList}
       ${resourcePanel}
     </div>

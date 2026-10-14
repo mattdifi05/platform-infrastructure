@@ -705,7 +705,6 @@ test("Admin Control Center local foundation", async (t) => {
 
   const projectDetailHtml = await getText(`${baseUrl}/?section=projects&project=node-demo`);
   assert.match(projectDetailHtml, /ops-project-detail-screen/);
-  assert.match(projectDetailHtml, /<label class="ops-project-select">\s*<select name="restoreMode"[\s\S]*?<span class="ops-project-select-chevron"/);
   assert.doesNotMatch(projectDetailHtml, /ops-project-detail-back/);
   assert.doesNotMatch(projectDetailHtml, /Torna ad Applicazioni/);
   assert.match(projectDetailHtml, /<section class="ops-page" aria-label="Applicazioni">/);
@@ -724,27 +723,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(projectDetailHtml, /<h3>Secret<\/h3>|id="project-secrets"|ops-project-secret-panel/);
   assert.doesNotMatch(projectDetailHtml, /Importa \d+ secret esistenti/);
   assert.doesNotMatch(projectDetailHtml, /Secret rilevati|Inventario metadata secret/);
-  assert.match(projectDetailHtml, /Backup/);
-  assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-backups"'));
-  assert.ok(projectDetailHtml.indexOf('id="project-backups"') < projectDetailHtml.indexOf('id="project-databases"'));
-  assert.match(projectDetailHtml, /ops-project-backup-list/);
-  assert.match(projectDetailHtml, /4 risorse/);
-  assert.match(projectDetailHtml, /name="backupMode" value="all"/);
-  assert.doesNotMatch(projectDetailHtml, /Sorgenti \+ database/);
-  assert.doesNotMatch(projectDetailHtml, /ops-project-backup-fixed-scope/);
-  assert.match(projectDetailHtml, /name="backupRef"/);
-  assert.match(projectDetailHtml, /name="restoreMode"/);
-  assert.match(projectDetailHtml, /Tutto/);
-  assert.match(projectDetailHtml, /Solo database/);
-  assert.match(projectDetailHtml, /Solo sorgenti/);
-  assert.match(projectDetailHtml, /Backup da ripristinare/);
-  assert.match(projectDetailHtml, /Verifica ripristino isolato/);
-  assert.doesNotMatch(projectDetailHtml, />Ripristina backup</);
-  assert.match(projectDetailHtml, /Avvia backup/);
-  assert.match(projectDetailHtml, /action="\/actions\/backup-delete-command"[^>]*data-passkey-submit/);
-  assert.doesNotMatch(projectDetailHtml, /auth\/login\?returnTo=.*deleteBackup/);
-  assert.ok(projectDetailHtml.indexOf("Avvia backup") < projectDetailHtml.indexOf('class="ops-project-backup-list"'));
-  assert.match(projectDetailHtml, /ops-project-backup-head-form/);
+  assert.match(projectDetailHtml, /data-project-hosting-slot/);
+  assert.match(projectDetailHtml, /Visibilità e copia privata/);
+  assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-hosting"'));
+  assert.ok(projectDetailHtml.indexOf('id="project-hosting"') < projectDetailHtml.indexOf('id="project-databases"'));
+  assert.doesNotMatch(projectDetailHtml, /id="project-backups"|ops-project-backup-list|name="backupMode"|name="backupRef"|name="restoreMode"|Avvia backup|Verifica ripristino isolato|backup-delete-command/);
   assert.doesNotMatch(projectDetailHtml, /Backup DB/);
   assert.match(projectDetailHtml, /name="returnTo" value="project-detail"/);
   assert.doesNotMatch(projectDetailHtml, /Apri backup di Node Demo/);
@@ -3267,8 +3250,8 @@ test("direct application backup creates a signed source artifact and terminal jo
   assert.equal(existsSync(path.join(directJobsRoot, "done", `${result.job.id}.json`)), true);
   const html = await getText(`${baseUrl}/?section=projects&project=demo`);
   assert.doesNotMatch(html, /Ultime esecuzioni backup|Backup applicazione Demo completato|>Completato</);
-  assert.match(html, /Manifest firmato/);
-  assert.match(html, /action="\/actions\/backup-delete-command"[^>]*data-passkey-submit/);
+  assert.match(html, /data-project-hosting-slot/);
+  assert.doesNotMatch(html, /Manifest firmato|action="\/actions\/backup-delete-command"/);
   assert.doesNotMatch(html, /auth\/login\?returnTo=.*deleteBackup/);
 
   const genericDelete = await postJson(`${baseUrl}/actions/backup-command`, {

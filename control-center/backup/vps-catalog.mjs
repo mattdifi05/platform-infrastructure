@@ -1,5 +1,6 @@
 // Optional root-published VPS metadata adapter. Owner authentication remains in server.mjs.
 import fs from 'node:fs';
+import { withBackupControl } from './global-control.mjs';
 import { hostExtension } from '../host-extension.mjs';
 import path from 'node:path';
 import { backupDocumentDigest, normalizeBackupResources, parseBackupManifestDocument } from './contracts.mjs';
@@ -12,7 +13,7 @@ function publicManifest(manifest, properties) {
 
 export function readVpsBackupCatalog(root) {
   if (!root) return null;
-  if (hostExtension.readVpsBackupCatalog) return hostExtension.readVpsBackupCatalog(root);
+  if (hostExtension.readVpsBackupCatalog) return withBackupControl(hostExtension.readVpsBackupCatalog(root));
   const file = path.join(root, 'catalog.json');
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) || stat.size > 1048576) throw Error('VPS backup catalog unavailable');
@@ -41,8 +42,8 @@ export function readVpsBackupCatalog(root) {
   }
   manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   for (const application of applications) application.manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return { resources, manifests, applications, applicationManifests: applications.flatMap(application => application.manifests),
+  return withBackupControl({ backupControl: catalog.backupControl, enrollmentEnabled: catalog.enrollmentEnabled, resources, manifests, applications, applicationManifests: applications.flatMap(application => application.manifests),
     productionRestoreEnabled: catalog.productionRestoreEnabled === true, restoreProfileDigest,
     restoreScope: 'runtime-data-and-bind-configs', enabled: catalog.enabled === true,
-    queueActive: catalog.queueActive === true, scheduleActive: catalog.scheduleActive === true };
+    queueActive: catalog.queueActive === true, scheduleActive: catalog.scheduleActive === true });
 }

@@ -23,6 +23,7 @@ let publicOrigin = "";
 let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
+  ["POST", "/control/backups/control"],
   ["POST", "/control/projects/example/visibility"],
   ["POST", "/control/projects/example/clone"],
   ["POST", "/control/projects/example/clone/test-job/cancel"],
