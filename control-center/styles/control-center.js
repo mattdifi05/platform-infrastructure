@@ -2353,11 +2353,12 @@
     function pair(left, right, formatter) { return formatter(left) + " / " + formatter(right); }
     function table(id, rows, columns, cells) {
       var body = root.querySelector('[data-host-table="' + id + '"]');
+      if (!body) return;
       body.replaceChildren();
       if (!rows.length) { var row = document.createElement("tr"), cell = document.createElement("td"); cell.colSpan = columns; cell.textContent = "Dati non disponibili dal collector host."; row.append(cell); body.append(row); return; }
       rows.forEach(function (item) { var row = document.createElement("tr"); cells(item).forEach(function (text) { var cell = document.createElement("td"); cell.textContent = text; row.append(cell); }); body.append(row); });
     }
-    function detail(id, text) { root.querySelector('[data-host-detail="' + id + '"]').textContent = text; }
+    function detail(id, text) { var cell = root.querySelector('[data-host-detail="' + id + '"]'); if (cell) cell.textContent = text; }
     function render(value) {
       ["cpu", "memory", "disk"].forEach(function (id) {
         var metric = value[id] || {};
@@ -2393,28 +2394,28 @@
     async function load() {
       clearTimeout(timer);
       if (!active() || loading) return;
-      loading = true; button.disabled = true; root.setAttribute("aria-busy", "true");
+      loading = true; if (button) button.disabled = true; root.setAttribute("aria-busy", "true");
       try {
         var value = await hostingRequest("/control/resources/host");
         if (!active()) return;
         if (value.scope !== "host" || value.source !== "prometheus-node-exporter") throw Error("Fonte host non verificata.");
         var age = Date.now() - Date.parse(value.capturedAt || "");
         if (!Number.isFinite(age) || age > 60000 || age < -5000) {
-          render({}); status.textContent = "Metriche host non disponibili o non aggiornate. Il filesystem del Control Center non viene usato come sostituto.";
+          render({}); if (status) status.textContent = "Metriche host non disponibili o non aggiornate. Il filesystem del Control Center non viene usato come sostituto.";
         } else {
           render(value);
           var any = [value.cpu, value.memory, value.disk, value.network, value.diskIo, value.load, value.swap, value.inodes, value.processes, value.pressure].some(function (metric) { return metric && metric.available === true; });
-          status.textContent = any ? "Ultimo campione: " + new Date(value.capturedAt).toLocaleTimeString("it-IT") + " · Fonte host: node_exporter" : "Metriche host non disponibili. Riprova tra pochi secondi.";
+          if (status) status.textContent = any ? "Ultimo campione: " + new Date(value.capturedAt).toLocaleTimeString("it-IT") + " · Fonte host: node_exporter" : "Metriche host non disponibili. Riprova tra pochi secondi.";
         }
       } catch (error) {
-        if (active() && error.name !== "ReauthenticationRedirect") { render({}); status.textContent = "Metriche host non disponibili. Aggiorna per riprovare."; }
+        if (active() && error.name !== "ReauthenticationRedirect") { render({}); if (status) status.textContent = "Metriche host non disponibili. Aggiorna per riprovare."; }
       } finally {
-        loading = false; button.disabled = false; root.setAttribute("aria-busy", "false");
+        loading = false; if (button) button.disabled = false; root.setAttribute("aria-busy", "false");
         if (active()) timer = setTimeout(load, 2000);
       }
     }
     hostMetricPanels.set(root, { refresh: load });
-    button.addEventListener("click", load);
+    if (button) button.addEventListener("click", load);
     load();
   }
   function initHostMetrics() {

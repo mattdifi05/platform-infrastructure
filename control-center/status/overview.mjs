@@ -1,5 +1,3 @@
-const details = (rows) => rows.map(([id, label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("");
-
 function graph(id, label, series, unit = "%") {
   return `<div class="cc-overview-plot" data-overview-chart="${id}" data-overview-unit="${unit}">
     <div class="cc-overview-plot-scale"><span data-overview-ceiling>—</span><span>0${unit === "%" ? "%" : " B"}</span></div>
@@ -24,8 +22,7 @@ function utilization(id, label, subtitle) {
 
 export function renderOverview() {
   return `<section class="cc-overview" data-overview-page>
-    <section class="cc-overview-dashboard" data-host-metrics aria-labelledby="cc-host-metrics-title">
-      <div class="cc-overview-heading"><div><h2 id="cc-host-metrics-title">Il server, in tempo reale</h2><p>Intera VPS · campioni ogni 2 secondi · node_exporter</p></div><div class="cc-overview-heading-actions"><span class="cc-overview-state" data-overview-state>In attesa</span><button class="ops-button secondary compact" type="button" data-host-metrics-refresh>Aggiorna</button></div></div>
+    <section class="cc-overview-dashboard" data-host-metrics aria-label="Risorse della VPS">
       <div class="cc-overview-primary">${utilization("cpu", "CPU", "Media su 2 minuti")}${utilization("memory", "RAM", "Memoria utilizzata")}</div>
       <div class="cc-overview-capacity">
         <article class="cc-overview-card"><div class="cc-overview-card-head"><h3>Disco</h3><span class="cc-overview-card-caption">Filesystem principale</span></div><strong class="cc-overview-capacity-number" data-host-metric="disk">—</strong><small class="cc-overview-caption" data-host-metric-detail="disk">Spazio usato / totale</small><meter min="0" max="100" value="0" data-host-metric-meter="disk" aria-label="Utilizzo disco" hidden></meter></article>
@@ -37,15 +34,7 @@ export function renderOverview() {
         <article class="cc-overview-card"><div class="cc-overview-card-head"><h3>Attività disco</h3><span class="cc-overview-card-caption">Media su 2 minuti</span></div><div class="cc-overview-io-numbers"><div><span>Lettura</span><strong data-overview-value="diskRead">—</strong></div><div><span>Scrittura</span><strong data-overview-value="diskWrite">—</strong></div></div><small class="cc-overview-caption">Dispositivi fisici del server</small><div class="cc-overview-legend"><span><i></i>Lettura</span><span><i class="series-1"></i>Scrittura</span></div>${graph("diskIo", "Velocità delle letture e scritture disco", ["diskRead", "diskWrite"], "bytes/s")}</article>
       </div>
       <p class="cc-overview-history-note">Grafici dei campioni raccolti da quando apri questa pagina, fino a 2 minuti. Le interruzioni indicano dati non disponibili.</p>
-      <div class="cc-overview-details-heading"><h2>Dettagli del sistema</h2><span>Valori correnti e contatori</span></div>
-      <div class="cc-host-detail-grid">
-        <section class="cc-host-detail"><h3>Sistema</h3><dl>${details([["load", "Carico · 1 / 5 / 15 minuti"], ["uptime", "Tempo di attività"], ["processes", "Task eseguibili / bloccati"], ["fileDescriptors", "File descriptor allocati / limite"]])}</dl></section>
-        <section class="cc-host-detail"><h3>Memoria e filesystem</h3><dl>${details([["swap", "Swap usata / totale"], ["inodes", "Inode usati / totali"], ["ioTotals", "Letture / scritture disco"], ["ioOperations", "Operazioni lettura / scrittura al secondo"]])}</dl></section>
-      </div>
-      <section class="cc-host-detail"><h3>Connessione per interfaccia</h3><p class="cc-overview-caption">Velocità medie su 2 minuti. Contatori cumulativi, azzerabili al riavvio dell’interfaccia.</p><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr>${["Interfaccia", "Ricezione", "Invio", "Ricevuti", "Inviati", "Errori RX / TX", "Scarti RX / TX"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody data-host-table="network"><tr><td colspan="7">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
-      <section class="cc-host-detail"><h3>Attività dei dischi</h3><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr>${["Dispositivo", "Lettura", "Scrittura", "Letture / s", "Scritture / s", "Tempo occupato"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody data-host-table="diskIo"><tr><td colspan="6">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
       <section class="cc-host-detail"><h3>Pressione sulle risorse · PSI</h3><p class="cc-overview-caption">Percentuale del tempo di attesa o stallo negli ultimi 2 minuti.</p><dl class="cc-host-pressure">${[["cpuWaitingPercent", "CPU · attesa"], ["memoryWaitingPercent", "RAM · attesa"], ["memoryStalledPercent", "RAM · stallo"], ["ioWaitingPercent", "I/O · attesa"], ["ioStalledPercent", "I/O · stallo"]].map(([id, label]) => `<div><dt>${label}</dt><dd data-host-pressure="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
-      <p class="cc-overview-caption cc-overview-status" data-host-metrics-status role="status" aria-live="polite">Lettura delle metriche host…</p>
     </section>
   </section>`;
 }
