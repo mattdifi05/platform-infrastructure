@@ -227,14 +227,13 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     const html = await legacyPage.text();
     assert.match(html, /<h1 id="control-page-title">Applicazioni<\/h1>/, `${pathname} falls back to Applications`);
     assert.doesNotMatch(html, /data-cloudflare-dns|data-vps-restore/, `${pathname} does not render removed page tools`);
-    assert.doesNotMatch(html, /data-ai-portal-nav-toggle/, `${pathname} does not render the Server AI mobile menu toggle`);
   }
-  const serverAiPage = await request(baseUrl, "GET", "/?section=server-ai", identities.owner);
-  assert.equal(serverAiPage.status, 200);
-  const serverAiHtml = await serverAiPage.text();
-  assert.doesNotMatch(serverAiHtml, /data-ai-restore-dialog|data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
-  assert.match(serverAiHtml, /data-ops-nav-toggle/);
-  assert.doesNotMatch(serverAiHtml, /data-ai-portal-nav-toggle/);
+  const unknownPage = await request(baseUrl, "GET", "/?section=unknown-feature", identities.owner);
+  assert.equal(unknownPage.status, 200);
+  const unknownHtml = await unknownPage.text();
+  assert.match(unknownHtml, /<h1 id="control-page-title">Applicazioni<\/h1>/, "unknown sections fall back to Applications");
+  assert.doesNotMatch(unknownHtml, /data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
+  assert.match(unknownHtml, /data-ops-nav-toggle/);
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {

@@ -99,7 +99,7 @@ Its JSON fields are `tokenSha256` (SHA-256 of the raw token), `issuedAt`, and
 `expiresAt` (UTC ISO timestamps no more than 15 minutes apart). The overlay
 binds that file read-only into Control Center; it contains no token value.
 Recreate only Control Center with the complete active Compose overlay chain,
-including Server AI, backup, and Cloudflare DNS when present. If the token
+including backup and Cloudflare DNS when present. If the token
 expires before registration, replace the verifier with a new short-lived one
 and recreate Control Center; do not widen the CIDR. A real registered passkey
 closes first enrollment independently of token expiry.
@@ -132,12 +132,9 @@ The MinIO Community service is disabled; the gateway alone retains the internal
 `minio` DNS alias for compatible S3 clients. The backup broker
 and scheduler need a real admitted runtime intent and pinned scheduler image;
 `compose.backup-scheduler.yaml` is not loaded by this first-install path.
-Server AI is a separate platform subsystem. Start its own project only after
-its VPS-specific registry, controller policy, proxy, and credential files have
-been generated. When its project is active, the core script requires the
-protected `/etc/platform-infrastructure/server-ai/.env.server-ai` and appends
-both Control Center AI overlays. Its source/query reader profile remains
-disabled because this host has no application sources. No old API key is used.
+The generic administration bridge has a separate protected enrollment. See
+`deployment/host/PLATFORM-ADMIN.md`; it does not enroll application containers
+or infer backup jobs from repository presence.
 
 `cloudflare/from-zero.example.json` must not be applied as-is to the existing
 `example.com` zone: it contains an apex A record and requires an empty zone.

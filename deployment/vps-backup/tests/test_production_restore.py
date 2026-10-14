@@ -25,7 +25,7 @@ class RuntimeRestoreTests(unittest.TestCase):
     with self.assertRaises(RuntimeError):r.extract_subset(file,self.root/'out','data')
     self.assertFalse((self.root/'escape').exists())
  def test_management_plane_and_nested_bind_scope_are_preserved(self):
-  for path in ['/etc/ssh','/etc/machine-id','/run/docker.sock','/var/lib/platform-vps-backup/queue','/etc/platform-infrastructure/cloudflare-dns/api-token','/etc/platform-infrastructure/server-ai/infrastructure-token','/srv/platform-infrastructure','/srv/platform-infrastructure/src']:
+  for path in ['/etc/ssh','/etc/machine-id','/run/docker.sock','/var/lib/platform-vps-backup/queue','/etc/platform-infrastructure/cloudflare-dns/api-token','/etc/platform-infrastructure/admin/infrastructure-token','/srv/platform-infrastructure','/srv/platform-infrastructure/src']:
    self.assertFalse(r.bind_scope(path),path)
   mounts=[{'Type':'bind','Source':p} for p in ['/srv/platform-infrastructure/first-install/traefik/certs','/srv/platform-infrastructure/first-install/traefik/certs/a.pem','/run/x']]
   self.assertEqual(r.selected_bind_roots([{'Mounts':mounts}]),['/srv/platform-infrastructure/first-install/traefik/certs'])
@@ -62,7 +62,7 @@ class RuntimeRestoreTests(unittest.TestCase):
    (history/'profile.json').write_bytes(b'changed')
    with self.assertRaisesRegex(RuntimeError,'predecessor bytes differ'):r.b.validate_admission_chain(current)
  def test_stopped_enrolled_container_is_covered_but_missing_or_extra_is_denied(self):
-  ids=['a'*64,'b'*64];rows=[{'Id':x,'Name':'/'+str(i),'Config':{'Labels':{'com.docker.compose.project':'platform_server_ai'}},'State':{'Running':i==0}} for i,x in enumerate(ids)]
+  ids=['a'*64,'b'*64];rows=[{'Id':x,'Name':'/'+str(i),'Config':{'Labels':{'com.docker.compose.project':'platform_infra_vps'}},'State':{'Running':i==0}} for i,x in enumerate(ids)]
   def commands(args):
    return (ids[0]+'\n').encode() if args[1]=='ps' else json.dumps(rows).encode()
   with patch.object(r.b,'run',side_effect=commands):

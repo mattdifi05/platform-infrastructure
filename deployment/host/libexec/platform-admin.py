@@ -2,21 +2,21 @@
 """Typed infrastructure operations. No shell, project path, SQL or secret API."""
 import concurrent.futures,contextlib,datetime,hashlib,hmac,http.server,ipaddress,json,os,pathlib,re,secrets,socket,socketserver,sqlite3,ssl,stat,shutil,subprocess,tempfile,threading,time,uuid
 
-STATE=pathlib.Path('/var/lib/platform-server-ai-admin')
-SOCKET='/run/platform-server-ai-admin/admin.sock'
-TOKEN='/etc/platform-infrastructure/server-ai/infrastructure-token'
+STATE=pathlib.Path('/var/lib/platform-admin')
+SOCKET='/run/platform-admin/admin.sock'
+TOKEN='/etc/platform-infrastructure/admin/infrastructure-token'
 ZONE=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/generated/materialized-configs/dns/db.platform-infrastructure.com')
 BACKUP=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/local-private-backup')
 RUNTIME=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/state')
 MACHINE=hashlib.sha256(pathlib.Path('/etc/machine-id').read_bytes()).hexdigest() if pathlib.Path('/etc/machine-id').exists() else None
-CORE_CONTAINERS=frozenset('gf-postgres gf-mariadb gf-redis gf-keycloak gf-nats gf-grafana gf-prometheus gf-loki gf-alertmanager gf-node-exporter gf-local-dns gf-traefik gf-waf gf-project-router gf-phpmyadmin gf-phppgadmin gf-rustfs gf-minio-gateway gf-platform-alert-dispatcher gf-promtail gf-searxng gf-server-ai-observer gf-server-ai-project-source-reader gf-server-ai-project-query-reader'.split())
+CORE_CONTAINERS=frozenset('gf-postgres gf-mariadb gf-redis gf-keycloak gf-nats gf-grafana gf-prometheus gf-loki gf-alertmanager gf-node-exporter gf-local-dns gf-traefik gf-waf gf-project-router gf-phpmyadmin gf-phppgadmin gf-rustfs gf-minio-gateway gf-platform-alert-dispatcher gf-promtail'.split())
 HOSTING=frozenset()
 CONTAINERS=CORE_CONTAINERS|HOSTING
-INVENTORY=pathlib.Path('/etc/platform-infrastructure/server-ai/infrastructure-inventory.json')
-SERVICES=frozenset('chrony.service fail2ban.service cron.service systemd-resolved.service platform-docker-observer-proxy.service'.split())
+INVENTORY=pathlib.Path('/etc/platform-infrastructure/admin/infrastructure-inventory.json')
+SERVICES=frozenset('chrony.service fail2ban.service cron.service systemd-resolved.service'.split())
 JOBS={'dns':'platform-dns-probe.service','tls':'platform-db-tls-metrics.service','backup_metrics':'platform-backup-health-metrics.service','backup':'platform-backup-schedule.service','rustfs_recovery':'platform-rustfs-recovery.service','host_recovery':'platform-host-recovery.service','local_recovery':'platform-local-dedup.service'}
 PACKAGES=frozenset('openssl ca-certificates curl wget openssh-client openssh-server chrony fail2ban ufw auditd apparmor rsync jq python3 python3-minimal sudo tar gzip coreutils dnsutils iproute2 iptables nftables logrotate'.split())
-OPERATIONS=('service_start','service_restart','service_stop','service_reload','service_enable','service_disable','config_patch','container_start','container_restart','container_resources','package_refresh','package_upgrade','package_install','dns_record_set','dns_record_remove','firewall_ban','firewall_unban','firewall_reapply','database_reload','maintenance_run','log_rotate')
+OPERATIONS=('service_start','service_restart','service_stop','service_reload','service_enable','service_disable','config_patch','container_start','container_restart','container_resources','package_refresh','package_upgrade','package_install','dns_record_set','dns_record_remove','firewall_ban','firewall_unban','database_reload','maintenance_run','log_rotate')
 TOPICS=('capabilities','os','packages','services','timers','identity','config','containers','network','firewall','dns','tls','storage','logs','resources','backups','databases','audit','operation')
 PROTECTED_DNS=frozenset('ns portal admin auth login keycloak vpn'.split())
 LOCK=threading.Lock()
@@ -24,11 +24,11 @@ EXECUTOR=concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 class Rejected(Exception): pass
 PORTABLE=False
-HOST_CONFIG_PATH='/etc/platform-infrastructure/server-ai/admin-host.json'
-VPS_CONTAINERS=(CORE_CONTAINERS-frozenset(['gf-server-ai-project-source-reader','gf-server-ai-project-query-reader']))|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler gf-server-ai-controller'.split())
+HOST_CONFIG_PATH='/etc/platform-infrastructure/admin/admin-host.json'
+VPS_CONTAINERS=CORE_CONTAINERS|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler'.split())
 VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-promtail enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
 VPS_SERVICES=SERVICES|frozenset(['docker.service','ssh.service','auditd.service','apparmor.service','ufw.service'])
-LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','cloudflared.service','platform-cloudflared-vps.service','platform-server-ai-admin.service','platform-docker-observer-proxy.service'])
+LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','cloudflared.service','platform-cloudflared-vps.service','platform-admin.service'])
 HOME_JOBS=dict(JOBS)
 def protected_json(filename,limit=262144):
  p=pathlib.Path(filename)
@@ -58,7 +58,7 @@ def validate_host_config(value,machine_id):
   rows=value[key]
   if not isinstance(rows,list) or any(not isinstance(row,str) for row in rows) or len(rows)!=len(set(rows)) or not set(rows)<=allowed:raise Rejected('Host configuration includes unreviewed '+key)
  if not isinstance(value['jobs'],dict) or any(k not in HOME_JOBS or not isinstance(v,str) or HOME_JOBS[k]!=v for k,v in value['jobs'].items()):raise Rejected('Host configuration includes unreviewed jobs')
- if value['inventoryFile']!='/etc/platform-infrastructure/server-ai/infrastructure-inventory.json':raise Rejected('Inventory path outside fixed infrastructure boundary')
+ if value['inventoryFile']!='/etc/platform-infrastructure/admin/infrastructure-inventory.json':raise Rejected('Inventory path outside fixed infrastructure boundary')
  backup=bounded_runtime_path(value['backupRoot']);runtime=bounded_runtime_path(value['runtimeRoot'])
  if any(k in value['jobs'] for k in ['backup','rustfs_recovery','host_recovery','local_recovery']) and (backup is None or runtime is None):raise Rejected('Backup jobs require actual host backup state roots')
  return {**value,'backupRoot':backup,'runtimeRoot':runtime}
@@ -309,7 +309,7 @@ def read(topic,target,subject):
    page=int(target[5:]) if target else 0
    names=[line.split()[0] for line in command(['systemctl','list-unit-files','--type=service','--no-legend','--no-pager']).splitlines() if line.split()]
    return {'installedServiceCount':len(names),'installedServices':names[page*100:(page+1)*100],'page':page,'pageSize':100,'detail':'Use page:N or one exact installed .service target for status'}
-  if target and target not in SERVICES and target not in JOBS.values() and (PORTABLE or target!='platform-server-ai-egress.service'):raise Rejected('Service outside reviewed infrastructure inventory')
+  if target and target not in SERVICES and target not in JOBS.values():raise Rejected('Service outside reviewed infrastructure inventory')
   return {'services':{n:service_status(n) for n in ([target] if target else sorted(SERVICES))}}
  if topic=='timers':
   if target:return {'timer':target,'status':service_status(discovered_unit(target,'timer'))}
@@ -332,7 +332,7 @@ def read(topic,target,subject):
   return {'users':users[page*50:(page+1)*50],'groups':groups[page*50:(page+1)*50],'page':page,'pageSize':50,'userCount':len(users),'groupCount':len(groups),'sshd':selected_sshd(),'authorizedKeyMetadataOnly':True}
  if topic=='config':
   cloud_unit,cloud_path,_=cloudflared_unit()
-  paths={'sshd':'/etc/ssh/sshd_config','docker':'/etc/docker/daemon.json','cloudflared':cloud_path or '/etc/systemd/system/platform-cloudflared-vps.service','ufw':'/etc/default/ufw','vps-backup-timer':'/etc/systemd/system/platform-vps-backup.timer','vps-backup-queue-timer':'/etc/systemd/system/platform-vps-backup-queue.timer','server-ai-admin':'/etc/platform-infrastructure/server-ai/admin-host.json'}
+  paths={'sshd':'/etc/ssh/sshd_config','docker':'/etc/docker/daemon.json','cloudflared':cloud_path or '/etc/systemd/system/platform-cloudflared-vps.service','ufw':'/etc/default/ufw','vps-backup-timer':'/etc/systemd/system/platform-vps-backup.timer','vps-backup-queue-timer':'/etc/systemd/system/platform-vps-backup-queue.timer','platform-admin':'/etc/platform-infrastructure/admin/admin-host.json'}
   if target and target not in paths:raise Rejected('Only reviewed configuration metadata is exposed')
   keys=[target] if target else list(paths)
   return {'files':{key:{**metadata_file(paths[key]),'selectedValues':selected_config(key)} for key in keys},'rawContentExposed':False}
@@ -395,7 +395,7 @@ def read(topic,target,subject):
    raw=command(['docker','logs','--timestamps','--since','30m','--tail','80',identity],timeout=5)
    return {'container':target,'redactedDockerLogs':redacted_log_lines(raw)}
   if PORTABLE:discovered_unit(target)
-  elif target not in SERVICES and target not in JOBS.values() and target not in ['platform-server-ai-egress.service','platform-server-ai-admin.service']:raise Rejected('Logs require one reviewed infrastructure unit')
+  elif target not in SERVICES and target not in JOBS.values() and target not in ['platform-admin.service']:raise Rejected('Logs require one reviewed infrastructure unit')
   raw=command(['journalctl','--unit='+target,'--since=-30min','--lines=80','--no-pager','--output=short-iso'],timeout=5)
   return {'unit':target,'redactedJournal':redacted_log_lines(raw)}
  if topic=='resources':
@@ -453,7 +453,7 @@ def project_proof(value):
   if isinstance(value.get(k),dict):result[k]=project_proof(value[k])
  return result
 def replace_zone(data):
- fd,name=tempfile.mkstemp(prefix='.server-ai-zone-',dir=ZONE.parent)
+ fd,name=tempfile.mkstemp(prefix='.platform-zone-',dir=ZONE.parent)
  try:
   with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fsync(out.fileno());os.fchmod(out.fileno(),0o644)
   os.replace(name,ZONE)
@@ -474,7 +474,7 @@ def replace_fixed_config(path,data):
   existing=path.lstat()
   if not stat.S_ISREG(existing.st_mode) or existing.st_uid!=0 or existing.st_mode&0o022:raise Rejected('Existing configuration is not root protected')
   mode=stat.S_IMODE(existing.st_mode)
- fd,name=tempfile.mkstemp(prefix='.platform-server-ai-',dir=parent)
+ fd,name=tempfile.mkstemp(prefix='.platform-admin-',dir=parent)
  try:
   with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fchmod(out.fileno(),mode);os.fsync(out.fileno())
   os.replace(name,path)
@@ -489,7 +489,7 @@ def sync_config_directory(parent):
 def patch_config(args):
  target=args['target']
  if target=='vps-backup-timer':
-  path=pathlib.Path('/etc/systemd/system/platform-vps-backup.timer.d/90-platform-server-ai-schedule.conf')
+  path=pathlib.Path('/etc/systemd/system/platform-vps-backup.timer.d/90-platform-admin-schedule.conf')
   path.parent.mkdir(mode=0o755,exist_ok=True)
   calendar=args['onCalendar']
   command(['systemd-analyze','calendar',calendar],timeout=8)
@@ -497,7 +497,7 @@ def patch_config(args):
   validate=lambda:command(['systemctl','daemon-reload'],timeout=15)
   readback=lambda:selected_config('vps-backup-timer')
  else:
-  path=pathlib.Path('/etc/ssh/sshd_config.d/90-platform-server-ai-hardening.conf')
+  path=pathlib.Path('/etc/ssh/sshd_config.d/90-platform-admin-hardening.conf')
   path.parent.mkdir(mode=0o755,exist_ok=True)
   current={}
   if path.exists():
@@ -586,7 +586,6 @@ def validate_change(op,args):
   try:ip=ipaddress.IPv4Address(target)
   except ValueError:raise Rejected('Invalid firewall address')
   if not ip.is_global or ip.is_multicast:raise Rejected('Management/private networks cannot be banned by this tool')
- if op=='firewall_reapply' and target!='server-ai-egress':raise Rejected('Only the reviewed egress policy may be reapplied')
  if op=='database_reload' and target not in ({'gf-postgres','enterprise-postgres'}&CONTAINERS if PORTABLE else {'gf-postgres'}):raise Rejected('Only PostgreSQL existing configuration reload is supported; no arbitrary SQL/config write')
  if op=='maintenance_run' and target not in (portable_catalog()[4] if PORTABLE else JOBS):raise Rejected('Unknown reviewed maintenance job')
  if op=='log_rotate' and target!='system':raise Rejected('Only normal configured log rotation is supported')
@@ -636,7 +635,7 @@ def mutate(op,args):
   import shutil
   if not shutil.which('dig'):raise Rejected('DNS write requires the installed dig validator')
   dns_identity=docker('gf-local-dns')['Id']
-  original=safe_zone();text=original.decode();label=target.split('.')[0];begin='; BEGIN SERVER-AI MANAGED\n';end='; END SERVER-AI MANAGED\n'
+  original=safe_zone();text=original.decode();label=target.split('.')[0];begin='; BEGIN PLATFORM MANAGED\n';end='; END PLATFORM MANAGED\n'
   records={}
   if begin in text:
    head,tail=text.split(begin,1);block,rest=tail.split(end,1);text=head+rest
@@ -669,7 +668,6 @@ def mutate(op,args):
    replace_zone(original);command(['docker','restart','--time','15',dns_identity],timeout=35);raise
   return {'hostname':target,'address':records.get(label),'managedZoneSha256':hashlib.sha256(ZONE.read_bytes()).hexdigest(),'dnsContainer':container_summary(docker('gf-local-dns'))}
  if op in ['firewall_ban','firewall_unban']:return {'result':command(['fail2ban-client','set','sshd','banip' if op.endswith('_ban') else 'unbanip',target]),'observed':command(['fail2ban-client','status','sshd'])}
- if op=='firewall_reapply':command(['systemctl','reload','platform-server-ai-egress.service']);return {'observed':service_status('platform-server-ai-egress.service')}
  if op=='database_reload':identity=docker(target)['Id'];command(['docker','kill','--signal=HUP',identity]);return {'container':container_summary(docker(target)),'configurationSource':'existing mounted configuration; no SQL or project data modified'}
  if op=='maintenance_run':
   unit=JOBS[target]
@@ -739,7 +737,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
   self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(output)));self.end_headers();self.wfile.write(output)
 class Server(socketserver.ThreadingMixIn,socketserver.UnixStreamServer):daemon_threads=True
 def main():
- configured=os.environ.get('SERVER_AI_ADMIN_CONFIG')
+ configured=os.environ.get('PLATFORM_ADMIN_CONFIG')
  if configured:configure_host(configured)
  if MACHINE is None:raise RuntimeError('Host machine identity is unavailable')
  initialize()

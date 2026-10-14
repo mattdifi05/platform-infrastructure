@@ -79,7 +79,7 @@ environment and networks. It does not seed, import or delete applications.
 restriction for login and authenticated requests. The default `false` keeps the
 online passkey behavior; initial enrollment remains independently restricted.
 
-Legacy Server AI tables and credentials are retained as host state. The current
-online operations UI does not expose the retired Server AI surface, and image
-rollouts do not create or drop its tables. Backup profile pin changes must follow
-the existing forward admission chain and preserve application runtime records.
+The Control Center provides infrastructure operations and passkey authentication.
+Its native host extension remains separate from the dashboard runtime. Backup
+profile pin changes must follow the existing forward admission chain and preserve
+application runtime records.

@@ -1,7 +1,7 @@
 import importlib.util,os,pathlib,stat,tempfile,types,unittest
 from unittest.mock import patch
 
-SOURCE=pathlib.Path(__file__).resolve().parents[2]/'deployment/host/libexec/platform-server-ai-admin.py'
+SOURCE=pathlib.Path(__file__).resolve().parents[3]/'deployment/host/libexec/platform-admin.py'
 def load():
  spec=importlib.util.spec_from_file_location('admin_scope_test',SOURCE)
  module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
@@ -16,7 +16,7 @@ class InfrastructureScopeTests(unittest.TestCase):
   with patch.object(a,'discovered_unit',side_effect=lambda name:name),patch.object(a,'command',side_effect=unit_status),patch.object(a.pathlib.Path,'stat',return_value=types.SimpleNamespace(st_mode=stat.S_IFREG|0o644,st_uid=0)):
    self.assertEqual(a.writable_service('ssh.service','service_restart'),'ssh.service')
    self.assertEqual(a.writable_service('rsyslog.service','service_stop'),'rsyslog.service')
-   for target in ['ssh.service','docker.service','platform-server-ai-admin.service','systemd-resolved.service','platform-vps-backup.service','php-app.service']:
+   for target in ['ssh.service','docker.service','platform-admin.service','systemd-resolved.service','platform-vps-backup.service','php-app.service']:
     with self.subTest(target=target),self.assertRaises(a.Rejected):a.writable_service(target,'service_stop')
  def test_real_cloudflared_unit_is_visible_and_restartable_but_cannot_be_stopped(self):
   a=self.a

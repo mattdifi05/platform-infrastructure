@@ -48,23 +48,11 @@ export EMPTY_VPS_HOSTED_LOCK_SHA256=45a56612923c64022df1173ca11486445d20c5ef06aa
 }
 chmod 0600 "$ROOT/config/no-hosted-workloads.lock.json"
 COMPOSE=(docker compose --env-file "$ROOT/.env")
-AI_ENV=/etc/platform-infrastructure/server-ai/.env.server-ai
-AI_ACTIVE=$(docker ps -aq --filter label=com.docker.compose.project=platform_server_ai)
-if [[ -n "$AI_ACTIVE" ]]; then
-  [[ -f "$AI_ENV" && ! -L "$AI_ENV" && -r "$AI_ENV" ]] || {
-    echo 'Server AI is active but its private Compose environment is unreadable.' >&2
-    exit 1
-  }
-  COMPOSE+=(--env-file "$AI_ENV")
-fi
 COMPOSE+=(-p platform_infra_vps
   -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml
   -f compose.vps.yaml -f compose.vps-waf.yaml
   -f compose.empty-vps-networks.yaml -f compose.empty-vps-first-install.yaml
   -f compose.empty-vps-qualified-databases.yaml)
-if [[ -n "$AI_ACTIVE" ]]; then
-  COMPOSE+=(-f compose.server-ai-control-center.yaml -f compose.server-ai-empty-host-control-center.yaml)
-fi
 CC_CONFIG_FILES=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' enterprise-control-center 2>/dev/null || true)
 HOST_METRICS_ACTIVE=0
 for overlay in \
@@ -114,4 +102,4 @@ for attempt in {1..90}; do
 done
 "${COMPOSE[@]}" ps
 echo 'The empty-host platform core is healthy; hosted applications remain absent.'
-echo 'Backup admission, Server AI and public production go-live require separate real inputs.'
+echo 'Backup admission and public production go-live require separate real inputs.'

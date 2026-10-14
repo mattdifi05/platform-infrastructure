@@ -1,12 +1,12 @@
-import importlib.util,pathlib,unittest
+import importlib.util,pathlib,tempfile,unittest
 from unittest.mock import patch
-SOURCE=pathlib.Path(__file__).resolve().parents[2]/'deployment/host/libexec/platform-server-ai-admin.py'
+SOURCE=pathlib.Path(__file__).resolve().parents[3]/'deployment/host/libexec/platform-admin.py'
 def load():
  spec=importlib.util.spec_from_file_location('admin_test',SOURCE);a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a);return a
 class ConfigTests(unittest.TestCase):
  def setUp(self):
   self.a=load();self.identity='a'*64
-  self.cfg={'version':1,'machineId':self.identity,'containers':['gf-postgres','gf-control-center'],'services':['docker.service'],'jobs':{},'inventoryFile':'/etc/platform-infrastructure/server-ai/infrastructure-inventory.json','backupRoot':None,'runtimeRoot':None}
+  self.cfg={'version':1,'machineId':self.identity,'containers':['gf-postgres','gf-control-center'],'services':['docker.service'],'jobs':{},'inventoryFile':'/etc/platform-infrastructure/admin/infrastructure-inventory.json','backupRoot':None,'runtimeRoot':None}
  def test_default_distribution_has_no_hosted_applications(self):
   a=self.a
   self.assertFalse(a.PORTABLE);self.assertEqual(a.HOSTING,frozenset());self.assertEqual(a.CONTAINERS,a.CORE_CONTAINERS)
@@ -16,7 +16,7 @@ class ConfigTests(unittest.TestCase):
   cfg=self.a.validate_host_config(self.cfg,self.identity)
   self.assertIsNone(cfg['backupRoot']);self.assertEqual(cfg['jobs'],{})
  def test_foreign_machine_unknown_fields_apps_readers_and_arbitrary_units_rejected(self):
-  cases=[('machineId','b'*64),('version',2),('version',True),('jobs',{'invented':None}),('containers',['php-anniversary']),('containers',['gf-server-ai-project-source-reader']),('services',['arbitrary-root.service']),('jobs',{'backup':'arbitrary-root.service'}),('inventoryFile','/tmp/inventory.json')]
+  cases=[('machineId','b'*64),('version',2),('version',True),('jobs',{'invented':None}),('containers',['php-anniversary']),('containers',['gf-unreviewed-reader']),('services',['arbitrary-root.service']),('jobs',{'backup':'arbitrary-root.service'}),('inventoryFile','/tmp/inventory.json')]
   for key,value in cases:
    with self.subTest(key=key,value=value):
     with self.assertRaises(self.a.Rejected):self.a.validate_host_config({**self.cfg,key:value},self.identity)
@@ -40,4 +40,17 @@ class ConfigTests(unittest.TestCase):
   self.assertIn('container_restart',ops);self.assertIn('service_restart',ops);self.assertIn('database_reload',ops)
  def test_config_loader_rejects_arbitrary_path_before_read(self):
   with self.assertRaises(self.a.Rejected):self.a.configure_host('/tmp/config.json')
+ def test_existing_ledger_keeps_replay_jobs_and_audit_on_initialization(self):
+  a=self.a
+  with tempfile.TemporaryDirectory() as directory,patch.object(a,'STATE',pathlib.Path(directory)):
+   a.initialize()
+   with a.db() as c:
+    c.execute('insert into requests values (?,?)',('already-admitted',1.0))
+    c.execute('insert into jobs values (?,?,?,?,?,?,?)',('existing-job','owner','service_restart','{}','done',1.0,'{}'))
+    c.execute('insert into audit(at,subject,action,target,outcome,details) values (?,?,?,?,?,?)',(1.0,'owner','service_restart','chrony.service','done','{}'))
+   a.initialize()
+   with a.db() as c:
+    self.assertEqual(c.execute('select id from requests').fetchall(),[('already-admitted',)])
+    self.assertEqual(c.execute('select id,status from jobs').fetchall(),[('existing-job','done')])
+    self.assertEqual(c.execute('select count(*) from audit').fetchone()[0],1)
 if __name__=='__main__':unittest.main()
