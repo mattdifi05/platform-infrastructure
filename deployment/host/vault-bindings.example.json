@@ -1,0 +1,163 @@
+{
+  "schema": "platform.vault-bindings/v1",
+  "revision": "example-only-not-admitted",
+  "bindings": [
+    {
+      "id": "example-provider-key",
+      "itemId": "platform-private-example-provider-key",
+      "label": "Example API credential",
+      "project": "platform",
+      "environment": "private",
+      "rotation": "provider-update",
+      "targets": [
+        {
+          "path": "/srv/platform-infrastructure/example/secrets/provider-key",
+          "format": "raw-file",
+          "writeMode": "atomic",
+          "ownerUid": 1000,
+          "ownerGid": 1000,
+          "mode": 384,
+          "ancestorMetadata": [
+            {
+              "path": "/srv/platform-infrastructure/example/secrets",
+              "uid": 0,
+              "gid": 1000,
+              "mode": 488
+            },
+            {
+              "path": "/srv/platform-infrastructure/example",
+              "uid": 0,
+              "gid": 0,
+              "mode": 448
+            },
+            {
+              "path": "/srv/platform-infrastructure",
+              "uid": 0,
+              "gid": 0,
+              "mode": 493
+            }
+          ]
+        }
+      ],
+      "consumers": [
+        {
+          "containerId": "0000000000000000000000000000000000000000000000000000000000000000",
+          "containerName": "example-application",
+          "path": "/run/secrets/provider-key",
+          "format": "raw-file",
+          "restart": true,
+          "health": {
+            "kind": "docker-health"
+          }
+        }
+      ],
+      "provider": {
+        "kind": "openai"
+      }
+    },
+    {
+      "id": "example-database-password",
+      "itemId": "platform-private-example-database-password",
+      "label": "Example database password",
+      "project": "platform",
+      "environment": "private",
+      "rotation": "coupled-service",
+      "targets": [
+        {
+          "path": "/srv/platform-infrastructure/example/secrets/app.env",
+          "format": "env-key",
+          "writeMode": "atomic",
+          "key": "DB_PASSWORD",
+          "ownerUid": 1000,
+          "ownerGid": 1000,
+          "mode": 384,
+          "ancestorMetadata": [
+            {
+              "path": "/srv/platform-infrastructure/example/secrets",
+              "uid": 0,
+              "gid": 1000,
+              "mode": 488
+            },
+            {
+              "path": "/srv/platform-infrastructure/example",
+              "uid": 0,
+              "gid": 0,
+              "mode": 448
+            },
+            {
+              "path": "/srv/platform-infrastructure",
+              "uid": 0,
+              "gid": 0,
+              "mode": 493
+            }
+          ]
+        }
+      ],
+      "consumers": [
+        {
+          "containerId": "0000000000000000000000000000000000000000000000000000000000000000",
+          "containerName": "example-application",
+          "path": "/run/secrets/app.env",
+          "format": "env-key",
+          "restart": true,
+          "health": {
+            "kind": "docker-health"
+          },
+          "key": "DB_PASSWORD"
+        }
+      ]
+    },
+    {
+      "id": "example-smtp-password",
+      "itemId": "platform-private-example-smtp-password",
+      "label": "Example SMTP password",
+      "project": "platform",
+      "environment": "private",
+      "rotation": "provider-update",
+      "targets": [
+        {
+          "path": "/srv/platform-infrastructure/example/secrets/smtp.json",
+          "format": "json-key",
+          "writeMode": "atomic",
+          "key": "password",
+          "ownerUid": 1000,
+          "ownerGid": 1000,
+          "mode": 384,
+          "ancestorMetadata": [
+            {
+              "path": "/srv/platform-infrastructure/example/secrets",
+              "uid": 0,
+              "gid": 1000,
+              "mode": 488
+            },
+            {
+              "path": "/srv/platform-infrastructure/example",
+              "uid": 0,
+              "gid": 0,
+              "mode": 448
+            },
+            {
+              "path": "/srv/platform-infrastructure",
+              "uid": 0,
+              "gid": 0,
+              "mode": 493
+            }
+          ]
+        }
+      ],
+      "consumers": [
+        {
+          "containerId": "0000000000000000000000000000000000000000000000000000000000000000",
+          "containerName": "example-application",
+          "path": "/run/secrets/smtp.json",
+          "format": "json-key",
+          "restart": true,
+          "health": {
+            "kind": "docker-health"
+          },
+          "key": "password"
+        }
+      ]
+    }
+  ]
+}

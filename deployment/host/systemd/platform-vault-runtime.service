@@ -1,0 +1,36 @@
+[Unit]
+Description=Bounded application Vault runtime delivery
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/node /usr/local/libexec/platform-vault/deployment/host/libexec/platform-vault-runtime.mjs
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=platform-vault
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+StateDirectory=platform-vault
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/platform-infrastructure /var/lib/platform-vault /run/platform-vault
+ReadWritePaths=/var/lib/platform-vps-backup/operation.lock
+ReadOnlyPaths=/etc/platform-infrastructure/vault
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+TimeoutStopSec=180
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

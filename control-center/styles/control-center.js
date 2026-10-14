@@ -1193,6 +1193,56 @@
     }
   }
 
+  async function submitVaultRuntime(form) {
+    var box = form.closest("[data-vault-binding]");
+    var resultBox = box ? box.querySelector("[data-vault-runtime-result]") : null;
+    var button = form.querySelector("button[type=submit]");
+    if (button) button.disabled = true;
+    try {
+      var result = await hostingRequest(form.getAttribute("action"), Object.fromEntries(new FormData(form).entries()));
+      if (resultBox) resultBox.replaceChildren();
+      if (result.planId) {
+        var explanation = document.createElement("p");
+        explanation.textContent = "Versione " + result.versionId + ": piano verificato per " + (result.consumers || []).map(function (consumer) { return consumer.name; }).join(", ") + (result.requiresRestart ? ". Richiede riavvio controllato." : ".") + " Il provider " + (result.providerVerification === "available" ? "sarà verificato." : "non dispone di verifica automatica.");
+        var apply = document.createElement("button"); apply.type = "button"; apply.className = "ops-button primary"; apply.textContent = "Applica piano verificato";
+        apply.addEventListener("click", async function () {
+          apply.disabled = true;
+          try {
+            var queued = await hostingRequest("/control/vault/runtime/apply", { bindingId: result.bindingId, planId: result.planId, confirmation: result.confirmation, expectedVaultRevision: result.expectedVaultRevision, expectedBindingRevision: result.expectedBindingRevision });
+            explanation.textContent = "Operazione inviata. La consegna resta in attesa di verifica.";
+            apply.remove();
+            addVaultStatusButton(resultBox, queued.operationId);
+          } catch (error) { explanation.textContent = error.message || "Piano non più valido: ripeti la verifica."; apply.disabled = false; }
+        });
+        if (resultBox) resultBox.append(explanation, apply);
+      } else if (result.operationId && result.phase === "queued") {
+        if (resultBox) { resultBox.textContent = "Operazione inviata. Verifica il risultato."; addVaultStatusButton(resultBox, result.operationId); }
+      } else if (/\/adopt$/.test(form.getAttribute("action"))) {
+        clearCache(); await navigate(window.location.href, { history: "replace" });
+      } else if (resultBox) {
+        var operation = result.operation || result;
+        resultBox.textContent = "Fase: " + (operation.phase || operation.status || "verificata") + ". Aggiorna il Vault per leggere la versione applicata e le verifiche separate.";
+      }
+    } catch (error) { if (resultBox) resultBox.textContent = error.message || "Operazione Vault non disponibile."; }
+    finally { if (button && button.isConnected) button.disabled = false; }
+  }
+
+  function addVaultStatusButton(box, operationId) {
+    if (!box || !operationId) return;
+    var button = document.createElement("button"); button.type = "button"; button.className = "ops-button secondary"; button.textContent = "Verifica risultato";
+    button.addEventListener("click", async function () {
+      button.disabled = true;
+      try {
+        var result = await hostingRequest("/control/vault/runtime/status", { operationId: operationId });
+        var operation = result.operation || result;
+        var message = document.createElement("p"); message.textContent = "Fase: " + (operation.phase || operation.status || "sconosciuta") + "."; box.prepend(message);
+        if (["verified", "rolled-back", "rolled_back", "applied"].includes(operation.phase)) { clearCache(); await navigate(window.location.href, { history: "replace" }); }
+      } catch (error) { showError(error.message || "Stato non disponibile."); }
+      finally { if (button.isConnected) button.disabled = false; }
+    });
+    box.append(button);
+  }
+
   function hideVaultSecret(box, button) {
     var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
     var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
@@ -2499,6 +2549,7 @@
       if (event.defaultPrevented) return;
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-vault-runtime-form")) { event.preventDefault(); submitVaultRuntime(form); return; }
       if (form.hasAttribute("data-app-folder-form")) {
         event.preventDefault();
         var button = event.submitter || form.querySelector("button[type=submit]");

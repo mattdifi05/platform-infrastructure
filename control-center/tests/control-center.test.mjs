@@ -2359,7 +2359,7 @@ test("Admin Control Center local foundation", async (t) => {
   const vaultHtmlAfterApply = await getText(`${baseUrl}/?section=secrets`);
   assert.match(vaultHtmlAfterApply, /Node demo app password/);
   assert.match(vaultHtmlAfterApply, /Cosa significano i campi/);
-  assert.match(vaultHtmlAfterApply, /Usato realmente da: Node Demo/);
+  assert.match(vaultHtmlAfterApply, /Riferimento trovato per: Node Demo/);
   assert.match(vaultHtmlAfterApply, /node-demo\/src\/index\.js/);
   assert.match(vaultHtmlAfterApply, /Scansione completa:/);
   assert.doesNotMatch(vaultHtmlAfterApply, /vault-plain-value-should-not-leak/);

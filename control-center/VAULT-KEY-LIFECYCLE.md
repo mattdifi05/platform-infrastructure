@@ -40,6 +40,16 @@ can produce content. Signature bytes are omitted. Unknown fields, malformed or
 binary input, files above the small per-schema limit, symlinks, and files that
 change while read all fail closed to an empty metadata-only preview.
 
-## Current rollout gate
+## Runtime versions and delivery
 
-The implementation is sandbox-verified only. Live key initialization, Vault inventory read, migration, key rotation, Control Center restart, and deletion of any old key require a separate authorized maintenance gate and T08 restore evidence.
+The shared Vault store now has a version 3 envelope with immutable versions of
+each secret, while every ciphertext retains the version 2 AES-GCM/keyring format.
+Existing version 2 records are normalized without decrypting or replacing their
+ciphertext. Version 1 records still require the explicit migration above.
+
+The Control Center and native runtime operator share the same writer lock and
+revision checks. Adopting an enrolled runtime credential uses the existing
+dedicated keyring and preserves the credential. It neither rotates the encryption
+key nor reads backup/signing custody material. Delivery requires an exact,
+root-reviewed binding and a separate plan; see
+[application runtime delivery](../deployment/host/VAULT-RUNTIME.md).

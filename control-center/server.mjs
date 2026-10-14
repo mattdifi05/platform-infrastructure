@@ -68,6 +68,8 @@ import {
   readLegacyVaultMaterial,
   sealVaultPlaintext,
 } from "./vault/keyring.mjs";
+import { readStoreSync, loadStore, upsertVersion, withStoreLock, decryptVersion, protectedImportPath, VaultStoreError } from "./vault/store.mjs";
+import { createVaultRuntime, renderVaultRuntime, VaultRuntimeError } from "./vault/runtime.mjs";
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { applicationFolderCatalog, updateApplicationFolders, ApplicationFolderError } from "./state/application-folders.mjs";
@@ -100,6 +102,8 @@ const trustedExternalDatabase = process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATA
 const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
 const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || "";
 const vaultActiveKeyId = process.env.CONTROL_CENTER_VAULT_ACTIVE_KEY_ID || "";
+const vaultStoreConfig = { storePath: vaultFile, lockPath: `${vaultFile}.lock`, keyFile: vaultKeyFile, activeKeyId: vaultActiveKeyId };
+const vaultRuntime = createVaultRuntime(hostExtension.vaultRuntime);
 const vaultLegacyKeyFile = process.env.CONTROL_CENTER_VAULT_LEGACY_KEY_FILE || "";
 const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || path.join(platformInfraRoot, "secrets");
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
@@ -660,6 +664,7 @@ const server = createServer(async (req, res) => {
 
       if ((url.searchParams.get("section") || "projects") === "secrets") {
         context.vaultSecretUsage = await cachedVaultSecretUsageAnalysis(context);
+        context.vaultRuntime = await vaultRuntime.catalog();
       }
       htmlPage(req, res, await renderCachedControlCenter(context, url.searchParams));
     });
@@ -793,11 +798,18 @@ async function handleApi(req, res, url, context, operation) {
         }
         return json(res, section);
       }
+      case "vault.runtime.catalog": return json(res, await vaultRuntime.catalog());
+      case "vault.runtime.adopt": return json(res, await vaultRuntime.call({ ...payload, action: "adopt" }), 202);
+      case "vault.runtime.plan": return json(res, await vaultRuntime.call({ ...payload, action: "plan" }));
+      case "vault.runtime.apply": return json(res, await vaultRuntime.call({ ...payload, action: "apply" }), 202);
+      case "vault.runtime.rollback": return json(res, await vaultRuntime.call({ ...payload, action: "rollback" }));
+      case "vault.runtime.status": return json(res, await vaultRuntime.call({ ...payload, action: "status" }));
+      case "vault.secret.version": return json(res, await createVaultItemVersion(operation.parameters.vaultItemId, payload, context), 202);
       case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
-      case "vault.secret.store": return json(res, planVaultSecretCreate(payload, context), 202);
-      case "vault.import-existing": return json(res, planVaultSecretImportExisting(payload, context), 202);
-      case "vault.secret.reveal": return json(res, planVaultSecretReveal(operation.parameters.vaultItemId, payload, context), 202);
-      case "vault.secret.delete": return json(res, planVaultSecretDelete(operation.parameters.vaultItemId, payload, context), 202);
+      case "vault.secret.store": return json(res, await planVaultSecretCreate(payload, context), 202);
+      case "vault.import-existing": return json(res, await planVaultSecretImportExisting(payload, context), 202);
+      case "vault.secret.reveal": return json(res, await planVaultSecretReveal(operation.parameters.vaultItemId, payload, context), 202);
+      case "vault.secret.delete": return json(res, await planVaultSecretDelete(operation.parameters.vaultItemId, payload, context), 202);
       case "database.create": return json(res, planDatabaseCreate(payload, context), 202);
       case "database.backup": return json(res, planDatabaseBackup(operation.parameters.databaseId, payload, context), 202);
       case "backup.summary.read": return json(res, context.backups);
@@ -946,13 +958,13 @@ async function handleApi(req, res, url, context, operation) {
       return json(res, planMaterialAccessAudit(parts[3], payload, context), 202);
     }
     if (method === "GET" && route(parts, "control", "vault")) return json(res, { items: context.vaultItems, overview: context.overview.vault });
-    if (method === "POST" && route(parts, "control", "vault", "secrets")) return json(res, planVaultSecretCreate(payload, context), 202);
-    if (method === "POST" && route(parts, "control", "vault", "import-existing")) return json(res, planVaultSecretImportExisting(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "vault", "secrets")) return json(res, await planVaultSecretCreate(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "vault", "import-existing")) return json(res, await planVaultSecretImportExisting(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "reveal")) {
-      return json(res, planVaultSecretReveal(parts[3], payload, context), 202);
+      return json(res, await planVaultSecretReveal(parts[3], payload, context), 202);
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "delete")) {
-      return json(res, planVaultSecretDelete(parts[3], payload, context), 202);
+      return json(res, await planVaultSecretDelete(parts[3], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "workers-jobs")) {
@@ -1056,7 +1068,8 @@ async function handleApi(req, res, url, context, operation) {
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "operations")) return json(res, findById(context.operations, parts[2], "Operation"));
     if (method === "GET" && route(parts, "control", "audit")) return json(res, { audit: context.audit });
   } catch (error) {
-    if (error instanceof ValidationError) return json(res, { error: "validation_failed", message: error.message }, 422);
+    if (error instanceof VaultRuntimeError) return json(res, { error: "vault_runtime_unavailable", message: error.message }, 409);
+    if (error instanceof ValidationError || error instanceof VaultStoreError) return json(res, { error: "validation_failed", message: error.message }, 422);
     if (error instanceof RejectedOperationError) return json(res, { error: "operation_rejected", message: error.message }, 409);
     if (error instanceof StatusEventStreamError && !res.headersSent) {
       return json(res, { error: error.code.toLowerCase(), message: error.message }, error.status);
@@ -1454,12 +1467,13 @@ async function handleVaultCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
-    if (action === "create") operation = planVaultSecretCreate(payload, context);
-    else if (action === "delete") operation = planVaultSecretDelete(payload.id || payload.itemId || "", payload, context);
-    else if (action === "import-existing") operation = planVaultSecretImportExisting(payload, context);
+    if (action === "create") operation = await planVaultSecretCreate(payload, context);
+    else if (action === "delete") operation = await planVaultSecretDelete(payload.id || payload.itemId || "", payload, context);
+    else if (action === "version") operation = await createVaultItemVersion(payload.itemId, payload, context);
+    else if (action === "import-existing") operation = await planVaultSecretImportExisting(payload, context);
     else throw new ValidationError("Unsupported vault action.");
   } catch (error) {
-    if (error instanceof ValidationError) {
+    if (error instanceof ValidationError || error instanceof VaultStoreError) {
       json(res, { error: "validation_failed", message: error.message }, 422);
       return;
     }
@@ -6758,7 +6772,7 @@ function renderOpsVaultUsage(item, usage, scanComplete) {
     </span>`;
   }
   return `<span class="ops-vault-usage good" data-secret-usage-status="verified">
-    <strong>Usato realmente da: ${escapeHtml(targets.join(", "))}</strong>
+    <strong>Riferimento trovato per: ${escapeHtml(targets.join(", "))}</strong>
     <small>${escapeHtml(evidence.slice(0, 4).map((entry) => `${entry.targetName}: ${entry.file}`).join(" · "))}</small>
   </span>`;
 }
@@ -6813,6 +6827,7 @@ function renderOpsVault(context) {
         </div>
       </div>
     </div>
+    ${renderVaultRuntime(context.vaultRuntime || { available: false }, context.vaultItems)}
   </section>`;
 }
 
@@ -6834,6 +6849,8 @@ function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageSca
         <span>${escapeHtml(item.kind)}</span>
       </div>
       <small class="ops-vault-item-details">${escapeHtml(`${item.username || "utente non impostato"} · ${item.url || "host non impostato"} · ${rotation}`)}</small>
+      <small>${escapeHtml(`Versioni cifrate: ${item.versions?.length || 0} · Salvato nel Vault; la consegna è separata.`)}</small>
+      <form class="ops-vault-version-form" method="post" action="/actions/vault-command" autocomplete="off"> <input type="hidden" name="action" value="version"><input type="hidden" name="itemId" value="${escapeHtml(item.id)}"><textarea class="ops-vault-version-value" name="newValue" rows="2" placeholder="Nuova versione del secret" aria-label="Nuovo valore ${escapeHtml(item.label)}; ritorni a capo conservati" autocomplete="new-password" spellcheck="false" required></textarea><button class="ops-button secondary" type="submit">Salva nuova versione</button></form>
       ${renderOpsVaultUsage(item, usage, usageScanComplete)}
       <span class="ops-vault-reveal" data-vault-reveal-box>
         <input type="password" value="" placeholder="Protetto" readonly aria-label="Valore ${escapeHtml(item.label || item.itemKey)}" data-vault-reveal-value>
@@ -11541,11 +11558,22 @@ function planMaterialAccessAudit(id, payload, context) {
   return operationPlan("material.access", material.environment, true, ["validate material", "prepare access audit metadata", "do not read value material", "require apply confirmation", "write audit event"], { materialId: material.id, projectId: material.projectId, purpose, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "RECORD-MATERIAL-ACCESS" });
 }
 
-function planVaultSecretCreate(payload, context) {
+async function createVaultItemVersion(id, payload, context) {
+  if (Object.keys(payload).some(key => !["action", "itemId", "newValue", "expectedVaultRevision", "_csrf"].includes(key))) throw new ValidationError("Unsupported Vault version fields.");
+  if (payload.itemId && payload.itemId !== id) throw new ValidationError("Vault item identity mismatch.");
+  const state = await loadStore(vaultStoreConfig);
+  const item = state.items[id];
+  if (!item || typeof payload.newValue !== "string" || !payload.newValue) throw new ValidationError("Secret o nuova versione non validi.");
+  const result = await upsertVersion(vaultStoreConfig, { itemId: id, value: payload.newValue, expectedRevision: payload.expectedVaultRevision || state.revision });
+  appendAudit({ action: "vault.version.create", target: id, environment: item.environment || "local", risk: "high", result: "success", dryRun: false, summary: "Immutable encrypted version saved; runtime credentials remain unchanged." });
+  return result;
+}
+
+async function planVaultSecretCreate(payload, context) {
   const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
   const targetEnv = normalizeEnvironment(payload.targetEnv || payload.environment || context.environment);
   const itemKey = validateVaultItemKey(payload.itemKey || payload.name || "");
-  const kind = choice(String(payload.kind || payload.materialKind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "vault item kind");
+  const kind = choice(String(payload.kind || payload.materialKind || "application"), ["application", "docker", "provider", "kms", "database", "storage", "runtime"], "vault item kind");
   const id = vaultItemId(projectId, targetEnv, itemKey);
   const rawValue = String(payload.value || payload.plainValue || "");
   const details = vaultItemRecord({
@@ -11559,26 +11587,14 @@ function planVaultSecretCreate(payload, context) {
     url: payload.url || "",
     rotationDays: payload.rotationDays || 90,
     valueStored: false,
-    valueFingerprint: rawValue ? sha256(rawValue) : "",
+    valueFingerprint: "",
     source: "control-center-vault",
   });
   if (payload.confirm === "STORE-VAULT-SECRET") {
     if (!rawValue) throw new ValidationError("Vault value is required.");
-    const state = readVaultState();
-    const previous = state.items[id] || {};
-    const now = new Date().toISOString();
-    const item = vaultItemRecord({
-      ...previous,
-      ...details,
-      sealedValue: sealVaultValue(rawValue, id),
-      valueStored: true,
-      valueFingerprint: sha256(rawValue),
-      rotationStatus: details.rotationDays > 0 ? "planned" : "not-set",
-      createdAt: previous.createdAt || now,
-      updatedAt: now,
-    }, { includeSealed: true });
-    state.items[id] = item;
-    writeVaultState(state);
+    const current = await loadStore(vaultStoreConfig);
+    const stored = await upsertVersion(vaultStoreConfig, { itemId: id, value: rawValue, metadata: Object.fromEntries(Object.entries({ ...details, valueFingerprint: "", rotationStatus: "not-applied" }).filter(([key]) => !["id", "versions", "currentVersionId", "deletedAt"].includes(key))), expectedRevision: payload.expectedVaultRevision || current.revision });
+    const item = stored.item;
     upsertVaultMaterialMetadata(item);
     appendAudit({ action: "vault.item.create.apply", target: `${projectId}/${targetEnv}/${itemKey}`, environment: targetEnv, risk: "high", result: "success", dryRun: false, summary: "Vault item stored encrypted; plaintext value was not logged or returned." });
     const publicItem = vaultItemRecord(item);
@@ -11589,7 +11605,7 @@ function planVaultSecretCreate(payload, context) {
   return operationPlan("vault.item.create", targetEnv, true, ["validate vault metadata", "prepare encrypted local state", "require apply confirmation", "write audit event"], { ...details, valueProvided: Boolean(rawValue), valueStored: false, valueExposed: false, productionEvidence: false, confirmationRequired: "STORE-VAULT-SECRET" });
 }
 
-function planVaultSecretImportExisting(payload, context) {
+async function planVaultSecretImportExisting(payload, context) {
   const state = readVaultState();
   const candidates = readExistingSecretCandidates(context.projects);
   const replaceExisting = parseBoolean(payload.replaceExisting || "");
@@ -11615,30 +11631,11 @@ function planVaultSecretImportExisting(payload, context) {
         skipped.push(candidate.id);
         continue;
       }
-      const item = vaultItemRecord({
-        ...previous,
-        id: candidate.id,
-        itemKey: candidate.itemKey,
-        label: candidate.label,
-        projectId: "platform",
-        environment: "local",
-        kind: candidate.kind,
-        username: "",
-        url: candidate.sourceLabel,
-        rotationDays: candidate.rotationDays,
-        rotationStatus: candidate.rotationDays > 0 ? "planned" : "not-set",
-        linkedApps: candidate.linkedApps,
-        valueStored: true,
-        valueFingerprint: sha256(rawValue),
-        sealedValue: sealVaultValue(rawValue, candidate.id),
-        source: candidate.source,
-        createdAt: previous.createdAt || now,
-        updatedAt: now,
-      }, { includeSealed: true });
-      state.items[item.id] = item;
+      const current = await loadStore(vaultStoreConfig);
+      const stored = await upsertVersion(vaultStoreConfig, { itemId: candidate.id, value: rawValue, metadata: { itemKey: candidate.itemKey, label: candidate.label, projectId: "platform", environment: "local", kind: candidate.kind, rotationDays: candidate.rotationDays, rotationStatus: "not-applied", linkedApps: candidate.linkedApps, source: candidate.source }, expectedRevision: current.revision });
+      const item = stored.item;
       imported.push(vaultItemRecord(item));
     }
-    writeVaultState(state);
     for (const item of imported) upsertVaultMaterialMetadata(item);
     appendAudit({ action: "vault.import-existing.apply", target: "platform/local", environment: "local", risk: "high", result: "success", dryRun: false, summary: `Imported ${imported.length} existing files into the encrypted Vault; values were not logged.` });
     const operation = operationPlan("vault.import-existing.local", "local", false, ["scan approved secret directories", "read existing values locally", "encrypt each value into the Vault", "preserve original files", "write audit event"], { itemCount: candidates.length, importedCount: imported.length, skippedCount: skipped.length, importedIds: imported.map((item) => item.id), valueExposed: false, productionEvidence: false });
@@ -11648,7 +11645,7 @@ function planVaultSecretImportExisting(payload, context) {
   return operationPlan("vault.import-existing", "local", true, ["scan approved secret directories", "show importable count", "require apply confirmation", "do not read values during plan"], { itemCount: candidates.length, importableCount: importable.length, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "IMPORT-EXISTING-SECRETS" });
 }
 
-function planVaultSecretReveal(id, payload, context) {
+async function planVaultSecretReveal(id, payload, context) {
   const itemId = sanitizeIdentifier(id || "");
   if (!itemId) throw new ValidationError("Vault item id is required.");
   const state = readVaultState();
@@ -11661,7 +11658,7 @@ function planVaultSecretReveal(id, payload, context) {
     appendAudit({ action: "vault.item.reveal.plan", target: item.id, environment: item.environment, risk: "high", result: "planned", dryRun: true, summary: "Vault item reveal plan generated; value was not read." });
     return operationPlan("vault.item.reveal", item.environment, true, ["validate vault item", "require reveal confirmation", "do not include value in normal inventory"], { itemId: item.id, projectId: item.projectId, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: confirmation });
   }
-  const value = openVaultValue(existing.sealedValue, item.id);
+  const value = await decryptVersion(vaultStoreConfig, { itemId: item.id, versionId: existing.currentVersionId });
   const now = new Date();
   const revealExpiresAt = new Date(now.getTime() + vaultRevealTtlMs).toISOString();
   appendAudit({ action: "vault.item.reveal.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item value revealed to the local browser after explicit confirmation; value was not logged." });
@@ -11669,7 +11666,7 @@ function planVaultSecretReveal(id, payload, context) {
   return { ...operation, item, value, revealExpiresAt, ttlMs: vaultRevealTtlMs };
 }
 
-function planVaultSecretDelete(id, payload, context) {
+async function planVaultSecretDelete(id, payload, context) {
   const itemId = sanitizeIdentifier(id || "");
   if (!itemId) throw new ValidationError("Vault item id is required.");
   const state = readVaultState();
@@ -11678,8 +11675,10 @@ function planVaultSecretDelete(id, payload, context) {
   const item = vaultItemRecord(existing);
   const confirmation = `DELETE-VAULT-SECRET:${item.id}`;
   if (payload.confirm === confirmation) {
-    delete state.items[item.id];
-    writeVaultState(state);
+    const catalog = await vaultRuntime.catalog();
+    if (typeof hostExtension.vaultRuntime === "function" && !catalog.available) throw new RejectedOperationError("Verifica dei collegamenti Vault non disponibile: eliminazione bloccata.");
+    if (catalog.bindings.some(binding => binding.itemId === item.id)) throw new RejectedOperationError("Il secret è collegato a un’applicazione: eliminazione bloccata.");
+    await withStoreLock(vaultStoreConfig, tx => tx.deleteItem({ itemId: item.id, expectedRevision: payload.expectedVaultRevision || state.revision }));
     removeVaultMaterialMetadata(item);
     appendAudit({ action: "vault.item.delete.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item removed from encrypted state; value was not read or exposed." });
     const operation = operationPlan("vault.item.delete.local", item.environment, false, ["validate vault item", "remove encrypted vault record", "remove vault-owned material metadata", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRemoved: true, valueRead: false, valueExposed: false, productionEvidence: false });
@@ -12677,51 +12676,8 @@ function writeSensitiveMaterialsState(state) {
 }
 
 function readVaultState() {
-  if (!existsSync(vaultFile)) return { version: 2, items: {}, updatedAt: null };
-  try {
-    const parsed = JSON.parse(readFileSync(vaultFile, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !parsed.items || typeof parsed.items !== "object" || Array.isArray(parsed.items)) {
-      throw new Error("invalid Vault state shape");
-    }
-    return {
-      version: Number(parsed?.version) === 2 ? 2 : 1,
-      items: parsed.items,
-      updatedAt: parsed?.updatedAt || null,
-    };
-  } catch {
-    throw new ValidationError("Vault state is unreadable; no write was performed.");
-  }
-}
-
-function writeVaultState(state) {
-  const now = new Date().toISOString();
-  const normalized = {
-    version: 2,
-    updatedAt: now,
-    items: Object.fromEntries(
-      Object.values(state.items || {})
-        .filter((item) => item && !item.deletedAt)
-        .map((item) => {
-          const record = vaultItemRecord(item, { includeSealed: true });
-          return [record.id, record];
-        }),
-    ),
-  };
-  mkdirSync(path.dirname(vaultFile), { recursive: true });
-  const temporary = `${vaultFile}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
-  let fd = null;
-  try {
-    fd = openSync(temporary, "wx", 0o600);
-    writeFileSync(fd, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = null;
-    renameSync(temporary, vaultFile);
-  } catch (error) {
-    if (fd !== null) closeSync(fd);
-    rmSync(temporary, { force: true });
-    throw error;
-  }
+  try { return readStoreSync(vaultStoreConfig); }
+  catch { throw new ValidationError("Vault state is unreadable; no write was performed."); }
 }
 
 function readExistingSecretCandidates(projects = []) {
@@ -12966,7 +12922,7 @@ function existingSecretFileRecord(rootReal, filePath, origin) {
 
 function shouldSkipExistingSecretFile(relativePath) {
   const name = path.basename(relativePath).toLowerCase();
-  if (!name || name.startsWith(".")) return true;
+  if (!name || name.startsWith(".") || protectedImportPath(relativePath)) return true;
   if (["readme.md", "infra-secret-manager-audit.log", "infra-secret-manager-store.json", "secret-vault.json"].includes(name)) return true;
   if (name.endsWith(".sha256") || name.endsWith(".sig") || name.endsWith(".md") || name.endsWith(".log")) return true;
   return false;
@@ -13658,9 +13614,11 @@ function vaultItemRecord({
   createdAt = null,
   updatedAt = null,
   deletedAt = null,
+  currentVersionId = "",
+  versions = {},
 } = {}, { includeSealed = false } = {}) {
   const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
-  const cleanEnv = normalizeEnvironment(targetEnv);
+  const cleanEnv = kind === "runtime" && targetEnv === "private" ? "private" : normalizeEnvironment(targetEnv);
   const cleanKey = validateVaultItemKey(itemKey || "secret_value");
   const cleanRotationDays = parseRotationDays(rotationDays || 0);
   const cleanFingerprint = sanitizeVaultFingerprint(valueFingerprint);
@@ -13670,12 +13628,14 @@ function vaultItemRecord({
     label: sanitizeVaultText(label || humanName(cleanKey), 96),
     projectId: cleanProjectId,
     environment: cleanEnv,
-    kind: choice(String(kind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "vault item kind"),
+    kind: choice(String(kind || "application"), ["application", "docker", "provider", "kms", "database", "storage", "runtime"], "vault item kind"),
     username: sanitizeVaultText(username, 120),
     url: sanitizeVaultText(url, 200),
     rotationDays: cleanRotationDays,
     rotationStatus: rotationStatus || (cleanRotationDays > 0 ? "planned" : "not-set"),
     linkedApps: Array.isArray(linkedApps) ? [...new Set(linkedApps.map((item) => sanitizeIdentifier(item)).filter(Boolean))].slice(0, 100) : [],
+    currentVersionId,
+    versions: Array.isArray(versions) ? versions : Object.values(versions).map(version => ({ versionId: version.versionId, createdAt: version.createdAt })),
     valueStored: Boolean(valueStored || sealedValue),
     fingerprintStored: Boolean(cleanFingerprint),
     valueFingerprint: includeSealed ? cleanFingerprint : "",

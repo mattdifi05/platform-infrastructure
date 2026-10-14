@@ -47,6 +47,14 @@ const sensitiveTargets = Object.freeze([
   ["GET", "/control/backups/files"],
   ["GET", "/control/backups/preview"],
   ["GET", "/control/vault"],
+  ["GET", "/control/vault/runtime"],
+  ["POST", "/control/vault/secrets/example/versions"],
+  ["POST", "/control/vault/runtime/adopt"],
+  ["POST", "/control/vault/runtime/plan"],
+  ["POST", "/control/vault/runtime/apply"],
+  ["POST", "/control/vault/runtime/rollback"],
+  ["POST", "/control/vault/runtime/status"],
+
 ]);
 
 test("real HTTP authorization denies before payload/context/sinks and preserves CSRF and freshness", async (t) => {

@@ -6919,3 +6919,14 @@ pre {
 .cc-host-pressure > div { flex-direction: column; }
 @media (max-width: 1120px) { .cc-host-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 680px) { .cc-host-metric-grid, .cc-host-detail-grid { grid-template-columns: 1fr; } .cc-host-pressure { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Vault delivery uses the full card width and keeps review actions readable. */
+.ops-vault-runtime-item { display: block; }
+.ops-vault-runtime-item form, .ops-vault-version-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.ops-vault-runtime-item label { display: grid; gap: 6px; min-width: min(260px, 100%); }
+.ops-vault-runtime-item select, .ops-vault-version-form input { box-sizing: border-box; max-width: 100%; padding: 9px 12px; border: 1px solid var(--line, #d9dfeb); border-radius: 10px; background: var(--surface, #fff); color: inherit; font: inherit; }
+.ops-vault-runtime-item [data-vault-runtime-result] { margin-top: 12px; }
+.ops-vault-runtime-item small { display: block; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .ops-vault-runtime-item form > * { max-width: 100%; } .ops-vault-version-form input { width: 100%; } }
+
+.ops-vault-version-value { -webkit-text-security: disc; width: min(100%, 320px); padding: 9px 12px; border: 1px solid var(--line, #d9dfeb); border-radius: 10px; font: inherit; resize: vertical; }
