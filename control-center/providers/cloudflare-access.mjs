@@ -259,7 +259,8 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
       if (matchingRoutes.length > 1) throw Error('Multiple Cloudflare Tunnel routes match the project hostname');
       const route = matchingRoutes[0] || null;
       const dnsRecords = await list(`/zones/${project.zone.id}/dns_records?name=${encodeURIComponent(project.hostname)}`);
-      const matchingDns = dnsRecords.filter(record => record.name === project.hostname);
+      const matchingDns = dnsRecords.filter(record => record.name === project.hostname
+        && ['A', 'AAAA', 'CNAME'].includes(record.type));
       if (matchingDns.length > 1) throw Error('Multiple DNS records match the project hostname');
       const dns = matchingDns[0] || null;
       const exactApps = apps.filter(app => String(app.domain || '').toLowerCase() === project.hostname);
@@ -295,8 +296,7 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
           && dns.content === `${config.tunnelId}.cfargotunnel.com` && dns.proxied === true;
         if (!expectedTunnelRecord || !ID32.test(dns.id)) throw Error('Cloudflare DNS record differs from the admitted tunnel route');
         if (managed?.dnsRecordId) {
-          if (dns.id !== managed.dnsRecordId || !(Array.isArray(dns.tags) && dns.tags.includes(ownerTag(project.id)))
-            || dns.comment !== ownerTag(project.id)) throw Error('Managed DNS record ownership changed');
+          if (dns.id !== managed.dnsRecordId || dns.comment !== ownerTag(project.id)) throw Error('Managed DNS record ownership changed');
           if (managed.dnsRecordDigest && managed.dnsRecordDigest !== dnsFingerprint(dns)) throw Error('Managed DNS ownership changed');
         } else if (!project.isClone && (!dns.tags?.length) && !dns.comment) adoptableDns = true;
         else throw Error('Cloudflare DNS record is not provably managed');
@@ -335,10 +335,10 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
       };
       const revision = visibilityDigest(canonical(observed));
       const actions = mode === 'private'
-        ? ['ensure exact owner-only Cloudflare Access application before route', 'ensure tagged CNAME to the admitted tunnel', 'ensure exact host route to the admitted project router']
+        ? ['ensure exact owner-only Cloudflare Access application before route', 'ensure ownership-marked CNAME to the admitted tunnel', 'ensure exact host route to the admitted project router']
         : mode === 'public'
-          ? ['ensure tagged CNAME to the admitted tunnel', 'ensure exact host route to the admitted project router', 'remove only this project’s exact Access application after route readback']
-          : ['remove only this project’s exact host route', 'remove only this project’s tagged CNAME', 'retain the exact Cloudflare Access application and policy'];
+          ? ['ensure ownership-marked CNAME to the admitted tunnel', 'ensure exact host route to the admitted project router', 'remove only this project’s exact Access application after route readback']
+          : ['remove only this project’s exact host route', 'remove only this project’s ownership-marked CNAME', 'retain the exact Cloudflare Access application and policy'];
       if (resources.adoptableRoute || resources.adoptableDns) actions.unshift('adopt only the exact registered source host route and matching tunnel DNS record after revision confirmation');
       if (mode === 'offline' && wildcardMatchesHost(project.hostname, resources.ingress)) actions.unshift('replace the exact forwarding route with an exact 404 blocker so a broader Tunnel wildcard cannot expose the project');
       return {
@@ -433,20 +433,19 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
       };
       const ensureDns = async () => {
         if (!dns) {
-          const body = { type: 'CNAME', name: project.hostname, content: tunnelCname, proxied: true, ttl: 1, comment: ownerTag(project.id), tags: [ownerTag(project.id)] };
+          const body = { type: 'CNAME', name: project.hostname, content: tunnelCname, proxied: true, ttl: 1, comment: ownerTag(project.id) };
           const created = await request(zonePath, 'POST', body);
           const result = created.result;
-          if (!result || !ID32.test(result.id) || result.name !== project.hostname || result.content !== tunnelCname || result.proxied !== true || result.comment !== ownerTag(project.id) || !result.tags?.includes(ownerTag(project.id))) throw Error('Created Cloudflare DNS record failed owner verification');
+          if (!result || !ID32.test(result.id) || result.name !== project.hostname || result.content !== tunnelCname || result.proxied !== true || result.comment !== ownerTag(project.id)) throw Error('Created Cloudflare DNS record failed owner verification');
           dns = result;
         } else if (!(await store.load()).routes[project.hostname]?.dnsRecordId) {
           const patch = Object.fromEntries(['type', 'name', 'content', 'ttl', 'proxied', 'settings'].filter(key => dns[key] !== undefined).map(key => [key, dns[key]]));
           patch.comment = ownerTag(project.id);
-          patch.tags = [ownerTag(project.id)];
           await request(`${zonePath}/${dns.id}`, 'PATCH', patch);
           const readback = await list(`${zonePath}?name=${encodeURIComponent(project.hostname)}`);
           const actual = readback.find(record => record.id === dns.id);
           if (!actual || actual.name !== project.hostname || actual.type !== 'CNAME' || actual.content !== tunnelCname || actual.proxied !== true
-            || actual.comment !== ownerTag(project.id) || !actual.tags?.includes(ownerTag(project.id))) throw Error('Adopted Cloudflare DNS record readback differs');
+            || actual.comment !== ownerTag(project.id)) throw Error('Adopted Cloudflare DNS record readback differs');
           dns = actual;
         }
         await saveRouteState(project, current => ({ ...current, dnsRecordId: dns.id, dnsRecordDigest: dnsFingerprint(dns) }));
@@ -520,7 +519,7 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
         }
         if (dns) {
           const managed = (await store.load()).routes[project.hostname];
-          if (!managed?.dnsRecordId || managed.dnsRecordId !== dns.id || !dns.tags?.includes(ownerTag(project.id)) || dns.comment !== ownerTag(project.id)) throw Error('Refusing to remove a DNS record without exact persisted ownership');
+          if (!managed?.dnsRecordId || managed.dnsRecordId !== dns.id || dns.comment !== ownerTag(project.id)) throw Error('Refusing to remove a DNS record without exact persisted ownership');
           await request(`${zonePath}/${dns.id}`, 'DELETE');
           await saveRouteState(project, current => { delete current.dnsRecordId; delete current.dnsRecordDigest; current.mode = 'offline'; return current; });
           dns = null;
@@ -550,6 +549,19 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
       }
     }
 
+    async function edgeOwnerGate(project) {
+      try {
+        const response = await fetchImpl(`https://${project.hostname}/`, {
+          method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(3000),
+          headers: { Accept: 'text/html', 'Cache-Control': 'no-cache' },
+        });
+        const challenge = new URL(response.headers.get('location') || '', `https://${project.hostname}`);
+        return response.status === 302 && challenge.protocol === 'https:'
+          && challenge.hostname.endsWith('.cloudflareaccess.com')
+          && challenge.pathname.startsWith('/cdn-cgi/access/login/');
+      } catch { return false; }
+    }
+
     async function getVisibility(input) {
       const project = normalizeProject(input, config);
       const resources = await readResources(project);
@@ -557,9 +569,11 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
       const effective = currentMode(resources);
       const accessMatchesMode = effective === 'private' ? Boolean(resources.access) : effective === 'public' ? !resources.access : true;
       const adoptablePublic = !managed && !project.isClone && effective === 'public' && resources.adoptableRoute && resources.adoptableDns && !resources.access;
-      const verified = adoptablePublic || Boolean(managed && managed.mode === effective && accessMatchesMode
+      const apiVerified = adoptablePublic || Boolean(managed && managed.mode === effective && accessMatchesMode
         && (effective === 'offline' ? (!resources.route || managed.routeKind === 'offline-block') && !resources.dns : resources.route && resources.dns)
       );
+      const edgeVerified = effective === 'private' ? await edgeOwnerGate(project) : null;
+      const verified = apiVerified && (effective !== 'private' || edgeVerified);
       return {
         projectId: project.id,
         hostname: project.hostname,
@@ -568,6 +582,7 @@ export function createCloudflareVisibilityProvider({ env = process.env, fetchImp
         adoptable: Boolean(adoptablePublic),
         effective,
         verified,
+        edgeVerified,
         updatedAt: managed?.updatedAt || null,
         access: resources.access ? 'owner-only' : 'not-applied',
         accessApplicationId: resources.access?.id || null,

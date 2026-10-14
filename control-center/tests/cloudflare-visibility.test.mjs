@@ -27,9 +27,14 @@ function remoteFixture({ ingress, apps = [], dnsRecords = [] } = {}) {
   const calls = [];
   const fetchImpl = async (url, options) => {
     const parsed = new URL(url);
+    if (parsed.hostname !== 'api.cloudflare.com') {
+      assert.equal(options.headers.Authorization, undefined, 'API credentials must never be sent to the application');
+      return { status: 302, headers: { get: () => `https://owner.cloudflareaccess.com/cdn-cgi/access/login/${parsed.hostname}` } };
+    }
     const pathname = parsed.pathname;
     const method = options.method;
     const body = options.body ? JSON.parse(options.body) : undefined;
+    if (pathname.includes('/dns_records') && body) assert.equal('tags' in body, false, 'free-plan DNS writes cannot require paid record tags');
     calls.push({ method, pathname, body });
     let result;
     if (pathname.endsWith('/access/apps') && method === 'GET') result = applications;
@@ -116,7 +121,7 @@ test('private mode creates an exact owner-only Access app before adding its DNS 
   assert.deepEqual(remote.applications[0].policies[0].include, [{ email: { email: project.ownerEmail } }]);
   assert.deepEqual(remote.applications[0].policies[0].exclude, []);
   assert.equal(remote.applications[0].domain, project.hostname);
-  assert.equal(remote.records[0].tags[0], ownerTag);
+  assert.equal(remote.records[0].comment, ownerTag);
   const accessCreate = remote.calls.findIndex(call => call.method === 'POST' && call.pathname.endsWith('/access/apps'));
   const dnsCreate = remote.calls.findIndex(call => call.method === 'POST' && call.pathname.endsWith('/dns_records'));
   const tunnelWrite = remote.calls.findIndex(call => call.method === 'PUT' && call.pathname.endsWith('/configurations'));
@@ -124,6 +129,20 @@ test('private mode creates an exact owner-only Access app before adding its DNS 
   assert.equal(remote.tunnel.config.ingress[0].hostname, project.hostname, 'exact host route precedes the wildcard route');
   assert.equal(remote.tunnel.config.ingress.at(-1).service, 'http_status:404');
   assert.doesNotMatch(JSON.stringify(applied), /synthetic-token-value|owner@example.net/);
+});
+
+test('API policy readback alone cannot verify private publication before the edge denies anonymous access', async () => {
+  const remote = remoteFixture();
+  const edgeNotReady = { fetchImpl: (url, options) => new URL(url).hostname === 'api.cloudflare.com'
+    ? remote.fetchImpl(url, options) : Promise.resolve({ status: 200, headers: { get: () => null } }) };
+  const visibility = provider(edgeNotReady);
+  const plan = await visibility.planVisibility({ id: 'alpha' }, 'private');
+  await assert.rejects(visibility.applyVisibility(plan, confirmed(plan)), /readback/);
+  const status = await visibility.getVisibility({ id: 'alpha' });
+  assert.equal(status.effective, 'private');
+  assert.equal(status.edgeVerified, false);
+  assert.equal(status.verified, false);
+  assert.equal(remote.applications.length, 1);
 });
 
 test('registered source can adopt only its exact existing tunnel route and CNAME after reviewed confirmation', async () => {
@@ -138,9 +157,22 @@ test('registered source can adopt only its exact existing tunnel route and CNAME
   assert.equal(applied.effective, 'private');
   assert.equal(remote.tunnel.config.ingress[0].hostname, project.hostname);
   assert.equal(remote.records[0].id, existingDns.id);
-  assert.deepEqual(remote.records[0].tags, [ownerTag]);
+  assert.equal(remote.records[0].comment, ownerTag);
   assert.equal(remote.calls.some(call => call.method === 'POST' && call.pathname.endsWith('/dns_records')), false);
   assert.equal(remote.calls.some(call => call.method === 'PATCH' && call.pathname.endsWith(`/dns_records/${existingDns.id}`)), true);
+});
+
+test('apex visibility preserves unrelated mail and verification records at the same hostname', async () => {
+  const mail = { id: '1'.repeat(32), type: 'MX', name: project.hostname, content: 'mail.example.net', priority: 0 };
+  const verification = { id: '2'.repeat(32), type: 'TXT', name: project.hostname, content: 'synthetic-domain-verification' };
+  const route = { id: 'e'.repeat(32), type: 'CNAME', name: project.hostname, content: `${tunnelId}.cfargotunnel.com`, proxied: true, ttl: 1 };
+  const remote = remoteFixture({ ingress: [{ hostname: project.hostname, service: project.originService }, { service: 'http_status:404' }], dnsRecords: [mail, verification, route] });
+  const visibility = provider(remote);
+  const plan = await visibility.planVisibility({ id: project.id }, 'private');
+  assert.equal((await visibility.applyVisibility(plan, confirmed(plan))).verified, true);
+  const offline = await visibility.planVisibility({ id: project.id }, 'offline');
+  await visibility.applyVisibility(offline, confirmed(offline));
+  assert.deepEqual(remote.records, [mail, verification]);
 });
 
 test('clone admission is deterministic and uses its separately registered loopback origin', async () => {
@@ -155,10 +187,10 @@ test('clone admission is deterministic and uses its separately registered loopba
   assert.equal(remote.records[0].name, clone.hostname);
   assert.equal(remote.tunnel.config.ingress[0].service, project.cloneOriginService);
   assert.equal(remote.tunnel.config.ingress[0].hostname, clone.hostname);
-  assert.equal(remote.records[0].tags[0], 'control-center:visibility:v1:local-alpha');
+  assert.equal(remote.records[0].comment, 'control-center:visibility:v1:local-alpha');
 });
 
-test('offline removes only the recorded project route and tagged DNS while retaining Access protection', async () => {
+test('offline removes only the recorded project route and ownership-marked DNS while retaining Access protection', async () => {
   const remote = remoteFixture();
   const visibility = provider(remote);
   const privatePlan = await visibility.planVisibility({ id: 'alpha' }, 'private');
