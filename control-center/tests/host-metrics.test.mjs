@@ -111,7 +111,7 @@ test("partial and invalid observations do not fabricate complete network totals 
   assert.equal(result.processes.running, null);
 });
 
-test("reader coalesces concurrent requests and refreshes after its ten second cache expires", async () => {
+test("reader coalesces concurrent requests and refreshes after its two second cache expires", async () => {
   let time = clock, release;
   const f = fixture();
   const barrier = new Promise(resolve => { release = resolve; });
@@ -122,7 +122,7 @@ test("reader coalesces concurrent requests and refreshes after its ten second ca
   assert.strictEqual(one, two);
   assert.equal(f.counts().reads, 1);
   assert.equal(f.counts().queries, Object.keys(HOST_METRIC_QUERIES).length);
-  time += 9999; assert.strictEqual(await reader(), one);
+  time += 1999; assert.strictEqual(await reader(), one);
   time += 1; await reader();
   assert.equal(f.counts().reads, 2);
   assert.equal(f.counts().queries, Object.keys(HOST_METRIC_QUERIES).length * 2);

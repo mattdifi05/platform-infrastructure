@@ -2312,7 +2312,7 @@
         if (active() && error.name !== "ReauthenticationRedirect") { render({}); status.textContent = "Metriche host non disponibili. Aggiorna per riprovare."; }
       } finally {
         loading = false; button.disabled = false; root.setAttribute("aria-busy", "false");
-        if (active()) timer = setTimeout(load, 10000);
+        if (active()) timer = setTimeout(load, 2000);
       }
     }
     hostMetricPanels.set(root, { refresh: load });

@@ -92,6 +92,7 @@ test("global backup control HTTP requires fresh owner and CSRF, keeps OFF until 
   const settings = await (await request("GET", "/?section=settings", "viewer")).text();
   assert.match(settings, /<h1 id="control-page-title">Impostazioni<\/h1>/);
   assert.match(settings, /data-host-metrics/);
+  assert.match(settings, /aggiornamento ogni 2 secondi/);
   assert.match(settings, /data-global-backup-control/);
   const applications = await (await request("GET", "/?section=projects", "viewer")).text();
   assert.doesNotMatch(applications, /data-global-backup-control/);

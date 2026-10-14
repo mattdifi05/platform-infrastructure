@@ -123,7 +123,7 @@ const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
 const discoverHostedProjects = parseBoolean(process.env.CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS || "");
 const prometheusUrl = String(process.env.CONTROL_CENTER_PROMETHEUS_URL || "http://prometheus:9090").trim();
 const resourceProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_TIMEOUT_MS || 900), 250, 5000);
-const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_METRICS_TTL_MS || 10000), 1000, 60000);
+const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_METRICS_TTL_MS || 2000), 1000, 60000);
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
@@ -6172,7 +6172,7 @@ function renderOperationsSection(section, context, params, currentProject) {
 function renderOpsSettings() {
   return `<section class="cc-settings" data-settings-page>
     <section class="ops-project-detail-panel cc-settings-resources" data-host-metrics aria-labelledby="cc-host-metrics-title">
-      <div class="ops-project-detail-panel-head"><div><h2 id="cc-host-metrics-title">Risorse della VPS</h2><p class="cc-settings-note">Intero server · node_exporter · aggiornamento ogni 10 secondi</p></div><button class="ops-button secondary compact" type="button" data-host-metrics-refresh>Aggiorna</button></div>
+      <div class="ops-project-detail-panel-head"><div><h2 id="cc-host-metrics-title">Risorse della VPS</h2><p class="cc-settings-note">Intero server · node_exporter · aggiornamento ogni 2 secondi</p></div><button class="ops-button secondary compact" type="button" data-host-metrics-refresh>Aggiorna</button></div>
       <div class="cc-host-metric-grid">${[["cpu", "CPU", "Media degli ultimi 2 minuti"], ["memory", "RAM", "Memoria usata / totale"], ["disk", "Disco", "Spazio usato / totale"], ["network", "Connessione", "Ricezione ↓ / invio ↑ · media 2 minuti"]].map(([id, label, detail]) => `<article class="cc-host-metric" aria-label="${label}"><span>${label}</span><strong data-host-metric="${id}">—</strong><small data-host-metric-detail="${id}">${detail}</small>${id === "network" ? "" : `<meter min="0" max="100" value="0" data-host-metric-meter="${id}" aria-label="Utilizzo ${label}" hidden></meter>`}</article>`).join("")}</div>
       <div class="cc-host-detail-grid">
         <section class="cc-host-detail"><h3>Sistema</h3><dl>${[["load", "Carico · 1 / 5 / 15 minuti"], ["uptime", "Tempo di attività"], ["processes", "Task eseguibili / bloccati"], ["fileDescriptors", "File descriptor allocati / limite"]].map(([id,label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
