@@ -110,9 +110,9 @@ function extendedPayload(snapshot, results, now) {
   return { ...base, freshness, network, load, swap, diskIo, inodes, uptimeSeconds, processes, pressure, fileDescriptors };
 }
 
-export function createHostMetricsReader({ readSnapshot, query, ttlMs = 10000, now = Date.now }) {
+export function createHostMetricsReader({ readSnapshot, query, ttlMs = 2000, now = Date.now }) {
   if (typeof readSnapshot !== "function" || typeof query !== "function") throw Error("Host metrics require the existing snapshot reader and Prometheus query dependency.");
-  const ttl = Number.isFinite(ttlMs) ? Math.max(1000, Math.min(60000, ttlMs)) : 10000;
+  const ttl = Number.isFinite(ttlMs) ? Math.max(1000, Math.min(60000, ttlMs)) : 2000;
   let cached = null, expiresAt = 0, pending = null;
   return async function readHostMetrics() {
     if (cached && expiresAt > now()) return cached;
