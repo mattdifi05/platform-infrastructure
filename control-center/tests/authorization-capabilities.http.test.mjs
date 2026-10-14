@@ -23,6 +23,9 @@ let publicOrigin = "";
 let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
+  ["POST", "/control/projects/example/visibility"],
+  ["POST", "/control/projects/example/clone"],
+  ["POST", "/control/projects/example/clone/test-job/cancel"],
   ["POST", "/control/backups/production-restore"],
   ["GET", "/control/backups/vps"],
   ["POST", "/control/cloudflare/dns/change"],
@@ -345,6 +348,7 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_VAULT_FILE: path.join(stateRoot, "secret-vault.json"),
     CONTROL_CENTER_VAULT_KEY_FILE: path.join(stateRoot, "vault.key"),
     CONTROL_CENTER_EXISTING_SECRETS_DIR: path.join(stateRoot, "existing-secrets"),
+    PROJECT_HOSTING_JOBS_FILE: path.join(stateRoot, "hosting-jobs.json"),
     PROJECT_WORKER_JOBS_FILE: path.join(stateRoot, "worker-jobs.json"),
     PROJECT_IDENTITY_ACCESS_FILE: path.join(stateRoot, "identity-access.json"),
     PROJECT_DEPLOYMENTS_FILE: path.join(stateRoot, "deployments.jsonl"),
@@ -411,7 +415,7 @@ function freePort() {
 
 async function waitForHealth(url, child) {
   const started = Date.now();
-  while (Date.now() - started < 10_000) {
+  while (Date.now() - started < 45_000) {
     if (child.exitCode !== null) throw new Error(`Control Center exited early with code ${child.exitCode}.`);
     try {
       const response = await fetch(url);

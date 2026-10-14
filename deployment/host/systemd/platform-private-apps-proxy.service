@@ -1,0 +1,32 @@
+[Unit]
+Description=Loopback relay to admitted internal private application ingress
+Requires=platform-private-apps-proxy.socket docker.service
+After=platform-private-apps-proxy.socket docker.service
+ConditionPathExists=/etc/platform-infrastructure/private-ingress-proxy.env
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/platform-infrastructure/private-ingress-proxy.env
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd ${PLATFORM_PRIVATE_INGRESS_TARGET}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+MemoryMax=64M
+TasksMax=16
+LimitNOFILE=512
+Restart=on-failure
+RestartSec=2

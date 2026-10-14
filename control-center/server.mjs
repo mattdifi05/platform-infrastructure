@@ -47,6 +47,9 @@ import {
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
+import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
+import { createApplicationOperator } from "./hosting/application-operator.mjs";
+import { createHostingLifecycle } from "./hosting/lifecycle.mjs";
 import { cloudflareDnsChange, readCloudflareDnsStatus } from "./providers/cloudflare-dns.mjs";
 import {
   BackupQueueAdmissionError,
@@ -205,6 +208,20 @@ const statusEventBroker = createStatusEventBroker({
   maxQueueBytes: clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_QUEUE_BYTES || 1024 * 1024), 1024, 64 * 1024 * 1024),
 });
 const controlState = createControlStateStore(process.env);
+let hostingProvider = null;
+try { hostingProvider = createCloudflareVisibilityProviderFromEnv({ env: process.env }); } catch { /* Protected configuration unavailable: hosting operations stay disabled. */ }
+const hostingLifecycle = createHostingLifecycle({
+  provider: hostingProvider, native: createApplicationOperator(), store: controlState,
+  audit: (action, target) => appendAudit({ action, target, environment, risk: "high", result: "accepted", dryRun: false, summary: "Owner-authorized hosting lifecycle operation." }),
+  registerProject: job => {
+    const state = readState(); const existing = state.projects[job.targetId];
+    if (existing && existing.sourceProjectId !== job.sourceId) throw Error("Clone catalog ownership conflict");
+    state.projects[job.targetId] = { ...existing, declaredProject: true, sourceProjectId: job.sourceId, host: job.hostname, runtime: job.result?.runtime || "node", enabled: job.status === "available", cloneStatus: job.status, cloneRequestId: job.requestId, updatedAt: new Date().toISOString() };
+    writeState(state);
+  },
+});
+const hostingWorker = hostingProvider ? setInterval(() => { void hostingLifecycle.tick().catch(() => {}); }, 3000) : null;
+hostingWorker?.unref();
 const controlAuth = await createControlCenterAuth();
 const firstConfiguration = await createFirstConfiguration({ auth: controlAuth });
 const requestIdentity = new AsyncLocalStorage();
@@ -696,6 +713,7 @@ function rawRequestPathname(requestTarget) {
 }
 
 async function shutdown() {
+  clearInterval(hostingWorker);
   statusEventBroker.close();
   setTimeout(() => process.exit(1), 10_000).unref();
   const closed = new Promise(resolve => server.close(resolve));
@@ -721,6 +739,21 @@ async function handleApi(req, res, url, context, operation) {
     // identity used by authorization. The legacy comparisons below consume
     // only the already-resolved canonical method/path for ordinary routes.
     switch (operation.operationId) {
+      case "projects.hosting.status":
+      case "projects.hosting.plan":
+      case "projects.hosting.visibility":
+      case "projects.hosting.clone":
+      case "projects.hosting.cancel": {
+        const id = operation.parameters.projectId;
+        if (!resolveContextProject(context, id)) throw new ValidationError("Project is not admitted in this Control Center context.");
+        try {
+          if (operation.operationId === "projects.hosting.status") return json(res, await hostingLifecycle.status(id));
+          if (operation.operationId === "projects.hosting.plan") return json(res, { ok: true, plan: await hostingLifecycle.plan(id, url.searchParams.get("mode")) });
+          if (operation.operationId === "projects.hosting.visibility") return json(res, { ok: true, result: await hostingLifecycle.visibility(id, payload) });
+          if (operation.operationId === "projects.hosting.clone") return json(res, { ok: true, job: await hostingLifecycle.clone(id, payload) }, 202);
+          return json(res, { ok: true, job: await hostingLifecycle.cancel(id, operation.parameters.jobId, payload) }, 202);
+        } catch { return json(res, { ok: false, error: "hosting_operation_rejected", message: "Hosting operation unavailable, unsupported, or changed since review." }, 409); }
+      }
       case "overview.read": return json(res, context.overview);
       case "backup.vps.catalog": {
         const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
@@ -6372,7 +6405,11 @@ function observedApplications(strict = false) {
 function renderOpsProjects(context, params = new URLSearchParams()) {
   const observed = observedApplications().filter(app => !context.projects.some(project => project.slug === app.id || project.aliases?.includes(app.id)));
   const selectedObserved = observed.find(app => app.id === params.get("observed"));
-  if (selectedObserved) return renderObservedApplicationDetail(selectedObserved, controlIcon);
+  if (selectedObserved) {
+    const detail = renderObservedApplicationDetail(selectedObserved, controlIcon);
+    if (detail.includes("ops-project-detail-screen")) return detail;
+    return `<section class="ops-project-detail-screen" id="project-${escapeHtml(selectedObserved.id)}">${detail}</section>`;
+  }
   const resourcesByProject = projectResourceRowsByProject(context);
   const selectedSlug = sanitizeIdentifier(params.get("project") || "");
   const selectedProject = context.projects.find((project) => project.slug === selectedSlug || project.id === selectedSlug);
@@ -8932,7 +8969,12 @@ function projectStorage(context, projectOrId) {
 function resolveContextProject(context, projectOrId) {
   if (projectOrId && typeof projectOrId === "object") return projectOrId;
   const id = sanitizeIdentifier(projectOrId);
-  return context.projects.find((project) => project.slug === id || project.id === id || projectIdentitySet(project).has(id)) || null;
+  const managed = context.projects.find((project) => project.slug === id || project.id === id || projectIdentitySet(project).has(id));
+  if (managed) return managed;
+  // Reviewed host extension observations can admit a source that is mounted
+  // outside the ordinary projects tree; provider/native admission still applies.
+  const observed = observedApplications().find(application => application.id === id);
+  return observed ? { ...observed, slug: observed.id } : null;
 }
 
 function databaseMatchesProject(context, database, project) {

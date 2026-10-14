@@ -23,6 +23,11 @@ const CONTROL_ROUTES = Object.freeze([
 
   viewer("projects.list", "control", "projects"),
   admin("projects.create", "control", "projects"),
+  viewer("projects.hosting.status", "control", "projects", parameter("projectId"), "hosting-status"),
+  viewer("projects.hosting.plan", "control", "projects", parameter("projectId"), "hosting-plan"),
+  ownerFresh("POST", "projects.hosting.visibility", "control", "projects", parameter("projectId"), "visibility"),
+  ownerFresh("POST", "projects.hosting.clone", "control", "projects", parameter("projectId"), "clone"),
+  ownerFresh("POST", "projects.hosting.cancel", "control", "projects", parameter("projectId"), "clone", parameter("jobId"), "cancel"),
   viewer("projects.files.read", "control", "projects", parameter("projectId"), "files"),
   viewer("projects.read", "control", "projects", parameter("projectId")),
   admin("projects.update", "control", "projects", parameter("projectId"), "update"),
