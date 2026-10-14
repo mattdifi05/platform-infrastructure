@@ -157,7 +157,15 @@ def database_container(rows,volume):
  if len(matches)!=1:raise RuntimeError('Database volume must have one enrolled owner')
  return matches[0]
 
+def backup_control():
+ spec=importlib.util.spec_from_file_location('root_backup_control',HERE/'backup-control.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+def assert_backup_enabled(enrolled=None):
+ if enrolled is None:enrolled,_=profile()
+ backup_control().require_enabled(__import__('types').SimpleNamespace(**globals()),enrolled)
+
 def capture():
+ assert_backup_enabled()
  settle_restore_journal()
  if (WORK/'paused.json').exists():raise RuntimeError('Prior pause journal must be reconciled before a new capture')
  p,rows=profile()
@@ -325,7 +333,8 @@ def publish_catalog(verified_points=None):
    retained.append({'manifest':manifest,'offsiteVerified':True,'verifiedAt':point['verifiedAt']})
  schedule_active=subprocess.run(['systemctl','is-active','--quiet','platform-vps-backup.timer']).returncode==0
  queue_active=subprocess.run(['systemctl','is-active','--quiet','platform-vps-backup-queue.timer']).returncode==0
- body={'productionRestoreEnabled':p.get('productionRestoreAuthorized') is True,'restoreProfileDigest':sha(PROFILE),'scheduleActive':schedule_active,'queueActive':queue_active,'schema':'platform.vps-backup-catalog/v1','host':HOST,'enabled':p.get('captureAuthorized') is True and p.get('offsiteAuthorized') is True,'resources':enrolled_resources(p),'points':retained,'updatedAt':now()}
+ control_state=backup_control().status(__import__('types').SimpleNamespace(**globals()),p)
+ body={'backupControl':control_state,'enrollmentEnabled':p.get('captureAuthorized') is True and p.get('offsiteAuthorized') is True,'productionRestoreEnabled':p.get('productionRestoreAuthorized') is True,'restoreProfileDigest':sha(PROFILE),'scheduleActive':schedule_active,'queueActive':queue_active,'schema':'platform.vps-backup-catalog/v1','host':HOST,'enabled':p.get('captureAuthorized') is True and p.get('offsiteAuthorized') is True and control_state['enabled'],'resources':enrolled_resources(p),'points':retained,'updatedAt':now()}
  save(current,body);os.chown(current,0,1000);os.chmod(current,0o640)
  # No artifact bytes or credentials are exposed through the panel metadata mount.
 

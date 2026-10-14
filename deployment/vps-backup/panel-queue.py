@@ -18,7 +18,6 @@ def main():
  if os.geteuid()!=0 or len(sys.argv)!=1:raise RuntimeError('Root queue consumer only')
  os.umask(0o077);b.private(b.WORK,True)
  p,_=b.profile()
- if not(p.get('captureAuthorized') and p.get('offsiteAuthorized')):return
  with (b.WORK/'operation.lock').open('a') as lock:
   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   except BlockingIOError:return
@@ -42,8 +41,10 @@ def main():
    wanted=sorted(b.enrolled_resources(p),key=lambda r:r['id'])
    if sorted(job.get('resources',[]),key=lambda r:r['id'])!=wanted:raise RuntimeError('Queue resource set differs from signed VPS profile')
    b.save(record,{'jobId':ident,'requestSha256':__import__('hashlib').sha256(b.canonical(job)).hexdigest(),'status':'running','startedAt':b.now(),'profileSha256':b.sha(b.PROFILE)})
+   if job['operation']=='backup':b.assert_backup_enabled(p)
    spec=importlib.util.spec_from_file_location('ftps',HERE/'ftps-sync.py');f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
-   if job['operation']=='backup':b.capture();f.sync()
+   if job['operation']=='backup-control':b.backup_control().apply_and_publish(b,p,job)
+   elif job['operation']=='backup':b.capture();f.sync()
    elif job['operation'] in ('restore-drill','restore-production'):
     reference=job.get('sourceManifestPath','')
     if not re.fullmatch('manifests/manifest-vps-[a-z0-9-]+\\.json',reference):raise RuntimeError('Restore requires immutable native VPS manifest')
@@ -60,8 +61,16 @@ def main():
    b.save(record,{**json.loads(record.read_text()),'jobId':ident,'status':'done','finishedAt':b.now(),'operation':job['operation']})
    queue_command('finish','--jobId',ident,'--status','done','--summary','Native VPS operation completed; inspect exact operation scope and protected receipt','--exitCode','0')
   except Exception:
-   b.save(record,{**(json.loads(record.read_text()) if record.exists() else {}),'jobId':ident,'status':'failed','finishedAt':b.now()})
-   queue_command('finish','--jobId',ident,'--status','failed','--summary','Native VPS operation failed; protected root evidence retained','--exitCode','1')
+   control_failure={}
+   if job.get('operation')=='backup-control':
+    try:control_failure={'backupControlAfterFailure':b.backup_control().status(b,p)}
+    except Exception:control_failure={'backupControlAfterFailure':{'state':'unreadable','requiresRootReconciliation':True}}
+    try:b.publish_catalog()  # Readback must reflect a committed OFF even if scheduling failed.
+    except Exception:pass
+   b.save(record,{**(json.loads(record.read_text()) if record.exists() else {}),'jobId':ident,'status':'failed','finishedAt':b.now(),**control_failure})
+   control_enabled=control_failure.get('backupControlAfterFailure',{}).get('enabled')
+   control_summary=('Backup control failed; root switch '+('ON' if control_enabled is True else 'OFF' if control_enabled is False else 'UNKNOWN')+'; inspect root schedules before retry')
+   queue_command('finish','--jobId',ident,'--status','failed','--summary',(control_summary if job.get('operation')=='backup-control' else 'Native VPS operation failed; protected root evidence retained'),'--exitCode','1')
    raise
 if __name__=='__main__':
  try:

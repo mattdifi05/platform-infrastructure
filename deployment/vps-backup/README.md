@@ -1,5 +1,19 @@
 # Fresh VPS backup preparation
 
+## Runtime backup switch
+
+The Control Center's `Impostazioni` page exposes a global native backup switch.
+Its typed `backup-control` queue request requires a fresh owner session, CSRF
+validation and the current root control revision. Root stores the scalar in
+`/etc/platform-vps-backup/backup-control.json`; the existing signed profile remains
+the outer authorization boundary. Turning ON cannot broaden that profile.
+
+OFF blocks new scheduled/manual captures and FTP publication before writes, while
+the existing queue stays available to process control requests. It preserves
+recovery enrollment, restore authority, credentials and existing recovery points.
+The switch does not control Hostinger or any other provider-managed backups.
+Application detail pages no longer expose individual backup controls.
+
 This repository installs infrastructure-only backup code. Enrollment starts with
 the reviewed platform services and zero application resources. A host may retain
 an existing signed profile with additional application fields. The four backup

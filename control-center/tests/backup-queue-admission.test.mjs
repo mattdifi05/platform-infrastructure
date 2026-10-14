@@ -112,7 +112,7 @@ function rejectedCode(fn, code, ErrorType = BackupQueueAdmissionError) {
 }
 
 test("registry adapter accepts canonical aliases by operation identity and fails closed", () => {
-  assert.deepEqual(listBackupQueueOperationIds(), ["backup.production-restore", "backup.run", "database.backup", "legacy.backup", "legacy.database"]);
+  assert.deepEqual(listBackupQueueOperationIds(), ["backup.control.update", "backup.production-restore", "backup.run", "database.backup", "legacy.backup", "legacy.database"]);
   // FG-004/043 resolves /control and /control/v1 aliases to this same frozen
   // canonical identity; FG-069 never receives or re-matches their raw paths.
   for (const alias of ["/control/backups/run", "/control/v1/backups/run"]) {

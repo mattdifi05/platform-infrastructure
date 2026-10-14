@@ -30,8 +30,10 @@ Status does not animate simulated work. The client creates a validated run ID, o
 
 ## Action semantics
 
-- `Avvia backup` queues a typed real backup job for exact source/database resource IDs.
-- `Avvia restore drill` queues verification against disposable targets and does not claim to restore live data.
+- Application detail pages place visibility and private-copy controls beside databases. They do not expose individual application backup or restore controls.
+- Visibility changes show the actual plan, authentication, application and verification phases. Provider calls without granular progress use an indeterminate bar; completion requires a successful readback.
+- `Impostazioni` contains host resource usage and the global server backup switch. CPU/load, RAM/swap, filesystem/inodes, disk I/O, network rates/counters, uptime and available pressure/file-descriptor signals come from the existing Prometheus node-exporter sampler. They never fall back to the Control Center container. The page refreshes while visible; missing or stale values remain unavailable. Network counters are not a provider billing quota.
+- The global backup switch waits for the native root worker's persisted readback. OFF suspends native scheduled/manual capture and FTP publication; it does not delete copies or disable provider-managed backups. Restore authority remains separate.
 - Missing or stale metrics are rendered as unavailable; measured zero remains distinct from unavailable.
 
 ## Browser and accessibility evidence

@@ -20,9 +20,17 @@ services:
       - --collector.cpu
       - --collector.meminfo
       - --collector.filesystem
+      - --collector.stat
+      - --collector.time
+      - --collector.loadavg
+      - --collector.diskstats
+      - --collector.netdev
+      - --collector.pressure
+      - --collector.filefd
+      - --no-collector.netdev.netlink
       - --collector.filesystem.mount-points-include=^/$
       - --web.listen-address=:9100
-    # This tiny private tmpfs holds only the three bind targets. Docker's
+    # This tiny private tmpfs holds only the finite proc-file bind targets. Docker's
     # ordinary read-only container /sys supplies CPU topology; no host /sys
     # path is bound into this service.
     tmpfs:
@@ -41,6 +49,51 @@ services:
       - type: bind
         source: /proc/1/mountinfo
         target: /proc-host/1/mountinfo
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/loadavg
+        target: /proc-host/loadavg
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/uptime
+        target: /proc-host/uptime
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/diskstats
+        target: /proc-host/diskstats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/1/net/dev
+        target: /proc-host/net/dev
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/pressure/cpu
+        target: /proc-host/pressure/cpu
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/pressure/io
+        target: /proc-host/pressure/io
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/pressure/memory
+        target: /proc-host/pressure/memory
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/sys/fs/file-nr
+        target: /proc-host/sys/fs/file-nr
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/sys/fs/file-max
+        target: /proc-host/sys/fs/file-max
         read_only: true
         bind: {create_host_path: false}
       - type: bind
