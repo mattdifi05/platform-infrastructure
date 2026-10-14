@@ -53,3 +53,28 @@ dedicated keyring and preserves the credential. It neither rotates the encryptio
 key nor reads backup/signing custody material. Delivery requires an exact,
 root-reviewed binding and a separate plan; see
 [application runtime delivery](../deployment/host/VAULT-RUNTIME.md).
+
+
+## Managing an existing credential
+
+The owner can explicitly edit, reveal or remove an ordinary application credential.
+Editing writes an immutable encrypted version and preserves trailing newlines; it
+does not deliver the version. A bound credential still requires a reviewed plan
+and a separate apply action. Reveal and copy preserve multiline values.
+
+Removal requires fresh owner authorization, CSRF and the typed `RIMUOVI`
+confirmation. For an adopted binding, the native operator first verifies and
+detaches Vault management without changing runtime files, consumers or provider
+credentials. The Control Center then deletes only the encrypted item under the
+reviewed Vault revision. A concurrent edit leaves the encrypted item retained,
+even if detach already succeeded; the policy remains available for re-adoption.
+
+Custody material identified by its source or technical key (including
+`docker_action_*`, admission/signing/master keys and Vault keyrings) is excluded
+from ordinary import, reveal, version creation and removal. Legacy classification
+as `kms` alone does not exclude an ordinary provider or storage credential.
+
+The saved list and application bindings have bounded scrolling. Native operation
+status is polled every two seconds for at most 90 seconds; a verified delivery or
+rollback refreshes the page and its version/verification metadata. Health and
+provider checks are labeled separately and remain observations at the stated time.

@@ -151,6 +151,7 @@ export async function withStoreLock(input, callback) {
         check(typeof itemId === 'string' && idPattern.test(itemId) && typeof value === 'string' && Buffer.byteLength(value) > 0 && Buffer.byteLength(value) <= MAX_VALUE_BYTES, 'Vault item or value is invalid');
         check(metadata && typeof metadata === 'object' && !Array.isArray(metadata) && Object.keys(metadata).every(key => metadataFields.has(key)), 'Vault item metadata fields are invalid');
         const current = await loadStore(cfg); const previous = current.items[itemId];
+        check(!protectedVaultItem(previous) && !protectedVaultItem({ ...previous, ...metadata, id: itemId }), 'Protected custody material cannot be managed in the application Vault');
         check(!previous || Object.keys(previous.versions).length < MAX_VERSIONS, 'Vault version history is full; reconcile retained versions before adding another');
         const versionId = randomUUID(); const createdAt = new Date().toISOString();
         const sealedValue = sealVaultPlaintext(value, `${itemId}:version:${versionId}`, keyring(cfg), createdAt);
@@ -160,6 +161,7 @@ export async function withStoreLock(input, callback) {
       },
       deleteItem: async ({ itemId, expectedRevision } = {}) => {
         const current = await loadStore(cfg); check(current.items[itemId], 'Vault item is absent');
+        check(!protectedVaultItem(current.items[itemId]), 'Protected custody material cannot be managed in the application Vault');
         const next = structuredClone(current); delete next.items[itemId];
         return save(cfg, next, current, expectedRevision);
       },
@@ -177,11 +179,18 @@ export async function upsertVersion(input, args) { return withStoreLock(input, t
 export async function decryptVersion(input, { itemId, versionId } = {}) {
   const cfg = config(input); const store = await loadStore(cfg); const version = store.items[itemId]?.versions?.[versionId];
   check(version, 'Vault item version is absent');
+  check(!protectedVaultItem(store.items[itemId]), 'Protected custody material cannot be revealed from the application Vault');
   const aad = versionId === 'legacy-v2' ? itemId : `${itemId}:version:${versionId}`;
   return openVaultCiphertext(version.sealedValue, aad, keyring(cfg));
 }
 
 export function protectedImportPath(filename) {
   const name = path.basename(String(filename || '')).toLowerCase();
-  return /platform-vps-backup|admission-history/.test(String(filename || "")) || /(?:signing|authority|private|master|vault.*key|keyring|apns|admission|infra-secret-manager-store)/.test(name) || /\.(?:pem|p8|p12|pfx|key|crt|cer)$/.test(name);
+  return /^docker_action_/.test(name) || /platform-vps-backup|admission-history/.test(String(filename || "")) || /(?:signing|authority|private|master|vault.*key|keyring|apns|admission|infra-secret-manager-store)/.test(name) || /\.(?:pem|p8|p12|pfx|key|crt|cer)$/.test(name);
+}
+
+/** Metadata-only custody exclusion; never decrypt, read or fingerprint a key. */
+export function protectedVaultItem(item = {}) {
+  item ||= {};
+  return [item.itemKey, item.source].some(value => value && protectedImportPath(value)) || /(?:^|-)docker_action_/.test(String(item.id || ''));
 }

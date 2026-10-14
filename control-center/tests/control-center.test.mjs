@@ -154,7 +154,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseAdminWrongHost.status, 403);
   assert.equal((await databaseAdminWrongHost.json()).error, "database_admin_target_rejected");
 
-  const html = await getText(`${baseUrl}/`);
+  const overviewHome = await getText(`${baseUrl}/`);
+  assert.match(overviewHome, /section-overview/);
+  assert.match(overviewHome, /data-overview-page/);
+  assert.ok(overviewHome.indexOf('data-ops-nav-group="overview"') < overviewHome.indexOf('data-ops-nav-group="projects"'));
+  const html = await getText(`${baseUrl}/?section=projects`);
   assert.match(html, /Admin Control Center/);
   assert.match(html, /<body data-cc-theme="light" data-cc-preloading="true">/);
   assert.match(html, /data-cc-preload-screen/);
@@ -644,7 +648,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /Non eseguito in questo run/);
   assert.match(localClient, /setAttribute\("open", ""\)/);
   assert.match(localClient, /navigator\.clipboard\.writeText/);
-  assert.doesNotMatch(localClient, /window\.location\.reload/);
+  // Full refresh is restricted to explicit Vault mutation and verified native delivery.
+  assert.equal((localClient.match(/window\.location\.reload/g) || []).length, 2);
   const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
   assert.equal(localUiPackage.name, "@platform/control-center-local-ui");
   assert.equal(localUiPackage.controlCenterProject, "@platform/control-center");
@@ -887,7 +892,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(databasesOpsHtml, /name="project"/);
   const activityOpsHtml = await getText(`${baseUrl}/?section=activity`);
   assert.match(activityOpsHtml, /Applicazioni/);
-  assert.match(activityOpsHtml, /section-projects/);
+  assert.match(activityOpsHtml, /section-overview/);
   assert.doesNotMatch(activityOpsHtml, /data-status-section-detail|data-status-runner/);
   assert.doesNotMatch(activityOpsHtml, /Errori, avvisi e problemi/);
   assert.doesNotMatch(activityOpsHtml, /section=activity/);
@@ -1104,7 +1109,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(await streamAfterDisconnect.text(), /^id: 4$/m);
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
   assert.match(statusHtmlAfterRun, /Applicazioni/);
-  assert.match(statusHtmlAfterRun, /section-projects/);
+  assert.match(statusHtmlAfterRun, /section-overview/);
   assert.doesNotMatch(statusHtmlAfterRun, /Registro completo test|data-status-run-step-mark|data-status-section-detail|statusCategory=/);
 
   const readinessHtml = await getText(`${baseUrl}/?mode=advanced&section=readiness`);
@@ -2365,8 +2370,22 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(vaultHtmlAfterApply, /vault-plain-value-should-not-leak/);
   assert.doesNotMatch(vaultHtmlAfterApply, /sealedValue/);
 
+  assert.match(vaultHtmlAfterApply, /ops-vault-saved-scroll/);
+  assert.match(vaultHtmlAfterApply, />Modifica</);
+  assert.match(vaultHtmlAfterApply, />Elimina</);
+  const currentVaultRevision = (await import("../vault/store.mjs")).readStoreSync({ storePath: vaultFile }).revision;
+  const vaultNewVersion = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/versions`, { newValue: "vault-next-fixture\n", expectedVaultRevision: currentVaultRevision });
+  assert.equal(vaultNewVersion.status, 202);
+  assert.equal(vaultNewVersion.body.item.id, "node-demo-local-app-password");
+  assert.equal(vaultNewVersion.body.item.versions.length, 2);
+  const newVersionReveal = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/reveal`, { confirm: "REVEAL-VAULT-SECRET:node-demo-local-app-password" });
+  assert.equal(newVersionReveal.body.value, "vault-next-fixture\n");
+  const vaultDeleteWithoutTyped = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/delete`, { confirm: "DELETE-VAULT-SECRET:node-demo-local-app-password" });
+  assert.equal(vaultDeleteWithoutTyped.status, 422);
+
   const vaultDelete = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/delete`, {
     confirm: "DELETE-VAULT-SECRET:node-demo-local-app-password",
+    typedConfirmation: "RIMUOVI",
   });
   assert.equal(vaultDelete.status, 202);
   assert.equal(vaultDelete.body.type, "vault.item.delete.local");
@@ -2867,7 +2886,7 @@ test("Admin Control Center local foundation", async (t) => {
 
   const legacyBackupsHtml = await getText(`${baseUrl}/?section=backups`);
   assert.match(legacyBackupsHtml, /ops-shell/);
-  assert.match(legacyBackupsHtml, /data-ops-nav-group="projects" data-ops-nav-expanded="true"/);
+  assert.match(legacyBackupsHtml, /data-ops-nav-group="overview" data-ops-nav-expanded="true"/);
   assert.doesNotMatch(legacyBackupsHtml, /data-ops-nav-group="status"|data-status-runner/);
   assert.doesNotMatch(legacyBackupsHtml, /data-ops-nav-group="backups"|ops-nav-panel-backups|Backup applicazioni|File manager backup|backupProject=/);
 

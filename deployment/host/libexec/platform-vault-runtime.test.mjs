@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { validateRequest, validateEnvelope, validatePolicy, validatePlan, operationAfterExit, runJob } from './platform-vault-runtime.mjs';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { loadStore, withStoreLock, upsertVersion, decryptVersion, VaultConflictError } from '../../../control-center/vault/store.mjs';
+import { validateRequest, validateEnvelope, validatePolicy, validatePlan, operationAfterExit, runJob, runDetachJob } from './platform-vault-runtime.mjs';
 const policy = () => ({ schema: 'platform.vault-bindings/v1', revision: 'policy-1', bindings: [{
   id: 'binding-1', itemId: 'item-1', label: 'Fixture', project: 'platform', environment: 'private', rotation: 'configuration',
   targets: [{ path: '/srv/platform-infrastructure/fixture/password', format: 'raw-file', writeMode: 'in-place', ownerUid: 0, ownerGid: 0, mode: 0o600 }],
@@ -142,4 +146,103 @@ test('stale CAS plan fails before materialization or restart', async () => {
   const result = await runJob('op-fixture', f.deps);
   assert.equal(result.phase, 'failed'); assert.equal(f.runtime(), 'old');
   assert.equal(f.restarts(), 0); assert.equal(f.disposed(), false);
+});
+
+function detachFixture() {
+  const p = policy(), binding = p.bindings[0];
+  const request = { action: 'detach', bindingId: binding.id, itemId: binding.itemId, expectedVaultRevision: 'vault-1',
+    expectedBindingRevision: 'binding-old', confirmation: 'DETACH:' + binding.id };
+  const operation = { operationId: 'op-detach', kind: 'detach', request, bindingId: binding.id, itemId: binding.itemId,
+    policyRevision: p.revision, phase: 'queued', runtimeChanged: false, vaultChanged: false };
+  let state = { bindings: { [binding.id]: { revision: 'binding-old', appliedVersionId: 'old' }, unrelated: { revision: 'unchanged' } } };
+  const store = { revision: 'vault-1', items: { [binding.itemId]: { versions: { old: {} } } } };
+  let locked = false, verified = 0, writes = 0; const receipts = [];
+  const deps = {
+    readOperation: async () => structuredClone(operation), readPolicy: async () => p, busy: async own => { assert.equal(own, operation.operationId); return false; },
+    readState: async () => structuredClone(state), saveState: async next => { assert.equal(locked, true); state = structuredClone(next); },
+    saveOperation: async (id, next) => receipts.push(structuredClone(next)),
+    withStoreLock: async (cfg, callback) => { locked = true; try { return await callback({ load: async () => store }); } finally { locked = false; } },
+    decryptVersion: async (cfg, ref) => { assert.equal(locked, true); assert.equal(ref.versionId, 'old'); return 'fixture-current'; },
+    verify: async (binding, value) => { assert.equal(locked, true); assert.equal(value, 'fixture-current'); verified++; },
+    prepare: () => { writes++; throw Error('must not prepare'); }, writePrepared: () => { writes++; throw Error('must not write'); }, restart: () => { writes++; throw Error('must not restart'); },
+  };
+  return { p, binding, request, operation, store, deps, receipts, state: () => state, setState: next => { state = next; }, verified: () => verified, writes: () => writes };
+}
+
+test('detach request requires exact confirmation and both immutable revision references', () => {
+  const f = detachFixture(); assert.equal(validateRequest(f.request).action, 'detach');
+  for (const patch of [{ confirmation: 'DELETE:binding-1' }, { itemId: '' }, { expectedVaultRevision: '' }, { expectedBindingRevision: '' },
+    { path: '/srv/platform-infrastructure/secret' }, { versionId: 'old' }, { operationId: 'op-other' }]) assert.throws(() => validateRequest({ ...f.request, ...patch }));
+  const missing = { ...f.request }; delete missing.expectedBindingRevision; assert.throws(() => validateRequest(missing));
+});
+
+test('detach verifies current delivery inside the store lock and removes only binding metadata', async () => {
+  const f = detachFixture(), storeBefore = structuredClone(f.store);
+  const result = await runDetachJob('op-detach', f.deps);
+  assert.equal(result.phase, 'detached'); assert.equal(result.detached, true); assert.equal(result.vaultRevision, 'vault-1');
+  assert.equal(result.bindingRevision, 'unadopted'); assert.equal(f.verified(), 1); assert.equal(f.writes(), 0);
+  assert.deepEqual(f.state().bindings, { unrelated: { revision: 'unchanged' } });
+  assert.deepEqual(f.store, storeBefore); assert.equal(result.runtimeChanged, false); assert.equal(result.vaultChanged, false);
+  assert.doesNotMatch(JSON.stringify(f.receipts), /fixture-current|plaintext/);
+  assert.strictEqual(operationAfterExit(result), result);
+});
+
+test('detach is idempotent for already unadopted missing items but refuses adopted missing ciphertext', async () => {
+  const f = detachFixture(); f.setState({ bindings: {} }); f.request.expectedBindingRevision = 'unadopted'; f.store.items = {};
+  const result = await runDetachJob('op-detach', f.deps);
+  assert.equal(result.phase, 'detached'); assert.equal(result.idempotent, true); assert.equal(f.verified(), 0); assert.equal(f.writes(), 0);
+  const missing = detachFixture(); missing.store.items = {};
+  const rejected = await runDetachJob('op-detach', missing.deps);
+  assert.equal(rejected.phase, 'failed'); assert.equal(rejected.error, 'vault-version-unavailable');
+  assert.ok(missing.state().bindings[missing.binding.id]); assert.equal(missing.writes(), 0);
+});
+
+test('detach refuses stale CAS, busy/reconciliation and failed consumer readback without changing binding or files', async () => {
+  for (const kind of ['vault', 'binding', 'busy', 'reconciliation', 'delivery']) {
+    const f = detachFixture(), before = structuredClone(f.state());
+    if (kind === 'vault') f.request.expectedVaultRevision = 'stale';
+    if (kind === 'binding') f.request.expectedBindingRevision = 'stale';
+    if (kind === 'busy') f.deps.busy = async () => true;
+    if (kind === 'reconciliation') f.deps.busy = async () => { throw Error('runtime-reconciliation-required'); };
+    if (kind === 'delivery') f.deps.verify = async () => { throw Error('fixture-private-value'); };
+    const result = await runDetachJob('op-detach', f.deps);
+    assert.equal(result.phase, 'failed'); assert.equal(result.detached, false);
+    assert.deepEqual(f.state(), before); assert.equal(f.writes(), 0);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-private-value/);
+  }
+});
+
+test('detach receipt failure preserves runtime and Vault and requires reconciliation of metadata outcome', async () => {
+  const f = detachFixture(), save = f.deps.saveOperation; let once = true;
+  f.deps.saveOperation = async (id, operation) => {
+    if (operation.phase === 'detached' && once) { once = false; throw Error('injected receipt failure'); }
+    return save(id, operation);
+  };
+  const result = await runDetachJob('op-detach', f.deps);
+  assert.equal(result.phase, 'requires-reconciliation'); assert.equal(result.detached, false);
+  assert.equal(f.writes(), 0); assert.ok(f.store.items[f.binding.itemId]);
+});
+
+test('native detach and CC writers share the actual store lock; compound delete fails CAS after a concurrent edit', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'vault-detach-cas-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const cfg = { storePath: path.join(directory, 'vault.json'), keyFile: path.join(directory, 'fixture-keyring'), lockTimeoutMs: 2000 };
+  await writeFile(cfg.keyFile, `fixture=${'f'.repeat(64)}`, { mode: 0o600 });
+  const f = detachFixture(), empty = await loadStore(cfg);
+  const created = await upsertVersion(cfg, { itemId: f.binding.itemId, value: 'fixture-current', expectedRevision: empty.revision });
+  f.request.expectedVaultRevision = created.revision;
+  f.setState({ bindings: { [f.binding.id]: { revision: 'binding-old', appliedVersionId: created.versionId } } });
+  f.deps.withStoreLock = (_, callback) => withStoreLock(cfg, callback);
+  f.deps.decryptVersion = (_, ref) => decryptVersion(cfg, ref);
+  // Use the real file lock for detach; binding metadata stays a disposable in-memory fixture.
+  let entered, release; const started = new Promise(resolve => { entered = resolve; }); const barrier = new Promise(resolve => { release = resolve; });
+  const events = [];
+  f.deps.verify = async () => { events.push('native-lock-held'); entered(); await barrier; };
+  f.deps.saveState = async next => { f.setState(structuredClone(next)); events.push('detached'); };
+  const detach = runDetachJob('op-detach', f.deps); await started;
+  const edit = upsertVersion(cfg, { itemId: f.binding.itemId, value: 'fixture-concurrent-edit', expectedRevision: created.revision }).then(result => { events.push('cc-edited'); return result; });
+  await new Promise(resolve => setTimeout(resolve, 50)); assert.deepEqual(events, ['native-lock-held']);
+  release(); const [receipt] = await Promise.all([detach, edit]);
+  assert.equal(receipt.phase, 'detached'); assert.deepEqual(events, ['native-lock-held', 'detached', 'cc-edited']);
+  await assert.rejects(withStoreLock(cfg, tx => tx.deleteItem({ itemId: f.binding.itemId, expectedRevision: receipt.vaultRevision })), VaultConflictError);
+  assert.ok((await loadStore(cfg)).items[f.binding.itemId]); assert.equal(f.state().bindings[f.binding.id], undefined);
 });

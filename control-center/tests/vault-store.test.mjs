@@ -58,7 +58,20 @@ test('version-bound encryption rejects swapped ciphertext and unsafe key/store f
 });
 
 test('protected custody files are excluded before import can read or fingerprint them', () => {
-  for (const name of ['backup_signing_keys.txt', 'control_center_vault_keys.txt', 'authority-public.pem', 'authority-private.pem', 'infra-secret-manager-master.key', 'infra-secret-manager-store.json', 'APNs.p8', '/etc/platform-vps-backup/profile.json']) assert.equal(protectedImportPath(name), true, name);
+  for (const name of ['docker_action_runtime_intent_trust_key.txt', 'docker_action_request_key.txt', 'backup_signing_keys.txt', 'control_center_vault_keys.txt', 'authority-public.pem', 'authority-private.pem', 'infra-secret-manager-master.key', 'infra-secret-manager-store.json', 'APNs.p8', '/etc/platform-vps-backup/profile.json']) assert.equal(protectedImportPath(name), true, name);
   assert.equal(protectedImportPath('openai_api_key.txt'), false);
   assert.equal(protectedImportPath('smtp-password.txt'), false);
+});
+
+test('custody legacy metadata fails before key access for reveal, version creation and ordinary deletion', async t => {
+  const cfg = await fixture(t);
+  const sealed = sealVaultPlaintext('fixture-custody', 'old-import', parseVaultKeyring(`first=${'f'.repeat(64)}`));
+  await writeFile(cfg.storePath, JSON.stringify({ version: 2, items: { 'old-import': { id: 'old-import', itemKey: 'docker_action_response_key', source: 'docker_action_response_key.txt', sealedValue: sealed } } }), { mode: 0o600 });
+  await rm(cfg.keyFile); // The guard must reject metadata before attempting to access any key.
+  await assert.rejects(decryptVersion(cfg, { itemId: 'old-import', versionId: 'legacy-v2' }), /custody/);
+  await assert.rejects(upsertVersion(cfg, { itemId: 'old-import', value: 'fixture-new' }), /custody/);
+  await assert.rejects(upsertVersion(cfg, { itemId: 'old-import', value: 'fixture-new', metadata: { itemKey: 'ordinary', source: 'manual' } }), /custody/);
+  await assert.rejects(withStoreLock(cfg, tx => tx.deleteItem({ itemId: 'old-import' })), /custody/);
+  assert.deepEqual((await loadStore(cfg)).items['old-import'].versions['legacy-v2'].sealedValue, sealed);
+  await assert.rejects(upsertVersion(cfg, { itemId: 'manual-custody', value: 'fixture-new', metadata: { kind: 'kms', itemKey: 'backup_signing_keys' } }), /custody/);
 });

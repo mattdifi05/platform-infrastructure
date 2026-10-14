@@ -7,6 +7,7 @@ test('native delivery accepts only references and rejects path, command and valu
   const runtime = createVaultRuntime(async () => { calls++; return {}; });
   for (const field of ['path', 'command', 'value', 'source', 'destination']) await assert.rejects(runtime.call({ action: 'apply', bindingId: 'app', planId: 'review', confirmation: 'APPLY:review', [field]: 'forbidden' }));
   assert.equal(calls, 0);
+  assert.throws(() => validateRuntimeRequest({ action: 'detach', bindingId: 'app', itemId: 'secret', expectedVaultRevision: 'vault', expectedBindingRevision: 'binding', confirmation: 'DETACH:app', planId: 'unexpected' }));
   assert.throws(() => validateRuntimeRequest({ action: 'adopt', bindingId: 'app', confirmation: 'ADOPT:other' }));
 });
 

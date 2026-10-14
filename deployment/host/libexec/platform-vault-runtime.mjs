@@ -22,12 +22,12 @@ const STORE = {
   ownerUid: 1000, ownerGid: 1000,
 };
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
-const terminal = new Set(['verified', 'rolled-back', 'failed', 'requires-reconciliation']);
+const terminal = new Set(['verified', 'rolled-back', 'detached', 'failed', 'requires-reconciliation']);
 const allowed = new Set(['action','bindingId','itemId','versionId','expectedVaultRevision','expectedBindingRevision','planId','confirmation','operationId']);
 const identifier = value => typeof value === 'string' && ID.test(value);
 export function validateRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !allowed.has(k))) throw Error('invalid-request');
-  if (!['catalog','adopt','plan','apply','rollback','status'].includes(body.action)) throw Error('invalid-action');
+  if (!['catalog','adopt','plan','apply','rollback','status','detach'].includes(body.action)) throw Error('invalid-action');
   for (const value of Object.values(body)) if (typeof value !== 'string' || !value || value.length > 256 || /[\x00-\x1f]/.test(value)) throw Error('invalid-field');
   for (const key of ['bindingId','itemId','versionId','planId','operationId']) if (body[key] !== undefined && !identifier(body[key])) throw Error('invalid-identifier');
   if (!['catalog','status'].includes(body.action) && !body.bindingId) throw Error('invalid-binding-request');
@@ -35,6 +35,8 @@ export function validateRequest(body) {
   if (body.action === 'plan' && ['itemId','versionId','expectedVaultRevision','expectedBindingRevision'].some(key => !body[key])) throw Error('invalid-plan-request');
   if (body.action === 'apply' && (!body.planId || body.confirmation !== 'APPLY:' + body.planId)) throw Error('plan-confirmation-invalid');
   if (body.action === 'status' && !body.operationId && !body.bindingId) throw Error('invalid-status-request');
+  if (body.action === 'detach' && (Object.keys(body).sort().join(',') !== 'action,bindingId,confirmation,expectedBindingRevision,expectedVaultRevision,itemId'
+      || body.confirmation !== 'DETACH:' + body.bindingId)) throw Error('invalid-detach-request');
   return body;
 }
 export function validateEnvelope(raw, signature, token, now = Date.now()) {
@@ -183,9 +185,10 @@ async function restart(binding) {
 const operationFile = id => STATE + '/operations/' + id + '.json';
 const planFile = id => STATE + '/plans/' + id + '.json';
 const id = prefix => prefix + '-' + randomBytes(16).toString('hex');
-async function busy() {
+async function busy(ignoreOperationId = '') {
   for (const name of (await fs.readdir(STATE + '/operations')).filter(n => /^op-[a-f0-9]{32}\.json$/.test(n))) {
     const op = await json(STATE + '/operations/' + name);
+    if (op.operationId === ignoreOperationId) continue;
     if (!terminal.has(op.phase)) return true;
     if (op.phase === 'requires-reconciliation') throw Error('runtime-reconciliation-required');
   }
@@ -210,6 +213,7 @@ export async function handle(body) {
   if (!binding || body.itemId && body.itemId !== binding.itemId) throw Error('binding-not-authorized');
   if (await busy()) throw Error('runtime-operation-in-progress');
   const record = state.bindings[binding.id];
+  if (body.action === 'detach') return await detachQueued(body, p);
   if (body.action === 'adopt') {
     if (body.confirmation !== 'ADOPT:' + binding.id) throw Error('adoption-confirmation-invalid');
     if (record?.appliedVersionId) return bindingPublic(binding, record, store);
@@ -249,6 +253,64 @@ export async function handle(body) {
   child.on('exit', () => { void settleChild(operationId, 'worker-exited-before-completion').catch(() => {}); });
   return { operationId, phase: 'queued', bindingId: binding.id };
 }
+async function detachQueued(body, p) {
+  const operationId = id('op');
+  const operation = { operationId, kind: 'detach', bindingId: body.bindingId, itemId: body.itemId, policyRevision: p.revision,
+    request: body, phase: 'queued', createdAt: new Date().toISOString(), runtimeChanged: false, vaultChanged: false };
+  await save(operationFile(operationId), operation);
+  await new Promise((resolve, reject) => {
+    const child = spawn('/usr/bin/flock', ['--exclusive', '--nonblock', '/var/lib/platform-vps-backup/operation.lock',
+      process.execPath, fileURLToPath(import.meta.url), '--detach', operationId], { stdio: 'ignore' });
+    child.once('error', () => reject(Error('worker-start-failed')));
+    child.once('exit', code => code === 0 ? resolve() : reject(Error('maintenance-operation-in-progress')));
+  }).catch(async error => { await settleChild(operationId, error.message); throw error; });
+  const receipt = await json(operationFile(operationId));
+  if (receipt.phase !== 'detached' || receipt.detached !== true) throw Error(receipt.error || 'runtime-detach-failed');
+  return { operationId, bindingId: receipt.bindingId, itemId: receipt.itemId, detached: true,
+    vaultRevision: receipt.vaultRevision, bindingRevision: 'unadopted' };
+}
+
+/** Called only by the child already holding the existing global maintenance flock. */
+export async function runDetachJob(operationId, overrides = {}) {
+  const deps = {
+    readOperation: ident => json(operationFile(ident)), readPolicy: policy, readState: runtimeState, busy,
+    saveState: state => save(STATE + '/bindings.json', state), saveOperation: (ident, operation) => save(operationFile(ident), operation),
+    withStoreLock, decryptVersion, verify, ...overrides,
+  };
+  const operation = await deps.readOperation(operationId);
+  if (operation.operationId !== operationId || operation.kind !== 'detach' || operation.phase !== 'queued') throw Error('invalid-detach-operation');
+  let stateWriteAttempted = false;
+  try {
+    const request = validateRequest(operation.request);
+    if (request.action !== 'detach' || request.bindingId !== operation.bindingId || request.itemId !== operation.itemId) throw Error('invalid-detach-operation');
+    const p = await deps.readPolicy();
+    const binding = p.bindings.find(row => row.id === request.bindingId && row.itemId === request.itemId);
+    if (!binding || p.revision !== operation.policyRevision) throw Error('binding-not-authorized');
+    if (await deps.busy(operationId)) throw Error('runtime-operation-in-progress');
+    await deps.withStoreLock(STORE, async tx => {
+      const store = await tx.load(), state = await deps.readState(), record = state.bindings[binding.id];
+      if (store.revision !== request.expectedVaultRevision || (record?.revision || 'unadopted') !== request.expectedBindingRevision) throw Error('runtime-revision-conflict');
+      if (record?.appliedVersionId) {
+        if (!store.items[binding.itemId]?.versions?.[record.appliedVersionId]) throw Error('vault-version-unavailable');
+        const current = await deps.decryptVersion(STORE, { itemId: binding.itemId, versionId: record.appliedVersionId });
+        await deps.verify(binding, current);
+        operation.phase = 'detaching'; await deps.saveOperation(operationId, operation);
+        delete state.bindings[binding.id]; stateWriteAttempted = true;
+        await deps.saveState(state);
+      } else if (record) throw Error('invalid-unadopted-binding-state');
+      Object.assign(operation, { phase: 'detached', detached: true, vaultRevision: store.revision, bindingRevision: 'unadopted',
+        idempotent: !record, runtimeChanged: false, vaultChanged: false, completedAt: new Date().toISOString() });
+      await deps.saveOperation(operationId, operation);
+    });
+  } catch (error) {
+    operation.phase = stateWriteAttempted ? 'requires-reconciliation' : 'failed';
+    operation.error = /^(?:invalid-|binding-|runtime-|vault-)/.test(error.message) ? error.message : 'runtime-detach-failed';
+    operation.detached = false; operation.completedAt = new Date().toISOString();
+    try { await deps.saveOperation(operationId, operation); } catch { /* Parent settles the last durable operation phase. */ }
+  }
+  return operation;
+}
+
 export function operationAfterExit(operation, error = 'interrupted-operation') {
   if (terminal.has(operation.phase)) return operation;
   return { ...operation, phase: operation.phase === 'queued' ? 'failed' : 'requires-reconciliation', error,
@@ -372,5 +434,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (process.getuid() !== 0) throw Error('root-required');
   process.umask(0o077);
   if (process.argv[2] === '--job' && ID.test(process.argv[3] || '')) await runJob(process.argv[3]);
+  else if (process.argv[2] === '--detach' && ID.test(process.argv[3] || '')) await runDetachJob(process.argv[3]);
   else await serve();
 }

@@ -48,6 +48,7 @@ import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 import { normalizeBackupControl } from "./backup/global-control.mjs";
 import { createHostMetricsReader } from "./resources/host-metrics.mjs";
+import { renderOverview } from "./status/overview.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
 import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
 import { createApplicationOperator } from "./hosting/application-operator.mjs";
@@ -68,8 +69,9 @@ import {
   readLegacyVaultMaterial,
   sealVaultPlaintext,
 } from "./vault/keyring.mjs";
-import { readStoreSync, loadStore, upsertVersion, withStoreLock, decryptVersion, protectedImportPath, VaultStoreError } from "./vault/store.mjs";
+import { readStoreSync, loadStore, upsertVersion, withStoreLock, decryptVersion, protectedImportPath, protectedVaultItem, VaultStoreError } from "./vault/store.mjs";
 import { createVaultRuntime, renderVaultRuntime, VaultRuntimeError } from "./vault/runtime.mjs";
+import { removeVaultItem, renderVaultManagementControls } from "./vault/management.mjs";
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { applicationFolderCatalog, updateApplicationFolders, ApplicationFolderError } from "./state/application-folders.mjs";
@@ -1896,6 +1898,7 @@ async function buildContext({ projects, state }) {
     .map((material) => sensitiveMaterialRecord(material))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.materialName}`.localeCompare(`${b.projectId}:${b.environment}:${b.materialName}`));
   const vaultItems = Object.values(readVaultState().items || {})
+    .filter(item => !protectedVaultItem(item))
     .filter((item) => item && !item.deletedAt)
     .map((item) => vaultItemRecord(item))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`));
@@ -6007,8 +6010,8 @@ async function renderCachedControlCenter(context, params) {
 
 function renderControlCenter(context, params) {
   const sections = operationsPortalSections();
-  const requestedSection = params.get("section") || "projects";
-  const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "projects";
+  const requestedSection = params.get("section") || "overview";
+  const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "overview";
   const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : context.projects[0]?.slug || "";
   const currentProject = context.projects.find((project) => project.slug === selectedProject) || null;
   const activeProject = section === "projects" && params.has("project") ? currentProject : null;
@@ -6048,7 +6051,7 @@ ${controlCenterScriptTags()}
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
-      <a class="ops-brand" href="/?section=projects" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
+      <a class="ops-brand" href="/?section=overview" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
       ${renderOperationsNav(sections, section, context, activeProject, params)}
       ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Logout" title="Logout">${controlIcon("logout")}</button></form>` : ""}
     </aside>
@@ -6155,6 +6158,7 @@ function statusNavChildren(context, params = new URLSearchParams(), currentSecti
 
 function operationsPortalSections() {
   return [
+    { id: "overview", label: "Panoramica", icon: "server" },
     { id: "projects", label: "Applicazioni", icon: "projects" },
     { id: "secrets", label: "Secret", icon: "shield" },
     { id: "settings", label: "Impostazioni", icon: "settings" },
@@ -6167,7 +6171,8 @@ function operationPageHint(section, context) {
   const hints = {
     projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
     secrets: "Vault cifrato e inventario centralizzato dei secret.",
-    settings: "Risorse generali della VPS e impostazioni del server.",
+    overview: "Risorse della VPS in tempo reale.",
+    settings: "Impostazioni del server e controllo dei backup.",
     files: "Inventario file applicazione in sola lettura.",
     databases: "Database collegati alle applicazioni e azioni metadata.",
   };
@@ -6175,6 +6180,7 @@ function operationPageHint(section, context) {
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
+  if (section === "overview") return renderOverview();
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "settings") return renderOpsSettings();
@@ -6185,18 +6191,6 @@ function renderOperationsSection(section, context, params, currentProject) {
 
 function renderOpsSettings() {
   return `<section class="cc-settings" data-settings-page>
-    <section class="ops-project-detail-panel cc-settings-resources" data-host-metrics aria-labelledby="cc-host-metrics-title">
-      <div class="ops-project-detail-panel-head"><div><h2 id="cc-host-metrics-title">Risorse della VPS</h2><p class="cc-settings-note">Intero server · node_exporter · aggiornamento ogni 2 secondi</p></div><button class="ops-button secondary compact" type="button" data-host-metrics-refresh>Aggiorna</button></div>
-      <div class="cc-host-metric-grid">${[["cpu", "CPU", "Media degli ultimi 2 minuti"], ["memory", "RAM", "Memoria usata / totale"], ["disk", "Disco", "Spazio usato / totale"], ["network", "Connessione", "Ricezione ↓ / invio ↑ · media 2 minuti"]].map(([id, label, detail]) => `<article class="cc-host-metric" aria-label="${label}"><span>${label}</span><strong data-host-metric="${id}">—</strong><small data-host-metric-detail="${id}">${detail}</small>${id === "network" ? "" : `<meter min="0" max="100" value="0" data-host-metric-meter="${id}" aria-label="Utilizzo ${label}" hidden></meter>`}</article>`).join("")}</div>
-      <div class="cc-host-detail-grid">
-        <section class="cc-host-detail"><h3>Sistema</h3><dl>${[["load", "Carico · 1 / 5 / 15 minuti"], ["uptime", "Tempo di attività"], ["processes", "Task eseguibili / bloccati"], ["fileDescriptors", "File descriptor allocati / limite"]].map(([id,label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
-        <section class="cc-host-detail"><h3>Memoria e filesystem</h3><dl>${[["swap", "Swap usata / totale"], ["inodes", "Inode usati / totali"], ["ioTotals", "Letture / scritture disco"], ["ioOperations", "Operazioni lettura / scrittura al secondo"]].map(([id,label]) => `<div><dt>${label}</dt><dd data-host-detail="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
-      </div>
-      <section class="cc-host-detail"><h3>Connessione per interfaccia</h3><p class="cc-settings-note">Velocità medie su 2 minuti. Contatori cumulativi, azzerabili al riavvio dell’interfaccia.</p><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr><th scope="col">Interfaccia</th><th scope="col">Ricezione</th><th scope="col">Invio</th><th scope="col">Ricevuti</th><th scope="col">Inviati</th><th scope="col">Errori RX / TX</th><th scope="col">Scarti RX / TX</th></tr></thead><tbody data-host-table="network"><tr><td colspan="7">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
-      <section class="cc-host-detail"><h3>Attività dei dischi</h3><div class="cc-host-table-scroll"><table class="cc-host-table"><thead><tr><th scope="col">Dispositivo</th><th scope="col">Lettura</th><th scope="col">Scrittura</th><th scope="col">Letture / s</th><th scope="col">Scritture / s</th><th scope="col">Tempo occupato</th></tr></thead><tbody data-host-table="diskIo"><tr><td colspan="6">Dati non disponibili dal collector host.</td></tr></tbody></table></div></section>
-      <section class="cc-host-detail"><h3>Pressione sulle risorse · PSI</h3><p class="cc-settings-note">Percentuale del tempo di attesa o stallo negli ultimi 2 minuti.</p><dl class="cc-host-pressure">${[["cpuWaitingPercent", "CPU · attesa"], ["memoryWaitingPercent", "RAM · attesa"], ["memoryStalledPercent", "RAM · stallo"], ["ioWaitingPercent", "I/O · attesa"], ["ioStalledPercent", "I/O · stallo"]].map(([id,label])=>`<div><dt>${label}</dt><dd data-host-pressure="${id}">Non disponibile</dd></div>`).join("")}</dl></section>
-      <p class="cc-settings-note" data-host-metrics-status role="status" aria-live="polite">Lettura delle metriche host…</p>
-    </section>
     <section class="ops-project-detail-panel cc-settings-backups" aria-labelledby="cc-backup-settings-title"><h2 id="cc-backup-settings-title">Backup</h2>
       <aside class="cc-global-backup-control" data-global-backup-control aria-label="Controllo backup del server"><div><strong>Backup del server</strong><small>Copie locali e FTP</small><p data-backup-control-status role="status" aria-live="polite">Verifica dello stato…</p></div><button class="cc-backup-switch" type="button" role="switch" aria-label="Backup del server" aria-checked="false" data-backup-control-toggle disabled hidden><span class="cc-backup-switch-track" aria-hidden="true"><span></span></span><span data-backup-control-label>Verifica…</span></button><button class="ops-button secondary compact" type="button" data-backup-control-refresh hidden>Ricontrolla</button></aside>
     </section>
@@ -6551,7 +6545,7 @@ function vaultSecretUsageAnalysis(context) {
     platformReferenced: false,
     referenceCount: 0,
   }]));
-  const matchers = items.map((item) => {
+  const matchers = items.filter(item => item.kind !== "runtime" && item.source !== "native-runtime").map((item) => {
     const token = String(item.itemKey || "").trim().toLowerCase();
     const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return {
@@ -6595,7 +6589,7 @@ function vaultSecretUsageAnalysis(context) {
   ]);
 
   const scanRoot = (root, scope, targetId, targetName, prefix = "") => {
-    if (!root || !existsSync(root) || !safeIsDirectory(root)) return;
+    if (!matchers.length || !root || !existsSync(root) || !safeIsDirectory(root)) return;
     const rootRealPath = safeRealpath(root);
     if (!rootRealPath) return;
     stats.rootsScanned += 1;
@@ -6627,7 +6621,7 @@ function vaultSecretUsageAnalysis(context) {
           else if (current.depth >= 16) stats.complete = false;
           continue;
         }
-        if (!entry.isFile() || !textFileAllowed(name)) continue;
+        if (!entry.isFile() || !textFileAllowed(name) || name === "secret-vault.json" || name === path.basename(vaultFile) || protectedImportPath(fullPath)) continue;
         let fileStat;
         try {
           fileStat = statSync(fullPath);
@@ -6745,7 +6739,7 @@ function renderVaultFieldGuide() {
     ["Etichetta", "Nome leggibile mostrato nel Control Center; non cambia il collegamento tecnico."],
     ["Applicazione", "Proprietario dichiarato del secret. Non viene considerato prova d'uso: sotto ogni secret mostro le app trovate davvero."],
     ["Ambiente", "Ambito previsto del valore: local, staging o production."],
-    ["Tipo", "Classifica il secret per database, provider, storage, Docker, KMS o applicazione."],
+    ["Tipo", "Classifica il secret per database, provider, storage, Docker o applicazione."],
     ["Utente / account", "Identità facoltativa a cui appartiene la credenziale; non è il valore segreto."],
     ["URL / host", "Endpoint facoltativo presso cui la credenziale viene utilizzata."],
     ["Giorni rotazione", "Scadenza organizzativa per la sostituzione. Non ruota automaticamente il valore."],
@@ -6767,7 +6761,7 @@ function renderOpsVaultUsage(item, usage, scanComplete) {
   const declaredOwner = item.projectId === "platform" ? "Piattaforma" : item.projectId;
   if (!targets.length) {
     return `<span class="ops-vault-usage warn" data-secret-usage-status="not-found">
-      <strong>Nessun utilizzo reale trovato</strong>
+      <strong>Solo Vault · Nessun riferimento trovato</strong>
       <small>${escapeHtml(scanComplete ? `Nessun riferimento alla chiave nei sorgenti/config attuali. Proprietario dichiarato: ${declaredOwner}.` : `Scansione incompleta; nessun riferimento trovato finora. Proprietario dichiarato: ${declaredOwner}.`)}</small>
     </span>`;
   }
@@ -6779,11 +6773,15 @@ function renderOpsVaultUsage(item, usage, scanComplete) {
 
 function renderOpsVault(context) {
   const usageAnalysis = vaultSecretUsageAnalysis(context);
+  const vaultRevision = readVaultState().revision;
   const itemRows = context.vaultItems.map((item) => renderOpsVaultItem(item, {
     usage: usageAnalysis.byId[item.id],
     usageScanComplete: usageAnalysis.stats.complete,
+    bindings: (context.vaultRuntime?.bindings || []).filter(binding => binding.itemId === item.id),
+    expectedRevision: vaultRevision,
   })).join("");
   return `<section class="ops-section ops-projects-redesign ops-vault-section" data-secret-scan-complete="${usageAnalysis.stats.complete ? "true" : "false"}" data-secret-scan-files="${escapeHtml(String(usageAnalysis.stats.filesScanned))}" data-secret-scan-bytes="${escapeHtml(String(usageAnalysis.stats.bytesScanned))}">
+    ${renderVaultRuntime(context.vaultRuntime || { available: false }, context.vaultItems)}
     <div class="ops-vault-grid">
       <form method="post" action="/actions/vault-command" class="ops-vault-panel ops-vault-form" autocomplete="off">
         <input type="hidden" name="action" value="create">
@@ -6800,7 +6798,7 @@ function renderOpsVault(context) {
           <input name="label" placeholder="Etichetta" aria-label="Etichetta secret" autocomplete="off">
           ${renderProjectSelect("projectId", "Applicazione", `<option value="platform">Platform</option>${sortedOpsProjects(context.projects).map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}`)}
           ${renderProjectSelect("targetEnv", "Ambiente", '<option value="local">Local</option><option value="staging">Staging</option><option value="production">Production</option>')}
-          ${renderProjectSelect("kind", "Tipo secret", '<option value="application">Applicazione</option><option value="database">Database</option><option value="provider">Provider</option><option value="storage">Storage</option><option value="docker">Docker</option><option value="kms">KMS</option>')}
+          ${renderProjectSelect("kind", "Tipo secret", '<option value="application">Applicazione</option><option value="database">Database</option><option value="provider">Provider</option><option value="storage">Storage</option><option value="docker">Docker</option>')}
           <input name="username" placeholder="Utente / account" aria-label="Utente o account" autocomplete="off">
           <input name="url" placeholder="URL / host" aria-label="URL o host" autocomplete="off">
           <input type="number" min="0" max="3650" name="rotationDays" value="90" aria-label="Giorni rotazione">
@@ -6822,16 +6820,15 @@ function renderOpsVault(context) {
           </form>
           <span class="ops-state ${context.vaultItems.length ? "good" : "warn"}">${escapeHtml(String(context.vaultItems.length))}</span>
         </div>
-        <div class="ops-vault-list" aria-label="Secret salvati nel vault">
+        <div class="ops-vault-list ops-vault-saved-scroll" role="region" tabindex="0" aria-label="Secret salvati nel vault, elenco scorrevole">
           ${itemRows || empty("Vault vuoto", "Aggiungi il primo secret cifrato.")}
         </div>
       </div>
     </div>
-    ${renderVaultRuntime(context.vaultRuntime || { available: false }, context.vaultItems)}
   </section>`;
 }
 
-function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageScanComplete = true } = {}) {
+function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageScanComplete = true, bindings = [], expectedRevision = "" } = {}) {
   const deleteConfirm = `DELETE-VAULT-SECRET:${item.id}`;
   const revealConfirm = `REVEAL-VAULT-SECRET:${item.id}`;
   const project = item.projectId === "platform" ? "Platform condiviso" : item.projectId;
@@ -6850,21 +6847,9 @@ function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageSca
       </div>
       <small class="ops-vault-item-details">${escapeHtml(`${item.username || "utente non impostato"} · ${item.url || "host non impostato"} · ${rotation}`)}</small>
       <small>${escapeHtml(`Versioni cifrate: ${item.versions?.length || 0} · Salvato nel Vault; la consegna è separata.`)}</small>
-      <form class="ops-vault-version-form" method="post" action="/actions/vault-command" autocomplete="off"> <input type="hidden" name="action" value="version"><input type="hidden" name="itemId" value="${escapeHtml(item.id)}"><textarea class="ops-vault-version-value" name="newValue" rows="2" placeholder="Nuova versione del secret" aria-label="Nuovo valore ${escapeHtml(item.label)}; ritorni a capo conservati" autocomplete="new-password" spellcheck="false" required></textarea><button class="ops-button secondary" type="submit">Salva nuova versione</button></form>
-      ${renderOpsVaultUsage(item, usage, usageScanComplete)}
-      <span class="ops-vault-reveal" data-vault-reveal-box>
-        <input type="password" value="" placeholder="Protetto" readonly aria-label="Valore ${escapeHtml(item.label || item.itemKey)}" data-vault-reveal-value>
-        <button class="ops-button secondary compact" type="button" data-vault-reveal-action data-vault-id="${escapeHtml(item.id)}" data-vault-confirm="${escapeHtml(revealConfirm)}">${controlIcon("eye")} Mostra</button>
-        <button class="ops-button secondary compact" type="button" data-vault-copy-action disabled>${controlIcon("copy")} Copia</button>
-      </span>
+      ${item.kind === "runtime" ? '<span class="ops-vault-usage"><strong>Collegamento runtime gestito</strong><small>Le verifiche del servizio sono nel pannello Consegna alle applicazioni.</small></span>' : renderOpsVaultUsage(item, usage, usageScanComplete)}
+      ${renderVaultManagementControls(item, { expectedRevision, bindings })}
     </div>
-    <form method="post" action="/actions/vault-command" class="ops-vault-delete-form" data-passkey-submit data-passkey-success-url="/?section=secrets">
-      <input type="hidden" name="action" value="delete">
-      <input type="hidden" name="id" value="${escapeHtml(item.id)}">
-      <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
-      ${returnProjectId ? `<input type="hidden" name="projectId" value="${escapeHtml(returnProjectId)}"><input type="hidden" name="returnTo" value="project-detail">` : ""}
-      <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
-    </form>
   </article>`;
 }
 
@@ -11675,13 +11660,11 @@ async function planVaultSecretDelete(id, payload, context) {
   const item = vaultItemRecord(existing);
   const confirmation = `DELETE-VAULT-SECRET:${item.id}`;
   if (payload.confirm === confirmation) {
-    const catalog = await vaultRuntime.catalog();
-    if (typeof hostExtension.vaultRuntime === "function" && !catalog.available) throw new RejectedOperationError("Verifica dei collegamenti Vault non disponibile: eliminazione bloccata.");
-    if (catalog.bindings.some(binding => binding.itemId === item.id)) throw new RejectedOperationError("Il secret è collegato a un’applicazione: eliminazione bloccata.");
-    await withStoreLock(vaultStoreConfig, tx => tx.deleteItem({ itemId: item.id, expectedRevision: payload.expectedVaultRevision || state.revision }));
+    if (payload.typedConfirmation !== "RIMUOVI") throw new ValidationError("Scrivi RIMUOVI per confermare la rimozione dal Vault.");
+    const removal = await removeVaultItem({ config: vaultStoreConfig, runtime: vaultRuntime, runtimeConfigured: typeof hostExtension.vaultRuntime === "function", itemId: item.id, expectedRevision: payload.expectedVaultRevision || state.revision });
     removeVaultMaterialMetadata(item);
-    appendAudit({ action: "vault.item.delete.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item removed from encrypted state; value was not read or exposed." });
-    const operation = operationPlan("vault.item.delete.local", item.environment, false, ["validate vault item", "remove encrypted vault record", "remove vault-owned material metadata", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRemoved: true, valueRead: false, valueExposed: false, productionEvidence: false });
+    appendAudit({ action: "vault.item.delete.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Encrypted Vault record and managed binding removed; runtime credential files and provider credentials remain unchanged." });
+    const operation = operationPlan("vault.item.delete.local", item.environment, false, ["validate vault item", "remove encrypted vault record", "remove vault-owned material metadata", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRemoved: true, runtimeCredentialsChanged: false, detachedBindings: removal.detachedBindings, valueRead: false, valueExposed: false, productionEvidence: false });
     return { ...operation, item: { ...item, deleted: true } };
   }
   appendAudit({ action: "vault.item.delete.plan", target: item.id, environment: item.environment, risk: "high", result: "planned", dryRun: true, summary: "Vault item delete plan generated; encrypted value was not read." });
@@ -12945,7 +12928,7 @@ function existingSecretItemKey(relativePath) {
 function existingSecretKind(itemKey, relativePath) {
   const text = `${itemKey} ${relativePath}`.toLowerCase();
   if (/(github|cloudflare|smtp|alertmanager|webhook|turnstile)/.test(text)) return "provider";
-  if (/(rclone|restic|minio|backup)/.test(text)) return "storage";
+  if (/(rclone|restic|minio|rustfs|backup)/.test(text)) return "storage";
   if (/(database|mariadb|postgres|redis|nats|keycloak|phpmyadmin|pgadmin|db)/.test(text)) return "database";
   if (/(key|signing|session|pepper|master|hash)/.test(text)) return "kms";
   return "application";

@@ -231,15 +231,15 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   assert.equal((await request(baseUrl, "GET", "/?section=vault", identities.owner)).status, 200, "fresh owner reaches Vault UI");
   for (const pathname of ["/?section=cloudflare", "/index.html?section=cloudflare", "/?section=vps-backups"]) {
     const legacyPage = await request(baseUrl, "GET", pathname, identities.owner301);
-    assert.equal(legacyPage.status, 200, `${pathname} follows standard Applications access`);
+    assert.equal(legacyPage.status, 200, `${pathname} follows standard Overview access`);
     const html = await legacyPage.text();
-    assert.match(html, /<h1 id="control-page-title">Applicazioni<\/h1>/, `${pathname} falls back to Applications`);
+    assert.match(html, /<h1 id="control-page-title">Panoramica<\/h1>/, `${pathname} falls back to Overview`);
     assert.doesNotMatch(html, /data-cloudflare-dns|data-vps-restore/, `${pathname} does not render removed page tools`);
   }
   const unknownPage = await request(baseUrl, "GET", "/?section=unknown-feature", identities.owner);
   assert.equal(unknownPage.status, 200);
   const unknownHtml = await unknownPage.text();
-  assert.match(unknownHtml, /<h1 id="control-page-title">Applicazioni<\/h1>/, "unknown sections fall back to Applications");
+  assert.match(unknownHtml, /<h1 id="control-page-title">Panoramica<\/h1>/, "unknown sections fall back to Overview");
   assert.doesNotMatch(unknownHtml, /data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
   assert.match(unknownHtml, /data-ops-nav-toggle/);
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
