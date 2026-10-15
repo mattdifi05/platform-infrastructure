@@ -423,6 +423,7 @@ export class AppPasskeyAuth {
     const method = String(req?.method || "GET").toUpperCase();
     const operation = req.controlCenterOperation || resolveAuthorizationCapability(method, url.pathname);
     if (operation.capability === "deny") return denied(403, "Endpoint capability is not declared.", { error: "endpoint_capability_denied" });
+    if (operation.capability === "owner" && session.role !== "owner") return denied(403, "Platform owner authorization required.");
     if (operation.capability === "owner:fresh") {
       if (session.role !== "owner") return denied(403, "Platform owner authorization required.");
       const authTime = new Date(session.identity?.authTime).getTime();

@@ -41,8 +41,10 @@ volumes:
 
 The socket has `0660 root:1000` permissions. The native service runs without
 interactive shell access, behind HMAC authentication, bounded request bodies,
-timestamp validation and persisted nonces. All portal routes require the owner,
-recent authentication and CSRF validation.
+timestamp validation and persisted nonces. Vault portal routes require an owner
+session, with CSRF validation for mutations. Revealing a value additionally
+requires recent passkey authentication; inventory and management do not prompt
+for another passkey.
 
 ## Lifecycle
 

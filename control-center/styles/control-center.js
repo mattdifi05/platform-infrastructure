@@ -1207,12 +1207,33 @@
     if (formSubmissions.has(form)) return;
     formSubmissions.add(form);
     var button = form.querySelector("button[type=submit]");
+    var secretRoot = form.closest("[data-secrets-page]");
+    if (secretRoot && secretRoot.dataset.managementBusy === "true") { formSubmissions.delete(form); return; }
+    var pendingControls = [];
+    if (secretRoot) {
+      secretRoot.dataset.managementBusy = "true"; form.setAttribute("aria-busy", "true");
+      secretRoot.querySelectorAll("[data-secret-create],[data-secret-edit],[data-secret-delete],[data-secret-close]").forEach(function (control) { if (!control.disabled) { pendingControls.push(control); control.disabled = true; } });
+      var pendingStatus = form.querySelector("[data-secret-form-status]");
+      if (pendingStatus) { pendingStatus.removeAttribute("data-error"); pendingStatus.textContent = form.elements.action.value === "delete" ? "Eliminazione in corso…" : "Salvataggio in corso…"; }
+    }
     if (button) button.disabled = true;
     try {
-      await hostingRequest(form.getAttribute("action"), Object.fromEntries(new FormData(form).entries()));
-      clearCache(); window.location.reload();
-    } catch (error) { if (error.name !== "ReauthenticationRedirect") showError(error.message || "Modifica Vault non riuscita."); }
-    finally { formSubmissions.delete(form); if (button && button.isConnected) button.disabled = false; }
+      var payload = Object.fromEntries(new FormData(form).entries());
+      await hostingRequest(form.getAttribute("action"), payload);
+      if (!form.isConnected || (secretRoot && !secretRoot.isConnected)) return;
+      form.querySelectorAll('textarea,input[type="password"]').forEach(function (field) { field.value = ""; });
+      clearCache();
+      await navigate(new URL(window.location.href), { history: "replace", pageScrollTop: currentPageScrollTop() });
+      document.dispatchEvent(new CustomEvent("cc-vault-management-complete", { detail: { action: payload.action } }));
+    } catch (error) {
+      if (error.name !== "ReauthenticationRedirect") {
+        if (!form.isConnected) return;
+        var inlineStatus = form.querySelector("[data-secret-form-status]");
+        if (inlineStatus) { inlineStatus.textContent = error.message || "Modifica Vault non riuscita."; inlineStatus.dataset.error = "true"; }
+        else showError(error.message || "Modifica Vault non riuscita.");
+      }
+    }
+    finally { if (secretRoot) delete secretRoot.dataset.managementBusy; form.removeAttribute("aria-busy"); pendingControls.forEach(function (control) { if (control.isConnected) control.disabled = false; }); formSubmissions.delete(form); if (button && button.isConnected) button.disabled = false; }
   }
 
   async function submitVaultRuntime(form) {
@@ -1257,7 +1278,7 @@
   function refreshVaultPanel(bindingBox) {
     clearCache();
     if (bindingBox && bindingBox.id) window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + "#" + bindingBox.id);
-    window.location.reload();
+    navigate(new URL(window.location.href), { history: "replace", pageScrollTop: currentPageScrollTop() }).then(function () { if (bindingBox && bindingBox.id) openVaultBinding(bindingBox.id); });
   }
 
   function openVaultBinding(bindingId) {
@@ -1299,65 +1320,61 @@
     timer = window.setTimeout(checkStatus, 2000);
   }
 
-  function hideVaultSecret(box, button) {
-    var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
-    var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
-    if (input) {
-      input.value = "";
-      if (input.tagName === "INPUT") input.type = "password";
-      input.dataset.vaultVisible = "false";
-    }
-    if (copyButton) copyButton.disabled = true;
-    if (button) button.textContent = "Mostra";
+  var vaultRevealStates = new WeakMap();
+  function setVaultRevealLabel(button, visible) {
+    if (!button) return;
+    var label = button.querySelector("[data-vault-reveal-label]");
+    if (label) label.textContent = visible ? "Nascondi" : "Mostra"; else button.textContent = visible ? "Nascondi" : "Mostra";
+    button.setAttribute("aria-pressed", String(visible));
+    if (button.hasAttribute("aria-label")) button.setAttribute("aria-label", button.getAttribute("aria-label").replace(/^(Mostra|Nascondi)/, visible ? "Nascondi" : "Mostra"));
   }
-
+  function hideVaultSecret(box, button) {
+    if (!box) return;
+    var previous = vaultRevealStates.get(box);
+    if (previous && previous.timer) window.clearTimeout(previous.timer);
+    vaultRevealStates.set(box, { generation: (previous?.generation || 0) + 1, timer: null });
+    var input = box.querySelector("[data-vault-reveal-value]");
+    var copyButton = box.querySelector("[data-vault-copy-action]");
+    if (input) { input.value = ""; if (input.tagName === "INPUT") input.type = "password"; input.dataset.vaultVisible = "false"; }
+    var revealed = box.querySelector("[data-secret-revealed]"); if (revealed) revealed.hidden = true;
+    if (copyButton) copyButton.disabled = true;
+    setVaultRevealLabel(button || box.querySelector("[data-vault-reveal-action]"), false);
+  }
+  function clearVaultReveals() {
+    document.querySelectorAll("[data-vault-reveal-box]").forEach(function (box) { hideVaultSecret(box); });
+  }
   async function revealVaultSecret(button) {
     var id = button.getAttribute("data-vault-id") || "";
     var confirm = button.getAttribute("data-vault-confirm") || "";
     var box = button.closest("[data-vault-reveal-box]");
-    var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
-    var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
-    if (!id || !confirm || !box || !input) return;
-    if (input.dataset.vaultVisible === "true") {
-      hideVaultSecret(box, button);
-      return;
-    }
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
+    var input = box?.querySelector("[data-vault-reveal-value]");
+    var copyButton = box?.querySelector("[data-vault-copy-action]");
+    if (!id || !confirm || !box || !input || button.disabled || passkeyActionInFlight) return;
+    if (input.dataset.vaultVisible === "true") { hideVaultSecret(box, button); return; }
+    hideVaultSecret(box, button);
+    var state = vaultRevealStates.get(box);
+    button.disabled = true; button.setAttribute("aria-busy", "true");
+    passkeyActionInFlight = true;
     try {
-      var response;
-      var payload;
-      for (var attempt = 0; attempt < 2; attempt += 1) {
-        var headers = new Headers();
-        headers.set("Accept", "application/json");
-        headers.set("Content-Type", "application/x-www-form-urlencoded");
-        headers.set("X-Requested-With", "platform-control-center");
-        addMutationHeaders(headers, "POST");
-        response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", {
-          body: new URLSearchParams({ confirm: confirm }),
-          credentials: "same-origin",
-          headers: headers,
-          method: "POST",
-        });
-        payload = await response.json();
-        if (payload.error !== "admin_reauthentication_required" || attempt > 0) break;
-        await authenticateWithSystemPasskey();
-      }
-      if (!response.ok) throw new Error(payload.message || payload.error || "Reveal failed.");
+      await authenticateWithSystemPasskey();
+      if (!box.isConnected || document.hidden || vaultRevealStates.get(box) !== state) return;
+      var headers = new Headers(); headers.set("Accept", "application/json"); headers.set("Content-Type", "application/x-www-form-urlencoded"); headers.set("X-Requested-With", "platform-control-center"); addMutationHeaders(headers, "POST");
+      var response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", { body: new URLSearchParams({ confirm: confirm }), credentials: "same-origin", headers: headers, method: "POST" });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || payload.error || "Valore non disponibile.");
+      if (!box.isConnected || document.hidden || vaultRevealStates.get(box) !== state) return;
       if (input.tagName === "INPUT") input.type = "text";
-      input.value = payload.value || "";
-      input.dataset.vaultVisible = "true";
-      button.textContent = "Nascondi";
-      if (copyButton) copyButton.disabled = false;
-      window.setTimeout(function () {
-        if (input.dataset.vaultVisible === "true") hideVaultSecret(box, button);
-      }, Math.max(10000, Number(payload.ttlMs || 120000)));
+      input.value = payload.value || ""; input.dataset.vaultVisible = "true";
+      var revealed = box.querySelector("[data-secret-revealed]"); if (revealed) revealed.hidden = false;
+      setVaultRevealLabel(button, true); if (copyButton) copyButton.disabled = false;
+      state.timer = window.setTimeout(function () { if (vaultRevealStates.get(box) === state) hideVaultSecret(box, button); }, Math.min(30000, Math.max(1, Number(payload.ttlMs) || 30000)));
     } catch (error) {
-      showError(error && error.message ? error.message : "Reveal failed.");
-    } finally {
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
+      var message = ["NotAllowedError", "AbortError"].includes(error?.name) ? "Autenticazione annullata. Il valore resta nascosto." : error?.message || "Valore non disponibile.";
+      var inline = box.querySelector("[data-secret-reveal-status]");
+      if (inline) { inline.textContent = message; inline.hidden = false; }
+      else showError(message);
     }
+    finally { passkeyActionInFlight = false; if (button.isConnected) { button.disabled = false; button.removeAttribute("aria-busy"); } }
   }
 
   async function copyVaultSecret(button) {
@@ -1378,6 +1395,7 @@
 
   async function navigate(url, options) {
     if (!url || !canRenderPath(url)) return false;
+    clearVaultReveals();
     var sequence = ++navigationSequence;
     var historyMode = options && options.history ? options.history : "push";
     var sidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : null;
@@ -2459,6 +2477,8 @@
   function init() {
     if (initialized) return;
     initialized = true;
+    document.addEventListener("visibilitychange", function () { if (document.hidden) clearVaultReveals(); });
+    window.addEventListener("pagehide", clearVaultReveals);
     document.body.dataset.ccEnhanced = "true";
     document.body.dataset.ccBootId = bootId;
     initProjectHosting();

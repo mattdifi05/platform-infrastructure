@@ -15,6 +15,8 @@ import { createServer as createNetServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parseVaultKeyring, sealVaultPlaintext } from "../vault/keyring.mjs";
+import { readStoreSync } from "../vault/store.mjs";
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 // Keep the child clock on an exact second so 300 seconds is a true inclusive
 // boundary, while staying close to the real clock used by Date construction.
@@ -34,9 +36,6 @@ const sensitiveTargets = Object.freeze([
   ["GET", "/control/overview"],
   ["GET", "/control/advanced/backup-restore"],
   ["POST", "/control/vault/secrets/example/reveal"],
-  ["POST", "/control/vault/secrets"],
-  ["POST", "/control/vault/import-existing"],
-  ["POST", "/control/vault/secrets/example/delete"],
   ["POST", "/control/databases"],
   ["POST", "/control/backups/files/delete"],
   ["POST", "/control/backups/run"],
@@ -46,16 +45,19 @@ const sensitiveTargets = Object.freeze([
   ["GET", "/control/backups/jobs"],
   ["GET", "/control/backups/files"],
   ["GET", "/control/backups/preview"],
-  ["GET", "/control/vault"],
-  ["GET", "/control/vault/runtime"],
-  ["POST", "/control/vault/secrets/example/versions"],
-  ["POST", "/control/vault/runtime/adopt"],
-  ["POST", "/control/vault/runtime/plan"],
-  ["POST", "/control/vault/runtime/apply"],
-  ["POST", "/control/vault/runtime/rollback"],
-  ["POST", "/control/vault/runtime/status"],
 
 ]);
+
+const ownerVaultTargets = [
+  ["GET", "/control/vault"], ["GET", "/control/vault/runtime"],
+  ["POST", "/control/vault/secrets"], ["POST", "/control/vault/import-existing"],
+  ["POST", "/control/vault/secrets/example/versions"], ["POST", "/control/vault/secrets/example/delete"],
+  ...["adopt", "plan", "apply", "rollback", "status"].map(action => ["POST", `/control/vault/runtime/${action}`]),
+  ["POST", "/actions/vault-command"],
+];
+const oldFixtureValue = "old-fixture-value-never-returned";
+const nextFixtureValue = "new-fixture-value-never-listed\n";
+const fixtureVaultId = "platform-local-qa-value";
 
 test("real HTTP authorization denies before payload/context/sinks and preserves CSRF and freshness", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "control-capabilities-http-"));
@@ -70,7 +72,9 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   mkdirSync(path.join(backupsDir, "postgres"), { recursive: true, mode: 0o700 });
   mkdirSync(reportsDir, { recursive: true, mode: 0o700 });
   writeFileSync(path.join(stateDir, "vault.key"), `test-v1=${"a".repeat(64)}\n`, { mode: 0o600 });
-  writeFileSync(path.join(stateDir, "secret-vault.json"), '{"version":2,"items":{}}\n', { mode: 0o600 });
+  const sealedOld = sealVaultPlaintext(oldFixtureValue, fixtureVaultId, parseVaultKeyring(`retired=${"f".repeat(64)}`));
+  // The configured keyring intentionally lacks retired: editor/list must never decrypt the old value.
+  writeFileSync(path.join(stateDir, "secret-vault.json"), JSON.stringify({ version: 2, items: { [fixtureVaultId]: { id: fixtureVaultId, itemKey: "qa_value", label: "Ordinary QA credential", projectId: "platform", environment: "local", kind: "provider", source: "manual", valueStored: true, sealedValue: sealedOld } } }), { mode: 0o600 });
   writeFileSync(path.join(backupsDir, "postgres", "fg043-canary.dump"), "non-secret backup canary\n", { mode: 0o600 });
   writeFileSync(clockModule, `Date.now = () => ${fixedNow};\n`, { mode: 0o600 });
   const sessionFixtures = [
@@ -158,6 +162,13 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       assert.equal((await stale.json()).error, "admin_reauthentication_required");
     }
   }
+  for (const [method, target] of ownerVaultTargets) {
+    for (const pathname of target.startsWith("/control/") ? [target, versioned(target)] : [target]) {
+      assert.equal((await request(baseUrl, method, pathname)).status, 401);
+      for (const identity of [identities.viewer, identities.admin]) assert.equal((await request(baseUrl, method, pathname, identity, { oversized: method === "POST" })).status, 403);
+      if (method === "POST") assert.equal((await request(baseUrl, method, pathname, identities.owner301, { validCsrf: true, origin: "https://attacker.example.test" })).status, 403, "stale owner still requires CSRF before context");
+    }
+  }
   for (const pathname of [
     "/CONTROL/vault",
     "/Control/vault",
@@ -186,32 +197,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     assert.equal((await request(baseUrl, "GET", pathname)).status, 401, `anonymous UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.viewer)).status, 403, `viewer UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.admin)).status, 403, `admin UI ${pathname}`);
-    const stale = await request(baseUrl, "GET", pathname, identities.owner301);
-    assert.equal(stale.status, 428, `stale owner UI ${pathname}`);
-    assert.equal((await stale.json()).error, "admin_reauthentication_required");
   }
-  const staleBrowserPage = await fetch(`${baseUrl}/?section=secrets`, {
-    headers: { accept: "text/html", host: publicHost, cookie: identities.owner301.cookie },
-    redirect: "manual",
-  });
-  assert.equal(staleBrowserPage.status, 303);
-  assert.equal(staleBrowserPage.headers.get("location"), "/auth/login?returnTo=%2F%3Fsection%3Dsecrets");
-  const staleBrowserMutation = await fetch(`${baseUrl}/actions/vault-command`, {
-    method: "POST",
-    headers: {
-      accept: "text/html",
-      host: publicHost,
-      cookie: identities.owner301.cookie,
-      origin: publicOrigin,
-      "sec-fetch-site": "same-origin",
-      "content-type": "application/x-www-form-urlencoded",
-      "x-csrf-token": identities.owner301.csrf,
-    },
-    body: new URLSearchParams({ action: "reveal", _csrf: identities.owner301.csrf }),
-    redirect: "manual",
-  });
-  assert.equal(staleBrowserMutation.status, 303);
-  assert.equal(staleBrowserMutation.headers.get("location"), "/auth/login");
   for (const [method, pathname] of [
     ["HEAD", "/"],
     ["OPTIONS", "/index.html"],
@@ -227,6 +213,51 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   }
   assert.equal(digestTree(root, new Set(["fixed-clock.mjs"])), beforeDenied, "denied requests must leave all state and sink fixtures byte-identical");
   restoreStateAfterDenied();
+
+  for (const [method, target] of ownerVaultTargets) {
+    for (const pathname of target.startsWith("/control/") ? [target, versioned(target)] : [target]) {
+      const response = await request(baseUrl, method, pathname, identities.owner301, { validCsrf: method === "POST" });
+      assert.ok(![401, 403, 404, 428, 500].includes(response.status), `owner session reaches Vault handler: ${method} ${pathname} -> ${response.status}`);
+    }
+  }
+  const staleBrowserPage = await fetch(`${baseUrl}/?section=secrets`, { headers: { accept: "text/html", host: publicHost, cookie: identities.owner301.cookie }, redirect: "manual" });
+  assert.equal(staleBrowserPage.status, 200, "owner can open metadata UI without a recent passkey");
+  const initialHtml = await staleBrowserPage.text();
+  assert.doesNotMatch(initialHtml, new RegExp(oldFixtureValue));
+  const inventory = await (await request(baseUrl, "GET", "/control/v1/vault", identities.owner301)).text();
+  assert.doesNotMatch(inventory, /old-fixture-value|sealedValue|ciphertext/);
+  const initialRevision = readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).revision;
+  const edited = await request(baseUrl, "POST", `/control/v1/vault/secrets/${fixtureVaultId}/versions`, identities.owner301, { validCsrf: true, payload: { newValue: nextFixtureValue, expectedVaultRevision: initialRevision } });
+  assert.equal(edited.status, 202, "replacement encrypts successfully without the retired decryption key");
+  const editResult = await edited.json();
+  assert.equal(editResult.item.versions.length, 2);
+  assert.doesNotMatch(JSON.stringify(editResult), /old-fixture-value|new-fixture-value|sealedValue/);
+  const afterEditHtml = await (await request(baseUrl, "GET", "/?section=secrets", identities.owner301)).text();
+  assert.doesNotMatch(afterEditHtml, /old-fixture-value|new-fixture-value/);
+  const storedState = readFileSync(path.join(stateDir, "secret-vault.json"), "utf8");
+  assert.doesNotMatch(storedState, /old-fixture-value|new-fixture-value/);
+  assert.deepEqual(JSON.parse(storedState).items[fixtureVaultId].versions["legacy-v2"].sealedValue, sealedOld, "replacement preserves the undecrypted historical ciphertext");
+  const staleReveal = await request(baseUrl, "POST", `/control/v1/vault/secrets/${fixtureVaultId}/reveal`, identities.owner301, { validCsrf: true, payload: { confirm: `REVEAL-VAULT-SECRET:${fixtureVaultId}` } });
+  assert.equal(staleReveal.status, 428);
+  const freshReveal = await request(baseUrl, "POST", `/control/v1/vault/secrets/${fixtureVaultId}/reveal`, identities.owner, { validCsrf: true, payload: { confirm: `REVEAL-VAULT-SECRET:${fixtureVaultId}` } });
+  assert.equal(freshReveal.status, 202);
+  const revealed = await freshReveal.json();
+  assert.equal(revealed.value, nextFixtureValue);
+  assert.equal(revealed.ttlMs, 30000);
+  for (const action of ["reveal", "get", "read"]) {
+    const legacy = await request(baseUrl, "POST", "/actions/vault-command", identities.owner301, { validCsrf: true, payload: { action, itemId: fixtureVaultId, confirm: `REVEAL-VAULT-SECRET:${fixtureVaultId}` } });
+    assert.equal(legacy.status, 422, `legacy ${action} cannot bypass the reveal gate`);
+    assert.doesNotMatch(await legacy.text(), /new-fixture-value|old-fixture-value/);
+  }
+  const created = await request(baseUrl, "POST", "/control/vault/secrets", identities.owner301, { validCsrf: true, payload: { itemKey: "session_only", projectId: "platform", targetEnv: "local", kind: "provider", value: "session-create-fixture", confirm: "STORE-VAULT-SECRET" } });
+  assert.equal(created.status, 202);
+  const createdItem = (await created.json()).item;
+  const deleteRevision = readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).revision;
+  const deleted = await request(baseUrl, "POST", `/control/v1/vault/secrets/${createdItem.id}/delete`, identities.owner301, { validCsrf: true, payload: { confirm: `DELETE-VAULT-SECRET:${createdItem.id}`, typedConfirmation: "RIMUOVI", expectedVaultRevision: deleteRevision } });
+  assert.equal(deleted.status, 202);
+  assert.equal(readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).items[createdItem.id], undefined);
+  assert.doesNotMatch(readFileSync(path.join(stateDir, "audit.jsonl"), "utf8"), /old-fixture-value|new-fixture-value|session-create-fixture/);
+
 
   assert.equal((await request(baseUrl, "GET", "/?section=vault", identities.owner)).status, 200, "fresh owner reaches Vault UI");
   for (const pathname of ["/?section=cloudflare", "/index.html?section=cloudflare", "/?section=vps-backups"]) {
@@ -265,7 +296,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     else assert.equal(response.status, expected);
   }
 
-  const futureAuth = await request(baseUrl, "GET", "/control/vault", identities.ownerFuture);
+  const futureAuth = await request(baseUrl, "POST", "/control/v1/vault/secrets/missing/reveal", identities.ownerFuture, { validCsrf: true });
   assert.equal(futureAuth.status, 428);
   assert.equal((await futureAuth.json()).error, "admin_reauthentication_required");
 
@@ -275,9 +306,11 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     [{ validCsrf: true, fetchSite: "cross-site" }, "csrf_fetch_site_rejected"],
     [{ invalidCsrf: true }, "csrf_token_rejected"],
   ]) {
-    const invalidCsrf = await request(baseUrl, "POST", boundaryPath, identities.owner299, options);
-    assert.equal(invalidCsrf.status, 403, error);
-    assert.equal((await invalidCsrf.json()).error, error);
+    for (const pathname of [boundaryPath, versioned(boundaryPath)]) {
+      const invalidCsrf = await request(baseUrl, "POST", pathname, identities.owner299, options);
+      assert.equal(invalidCsrf.status, 403, `${pathname} ${error}`);
+      assert.equal((await invalidCsrf.json()).error, error);
+    }
   }
 
   const restoreStateAfterUnknown = installContextTripwire(path.join(stateDir, "projects.json"));
@@ -337,7 +370,7 @@ function request(baseUrl, method, pathname, identity = null, options = {}) {
     }
     body = options.oversized
       ? `padding=${"x".repeat(70 * 1024)}`
-      : new URLSearchParams({ _csrf: options.invalidCsrf ? "invalid-csrf-token" : identity?.csrf || "" });
+      : new URLSearchParams({ ...options.payload, _csrf: options.invalidCsrf ? "invalid-csrf-token" : identity?.csrf || "" });
   }
   return fetch(`${baseUrl}${pathname}`, { method, headers, body, redirect: "manual" });
 }

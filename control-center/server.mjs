@@ -72,6 +72,7 @@ import {
 import { readStoreSync, loadStore, upsertVersion, withStoreLock, decryptVersion, protectedImportPath, protectedVaultItem, VaultStoreError } from "./vault/store.mjs";
 import { createVaultRuntime, renderVaultRuntime, VaultRuntimeError } from "./vault/runtime.mjs";
 import { removeVaultItem, renderVaultManagementControls } from "./vault/management.mjs";
+import { renderSecretPage } from "./vault/ui.mjs";
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { applicationFolderCatalog, updateApplicationFolders, ApplicationFolderError } from "./state/application-folders.mjs";
@@ -109,7 +110,7 @@ const vaultRuntime = createVaultRuntime(hostExtension.vaultRuntime);
 const vaultLegacyKeyFile = process.env.CONTROL_CENTER_VAULT_LEGACY_KEY_FILE || "";
 const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || path.join(platformInfraRoot, "secrets");
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
-const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
+const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 30000), 10000, 30000);
 const backupJobsDir = process.env.PROJECT_BACKUP_JOBS_DIR || "/var/www/project-state/backup-jobs";
 const directApplicationBackups = parseBoolean(process.env.CONTROL_CENTER_DIRECT_APPLICATION_BACKUPS || "");
 const backupSigningKeysFile = process.env.CONTROL_CENTER_BACKUP_SIGNING_KEYS_FILE || process.env.BACKUP_SIGNING_KEYS_FILE || "/run/secrets/backup_signing_keys";
@@ -463,7 +464,7 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && ["/", "/index.html"].includes(url.pathname) && url.searchParams.get("section") === "secrets") {
       const secretAuthorization = controlAuth.authorize(
-        { ...req, controlCenterOperation: { capability: "owner:fresh" } },
+        { ...req, controlCenterOperation: { capability: "owner" } },
         url,
         session,
       );
@@ -6092,7 +6093,7 @@ function renderOperationsNavGroup(item, section, context, activeProject, params 
         <span class="ops-nav-main-label">${escapeHtml(item.label)}</span>
         <span class="ops-nav-chevron" aria-hidden="true">${controlIcon("chevron-down")}</span>
       </button>`
-    : `<a class="ops-nav-main ops-nav-direct${currentSection ? " active" : ""}" href="${directHref}"${item.id === "secrets" ? ' data-passkey-return-to="/?section=secrets"' : ""}${currentSection ? ' aria-current="page"' : ""}>
+    : `<a class="ops-nav-main ops-nav-direct${currentSection ? " active" : ""}" href="${directHref}"${currentSection ? ' aria-current="page"' : ""}>
         ${controlIcon(item.icon)}
         <span class="ops-nav-main-label">${escapeHtml(item.label)}</span>
       </a>`;
@@ -6154,7 +6155,7 @@ function operationsPortalSections() {
 function operationPageHint(section, context) {
   const hints = {
     projects: "Host, runtime e organizzazione delle applicazioni.",
-    secrets: "Vault cifrato e inventario centralizzato dei secret.",
+    secrets: "Credenziali cifrate, organizzate per applicazione.",
     overview: "Risorse della VPS in tempo reale.",
     settings: "Impostazioni del server e controllo dei backup.",
     files: "Inventario file applicazione in sola lettura.",
@@ -6756,60 +6757,7 @@ function renderOpsVaultUsage(item, usage, scanComplete) {
 }
 
 function renderOpsVault(context) {
-  const usageAnalysis = vaultSecretUsageAnalysis(context);
-  const vaultRevision = readVaultState().revision;
-  const itemRows = context.vaultItems.map((item) => renderOpsVaultItem(item, {
-    usage: usageAnalysis.byId[item.id],
-    usageScanComplete: usageAnalysis.stats.complete,
-    bindings: (context.vaultRuntime?.bindings || []).filter(binding => binding.itemId === item.id),
-    expectedRevision: vaultRevision,
-  })).join("");
-  return `<section class="ops-section ops-projects-redesign ops-vault-section" data-secret-scan-complete="${usageAnalysis.stats.complete ? "true" : "false"}" data-secret-scan-files="${escapeHtml(String(usageAnalysis.stats.filesScanned))}" data-secret-scan-bytes="${escapeHtml(String(usageAnalysis.stats.bytesScanned))}">
-    ${renderVaultRuntime(context.vaultRuntime || { available: false }, context.vaultItems)}
-    <div class="ops-vault-grid">
-      <form method="post" action="/actions/vault-command" class="ops-vault-panel ops-vault-form" autocomplete="off">
-        <input type="hidden" name="action" value="create">
-        <input type="hidden" name="confirm" value="STORE-VAULT-SECRET">
-        <div class="ops-vault-panel-head">
-          <span class="ops-project-row-icon static" aria-hidden="true">${controlIcon("shield")}</span>
-          <div>
-            <h2>Aggiungi secret</h2>
-            <p>Valore cifrato. Visibile solo quando premi mostra.</p>
-          </div>
-        </div>
-        <div class="ops-vault-fields">
-          <input name="itemKey" placeholder="nome_secret" aria-label="Nome secret" autocomplete="off" required>
-          <input name="label" placeholder="Etichetta" aria-label="Etichetta secret" autocomplete="off">
-          ${renderProjectSelect("projectId", "Applicazione", `<option value="platform">Platform</option>${sortedOpsProjects(context.projects).map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}`)}
-          ${renderProjectSelect("targetEnv", "Ambiente", '<option value="local">Local</option><option value="staging">Staging</option><option value="production">Production</option>')}
-          ${renderProjectSelect("kind", "Tipo secret", '<option value="application">Applicazione</option><option value="database">Database</option><option value="provider">Provider</option><option value="storage">Storage</option><option value="docker">Docker</option>')}
-          <input name="username" placeholder="Utente / account" aria-label="Utente o account" autocomplete="off">
-          <input name="url" placeholder="URL / host" aria-label="URL o host" autocomplete="off">
-          <input type="number" min="0" max="3650" name="rotationDays" value="90" aria-label="Giorni rotazione">
-          <input type="password" name="value" placeholder="Valore secret" aria-label="Valore secret" autocomplete="new-password" required>
-        </div>
-        ${renderVaultFieldGuide()}
-        <button class="ops-button primary" type="submit">${controlIcon("save")} Salva secret</button>
-      </form>
-      <div class="ops-vault-panel ops-vault-inventory">
-        <div class="ops-vault-list-head">
-          <div>
-            <h2>Secret salvati</h2>
-            <p>${escapeHtml(`Scansione ${usageAnalysis.stats.complete ? "completa" : "parziale"}: ${usageAnalysis.stats.referencedSecrets}/${usageAnalysis.stats.totalSecrets} secret con riferimenti reali in ${usageAnalysis.stats.filesScanned} file.`)}</p>
-          </div>
-          <form method="post" action="/actions/vault-command" class="ops-vault-import-form">
-            <input type="hidden" name="action" value="import-existing">
-            <input type="hidden" name="confirm" value="IMPORT-EXISTING-SECRETS">
-            <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Importa esistenti</button>
-          </form>
-          <span class="ops-state ${context.vaultItems.length ? "good" : "warn"}">${escapeHtml(String(context.vaultItems.length))}</span>
-        </div>
-        <div class="ops-vault-list ops-vault-saved-scroll" role="region" tabindex="0" aria-label="Secret salvati nel vault, elenco scorrevole">
-          ${itemRows || empty("Vault vuoto", "Aggiungi il primo secret cifrato.")}
-        </div>
-      </div>
-    </div>
-  </section>`;
+  return renderSecretPage({ items: context.vaultItems, projects: sortedOpsProjects(context.projects), runtime: context.vaultRuntime || { available: false }, revision: readVaultState().revision, usageAnalysis: vaultSecretUsageAnalysis(context), renderUsage: renderOpsVaultUsage, icon: controlIcon, fieldGuide: renderVaultFieldGuide().replace(' open>', '>').replace('Cosa significano i campi', 'Guida ai campi') });
 }
 
 function renderOpsVaultItem(item, { returnProjectId = "", usage = null, usageScanComplete = true, bindings = [], expectedRevision = "" } = {}) {

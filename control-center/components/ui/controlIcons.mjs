@@ -1,6 +1,9 @@
 export function controlIcon(name) {
-  // Font Awesome Free solid icon paths, embedded inline to keep the portal self-hosted.
+  // Inline action outlines and Font Awesome Free solid paths keep the portal self-hosted.
   const icons = {
+    lock: [24, 24, '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M7 10V7a5 5 0 0 1 10 0v3M6 10h12v11H6zM12 14v3"/>'],
+    edit: [24, 24, '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14z"/>'],
+    link: [24, 24, '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'],
     overview: [576, 512, '<path d="M575.8 255.5c0 18-15 32.1-32 32.1h-32l.7 160.2c.2 35.5-28.5 64.3-64 64.3H128.1c-35.3 0-64-28.7-64-64V287.6H32c-18 0-32-14-32-32.1c0-9 3.8-17.3 10.4-23.4L266.4 8c14.4-12.7 36-12.7 50.5 0l248.5 224.1c6.6 6.1 10.4 14.4 10.4 23.4z"/>'],
     projects: [512, 512, '<path d="M64 480h384c35.3 0 64-28.7 64-64V160c0-35.3-28.7-64-64-64H288.8c-10.1 0-19.6-4.7-25.6-12.8L243.2 56C232.1 41.2 214.7 32 196.2 32H64C28.7 32 0 60.7 0 96v320c0 35.3 28.7 64 64 64z"/>'],
     applications: [512, 512, '<path d="M234.5 5.7c13.9-7.6 30.9-7.6 44.8 0l192 104.7c15.4 8.4 24.7 24.5 24.7 41.9v207.4c0 17.4-9.3 33.5-24.7 41.9l-192 104.7c-13.9 7.6-30.9 7.6-44.8 0l-192-104.7C27.1 393.2 17.8 377.1 17.8 359.7V152.3c0-17.4 9.3-33.5 24.7-41.9l192-104.7zM256 53.3L72.5 153.4 256 253.5l183.5-100.1L256 53.3zM464 194.9 280 295.3v157l184-100.3V194.9zM232 452.3v-157L48 194.9V352l184 100.3z"/>'],

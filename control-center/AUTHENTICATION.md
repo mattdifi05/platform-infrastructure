@@ -41,6 +41,16 @@ by default). Browser requests are redirected to the native passkey login;
 JSON callers receive `admin_reauthentication_required` and the same reauth
 URL. Mutations additionally require the double-submit CSRF token.
 
+Vault metadata, creation, replacement versions, import, removal and runtime plans
+use an authenticated owner session for its normal lifetime. They do not request
+reauthentication; every mutation still requires CSRF and the existing revision,
+binding and confirmation checks. Only the explicit value-reveal endpoint uses
+`owner:fresh`, for both `/control/vault/.../reveal` and `/control/v1/vault/.../reveal`.
+The browser requests a passkey at the reveal action and clears the returned value
+after at most 30 seconds, on navigation and when the page becomes hidden. Lists,
+HTML and replacement editors contain metadata only; editors start with an empty
+replacement field and never decrypt the current version.
+
 ## Database
 
 Apply the idempotent migration before the first start:
