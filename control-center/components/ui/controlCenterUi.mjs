@@ -18,6 +18,7 @@ export const controlCenterComponents = [
 export const controlCenterCssEntrypoints = [
   "/assets/control-center/control-center.css",
   "/assets/control-center/overview.css",
+  "/assets/control-center/applications.css",
 ];
 
 export const controlCenterScriptEntrypoints = [
@@ -32,6 +33,7 @@ const assetVersionByHref = new Map([
   ["/assets/control-center/control-center.css", "../../styles/control-center.css"],
   ["/assets/control-center/control-center.js", "../../styles/control-center.js"],
   ["/assets/control-center/overview.css", "../../styles/overview.css"],
+  ["/assets/control-center/applications.css", "../../styles/applications.css"],
   ["/assets/control-center/overview.js", "../../styles/overview.js"],
 ].map(([href, relativePath]) => [
   href,

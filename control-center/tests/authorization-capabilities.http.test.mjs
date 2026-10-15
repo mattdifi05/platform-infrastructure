@@ -241,7 +241,8 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   const unknownHtml = await unknownPage.text();
   assert.match(unknownHtml, /<h1 id="control-page-title">Panoramica<\/h1>/, "unknown sections fall back to Overview");
   assert.doesNotMatch(unknownHtml, /data-vps-restore/, "restore dialog is absent when the VPS catalog is not configured");
-  assert.match(unknownHtml, /data-ops-nav-toggle/);
+  assert.match(unknownHtml, /class="ops-nav-main ops-nav-direct/);
+  assert.doesNotMatch(unknownHtml, /ops-nav-panel-projects|data-ops-nav-toggle/);
   assert.equal((await request(baseUrl, "GET", "/index.html?section=projects", identities.owner300)).status, 200, "300-second owner reaches HTML shell");
 
   for (const [method, pathname] of sensitiveTargets) {

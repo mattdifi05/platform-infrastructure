@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderOverview } from "./overview.mjs";
-import { projectHostSample, appendHostSample, seriesSegments, chartGeometry, displayHistory, createOverviewFrameLoop, HISTORY_LIMIT, SAMPLE_TRANSITION_MS } from "../styles/overview.js";
+import { projectHostSample, appendHostSample, seriesSegments, chartGeometry, visibleSeriesSegments, createOverviewFrameLoop, HISTORY_LIMIT, PRESENTATION_DELAY_MS } from "../styles/overview.js";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const actual = (overrides = {}) => ({ scope: "host", source: "prometheus-node-exporter", capturedAt: new Date(now).toISOString(), cpu: { available: true, usedPercent: 12.4 }, memory: { available: true, usedPercent: 17.1 }, swap: { available: true, usedBytes: 0, totalBytes: 0 }, network: { available: true, totals: { rxBytesPerSecond: 1024, txBytesPerSecond: null } }, diskIo: { available: true, totals: { readBytesPerSecond: 0, writeBytesPerSecond: 4096 } }, ...overrides });
@@ -26,12 +26,12 @@ test("stale, unknown-source and failed responses create gaps instead of fabricat
   }
 });
 
-test("history is bounded to 60 observations and two minutes without prefilled past", () => {
+test("history is bounded with enough measured buffer for both presentation boundaries", () => {
   let history = [];
   assert.equal(appendHostSample(history, { observedAt: now, cpu: 5 }).length, 1);
   for (let i = 0; i < 100; i++) history = appendHostSample(history, { observedAt: now + i * 2000, cpu: i });
   assert.equal(history.length, HISTORY_LIMIT);
-  assert.equal(history[0].cpu, 40);
+  assert.equal(history[0].cpu, 36);
   assert.equal(appendHostSample(history, history.at(-1)), history);
   history = appendHostSample(history, { observedAt: now + 500_000, cpu: 0 });
   assert.equal(history.length, 1);
@@ -65,20 +65,46 @@ test("overview retains graphs, capacity and PSI while removing requested detail 
   assert.ok(!html.includes("data-global-backup-control"));
 });
 
-test("visual easing reaches the real target, preserves recorded history and never bridges missing values", () => {
-  const history = [{ observedAt: now, cpu: 10, memory: null }, { observedAt: now + 2000, cpu: 30, memory: 17, networkRx: null }];
+test("both boundaries interpolate real neighbors without changing recorded measurements", () => {
+  const cursor = now + 121_000;
+  const history = [{ observedAt: now, cpu: 10 }, { observedAt: now + 2000, cpu: 30 }, { observedAt: now + 120_000, cpu: 40 }, { observedAt: now + 122_000, cpu: 80 }];
   const original = structuredClone(history);
-  const transition = { startedAt: now + 2000, from: { cpu: 10, memory: null, networkRx: 1024 } };
-  assert.equal(displayHistory(history, transition, transition.startedAt).at(-1).cpu, 10);
-  const middle = displayHistory(history, transition, transition.startedAt + SAMPLE_TRANSITION_MS / 2);
-  assert.equal(middle.at(-1).cpu, 20);
-  assert.equal(middle.at(-1).memory, 17);
-  assert.equal(middle.at(-1).networkRx, null);
-  assert.equal(displayHistory(history, transition, transition.startedAt + SAMPLE_TRANSITION_MS), history);
+  const segments = visibleSeriesSegments(history, "cpu", cursor);
+  assert.equal(segments[0][0].at, cursor - 120_000);
+  assert.equal(segments[0][0].value, 20);
+  assert.equal(segments.at(-1).at(-1).at, cursor);
+  assert.equal(segments.at(-1).at(-1).value, 60);
+  const geometry = chartGeometry(history, ["cpu"], { ceiling: 100, renderTime: cursor });
+  assert.ok(geometry.series[0].line.startsWith("M0.00,116.00"));
+  assert.equal(geometry.series[0].point.x, 600);
+  assert.equal(geometry.series[0].point.y, 68);
   assert.deepEqual(history, original);
-  const before = chartGeometry(history, ["cpu"], { ceiling: 100, renderTime: now + 2000 });
-  const after = chartGeometry(history, ["cpu"], { ceiling: 100, renderTime: now + 3000 });
-  assert.equal(before.series[0].point.x - after.series[0].point.x, 5);
+});
+
+test("poll arrivals and retention eviction cannot move either endpoint at the same display cursor", () => {
+  let history = [];
+  for (let i = 0; i < 64; i++) history = appendHostSample(history, { observedAt: now + i * 2000, cpu: i, networkRx: i * 100 });
+  const cursor = now + 128_000 - PRESENTATION_DELAY_MS;
+  const before = chartGeometry(history, ["cpu", "networkRx"], { renderTime: cursor });
+  const next = appendHostSample(history, { observedAt: now + 128_000, cpu: 90, networkRx: 999999 });
+  assert.equal(next.length, HISTORY_LIMIT);
+  assert.equal(next[0].observedAt, now + 2000);
+  const after = chartGeometry(next, ["cpu", "networkRx"], { renderTime: cursor });
+  assert.deepEqual(after, before, "future sample and out-of-view oldest eviction must not alter visible geometry or autoscale");
+  const moving = chartGeometry(next, ["cpu"], { ceiling: 100, renderTime: cursor + 100 });
+  const previous = chartGeometry(next, ["cpu"], { ceiling: 100, renderTime: cursor });
+  assert.equal(moving.series[0].point.x, 600);
+  assert.ok(Math.abs(moving.series[0].point.y - previous.series[0].point.y) < 1);
+  assert.ok(moving.series[0].line.startsWith("M0.00,"));
+});
+
+test("clipping does not interpolate across missing values or unobserved intervals", () => {
+  const missing = [{observedAt:now,cpu:10},{observedAt:now+2000,cpu:null},{observedAt:now+4000,cpu:90}];
+  const segments = visibleSeriesSegments(missing, "cpu", now+3000);
+  assert.deepEqual(segments, [[{at:now,value:10}]]);
+  assert.equal(chartGeometry(missing,["cpu"],{renderTime:now+3000}).series[0].point.x,585);
+  const unobserved = [{observedAt:now,cpu:10},{observedAt:now+20_000,cpu:90}];
+  assert.deepEqual(visibleSeriesSegments(unobserved,"cpu",now+10_000),[[{at:now,value:10}]]);
 });
 
 test("all charts share one frame loop which cancels while hidden or disconnected", () => {

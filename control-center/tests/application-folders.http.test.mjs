@@ -69,6 +69,13 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   assert.equal(catalog.memberships["project:beta"], "");
   const filtered = await (await request("GET", `/?section=projects&folder=${folderId}`, "owner")).text();
   assert.match(filtered, /id="project-alpha"/);
+  assert.match(filtered, /data-application-search-input/);
+  assert.match(filtered, /data-app-folder-group/);
+  assert.match(filtered, /Gestisci cartella Clienti/);
+  assert.match(filtered, /class="ops-nav-main ops-nav-direct active" href="\/\?section=projects" aria-current="page"/);
+  assert.doesNotMatch(filtered, /ops-nav-panel-projects|ops-nav-subitem/);
+  assert.ok(filtered.indexOf('class="ops-logout-form"') < filtered.indexOf('class="ops-layout"'));
+  assert.match(filtered, /aria-label="Esci"/);
   assert.doesNotMatch(filtered, /id="project-beta"/);
   const unfiled = await (await request("GET", "/?section=projects&folder=unfiled", "owner")).text();
   assert.match(unfiled, /id="project-beta"/);

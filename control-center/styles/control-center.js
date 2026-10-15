@@ -500,6 +500,7 @@
     restoreSidebarScrollTop(previousSidebarScrollTop);
     positionOpsNavPill({ fromViewportRect: previousPillRect });
     restoreNavigationFocus();
+    animatePortalPage();
     opsNavLastPillRect = null;
     document.dispatchEvent(new CustomEvent("cc:navigation-complete", { detail: { url: target.href } }));
     scheduleControlCenterPreload();
@@ -520,9 +521,18 @@
   }
 
   function restoreNavigationFocus() {
-    var active = document.querySelector(".ops-nav-subitem[aria-current='page']");
+    var active = document.querySelector(".ops-page h1") || document.querySelector(".ops-nav-main[aria-current='page']");
     if (!active || typeof active.focus !== "function") return;
+    if (active.tagName === "H1") active.tabIndex = -1;
     active.focus({ preventScroll: true });
+  }
+
+  function animatePortalPage() {
+    var page = document.querySelector(".ops-shell .ops-page");
+    if (!page || typeof page.animate !== "function" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    page.getAnimations().forEach(function (animation) { if (animation.id === "cc-route-enter") animation.cancel(); });
+    var entrance = page.animate([{ opacity: .5, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 180, easing: "ease-out" });
+    entrance.id = "cc-route-enter";
   }
 
   function setText(node, value) {
@@ -1564,6 +1574,23 @@
     return sameOriginUrl(row.getAttribute("data-project-row-link") || "");
   }
 
+  function filterApplications(root) {
+    if (!root) return;
+    var input = root.querySelector("[data-application-search-input]");
+    var query = String(input ? input.value : "").trim().toLocaleLowerCase("it");
+    var visible = 0;
+    root.querySelectorAll("[data-application-row]").forEach(function (row) {
+      var matches = String(row.dataset.applicationSearch || "").toLocaleLowerCase("it").indexOf(query) !== -1;
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    root.querySelectorAll("[data-app-folder-group]").forEach(function (group) {
+      group.hidden = Boolean(query) && !group.querySelector("[data-application-row]:not([hidden])");
+    });
+    var empty = root.querySelector("[data-application-search-empty]");
+    if (empty) empty.hidden = !query || visible > 0;
+  }
+
   function startFileManagers() {
     var manager = document.querySelector("[data-file-manager]");
     if (manager) {
@@ -2448,7 +2475,20 @@
     storeCache(window.location.href, document.documentElement.outerHTML, "");
     runInitialControlCenterPreload();
 
+    document.addEventListener("toggle", function (event) {
+      var details = event.target;
+      if (!(details instanceof HTMLDetailsElement) || !details.open || !details.closest(".cc-applications")) return;
+      document.querySelectorAll(".cc-applications details[open]").forEach(function (other) { if (other !== details) other.open = false; });
+    }, true);
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") return;
+      var focusedDetails = event.target.closest ? event.target.closest(".cc-applications details[open]") : null;
+      document.querySelectorAll(".cc-applications details[open]").forEach(function (details) { details.open = false; });
+      if (focusedDetails) { event.preventDefault(); var summary = focusedDetails.querySelector("summary"); if (summary) summary.focus(); }
+    });
     document.addEventListener("click", function (event) {
+      var currentPopover = event.target.closest ? event.target.closest(".cc-applications details") : null;
+      document.querySelectorAll(".cc-applications details[open]").forEach(function (details) { if (details !== currentPopover) details.open = false; });
       var inlineStatusRun = event.target.closest ? event.target.closest("[data-status-run-inline]") : null;
       if (inlineStatusRun) {
         event.stopPropagation();
@@ -2646,6 +2686,8 @@
     });
 
     document.addEventListener("input", function (event) {
+      var applicationSearch = event.target.closest ? event.target.closest("[data-application-search-input]") : null;
+      if (applicationSearch) { filterApplications(applicationSearch.closest("[data-app-folders]")); return; }
       var search = event.target.closest ? event.target.closest("[data-file-search]") : null;
       if (!search) return;
       var manager = search.closest("[data-file-manager]");
