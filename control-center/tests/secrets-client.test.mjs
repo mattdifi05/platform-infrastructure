@@ -174,3 +174,147 @@ test('the editor cannot switch or close while a management request is pending', 
   assert.equal(prevented, true);
   assert.equal(root.dataset.editorOpen, 'true');
 });
+
+function motionFixture({ reduced = false } = {}) {
+  const animations = [], listeners = {}, focus = [];
+  const createAnimation = (frames, options) => {
+    const finished = deferred();
+    const animation = { frames, options, finished: finished.promise, finish: finished.resolve, cancelled: false, cancel() { this.cancelled = true; finished.reject(new Error('Animation replaced')); } };
+    animations.push(animation); return animation;
+  };
+  const fields = { create: { value: '' }, edit: { value: '' }, delete: { value: '' } }, statuses = {};
+  const forms = Object.fromEntries(Object.keys(fields).map(mode => {
+    statuses[mode] = { textContent: '', removeAttribute() {} };
+    return [mode, { hidden: true, resets: 0, elements: { itemId: {}, id: {}, confirm: {} }, reset() { this.resets++; fields[mode].value = ''; }, querySelector(selector) { return selector === '[data-secret-form-status]' ? statuses[mode] : { focus: () => focus.push(mode) }; } }];
+  }));
+  const editor = { hidden: true, animate: createAnimation, contains: () => false, querySelector: selector => forms[selector.match(/data-secret-(\w+)-form/)[1]] };
+  const root = { isConnected: true, dataset: {}, querySelector: selector => selector === '[data-secret-editor]' ? editor : { textContent: '' }, querySelectorAll: selector => selector === '[data-secret-editor] form' ? Object.values(forms) : [] };
+  const context = { document: { readyState: 'loading', addEventListener: (name, callback) => { listeners[name] = callback; }, querySelector: () => root }, window: { matchMedia: () => ({ matches: reduced }), getComputedStyle: () => ({ opacity: '.7', transform: 'matrix(1,0,0,1,4,0)' }) } };
+  vm.createContext(context);
+  vm.runInContext(editorSource.replace(/\}\)\(\);\s*$/, 'globalThis.secretMotion = { animate, filter, open, close };})();'), context);
+  const trigger = { isConnected: true, closest: () => null, focus: () => focus.push('trigger') };
+  return { context, motion: context.secretMotion, animations, root, editor, forms, fields, trigger, focus, createAnimation };
+}
+
+test('rapid editor open-close-open cancels superseded motion without hiding or clearing the new draft', async () => {
+  const h = motionFixture();
+  h.motion.open(h.root, 'create', h.trigger);
+  h.motion.close(h.root);
+  h.motion.open(h.root, 'edit', h.trigger);
+  h.fields.edit.value = 'public-in-progress-draft';
+  await tick();
+  assert.equal(h.animations.length, 3);
+  assert.equal(h.animations[0].cancelled, true, 'Opening animation is tracked and cancelled on close');
+  assert.equal(h.animations[1].cancelled, true, 'Stale close is cancelled by the new editor');
+  assert.equal(h.editor.hidden, false);
+  assert.equal(h.forms.edit.hidden, false);
+  assert.equal(h.fields.edit.value, 'public-in-progress-draft');
+  assert.equal(h.root.dataset.editorOpen, 'true');
+  assert.equal(h.focus.at(-1), 'edit', 'Stale closing callback cannot steal focus');
+  assert.equal(h.animations[2].frames[0].opacity, '.7', 'Interrupted motion continues from its visible state');
+});
+
+test('editor close restores focus only after completion and ignores a detached page', async () => {
+  for (const detached of [false, true]) {
+    const h = motionFixture();
+    h.motion.open(h.root, 'create', h.trigger);
+    h.motion.close(h.root);
+    assert.equal(h.editor.hidden, false);
+    if (detached) h.root.isConnected = false;
+    h.animations.at(-1).finish(); await tick();
+    assert.equal(h.editor.hidden, !detached);
+    assert.equal(h.focus.includes('trigger'), !detached);
+  }
+});
+
+test('finishing a closing animation cannot steal focus from a newly selected control', async () => {
+  const h = motionFixture();
+  h.motion.open(h.root, 'create', h.trigger);
+  h.motion.close(h.root);
+  h.context.document.activeElement = { id: 'another-navigation-control' };
+  h.animations.at(-1).finish(); await tick();
+  assert.equal(h.editor.hidden, true);
+  assert.equal(h.focus.includes('trigger'), false);
+});
+
+test('reduced motion keeps editor controls immediate with no animation or deferred focus', () => {
+  const h = motionFixture({ reduced: true });
+  h.motion.open(h.root, 'create', h.trigger);
+  assert.equal(h.editor.hidden, false);
+  h.motion.close(h.root);
+  assert.equal(h.animations.length, 0);
+  assert.equal(h.editor.hidden, true);
+  assert.equal(h.focus.at(-1), 'trigger');
+});
+
+test('search motion follows real visibility and repositions retained rows without a second list fade', () => {
+  const h = motionFixture();
+  const rows = ['alpha', 'beta'].map(name => ({ dataset: { secretSearch: name, secretLinked: 'false' }, hidden: false, animate: h.createAnimation, getBoundingClientRect() { return { top: rows.indexOf(this) === 0 ? 0 : rows[0].hidden ? 0 : 100 }; } }));
+  const search = { value: 'beta' }, empty = {}, count = {};
+  const root = { querySelector: selector => ({ '[data-secret-search]': search, '[data-secret-filter][aria-pressed="true"]': { dataset: { secretFilter: 'all' } }, '[data-secret-empty]': empty, '[data-secret-visible-count]': count })[selector], querySelectorAll: () => rows };
+  h.motion.filter(root);
+  assert.equal(rows[0].hidden, true);
+  assert.equal(rows[1].hidden, false);
+  assert.equal(count.textContent, '1 di 2 elementi');
+  assert.equal(h.animations.length, 1);
+  assert.equal(h.animations[0].frames[0].transform, 'translateY(100px)');
+  search.value = '';
+  h.motion.filter(root);
+  assert.equal(rows.every(row => !row.hidden), true);
+  assert.equal(h.animations[0].cancelled, true, 'Rapid search replaces the retained-row movement');
+  assert.equal(h.animations.length, 3, 'Only the entering and repositioned rows animate');
+});
+
+test('cached route transitions replace only their own motion, respect reduced motion and focus the heading', async () => {
+  const h = motionFixture();
+  let reduced = false, focused;
+  const heading = { tagName: 'H1', focus: options => { focused = options; } }, page = { animate: h.createAnimation };
+  const context = { document: { querySelector: selector => selector === '.ops-page h1' ? heading : page }, window: { matchMedia: () => ({ matches: reduced }) } };
+  vm.createContext(context);
+  vm.runInContext(section('  function restoreNavigationFocus()', '  function setText('), context);
+  context.restoreNavigationFocus();
+  assert.equal(heading.tabIndex, -1);
+  assert.equal(focused.preventScroll, true);
+  context.animatePortalPage(); context.animatePortalPage();
+  assert.equal(h.animations[0].cancelled, true);
+  assert.equal(h.animations[1].id, 'cc-route-enter');
+  reduced = true; context.animatePortalPage();
+  assert.equal(h.animations[1].cancelled, true);
+  assert.equal(h.animations.length, 2);
+  await tick();
+  assert.match(source, /fitSingleLineText\(\);\s*animatePortalPage\(\)/, 'Initial render uses the same entrance as cached navigation');
+});
+
+test('Applications local filtering preserves groups and replaces row movement without fetching', () => {
+  for (const reduced of [false, true]) {
+    const h = motionFixture(), search = { value: 'beta' }, empty = {};
+    const rows = ['alpha', 'beta'].map(name => ({ dataset: { applicationSearch: name }, hidden: false, animate: h.createAnimation, getBoundingClientRect() { return { top: rows.indexOf(this) === 0 ? 0 : rows[0].hidden ? 0 : 80 }; } }));
+    const groups = rows.map(row => ({ hidden: false, querySelector: () => row.hidden ? null : row }));
+    const root = { querySelector: selector => selector === '[data-application-search-input]' ? search : empty, querySelectorAll: selector => selector === '[data-application-row]' ? rows : groups };
+    const context = { document: {}, window: { matchMedia: () => ({ matches: reduced }) } };
+    vm.createContext(context);
+    vm.runInContext(section('  var portalMotions =', '  function setText(') + section('  function filterApplications(', '  function startFileManagers('), context);
+    context.filterApplications(root);
+    assert.equal(groups[0].hidden, true);
+    assert.equal(groups[1].hidden, false);
+    assert.equal(empty.hidden, true);
+    search.value = ''; context.filterApplications(root);
+    assert.ok(rows.every(row => !row.hidden));
+    assert.ok(groups.every(group => !group.hidden));
+    assert.equal(h.animations.length, reduced ? 0 : 3);
+    if (!reduced) assert.equal(h.animations[0].cancelled, true);
+  }
+});
+
+test('reduced-motion sidebar moves the existing pill immediately without a transition frame', () => {
+  const pill = { style: {} }, nav = { dataset: {}, isConnected: true, querySelector: () => pill };
+  let cancelled = 0;
+  const context = { opsNavPillFrame: 7, usableOpsNavPillTarget: () => true, opsNavPixel: value => value + 'px', window: { matchMedia: () => ({ matches: true }), cancelAnimationFrame: () => { cancelled++; }, requestAnimationFrame: () => 1 } };
+  vm.createContext(context);
+  vm.runInContext(section('  function opsNavPillRectToTarget(', '  function positionOpsNavPill('), context);
+  assert.equal(context.applyOpsNavPill(nav, { left: 4, top: 20, width: 200, height: 44 }, {}), true);
+  assert.equal(cancelled, 1);
+  assert.equal(nav.dataset.navPillInstant, 'true');
+  assert.equal(pill.style.transform, 'translate3d(4px, 20px, 0)');
+  assert.equal(pill.style.width, '200px');
+});

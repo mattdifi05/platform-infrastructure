@@ -6051,6 +6051,7 @@ ${controlCenterScriptTags()}
   <button class="ops-button primary compact" type="button" data-cc-preload-retry hidden>Riprova</button>
 </div>
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
+  <template data-control-icon="xmark">${controlIcon("xmark")}</template>
   ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Esci" title="Esci">${controlIcon("logout")}</button></form>` : ""}
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
@@ -6498,7 +6499,7 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
   const rows = groups.filter(folder => selected === "all" || folder.id === selected).map(folder => {
     const members = apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id);
     if (!members.length && selected === "all") return "";
-    const management = folder.id === "unfiled" ? "" : `<details class="cc-app-folder-menu"><summary aria-label="Gestisci cartella ${escapeHtml(folder.name)}" title="Gestisci cartella">⋮</summary><div class="cc-app-popover"><form data-app-folder-form action="/control/project-folders/${escapeHtml(folder.id)}/rename"><label>Nome cartella<input name="name" maxlength="80" required value="${escapeHtml(folder.name)}"></label><button type="submit" class="ops-button secondary compact">Rinomina</button></form><form data-app-folder-form data-folder-delete action="/control/project-folders/${escapeHtml(folder.id)}/delete"><p>Le applicazioni restano disponibili in Senza cartella.</p><button type="submit" class="ops-button danger compact">Elimina cartella</button></form></div></details>`;
+    const management = folder.id === "unfiled" ? "" : `<details class="cc-app-folder-menu"><summary aria-label="Gestisci cartella ${escapeHtml(folder.name)}" title="Gestisci cartella">${controlIcon("ellipsis-vertical")}</summary><div class="cc-app-popover"><form data-app-folder-form action="/control/project-folders/${escapeHtml(folder.id)}/rename"><label>Nome cartella<input name="name" maxlength="80" required value="${escapeHtml(folder.name)}"></label><button type="submit" class="ops-button secondary compact">Rinomina</button></form><form data-app-folder-form data-folder-delete action="/control/project-folders/${escapeHtml(folder.id)}/delete"><p>Le applicazioni restano disponibili in Senza cartella.</p><button type="submit" class="ops-button danger compact">Elimina cartella</button></form></div></details>`;
     return `<section class="cc-app-folder-group" data-app-folder-group aria-label="${escapeHtml(folder.name)}"><header class="cc-app-folder-heading"><h2>${controlIcon("folder")} ${escapeHtml(folder.name)} <small>${members.length}</small></h2>${management}</header><div class="cc-app-column-head" aria-hidden="true"><span>Applicazione</span><span>Host</span><span>Runtime</span><span>Cartella</span><span></span></div><div class="ops-project-list">${members.map(app => {
       const options = `<option value="">Senza cartella</option>` + catalog.folders.map(item => `<option value="${escapeHtml(item.id)}" ${catalog.memberships[app.key] === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
       const placement = `<details class="cc-app-folder-placement"><summary aria-label="Cartella di ${escapeHtml(app.record.name || app.record.id)}">${escapeHtml(folder.name)} ${controlIcon("chevron-down")}</summary><form class="cc-app-popover" data-app-folder-form action="/control/project-folders/membership"><input type="hidden" name="applicationKey" value="${escapeHtml(app.key)}"><label>Cartella di ${escapeHtml(app.record.name || app.record.id)}<select name="folderId">${options}</select></label><button type="submit" class="ops-button secondary compact">Sposta</button></form></details>`;
@@ -6731,7 +6732,7 @@ function renderVaultFieldGuide() {
     ["Valore secret", "Dato cifrato nel Vault, leggibile solo dopo conferma passkey."],
   ];
   return `<details class="ops-vault-field-guide" open>
-    <summary>Cosa significano i campi</summary>
+    <summary>${controlIcon("chevron")}Cosa significano i campi</summary>
     <dl>${fields.map(([name, description]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(description)}</dd></div>`).join("")}</dl>
   </details>`;
 }
@@ -6962,13 +6963,8 @@ function databaseCredentialDisplayLabel(database, project) {
 }
 
 function renderProjectDetailResources(summary) {
-  const icons = [
-    '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/>',
-    '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 10v4m4-4v4m4-4v4m3-4v4"/>',
-    '<path d="M6 3h12l3 9v8H3v-8zM3 12h18M16 16h2"/>',
-    '<path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10"/>',
-  ];
-  const resourceRows = [["CPU", summary.cpu], ["RAM", summary.memory], ["Disco", summary.disk], ["Container", summary.containerCount ? `${summary.runningContainerCount}/${summary.containerCount} in esecuzione` : "Non disponibili"]].map(([label, value], index) => `<div class="ops-project-detail-fact"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[index]}</svg><span>${escapeHtml(label)}</span><strong title="${escapeHtml(label === "Container" ? summary.containers : value)}">${escapeHtml(value)}</strong></div>`).join("");
+  const icons = ["microchip", "memory", "hard-drive", "cube"];
+  const resourceRows = [["CPU", summary.cpu], ["RAM", summary.memory], ["Disco", summary.disk], ["Container", summary.containerCount ? `${summary.runningContainerCount}/${summary.containerCount} in esecuzione` : "Non disponibili"]].map(([label, value], index) => `<div class="ops-project-detail-fact">${controlIcon(icons[index])}<span>${escapeHtml(label)}</span><strong title="${escapeHtml(label === "Container" ? summary.containers : value)}">${escapeHtml(value)}</strong></div>`).join("");
   return `<div class="ops-project-detail-panel cc-app-resources" id="project-resources"><div class="ops-project-detail-panel-head ops-project-resource-head"><h3>Risorse applicazione</h3></div><div class="ops-project-detail-resource-grid">${resourceRows}</div></div>`;
 }
 

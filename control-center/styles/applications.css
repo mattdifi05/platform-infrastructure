@@ -116,18 +116,17 @@
 .cc-applications-toolbar .ops-button.primary { background: #2f7df6; border-color: #2f7df6; }
 .cc-app-folder-placement > summary { justify-content: flex-start; gap: 16px; }
 /* Shared route feedback plus quiet motion for local catalog interactions. */
-.ops-shell .ops-page { transition: opacity 140ms ease, transform 180ms ease; animation: cc-app-page-in 180ms ease-out; }
+.ops-shell .ops-page { transition: opacity 140ms ease, transform 180ms ease; }
 body[data-cc-navigation="loading"] .ops-shell .ops-page { opacity: .62; transform: translateY(2px); }
-.cc-applications .cc-app-folder-entry { animation: cc-app-row-in 160ms ease-out; }
-.cc-applications details[open] > .cc-app-popover { animation: cc-app-popover-in 150ms ease-out; transform-origin: top right; }
+.cc-applications .cc-app-folder-entry { animation: cc-app-row-in 180ms cubic-bezier(.22,1,.36,1); }
+.cc-applications details[open] > .cc-app-popover { animation: cc-app-popover-in 180ms cubic-bezier(.22,1,.36,1); transform-origin: top right; }
 .cc-app-folder-tab { transition: color 140ms ease, border-color 160ms ease; }
 .cc-applications .ops-button, .cc-applications summary, .cc-application-open, .cc-app-detail-back, .cc-application-detail .ops-button { transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, transform 120ms ease; }
 .cc-applications .ops-button:active, .cc-application-detail .ops-button:active { transform: translateY(1px); }
 .cc-app-folder-tab:hover, .cc-application-open:hover, .cc-app-detail-back:hover { color: #155eef; }
 .cc-applications .cc-app-folder-placement summary:hover { color: #2f7df6; }
 .cc-applications [aria-busy="true"], .cc-applications button:disabled { opacity: .6; }
-@keyframes cc-app-page-in { from { opacity: .5; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes cc-app-row-in { from { opacity: .3; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes cc-app-row-in { from { opacity: .88; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes cc-app-popover-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @media (prefers-reduced-motion: reduce) {
   .ops-shell .ops-page, .cc-applications .cc-app-folder-entry, .cc-applications details[open] > .cc-app-popover { animation: none; }
@@ -137,7 +136,7 @@ body[data-cc-navigation="loading"] .ops-shell .ops-page { opacity: .62; transfor
 .cc-app-column-head { padding-left: 16px; }
 .cc-app-column-head > span:first-child { padding-left: 6px; }
 @supports (transition-behavior: allow-discrete) {
-  .cc-applications details::details-content { opacity: 0; transition: opacity 150ms ease, content-visibility 150ms allow-discrete; }
+  .cc-applications details::details-content { opacity: 0; transition: opacity 180ms cubic-bezier(.22,1,.36,1), content-visibility 180ms allow-discrete; }
   .cc-applications details[open]::details-content { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -150,7 +149,7 @@ body[data-cc-navigation="loading"] .ops-shell .ops-page { opacity: .62; transfor
 .cc-application-detail .ops-project-detail-item-icon { width: 40px; height: 40px; border-radius: 10px; }
 .cc-application-detail .ops-project-database-main strong { font-size: 14px; }
 .cc-application-detail .ops-project-database-main small { font-size: 11px; font-weight: 400; }
-.cc-application-detail details[open] > :not(summary) { animation: cc-app-popover-in 150ms ease-out; }
+.cc-application-detail details[open] > :not(summary) { animation: cc-app-popover-in 180ms cubic-bezier(.22,1,.36,1); }
 @media (prefers-reduced-motion: reduce) { .cc-application-detail details[open] > :not(summary) { animation: none; } }
 .cc-application-detail .ops-project-detail-fact strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 /* Override legacy detail minimums so primary controls remain above the file list. */
@@ -164,3 +163,13 @@ body[data-cc-navigation="loading"] .ops-shell .ops-page { opacity: .62; transfor
 .cc-application-detail .ops-project-detail-resource-grid { margin-top: 10px; }
 .cc-application-detail .ops-file-explorer { gap: 0; }
 .cc-application-detail .ops-file-breadcrumb { min-height: 32px; padding: 6px 10px; }
+
+.cc-app-folder-menu > summary > svg { width: 5px; height: 16px; }
+.cc-dialog-head [data-hosting-close] > svg { width: 14px; height: 16px; }
+
+.cc-restore-dialog[open] { animation: cc-dialog-in 180ms cubic-bezier(.22,1,.36,1); }
+.cc-restore-dialog[open]::backdrop { animation: cc-dialog-shade-in 180ms ease-out; }
+.cc-hosting-dialog[data-closing="true"]::backdrop { animation: none; background: transparent; transition: background 140ms ease-out; }
+@keyframes cc-dialog-in { from { opacity: 0; transform: translateY(6px) scale(.995); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes cc-dialog-shade-in { from { background: transparent; } to { background: #181b2561; } }
+@media (prefers-reduced-motion: reduce) { .cc-restore-dialog[open], .cc-restore-dialog[open]::backdrop { animation: none; } .cc-hosting-dialog[data-closing="true"]::backdrop { transition: none; } }
