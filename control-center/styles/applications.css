@@ -1,5 +1,5 @@
 /* Applications catalog follows the accepted desktop reference. */
-.ops-shell.section-projects { --ops-sidebar-width: 236px; background: #f6f8fc; }
+.ops-shell.section-projects { background: #f6f8fc; }
 .section-projects .ops-page { padding: 26px 30px 40px 36px; gap: 24px; }
 .section-projects .ops-page-head h1 { font-size: 32px; line-height: 1.2; letter-spacing: -.8px; font-weight: 750; margin-bottom: 6px; }
 .section-projects .ops-page-head span { color: #65758a; font-size: 16px; line-height: 1.45; }
