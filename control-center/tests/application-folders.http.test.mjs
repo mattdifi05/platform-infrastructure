@@ -11,10 +11,11 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const stateDir = path.join(root, "state");
   mkdirSync(stateDir);
   mkdirSync(path.join(root, "projects"));
+  const staleFolderId = "folder-00000000-0000-0000-0000-000000000001";
   const initial = { projects: {
     alpha: { declaredProject: true, displayName: "Alpha app", host: "alpha.example.test", runtime: "node" },
     beta: { declaredProject: true, displayName: "Beta app", host: "beta.example.test", runtime: "php" },
-  }, subdomains: { retained: true }, extra: "preserved" };
+  }, subdomains: { retained: true }, extra: "preserved", applicationFolders: { folders: { [staleFolderId]: { name: "Temporaneamente assente" } }, memberships: { "project:absent": staleFolderId }, extra: "retained-folder-metadata" } };
   writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify(initial));
   writeFileSync(path.join(stateDir, "vault.key"), `test-v1=${"a".repeat(64)}\n`, { mode: 0o600 });
   const reservation = createServer();
@@ -50,9 +51,17 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
     if (method === "POST" && csrf) Object.assign(headers, { origin, "sec-fetch-site": "same-origin", "x-csrf-token": item?.csrf || "invalid" });
     return fetch(`${base}${route}`, { method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}) });
   }
+  function assertDeleteControl(html, folderId, disabled) {
+    const form = html.match(new RegExp(`<form[^>]*action="/control/project-folders/${folderId}/delete"[^>]*>([\\s\\S]*?)</form>`));
+    assert.ok(form, `Delete form must be rendered for ${folderId}`);
+    const button = form[1].match(/<button\b[^>]*>/)?.[0];
+    assert.ok(button, "Delete control must be a button");
+    assert.equal(/\bdisabled(?:\s|>|=)/.test(button), disabled);
+    assert.match(form[1], disabled ? /sposta prima tutte le applicazioni/ : /vuota e può essere eliminata/);
+  }
   const routes = ["/control/project-folders", "/control/project-folders/membership", "/control/project-folders/missing/rename", "/control/project-folders/missing/delete"];
   const before = readFileSync(path.join(stateDir, "projects.json"), "utf8");
-  for (const route of routes) {
+  for (const route of [...routes, ...routes.map(route => route.replace("/control/", "/control/v1/"))]) {
     const anon = await request("POST", route, null, {});
     assert.equal(anon.status, 401, await anon.text());
     assert.equal((await request("POST", route, "viewer", {})).status, 403);
@@ -67,11 +76,24 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const catalog = await (await request("GET", routes[0], "viewer")).json();
   assert.equal(catalog.memberships["project:alpha"], folderId);
   assert.equal(catalog.memberships["project:beta"], "");
+  assert.equal(catalog.folders.find(folder => folder.id === folderId).canDelete, false);
+  assert.equal(catalog.folders.find(folder => folder.id === staleFolderId).canDelete, false);
+  assert.equal(Object.hasOwn(catalog.memberships, "project:absent"), false);
+  for (const prefix of ["/control", "/control/v1"]) for (const occupiedId of [folderId, staleFolderId]) {
+    const beforeDelete = readFileSync(path.join(stateDir, "projects.json"), "utf8");
+    const rejected = await request("POST", `${prefix}/project-folders/${occupiedId}/delete`, "owner", {});
+    assert.equal(rejected.status, 422);
+    assert.match(await rejected.text(), /contiene applicazioni/);
+    assert.equal(readFileSync(path.join(stateDir, "projects.json"), "utf8"), beforeDelete);
+  }
   const filtered = await (await request("GET", `/?section=projects&folder=${folderId}`, "owner")).text();
   assert.match(filtered, /id="project-alpha"/);
   assert.match(filtered, /data-application-search-input/);
   assert.match(filtered, /data-app-folder-group/);
   assert.match(filtered, /Gestisci cartella Clienti/);
+  assertDeleteControl(filtered, folderId, true);
+  const allFolders = await (await request("GET", "/?section=projects", "owner")).text();
+  assertDeleteControl(allFolders, staleFolderId, true);
   assert.match(filtered, /class="ops-nav-main ops-nav-direct active" href="\/\?section=projects" aria-current="page"/);
   assert.doesNotMatch(filtered, /ops-nav-panel-projects|ops-nav-subitem/);
   assert.ok(filtered.indexOf('class="ops-logout-form"') < filtered.indexOf('class="ops-layout"'));
@@ -81,12 +103,27 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   assert.match(unfiled, /id="project-beta"/);
   assert.doesNotMatch(unfiled, /id="project-alpha"/);
   assert.equal((await request("POST", `/control/v1/project-folders/${folderId}/rename`, "admin", { name: "Lavoro" })).status, 200);
+  const renamed = JSON.parse(readFileSync(path.join(stateDir, "projects.json"), "utf8"));
+  assert.equal(renamed.applicationFolders.folders[folderId].name, "Lavoro");
+  assert.equal(renamed.applicationFolders.memberships["project:alpha"], folderId);
+  const renamedCatalog = await (await request("GET", "/control/v1/project-folders", "viewer")).json();
+  assert.deepEqual(renamedCatalog.folders.find(folder => folder.id === folderId), { id: folderId, name: "Lavoro", canDelete: false });
+  assert.equal((await request("POST", `/control/v1/project-folders/membership`, "admin", { applicationKey: "project:alpha", folderId: "" })).status, 200);
+  const emptyCatalog = await (await request("GET", routes[0], "viewer")).json();
+  assert.equal(emptyCatalog.folders.find(folder => folder.id === folderId).canDelete, true);
   assert.equal((await request("POST", `/control/project-folders/${folderId}/delete`, "owner", {})).status, 200);
+  const emptyCreate = await request("POST", "/control/v1/project-folders", "admin", { name: "Vuota" });
+  assert.equal(emptyCreate.status, 200);
+  const { folderId: emptyId } = await emptyCreate.json();
+  const withEmptyFolder = await (await request("GET", "/?section=projects", "owner")).text();
+  assert.match(withEmptyFolder, /data-app-folder-group aria-label="Vuota"/);
+  assertDeleteControl(withEmptyFolder, emptyId, false);
+  assert.equal((await request("POST", `/control/v1/project-folders/${emptyId}/delete`, "admin", {})).status, 200);
   const after = JSON.parse(readFileSync(path.join(stateDir, "projects.json"), "utf8"));
   assert.deepEqual(after.projects, initial.projects);
   assert.deepEqual(after.subdomains, initial.subdomains);
   assert.equal(after.extra, initial.extra);
-  assert.deepEqual(after.applicationFolders, { folders: {}, memberships: {} });
+  assert.deepEqual(after.applicationFolders, initial.applicationFolders);
 });
 
 function isolatedStateEnv(stateRoot) {

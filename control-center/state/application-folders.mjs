@@ -8,9 +8,10 @@ const object = (value) => value && typeof value === "object" && !Array.isArray(v
 // app cannot silently inherit a managed app's placement with the same name.
 export function applicationFolderCatalog(state, applications = []) {
   const metadata = object(state.applicationFolders);
+  const occupiedFolders = new Set(Object.values(object(metadata.memberships)));
   const folders = Object.entries(object(metadata.folders))
     .filter(([id, folder]) => /^folder-[a-f0-9-]{36}$/.test(id) && typeof folder?.name === "string")
-    .map(([id, folder]) => ({ id, name: folder.name }))
+    .map(([id, folder]) => ({ id, name: folder.name, canDelete: !occupiedFolders.has(id) }))
     .sort((a, b) => a.name.localeCompare(b.name, "it"));
   const ids = new Set(folders.map(folder => folder.id));
   const memberships = Object.fromEntries(applications.map(app => [app.key,
@@ -36,8 +37,8 @@ export function updateApplicationFolders(store, action, payload, applications = 
       folders[id] = { ...object(folders[id]), name };
       result = { folderId: id };
     } else if (action === "delete") {
+      if (Object.values(memberships).includes(folderId)) throw new ApplicationFolderError("La cartella contiene applicazioni. Spostale prima di eliminarla.");
       delete folders[folderId];
-      for (const [key, id] of Object.entries(memberships)) if (id === folderId) delete memberships[key];
       result = { folderId: "unfiled" };
     } else if (action === "membership") {
       const key = String(payload.applicationKey || "");

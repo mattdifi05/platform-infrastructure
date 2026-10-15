@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createControlStateStore } from "../state/catalog.mjs";
-import { applicationFolderCatalog, updateApplicationFolders } from "../state/application-folders.mjs";
+import { ApplicationFolderError, applicationFolderCatalog, updateApplicationFolders } from "../state/application-folders.mjs";
 import { resolveAuthorizationCapability } from "../auth/route-capabilities.mjs";
 
 const apps = [{ key: "project:alpha" }, { key: "project:beta" }, { key: "observed:alpha" }];
@@ -29,10 +29,14 @@ test("folders persist in project state, isolate memberships, and preserve app an
   assert.equal(catalog.memberships["project:beta"], b);
   assert.equal(catalog.memberships["observed:alpha"], "", "source-qualified app IDs must not mix");
   updateApplicationFolders(store, "rename", { folderId: a, name: "Lavoro" }, apps);
+  const renamed = store.read("projects").value;
+  assert.equal(renamed.applicationFolders.folders[a].name, "Lavoro");
+  assert.equal(renamed.applicationFolders.memberships["project:alpha"], a);
   updateApplicationFolders(store, "membership", { applicationKey: "project:alpha", folderId: b }, apps);
+  for (const applicationKey of ["project:alpha", "project:beta"]) updateApplicationFolders(store, "membership", { applicationKey, folderId: "" }, apps);
   updateApplicationFolders(store, "delete", { folderId: b }, apps);
   catalog = applicationFolderCatalog(store.read("projects").value, apps);
-  assert.deepEqual(catalog.folders, [{ id: a, name: "Lavoro" }]);
+  assert.deepEqual(catalog.folders, [{ id: a, name: "Lavoro", canDelete: true }]);
   assert.deepEqual(catalog.memberships, Object.fromEntries(apps.map(app => [app.key, ""])));
   assert.deepEqual(store.read("projects").value.projects, initial.projects);
 });
@@ -51,6 +55,34 @@ test("stale apps and removed folders never leak into visible groups, and invalid
   }
   updateApplicationFolders(store, "membership", { applicationKey: "project:alpha", folderId: "" }, apps);
   assert.equal(applicationFolderCatalog(store.read("projects").value, apps).memberships["project:alpha"], "");
+});
+
+test("nonempty folders cannot be deleted even when assigned apps are absent, and rejected writes preserve exact metadata", t => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "application-folders-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "projects.json");
+  const store = createControlStateStore({ PROJECT_STATE_FILE: file });
+  const folderId = updateApplicationFolders(store, "create", { name: "In uso" }, apps).folderId;
+  const emptyId = updateApplicationFolders(store, "create", { name: "Vuota" }, apps).folderId;
+  updateApplicationFolders(store, "membership", { applicationKey: "project:alpha", folderId }, apps);
+  for (const catalogApps of [apps, []]) {
+    const before = readFileSync(file, "utf8");
+    const token = store.read("projects").token;
+    const catalog = applicationFolderCatalog(store.read("projects").value, catalogApps);
+    assert.equal(catalog.folders.find(folder => folder.id === folderId).canDelete, false);
+    assert.equal(catalog.folders.find(folder => folder.id === emptyId).canDelete, true);
+    assert.throws(() => updateApplicationFolders(store, "delete", { folderId }, catalogApps), error => error instanceof ApplicationFolderError && /contiene applicazioni/.test(error.message));
+    assert.equal(readFileSync(file, "utf8"), before);
+    assert.equal(store.read("projects").token, token);
+  }
+  updateApplicationFolders(store, "rename", { folderId, name: "  Nuovo nome  " }, []);
+  assert.deepEqual(applicationFolderCatalog(store.read("projects").value, []).folders.find(folder => folder.id === folderId), { id: folderId, name: "Nuovo nome", canDelete: false });
+  assert.equal(store.read("projects").value.applicationFolders.memberships["project:alpha"], folderId);
+  updateApplicationFolders(store, "membership", { applicationKey: "project:alpha", folderId: "" }, apps);
+  assert.equal(applicationFolderCatalog(store.read("projects").value, []).folders.find(folder => folder.id === folderId).canDelete, true);
+  assert.deepEqual(updateApplicationFolders(store, "delete", { folderId }, []), { folderId: "unfiled" });
+  updateApplicationFolders(store, "delete", { folderId: emptyId }, []);
+  assert.deepEqual(store.read("projects").value.applicationFolders, { folders: {}, memberships: {} });
 });
 
 test("folder API uses the explicit viewer/admin route catalog for canonical and v1 routes", () => {
