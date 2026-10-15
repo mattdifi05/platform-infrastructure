@@ -1,3 +1,5 @@
+import { controlIcon } from '../components/ui/controlIcons.mjs';
+
 const actions = new Set(['catalog', 'adopt', 'plan', 'apply', 'rollback', 'status', 'detach']);
 const fields = new Set(['action', 'bindingId', 'itemId', 'versionId', 'expectedVaultRevision', 'expectedBindingRevision', 'planId', 'confirmation', 'operationId']);
 const secretFields = /^(?:value|newValue|plainValue|plaintext|sealedValue|ciphertext|token|password|path|command|destination|source)$/i;
@@ -48,7 +50,7 @@ const hidden = (name, value) => `<input type="hidden" name="${name}" value="${es
 const displayDate = value => { const date = new Date(value); return value && !Number.isNaN(date.getTime()) ? new Intl.DateTimeFormat('it-IT', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Rome' }).format(date) : 'non disponibile'; };
 export function renderVaultRuntime(catalog, items = []) {
   if (!catalog.available) return '<section class="ops-vault-panel"><h2>Consegna alle applicazioni</h2><p>Distribuzione non configurata. I valori salvati restano nel Vault e non cambiano le credenziali in uso.</p></section>';
-  return `<details class="ops-vault-panel ops-vault-runtime-panel" data-vault-runtime-panel><summary><strong>Consegna alle applicazioni</strong><span>${catalog.bindings.length} collegamenti · Apri gestione</span></summary><p>Centralizza le credenziali attuali senza cambiarle. Per una nuova versione: verifica il piano, poi applicalo. La verifica del provider è distinta dalla salute dell’applicazione.</p><div class="ops-vault-list ops-vault-runtime-scroll" role="region" tabindex="0" aria-label="Collegamenti applicazioni, elenco scorrevole">${catalog.bindings.map(binding => {
+  return `<details class="ops-vault-panel ops-vault-runtime-panel" data-vault-runtime-panel><summary><strong>${controlIcon("cube")}Consegna alle applicazioni</strong><span>${catalog.bindings.length} collegamenti · Apri gestione${controlIcon("chevron-down")}</span></summary><p>Centralizza le credenziali attuali senza cambiarle. Per una nuova versione: verifica il piano, poi applicalo. La verifica del provider è distinta dalla salute dell’applicazione.</p><div class="ops-vault-list ops-vault-runtime-scroll" role="region" tabindex="0" aria-label="Collegamenti applicazioni, elenco scorrevole">${catalog.bindings.map(binding => {
     const item = items.find(row => row.id === binding.itemId);
     const operationId = typeof binding.lastOperation === 'string' ? binding.lastOperation : binding.lastOperation?.operationId;
     const rotationUnsupported = binding.rotation === 'coupled-service' || binding.rotation === false || binding.rotation?.supported === false || /unsupported|disabled|coupled/i.test(String(binding.rotation));
