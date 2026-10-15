@@ -13,9 +13,6 @@ const SENSITIVE_MUTATIONS = Object.freeze([
   { id: "vps-production-restore", method: "POST", path: "/control/backups/production-restore", operationId: "backup.production-restore" },
   { id: "cloudflare-dns-owner", method: "POST", path: "/control/cloudflare/dns/change", operationId: "cloudflare.dns.change" },
   { id: "CAN-016", method: "POST", path: "/control/vault/secrets/example/reveal", operationId: "vault.secret.reveal" },
-  { id: "CAN-017", method: "POST", path: "/control/vault/secrets", operationId: "vault.secret.store" },
-  { id: "CAN-018", method: "POST", path: "/control/vault/import-existing", operationId: "vault.import-existing" },
-  { id: "CAN-019", method: "POST", path: "/control/vault/secrets/example/delete", operationId: "vault.secret.delete" },
   { id: "CAN-020", method: "POST", path: "/control/databases", operationId: "database.create" },
   { id: "CAN-021", method: "POST", path: "/control/backups/files/delete", operationId: "backup.file.delete" },
   { id: "CAN-022", method: "POST", path: "/control/backups/run", operationId: "backup.run" },
@@ -30,11 +27,17 @@ const SENSITIVE_READS = Object.freeze([
   { id: "CAN-148-jobs", method: "GET", path: "/control/backups/jobs", operationId: "backup.jobs.read" },
   { id: "CAN-148-files", method: "GET", path: "/control/backups/files", operationId: "backup.files.list" },
   { id: "CAN-148-preview", method: "GET", path: "/control/backups/preview", operationId: "backup.file.preview" },
-  { id: "CAN-208", method: "GET", path: "/control/vault", operationId: "vault.inventory.read" },
 ]);
 
-const LEGACY_SENSITIVE_ROUTES = Object.freeze([
+const OWNER_VAULT_TARGETS = [
+  ["GET", "/control/vault"], ["GET", "/control/vault/runtime"],
+  ["POST", "/control/vault/secrets"], ["POST", "/control/vault/import-existing"],
+  ["POST", "/control/vault/secrets/example/versions"], ["POST", "/control/vault/secrets/example/delete"],
+  ...["adopt", "plan", "apply", "rollback", "status"].map(action => ["POST", `/control/vault/runtime/${action}`]),
   ["POST", "/actions/vault-command"],
+];
+
+const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   ["POST", "/actions/database-command"],
   ["POST", "/actions/database-delete-command"],
   ["POST", "/actions/database-admin-login"],
@@ -161,11 +164,11 @@ test("fresh-owner authorization accepts 299 and 300 seconds but rejects 301 seco
   t.mock.timers.enable({ apis: ["Date"], now });
   const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
-  for (const pathname of ["/control/vault"]) {
+  for (const pathname of ["/control/vault/secrets/example/reveal"]) {
     const target = url(pathname);
     const request = {
-      method: "GET",
-      controlCenterOperation: resolveAuthorizationCapability("GET", target.pathname),
+      method: "POST",
+      controlCenterOperation: resolveAuthorizationCapability("POST", target.pathname),
     };
 
     assert.equal(auth.authorize(request, target, session("owner", 299, now)).status, 200, pathname);
@@ -178,10 +181,10 @@ test("fresh-owner authorization accepts 299 and 300 seconds but rejects 301 seco
 test("fresh-owner authorization fails closed for missing, malformed, and future auth_time", async (t) => {
   const auth = await createControlCenterAuth({ env: appPasskeyEnv() });
   t.after(() => auth.close());
-  const target = url("/control/vault");
+  const target = url("/control/vault/secrets/example/reveal");
   const request = {
-    method: "GET",
-    controlCenterOperation: resolveAuthorizationCapability("GET", target.pathname),
+    method: "POST",
+    controlCenterOperation: resolveAuthorizationCapability("POST", target.pathname),
   };
 
   for (const authTime of [undefined, "not-a-date", new Date(Date.now() + 60_000)]) {
@@ -192,6 +195,20 @@ test("fresh-owner authorization fails closed for missing, malformed, and future 
       identity: { authTime },
     });
     assert.equal(result.status, 428, `auth_time=${String(authTime)}`);
+  }
+});
+
+test("Vault management requires the owner session; only explicit reveal requires fresh passkey proof", async t => {
+  const auth = await createControlCenterAuth({ env: appPasskeyEnv() }); t.after(() => auth.close());
+  for (const [method, target] of OWNER_VAULT_TARGETS) {
+    const paths = target.startsWith("/control/") ? [target, versioned(target)] : [target];
+    for (const pathname of paths) {
+      assert.equal(resolveAuthorizationCapability(method, pathname).capability, "owner", pathname);
+      assert.equal(authorize(auth, method, pathname, session("viewer")).status, 403);
+      assert.equal(authorize(auth, method, pathname, session("admin")).status, 403);
+      assert.equal(authorize(auth, method, pathname, session("owner", 301)).status, 200);
+      assert.equal(authorize(auth, method, pathname, { ok: false, status: 401 }).status, 401);
+    }
   }
 });
 

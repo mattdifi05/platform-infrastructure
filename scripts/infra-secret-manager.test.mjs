@@ -11,6 +11,49 @@ import { assertNoPlaintextFingerprints } from "./secret-store-metadata.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const manager = path.join(here, "infra-secret-manager.mjs");
 
+test("legacy MinIO and phpMyAdmin secrets remain optional and are not regenerated after retirement", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secret-manager-retired-"));
+  const storePath = path.join(root, "store.json");
+  const valueFile = path.join(root, "value.txt");
+  const legacyNames = ["minio_root_password", "phpmyadmin_control_password"];
+  const run = (command, args = []) => {
+    const result = spawnSync(process.execPath, [manager, command,
+      "--secretsDir", root, "--store", storePath,
+      "--masterKey", path.join(root, "master.key"),
+      "--auditLog", path.join(root, "audit.jsonl"), ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const assertRetired = () => {
+    const store = JSON.parse(fs.readFileSync(storePath, "utf8"));
+    for (const name of legacyNames) {
+      assert.equal(Object.hasOwn(store.secrets, name), false);
+      assert.equal(fs.existsSync(path.join(root, `${name}.txt`)), false);
+    }
+  };
+  try {
+    run("init");
+    assertRetired();
+    fs.writeFileSync(valueFile, "optional_legacy_password_fixture_0123456789\n", { mode: 0o600 });
+    for (const name of legacyNames) run("set", ["--name", name, "--valueFile", valueFile]);
+    run("verify");
+    const store = JSON.parse(fs.readFileSync(storePath, "utf8"));
+    for (const name of legacyNames) {
+      assert.equal(fs.existsSync(path.join(root, `${name}.txt`)), true);
+      delete store.secrets[name];
+      fs.unlinkSync(path.join(root, `${name}.txt`));
+    }
+    fs.writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+    run("verify");
+    run("materialize");
+    assertRetired();
+    run("init");
+    run("verify");
+    assertRetired();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("migrates plaintext-derived fingerprints and preserves timestamps without an oracle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secret-manager-metadata-"));
   const storePath = path.join(root, "store.json");

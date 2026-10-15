@@ -9,6 +9,7 @@ const route = (method, operationId, capability, ...segments) => Object.freeze({
 });
 const viewer = (operationId, ...segments) => route("GET", operationId, "viewer", ...segments);
 const admin = (operationId, ...segments) => route("POST", operationId, "admin", ...segments);
+const owner = (method, operationId, ...segments) => route(method, operationId, "owner", ...segments);
 const ownerFresh = (method, operationId, ...segments) => route(method, operationId, "owner:fresh", ...segments);
 
 // This is the complete Control API contract. Authorization and dispatch both
@@ -85,18 +86,18 @@ const CONTROL_ROUTES = Object.freeze([
   admin("secrets.material.usage", "control", "secrets", "materials", parameter("materialId"), "usage"),
   admin("secrets.material.access", "control", "secrets", "materials", parameter("materialId"), "access"),
 
-  ownerFresh("GET", "vault.runtime.catalog", "control", "vault", "runtime"),
-  ownerFresh("POST", "vault.runtime.adopt", "control", "vault", "runtime", "adopt"),
-  ownerFresh("POST", "vault.runtime.plan", "control", "vault", "runtime", "plan"),
-  ownerFresh("POST", "vault.runtime.apply", "control", "vault", "runtime", "apply"),
-  ownerFresh("POST", "vault.runtime.rollback", "control", "vault", "runtime", "rollback"),
-  ownerFresh("POST", "vault.runtime.status", "control", "vault", "runtime", "status"),
-  ownerFresh("POST", "vault.secret.version", "control", "vault", "secrets", parameter("vaultItemId"), "versions"),
-  ownerFresh("GET", "vault.inventory.read", "control", "vault"),
-  ownerFresh("POST", "vault.secret.store", "control", "vault", "secrets"),
-  ownerFresh("POST", "vault.import-existing", "control", "vault", "import-existing"),
+  owner("GET", "vault.runtime.catalog", "control", "vault", "runtime"),
+  owner("POST", "vault.runtime.adopt", "control", "vault", "runtime", "adopt"),
+  owner("POST", "vault.runtime.plan", "control", "vault", "runtime", "plan"),
+  owner("POST", "vault.runtime.apply", "control", "vault", "runtime", "apply"),
+  owner("POST", "vault.runtime.rollback", "control", "vault", "runtime", "rollback"),
+  owner("POST", "vault.runtime.status", "control", "vault", "runtime", "status"),
+  owner("POST", "vault.secret.version", "control", "vault", "secrets", parameter("vaultItemId"), "versions"),
+  owner("GET", "vault.inventory.read", "control", "vault"),
+  owner("POST", "vault.secret.store", "control", "vault", "secrets"),
+  owner("POST", "vault.import-existing", "control", "vault", "import-existing"),
   ownerFresh("POST", "vault.secret.reveal", "control", "vault", "secrets", parameter("vaultItemId"), "reveal"),
-  ownerFresh("POST", "vault.secret.delete", "control", "vault", "secrets", parameter("vaultItemId"), "delete"),
+  owner("POST", "vault.secret.delete", "control", "vault", "secrets", parameter("vaultItemId"), "delete"),
 
   viewer("workers-jobs.read", "control", "workers-jobs"),
   admin("workers-jobs.worker.create", "control", "workers-jobs", "workers"),
@@ -159,7 +160,7 @@ const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   // lifetime. Fresh passkey proof remains attached to sensitive operations.
   viewer("ui.control-center"),
   viewer("ui.control-center.index", "index.html"),
-  ownerFresh("POST", "legacy.vault", "actions", "vault-command"),
+  owner("POST", "legacy.vault", "actions", "vault-command"),
   ownerFresh("POST", "legacy.database", "actions", "database-command"),
   ownerFresh("POST", "legacy.database-delete", "actions", "database-delete-command"),
   ownerFresh("POST", "legacy.database-admin-login", "actions", "database-admin-login"),

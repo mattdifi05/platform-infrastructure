@@ -527,12 +527,22 @@
     active.focus({ preventScroll: true });
   }
 
+  var portalMotions = new WeakMap();
+  function animatePortalElement(element, frames) {
+    if (!element) return;
+    var previous = portalMotions.get(element);
+    if (previous) { previous.cancel(); portalMotions.delete(element); }
+    if (typeof element.animate !== "function" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    var animation = element.animate(frames, { duration: 220, easing: "cubic-bezier(.22,1,.36,1)" });
+    portalMotions.set(element, animation);
+    var finish = function () { if (portalMotions.get(element) === animation) portalMotions.delete(element); };
+    animation.finished.then(finish, finish);
+    return animation;
+  }
+
   function animatePortalPage() {
-    var page = document.querySelector(".ops-shell .ops-page");
-    if (!page || typeof page.animate !== "function" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    page.getAnimations().forEach(function (animation) { if (animation.id === "cc-route-enter") animation.cancel(); });
-    var entrance = page.animate([{ opacity: .5, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 180, easing: "ease-out" });
-    entrance.id = "cc-route-enter";
+    var entrance = animatePortalElement(document.querySelector(".ops-shell .ops-page"), [{ opacity: .88, transform: "translateY(4px)" }, { opacity: 1, transform: "translateY(0)" }]);
+    if (entrance) entrance.id = "cc-route-enter";
   }
 
   function setText(node, value) {
@@ -946,7 +956,7 @@
       if (nav) nav.removeAttribute("data-nav-pill-ready");
       return false;
     }
-    var instant = Boolean(options && options.instant);
+    var instant = Boolean(options && options.instant) || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     var from = instant ? null : opsNavPillRectToTarget(nav, options && options.fromViewportRect);
     if (opsNavPillFrame) {
       window.cancelAnimationFrame(opsNavPillFrame);
@@ -1207,12 +1217,33 @@
     if (formSubmissions.has(form)) return;
     formSubmissions.add(form);
     var button = form.querySelector("button[type=submit]");
+    var secretRoot = form.closest("[data-secrets-page]");
+    if (secretRoot && secretRoot.dataset.managementBusy === "true") { formSubmissions.delete(form); return; }
+    var pendingControls = [];
+    if (secretRoot) {
+      secretRoot.dataset.managementBusy = "true"; form.setAttribute("aria-busy", "true");
+      secretRoot.querySelectorAll("[data-secret-create],[data-secret-edit],[data-secret-delete],[data-secret-close]").forEach(function (control) { if (!control.disabled) { pendingControls.push(control); control.disabled = true; } });
+      var pendingStatus = form.querySelector("[data-secret-form-status]");
+      if (pendingStatus) { pendingStatus.removeAttribute("data-error"); pendingStatus.textContent = form.elements.action.value === "delete" ? "Eliminazione in corso…" : "Salvataggio in corso…"; }
+    }
     if (button) button.disabled = true;
     try {
-      await hostingRequest(form.getAttribute("action"), Object.fromEntries(new FormData(form).entries()));
-      clearCache(); window.location.reload();
-    } catch (error) { if (error.name !== "ReauthenticationRedirect") showError(error.message || "Modifica Vault non riuscita."); }
-    finally { formSubmissions.delete(form); if (button && button.isConnected) button.disabled = false; }
+      var payload = Object.fromEntries(new FormData(form).entries());
+      await hostingRequest(form.getAttribute("action"), payload);
+      if (!form.isConnected || (secretRoot && !secretRoot.isConnected)) return;
+      form.querySelectorAll('textarea,input[type="password"]').forEach(function (field) { field.value = ""; });
+      clearCache();
+      await navigate(new URL(window.location.href), { history: "replace", pageScrollTop: currentPageScrollTop() });
+      document.dispatchEvent(new CustomEvent("cc-vault-management-complete", { detail: { action: payload.action } }));
+    } catch (error) {
+      if (error.name !== "ReauthenticationRedirect") {
+        if (!form.isConnected) return;
+        var inlineStatus = form.querySelector("[data-secret-form-status]");
+        if (inlineStatus) { inlineStatus.textContent = error.message || "Modifica Vault non riuscita."; inlineStatus.dataset.error = "true"; }
+        else showError(error.message || "Modifica Vault non riuscita.");
+      }
+    }
+    finally { if (secretRoot) delete secretRoot.dataset.managementBusy; form.removeAttribute("aria-busy"); pendingControls.forEach(function (control) { if (control.isConnected) control.disabled = false; }); formSubmissions.delete(form); if (button && button.isConnected) button.disabled = false; }
   }
 
   async function submitVaultRuntime(form) {
@@ -1257,7 +1288,7 @@
   function refreshVaultPanel(bindingBox) {
     clearCache();
     if (bindingBox && bindingBox.id) window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + "#" + bindingBox.id);
-    window.location.reload();
+    navigate(new URL(window.location.href), { history: "replace", pageScrollTop: currentPageScrollTop() }).then(function () { if (bindingBox && bindingBox.id) openVaultBinding(bindingBox.id); });
   }
 
   function openVaultBinding(bindingId) {
@@ -1299,65 +1330,61 @@
     timer = window.setTimeout(checkStatus, 2000);
   }
 
-  function hideVaultSecret(box, button) {
-    var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
-    var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
-    if (input) {
-      input.value = "";
-      if (input.tagName === "INPUT") input.type = "password";
-      input.dataset.vaultVisible = "false";
-    }
-    if (copyButton) copyButton.disabled = true;
-    if (button) button.textContent = "Mostra";
+  var vaultRevealStates = new WeakMap();
+  function setVaultRevealLabel(button, visible) {
+    if (!button) return;
+    var label = button.querySelector("[data-vault-reveal-label]");
+    if (label) label.textContent = visible ? "Nascondi" : "Mostra"; else button.textContent = visible ? "Nascondi" : "Mostra";
+    button.setAttribute("aria-pressed", String(visible));
+    if (button.hasAttribute("aria-label")) button.setAttribute("aria-label", button.getAttribute("aria-label").replace(/^(Mostra|Nascondi)/, visible ? "Nascondi" : "Mostra"));
   }
-
+  function hideVaultSecret(box, button) {
+    if (!box) return;
+    var previous = vaultRevealStates.get(box);
+    if (previous && previous.timer) window.clearTimeout(previous.timer);
+    vaultRevealStates.set(box, { generation: (previous?.generation || 0) + 1, timer: null });
+    var input = box.querySelector("[data-vault-reveal-value]");
+    var copyButton = box.querySelector("[data-vault-copy-action]");
+    if (input) { input.value = ""; if (input.tagName === "INPUT") input.type = "password"; input.dataset.vaultVisible = "false"; }
+    var revealed = box.querySelector("[data-secret-revealed]"); if (revealed) revealed.hidden = true;
+    if (copyButton) copyButton.disabled = true;
+    setVaultRevealLabel(button || box.querySelector("[data-vault-reveal-action]"), false);
+  }
+  function clearVaultReveals() {
+    document.querySelectorAll("[data-vault-reveal-box]").forEach(function (box) { hideVaultSecret(box); });
+  }
   async function revealVaultSecret(button) {
     var id = button.getAttribute("data-vault-id") || "";
     var confirm = button.getAttribute("data-vault-confirm") || "";
     var box = button.closest("[data-vault-reveal-box]");
-    var input = box ? box.querySelector("[data-vault-reveal-value]") : null;
-    var copyButton = box ? box.querySelector("[data-vault-copy-action]") : null;
-    if (!id || !confirm || !box || !input) return;
-    if (input.dataset.vaultVisible === "true") {
-      hideVaultSecret(box, button);
-      return;
-    }
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
+    var input = box?.querySelector("[data-vault-reveal-value]");
+    var copyButton = box?.querySelector("[data-vault-copy-action]");
+    if (!id || !confirm || !box || !input || button.disabled || passkeyActionInFlight) return;
+    if (input.dataset.vaultVisible === "true") { hideVaultSecret(box, button); return; }
+    hideVaultSecret(box, button);
+    var state = vaultRevealStates.get(box);
+    button.disabled = true; button.setAttribute("aria-busy", "true");
+    passkeyActionInFlight = true;
     try {
-      var response;
-      var payload;
-      for (var attempt = 0; attempt < 2; attempt += 1) {
-        var headers = new Headers();
-        headers.set("Accept", "application/json");
-        headers.set("Content-Type", "application/x-www-form-urlencoded");
-        headers.set("X-Requested-With", "platform-control-center");
-        addMutationHeaders(headers, "POST");
-        response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", {
-          body: new URLSearchParams({ confirm: confirm }),
-          credentials: "same-origin",
-          headers: headers,
-          method: "POST",
-        });
-        payload = await response.json();
-        if (payload.error !== "admin_reauthentication_required" || attempt > 0) break;
-        await authenticateWithSystemPasskey();
-      }
-      if (!response.ok) throw new Error(payload.message || payload.error || "Reveal failed.");
+      await authenticateWithSystemPasskey();
+      if (!box.isConnected || document.hidden || vaultRevealStates.get(box) !== state) return;
+      var headers = new Headers(); headers.set("Accept", "application/json"); headers.set("Content-Type", "application/x-www-form-urlencoded"); headers.set("X-Requested-With", "platform-control-center"); addMutationHeaders(headers, "POST");
+      var response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", { body: new URLSearchParams({ confirm: confirm }), credentials: "same-origin", headers: headers, method: "POST" });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || payload.error || "Valore non disponibile.");
+      if (!box.isConnected || document.hidden || vaultRevealStates.get(box) !== state) return;
       if (input.tagName === "INPUT") input.type = "text";
-      input.value = payload.value || "";
-      input.dataset.vaultVisible = "true";
-      button.textContent = "Nascondi";
-      if (copyButton) copyButton.disabled = false;
-      window.setTimeout(function () {
-        if (input.dataset.vaultVisible === "true") hideVaultSecret(box, button);
-      }, Math.max(10000, Number(payload.ttlMs || 120000)));
+      input.value = payload.value || ""; input.dataset.vaultVisible = "true";
+      var revealed = box.querySelector("[data-secret-revealed]"); if (revealed) revealed.hidden = false;
+      setVaultRevealLabel(button, true); if (copyButton) copyButton.disabled = false;
+      state.timer = window.setTimeout(function () { if (vaultRevealStates.get(box) === state) hideVaultSecret(box, button); }, Math.min(30000, Math.max(1, Number(payload.ttlMs) || 30000)));
     } catch (error) {
-      showError(error && error.message ? error.message : "Reveal failed.");
-    } finally {
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
+      var message = ["NotAllowedError", "AbortError"].includes(error?.name) ? "Autenticazione annullata. Il valore resta nascosto." : error?.message || "Valore non disponibile.";
+      var inline = box.querySelector("[data-secret-reveal-status]");
+      if (inline) { inline.textContent = message; inline.hidden = false; }
+      else showError(message);
     }
+    finally { passkeyActionInFlight = false; if (button.isConnected) { button.disabled = false; button.removeAttribute("aria-busy"); } }
   }
 
   async function copyVaultSecret(button) {
@@ -1378,6 +1405,7 @@
 
   async function navigate(url, options) {
     if (!url || !canRenderPath(url)) return false;
+    clearVaultReveals();
     var sequence = ++navigationSequence;
     var historyMode = options && options.history ? options.history : "push";
     var sidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : null;
@@ -1579,8 +1607,13 @@
     var input = root.querySelector("[data-application-search-input]");
     var query = String(input ? input.value : "").trim().toLocaleLowerCase("it");
     var visible = 0;
-    root.querySelectorAll("[data-application-row]").forEach(function (row) {
+    var changed = new Set(), positions = new Map();
+    var rows = Array.from(root.querySelectorAll("[data-application-row]"));
+    rows.forEach(function (row) { if (!row.hidden && row.getBoundingClientRect) positions.set(row, row.getBoundingClientRect().top); });
+    rows.forEach(function (row) { var animation = portalMotions.get(row); if (animation) { animation.cancel(); portalMotions.delete(row); } });
+    rows.forEach(function (row) {
       var matches = String(row.dataset.applicationSearch || "").toLocaleLowerCase("it").indexOf(query) !== -1;
+      if (matches && row.hidden) changed.add(row);
       row.hidden = !matches;
       if (matches) visible += 1;
     });
@@ -1589,6 +1622,14 @@
     });
     var empty = root.querySelector("[data-application-search-empty]");
     if (empty) empty.hidden = !query || visible > 0;
+    rows.forEach(function (row) {
+      if (row.hidden) return;
+      if (changed.has(row)) animatePortalElement(row, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "translateY(0)" }]);
+      else if (positions.has(row) && row.getBoundingClientRect) {
+        var delta = positions.get(row) - row.getBoundingClientRect().top;
+        if (Math.abs(delta) > 1) animatePortalElement(row, [{ transform: "translateY(" + delta + "px)" }, { transform: "translateY(0)" }]);
+      }
+    });
   }
 
   function startFileManagers() {
@@ -2099,7 +2140,7 @@
     var title = operation === "clone" ? "Crea copia privata" : "Cambia visibilità";
     dialog.setAttribute("aria-label", title);
     var actionLabel = operation === "clone" ? "CLONE" : String(mode || "").toUpperCase();
-    dialog.innerHTML = '<div class="cc-dialog-head"><h2>' + title + '</h2><button type="button" data-hosting-close aria-label="Chiudi">×</button></div>' +
+    dialog.innerHTML = '<div class="cc-dialog-head"><h2>' + title + '</h2><button type="button" data-hosting-close aria-label="Chiudi">' + (document.querySelector('template[data-control-icon="xmark"]')?.innerHTML || "Chiudi") + '</button></div>' +
       (operation === "clone"
         ? '<dl class="cc-hosting-review"><dt>Host previsto</dt><dd data-hosting-target></dd><dt>Origine</dt><dd>La produzione resta separata dalla copia.</dd><dt>Dati</dt><dd>Archivio e credenziali isolati dalla produzione.</dd><dt>Invio email</dt><dd>Disattivato</dd><dt>Pianificazioni</dt><dd>Disattivate</dd><dt>Accesso</dt><dd>Cloudflare Access · solo account owner</dd></dl>'
         : '<p>La visibilità attuale rimane quella verificata finché il servizio non conferma il nuovo stato.</p><p class="cc-hosting-review-value">Nuovo stato richiesto: <strong>' + hostingModeLabel(mode) + '</strong></p><div class="cc-hosting-plan" data-hosting-plan hidden><strong>Piano per <span data-hosting-plan-host></span></strong><div class="cc-hosting-plan-hosts" data-hosting-plan-hosts></div><small data-hosting-plan-revision></small></div>') +
@@ -2119,14 +2160,24 @@
       var progress = dialog.querySelector("[data-hosting-dialog-progress]"); progress.hidden = !loading; progress.setAttribute("aria-label", text);
     }
     function updateApply() {
-      apply.disabled = busy || succeeded || (operation === "visibility" && !reviewedPlan) || input.value.trim() !== actionLabel;
-      input.disabled = busy || succeeded || (operation === "visibility" && !reviewedPlan);
-      dialog.querySelectorAll("[data-hosting-close]").forEach(function (button) { button.disabled = busy; });
+      apply.disabled = closingReview || busy || succeeded || (operation === "visibility" && !reviewedPlan) || input.value.trim() !== actionLabel;
+      input.disabled = closingReview || busy || succeeded || (operation === "visibility" && !reviewedPlan);
+      dialog.querySelectorAll("[data-hosting-close]").forEach(function (button) { button.disabled = closingReview || busy; });
     }
-    function closeReview() { if (busy) return; dialog.close(); }
+    var closingReview = false;
+    function closeReview() {
+      if (busy || closingReview) return;
+      closingReview = true;
+      if (!dialog.animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches) { dialog.close(); return; }
+      dialog.dataset.closing = "true";
+      dialog.querySelectorAll("button,input").forEach(function (control) { control.disabled = true; });
+      var leave = dialog.animate([{ opacity: 1, transform: "translateY(0) scale(1)" }, { opacity: 0, transform: "translateY(4px) scale(.995)" }], { duration: 140, easing: "cubic-bezier(.22,1,.36,1)" });
+      var finish = function () { if (dialog.isConnected) dialog.close(); };
+      leave.finished.then(finish, finish);
+    }
     input.addEventListener("input", updateApply);
     dialog.querySelectorAll("[data-hosting-close]").forEach(function (button) { button.addEventListener("click", closeReview); });
-    dialog.addEventListener("cancel", function (event) { if (busy) event.preventDefault(); });
+    dialog.addEventListener("cancel", function (event) { event.preventDefault(); if (!busy) closeReview(); });
     dialog.addEventListener("close", function () {
       if (!succeeded && !busy) {
         state.operation = "";
@@ -2136,6 +2187,7 @@
       dialog.remove();
     }, { once: true });
     async function loadPlan() {
+      if (closingReview || !dialog.isConnected) return;
       reviewedPlan = null; input.value = ""; retry.hidden = true;
       state.operation = "review";
       syncHostingControls(panel);
@@ -2144,7 +2196,7 @@
       updateApply();
       try {
         var value = await hostingRequest("/control/projects/" + encodeURIComponent(projectId) + "/hosting-plan?mode=" + encodeURIComponent(mode));
-        if (!dialog.isConnected) return;
+        if (closingReview || !dialog.isConnected) return;
         var plan = value.plan || {};
         if ((typeof plan.revision !== "string" && typeof plan.revision !== "number") || !plan.confirmationRequired) throw Error("Il piano non include revisione e conferma valide.");
         reviewedPlan = plan;
@@ -2175,7 +2227,7 @@
         hostingFeedback(panel, "review", "Piano pronto. In attesa della tua conferma.", false);
         updateApply(); input.focus();
       } catch (error) {
-        if (!dialog.isConnected) return;
+        if (closingReview || !dialog.isConnected) return;
         retry.hidden = false;
         dialogFeedback("error", "Piano non disponibile. Aggiorna il piano per riprovare.", false);
         hostingFeedback(panel, "error", "Piano non disponibile. Nessuna modifica confermata.", false);
@@ -2183,11 +2235,12 @@
       }
     }
     retry.addEventListener("click", function () {
+      if (closingReview || !dialog.isConnected) return;
       if (operation === "visibility") loadPlan();
       else { retry.hidden = true; input.value = ""; dialogFeedback("review", "Controlla i dati e conferma nuovamente la richiesta.", false); updateApply(); }
     });
     apply.addEventListener("click", async function () {
-      if (apply.disabled || busy) return;
+      if (closingReview || !dialog.isConnected || apply.disabled || busy) return;
       busy = true; submitted = true; retry.hidden = true; state.operation = operation;
       updateApply(); syncHostingControls(panel);
       try {
@@ -2399,7 +2452,13 @@
         if (available) meter.value = Math.min(100, metric.usedPercent);
       });
       var network = value.network || {}, totals = network.totals || {};
-      root.querySelector('[data-host-metric="network"]').textContent = network.available ? "↓ " + speed(totals.rxBytesPerSecond) + "\n↑ " + speed(totals.txBytesPerSecond) : "—";
+      var networkNode = root.querySelector('[data-host-metric="network"]');
+      var rxNode = networkNode.querySelector('[data-host-network-value="rx"]');
+      var txNode = networkNode.querySelector('[data-host-network-value="tx"]');
+      if (rxNode && txNode) {
+        rxNode.textContent = network.available ? speed(totals.rxBytesPerSecond) : "—";
+        txNode.textContent = network.available ? speed(totals.txBytesPerSecond) : "—";
+      } else networkNode.textContent = network.available ? "Ricezione " + speed(totals.rxBytesPerSecond) + "\nInvio " + speed(totals.txBytesPerSecond) : "—";
       root.querySelector('[data-host-metric-detail="network"]').textContent = network.available ? "Media 2 minuti · interfacce host, bridge e tunnel esclusi" : "Non disponibile";
       var load = value.load || {}, swap = value.swap || {}, inodes = value.inodes || {}, io = value.diskIo || {}, ioTotals = io.totals || {}, processes = value.processes || {}, descriptors = value.fileDescriptors || {};
       detail("load", load.available ? [load.one, load.five, load.fifteen].map(amount).join(" / ") : "Non disponibile");
@@ -2459,6 +2518,8 @@
   function init() {
     if (initialized) return;
     initialized = true;
+    document.addEventListener("visibilitychange", function () { if (document.hidden) clearVaultReveals(); });
+    window.addEventListener("pagehide", clearVaultReveals);
     document.body.dataset.ccEnhanced = "true";
     document.body.dataset.ccBootId = bootId;
     initProjectHosting();
@@ -2472,6 +2533,7 @@
     document.addEventListener("click", openProjectRestore);
     startFileManagers();
     fitSingleLineText();
+    animatePortalPage();
     storeCache(window.location.href, document.documentElement.outerHTML, "");
     runInitialControlCenterPreload();
 

@@ -171,7 +171,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(html, /data-ops-nav-group="vault"|section=vault/);
   assert.match(html, /data-ops-nav-group="secrets"/);
   assert.doesNotMatch(html, /data-ops-nav-group="redis"|href="\/\?section=redis"/);
-  assert.match(html, /<a class="ops-nav-main ops-nav-direct" href="\/\?section=secrets" data-passkey-return-to="\/\?section=secrets">/);
+  assert.match(html, /<a class="ops-nav-main ops-nav-direct" href="\/\?section=secrets">/);
   assert.doesNotMatch(html, /data-status-runner|data-status-run-form|Avvia test reali|Registro completo test/);
   assert.doesNotMatch(html, /Attività/);
   assert.doesNotMatch(html, /section=activity/);
@@ -328,18 +328,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /\.ops-project-state-dot\.warn/);
   assert.match(localStyles, /\.ops-project-state-dot\.bad/);
   assert.match(localStyles, /\.ops-page\s*\{[^}]*align-content:\s*start/s);
-  assert.match(localStyles, /\.section-secrets\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.section-secrets \.ops-page\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.section-secrets \.ops-vault-section\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.section-secrets \.ops-vault-grid\s*\{[^}]*height:\s*auto[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.ops-vault-form\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
-  assert.match(localStyles, /\.ops-vault-inventory\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.ops-vault-list\s*\{[^}]*overflow:\s*auto[^}]*overscroll-behavior:\s*contain/s);
-  assert.match(localStyles, /\.ops-vault-list\s*\{[^}]*grid-auto-rows:\s*max-content/s);
-  assert.match(localStyles, /\.ops-vault-item\s*\{[^}]*align-items:\s*start[^}]*grid-auto-rows:\s*max-content[^}]*height:\s*auto[^}]*overflow:\s*hidden/s);
-  assert.match(localStyles, /\.ops-vault-item-meta\s*\{[^}]*flex-wrap:\s*wrap/s);
-  assert.match(localStyles, /\.ops-vault-item-main \.ops-vault-item-details\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*normal/s);
-  assert.match(localStyles, /\.ops-vault-reveal\s*\{[^}]*grid-template-columns:\s*minmax\(140px,\s*1fr\) auto auto[^}]*min-width:\s*0/s);
+  const secretStyles = await getText(`${baseUrl}/assets/control-center/secrets.css`);
+  assert.match(secretStyles, /\.cc-secrets \[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
+  assert.match(secretStyles, /\.cc-secret-list\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto[^}]*overscroll-behavior:\s*contain/s);
+  assert.match(secretStyles, /\.cc-secret-editor\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(secretStyles, /prefers-reduced-motion:\s*reduce/);
   assert.match(localStyles, /\.ops-section\s*\{[^}]*grid-auto-rows:\s*max-content/s);
   assert.match(localStyles, /\.ops-project-detail-screen\s*\{[^}]*align-content:\s*start/s);
   assert.match(localStyles, /\.ops-shell\s*\{[^}]*--ops-sidebar-width:\s*264px/s);
@@ -644,7 +637,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /setAttribute\("open", ""\)/);
   assert.match(localClient, /navigator\.clipboard\.writeText/);
   // Full refresh is restricted to explicit Vault mutation and verified native delivery.
-  assert.equal((localClient.match(/window\.location\.reload/g) || []).length, 2);
+  assert.equal((localClient.match(/window\.location\.reload/g) || []).length, 0);
   const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
   assert.equal(localUiPackage.name, "@platform/control-center-local-ui");
   assert.equal(localUiPackage.controlCenterProject, "@platform/control-center");
@@ -658,6 +651,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(localUiPackage.entrypoints.includes("/assets/control-center/control-center.js"), true);
   assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.css"), true);
   assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.js"), true);
+  for (const asset of ["secrets.css", "secrets.js"]) {
+    assert.equal(localUiPackage.entrypoints.includes(`/assets/control-center/${asset}`), true);
+    assert.equal(localUiPackage.servedAssets.includes(`/assets/control-center/${asset}`), true);
+  }
   assert.equal(localUiPackage.coreExports.includes("OperationsShell"), true);
   assert.equal(localUiPackage.coreExports.includes("ProjectFileBrowser"), true);
   assert.equal(localUiPackage.coreExports.includes("ActivityTable"), false);
@@ -2167,6 +2164,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(secretsHtml, /ops-shell/);
   assert.match(secretsHtml, /<h1 id="control-page-title">Secret<\/h1>/);
   assert.match(secretsHtml, /Aggiungi secret|Secret salvati/);
+  assert.match(secretsHtml, /data-secrets-page/);
+  assert.match(secretsHtml, /data-secret-search/);
+  assert.match(secretsHtml, /data-secret-filter="linked"/);
+  assert.match(secretsHtml, /data-secret-editor[^>]*hidden/);
+  assert.match(secretsHtml, /data-secret-edit-form[^]*?<textarea name="newValue"[^>]*><\/textarea>/);
+  assert.doesNotMatch(secretsHtml, /data-passkey-return-to="\/?\?section=secrets"/);
   assert.doesNotMatch(secretsHtml, /Secret rilevati|Inventario metadata secret/);
   assert.match(secretsHtml, /class="ops-nav-main ops-nav-direct active"[^>]*aria-current="page"/);
 
@@ -2269,7 +2272,7 @@ test("Admin Control Center local foundation", async (t) => {
   const importedVaultHtml = await getText(`${baseUrl}/?section=secrets`);
   assert.match(importedVaultHtml, /Github Token/);
   assert.match(importedVaultHtml, /Mostra/);
-  assert.match(importedVaultHtml, /Platform condiviso/);
+  assert.match(importedVaultHtml, /Platform/);
   assert.doesNotMatch(importedVaultHtml, /Secret rilevati|Inventario metadata secret/);
   assert.doesNotMatch(importedVaultHtml, /existing-github-token-should-reveal-only/);
 
@@ -2362,14 +2365,14 @@ test("Admin Control Center local foundation", async (t) => {
 
   const vaultHtmlAfterApply = await getText(`${baseUrl}/?section=secrets`);
   assert.match(vaultHtmlAfterApply, /Node demo app password/);
-  assert.match(vaultHtmlAfterApply, /Cosa significano i campi/);
+  assert.match(vaultHtmlAfterApply, /Guida ai campi/);
   assert.match(vaultHtmlAfterApply, /Riferimento trovato per: Node Demo/);
   assert.match(vaultHtmlAfterApply, /node-demo\/src\/index\.js/);
-  assert.match(vaultHtmlAfterApply, /Scansione completa:/);
+  assert.match(vaultHtmlAfterApply, /data-secret-scan-complete="true"/);
   assert.doesNotMatch(vaultHtmlAfterApply, /vault-plain-value-should-not-leak/);
   assert.doesNotMatch(vaultHtmlAfterApply, /sealedValue/);
 
-  assert.match(vaultHtmlAfterApply, /ops-vault-saved-scroll/);
+  assert.match(vaultHtmlAfterApply, /cc-secret-list/);
   assert.match(vaultHtmlAfterApply, />Modifica</);
   assert.match(vaultHtmlAfterApply, />Elimina</);
   const currentVaultRevision = (await import("../vault/store.mjs")).readStoreSync({ storePath: vaultFile }).revision;

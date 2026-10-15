@@ -48,3 +48,6 @@
 .cc-overview .cc-host-detail > .cc-overview-caption { margin: 8px 0 12px; }
 @media (max-width: 1120px) { .cc-overview-card { padding: 18px; } .cc-overview-card-head { align-items: flex-start; flex-direction: column; gap: 5px; } .cc-overview-io-numbers { gap: 16px; } .cc-overview-io-numbers strong { font-size: 19px; } }
 @media (prefers-reduced-motion: reduce) { .cc-overview *, .cc-overview *::before { transition: none !important; animation: none !important; } }
+
+.cc-overview-direction { display: inline-flex; align-items: center; gap: 8px; margin-right: 16px; }
+.cc-overview-direction > svg { width: 16px; height: 20px; flex: none; }

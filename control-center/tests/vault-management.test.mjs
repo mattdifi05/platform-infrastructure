@@ -4,8 +4,9 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { loadStore, upsertVersion, VaultConflictError } from '../vault/store.mjs';
-import { removeVaultItem, renderVaultManagementControls } from '../vault/management.mjs';
+import { removeVaultItem } from '../vault/management.mjs';
 import { createVaultRuntime } from '../vault/runtime.mjs';
+import { renderSecretPage } from '../vault/ui.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vault-management-'));
@@ -67,9 +68,12 @@ test('ordinary unbound record can be removed when native runtime is not configur
 });
 
 test('management explicitly separates edit, reveal and typed removal; labels and IDs are escaped', () => {
-  const html = renderVaultManagementControls({ id: 'app<secret', label: '<unsafe-label>' }, { expectedRevision: 'r1', bindings: [{ bindingId: 'app', label: 'App' }] });
-  assert.match(html, />Modifica</); assert.match(html, />Mostra</); assert.match(html, />Elimina</);
+  const html = renderSecretPage({ items: [{ id: 'app<secret', label: '<unsafe-label>', projectId: 'platform', environment: 'local', value: 'fixture-current-plaintext', sealedValue: { data: 'fixture-ciphertext' } }], revision: 'r1', runtime: { available: true, bindings: [{ bindingId: 'app', itemId: 'app<secret', label: 'App', versions: [] }] } });
+  assert.match(html, /data-secret-edit/); assert.match(html, /data-vault-reveal-action/); assert.match(html, /data-secret-delete/);
   assert.match(html, /name="expectedVaultRevision" value="r1"/); assert.match(html, /name="typedConfirmation" pattern="RIMUOVI"/);
   assert.match(html, /la credenziale in uso resta al servizio/); assert.match(html, /la credenziale in uso non cambia/i);
-  assert.match(html, /app&lt;secret/); assert.doesNotMatch(html, /<unsafe-label>/); assert.match(html, /#vault-runtime-app/);
+  assert.match(html, /app&lt;secret/); assert.doesNotMatch(html, /<unsafe-label>/); assert.match(html, /data-vault-binding-link="app"/);
+  assert.match(html, /data-secret-edit-form[^]*?<textarea name="newValue"[^>]*><\/textarea>/);
+  assert.match(html, /data-secret-revealed hidden/);
+  assert.doesNotMatch(html, /fixture-current-plaintext|fixture-ciphertext/);
 });

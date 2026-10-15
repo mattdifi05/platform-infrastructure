@@ -60,9 +60,13 @@ root-reviewed binding and a separate plan; see
 The owner can explicitly edit, reveal or remove an ordinary application credential.
 Editing writes an immutable encrypted version and preserves trailing newlines; it
 does not deliver the version. A bound credential still requires a reviewed plan
-and a separate apply action. Reveal and copy preserve multiline values.
+and a separate apply action. The replacement field starts empty; changing it
+does not decrypt the current version. Reveal and copy preserve multiline values.
+Only explicit reveal requires recent passkey proof; returned values expire from
+the browser within 30 seconds. Metadata and ordinary management use the owner
+session and retain all CSRF, revision and runtime-binding checks.
 
-Removal requires fresh owner authorization, CSRF and the typed `RIMUOVI`
+Removal requires an authenticated owner session, CSRF and the typed `RIMUOVI`
 confirmation. For an adopted binding, the native operator first verifies and
 detaches Vault management without changing runtime files, consumers or provider
 credentials. The Control Center then deletes only the encrypted item under the
