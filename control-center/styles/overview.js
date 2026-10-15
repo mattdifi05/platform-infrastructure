@@ -192,7 +192,13 @@ export function mountOverview(root) {
       const geometry = chartGeometry(panel.history, keys, { ceiling: chart.percent ? 100 : null, renderTime: cursor });
       const scaleText = geometry.hasData ? chart.percent ? "100%" : chart.root.dataset.overviewUnit === "bytes/s" ? speed(geometry.maximum) : bytes(geometry.maximum) : "—";
       if (chart.scale && chart.scale.textContent !== scaleText) chart.scale.textContent = scaleText;
-      if (chart.empty) { chart.empty.hidden = geometry.hasData; if (!geometry.hasData) chart.empty.textContent = "Dati non disponibili"; }
+      if (chart.empty) {
+        chart.empty.hidden = geometry.hasData;
+        if (!geometry.hasData) {
+          const preparing = panel.history.some((sample) => sample.observedAt > cursor && keys.some((key) => number(sample[key])));
+          chart.empty.textContent = preparing ? "Preparazione del grafico…" : "Dati non disponibili";
+        }
+      }
       for (const series of geometry.series) {
         const nodes = chart.series.find((item) => item.key === series.key);
         nodes.line.setAttribute("d", series.line);

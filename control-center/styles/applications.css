@@ -1,0 +1,166 @@
+/* Applications catalog follows the accepted desktop reference. */
+.ops-shell.section-projects { --ops-sidebar-width: 236px; background: #f6f8fc; }
+.section-projects .ops-page { padding: 26px 30px 40px 36px; gap: 24px; }
+.section-projects .ops-page-head h1 { font-size: 32px; line-height: 1.2; letter-spacing: -.8px; font-weight: 750; margin-bottom: 6px; }
+.section-projects .ops-page-head span { color: #65758a; font-size: 16px; line-height: 1.45; }
+.cc-applications { --ops-project-border: 1px solid #e8edf4; --ops-project-radius: 12px; --ops-project-inner-radius: 12px; --ops-project-shadow: none; display: grid; gap: 24px; }
+.cc-applications-toolbar { display: flex; gap: 16px; align-items: center; }
+.cc-app-search { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; padding: 0 16px; height: 48px; border: 1px solid #e8edf4; border-radius: 10px; background: #fff; color: #65758a; }
+.cc-app-search > svg { width: 18px; height: 18px; flex: none; }
+.cc-app-search input { border: 0; outline: 0; background: transparent; font: inherit; font-size: 14px; color: #182230; width: 100%; min-width: 0; height: 100%; }
+.cc-app-search:focus-within { box-shadow: var(--cc-focus); }
+.cc-app-search input::placeholder { color: #65758a; }
+.cc-applications-toolbar .ops-button { height: 48px; padding: 0 18px; border-radius: 10px; gap: 12px; font-size: 14px; }
+.cc-applications details { position: relative; }
+.cc-applications summary { cursor: pointer; list-style: none; }
+.cc-applications summary::-webkit-details-marker { display: none; }
+.cc-applications .cc-app-folder-create { display: block; margin: 0; }
+.cc-applications .cc-app-folder-filters { margin: 0; gap: 20px; border-bottom: 1px solid #dfe6f0; }
+.cc-app-folder-tab { display: inline-flex; align-items: center; gap: 9px; padding: 10px 10px 16px; color: #65758a; font-size: 14px; font-weight: 600; border-bottom: 3px solid transparent; text-decoration: none; margin-bottom: -1px; }
+.cc-app-folder-tab span { font-size: 12px; }
+.cc-app-folder-tab.active { color: #2f7df6; border-bottom-color: #2f7df6; }
+.cc-applications .cc-app-folder-groups { gap: 24px; }
+.cc-applications .cc-app-folder-group { border: 1px solid #e8edf4; border-radius: 12px; background: #fff; }
+.cc-app-folder-heading { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; min-height: 62px; gap: 12px; }
+.cc-applications .cc-app-folder-heading h2 { display: flex; align-items: center; gap: 12px; margin: 0; font-size: 18px; font-weight: 650; color: #182230; }
+.cc-app-folder-heading h2 svg { width: 24px; height: 24px; color: #475467; }
+.cc-applications .cc-app-folder-heading h2 small { margin: 0; font-size: 13px; color: #65758a; font-weight: 500; }
+.cc-app-folder-menu > summary { color: #65758a; font-size: 26px; line-height: 1; display: flex; justify-content: center; width: 28px; height: 28px; }
+.cc-app-column-head, .cc-applications .cc-application-row { display: grid; grid-template-columns: minmax(260px, 1.35fr) minmax(200px, 1.15fr) minmax(100px, .6fr) minmax(130px, .65fr) 70px; column-gap: 16px; }
+.cc-app-column-head { padding: 13px 20px; background: #f8fafd; border-top: 1px solid #e8edf4; border-bottom: 1px solid #e8edf4; color: #65758a; font-size: 12px; font-weight: 500; }
+.cc-applications .ops-project-list { display: block; }
+.cc-applications .cc-app-folder-entry + .cc-app-folder-entry { border-top: 1px solid #e8edf4; }
+.cc-applications .cc-application-row { padding: 12px 20px 12px 16px; min-height: 70px; background: transparent; border: 0; border-radius: 0; box-shadow: none; position: relative; }
+.cc-application-identity { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.cc-applications .ops-project-row-icon { width: 44px; height: 44px; flex: none; border-radius: 12px; }
+.cc-applications .ops-project-row-icon svg { width: 18px; height: 22px; }
+.cc-applications .ops-project-row-name { gap: 12px; grid-template-columns: 10px minmax(0, 1fr); }
+.cc-applications .ops-project-state-dot { width: 10px; height: 10px; }
+.cc-applications .ops-project-row-name strong { color: #182230; font-size: 14px; font-weight: 650; letter-spacing: -.1px; }
+.cc-applications .ops-project-row-host a { color: #2f7df6; font-size: var(--fit-font-size, 14px); font-weight: 500; }
+.cc-applications .ops-project-row-runtime strong { font-size: 13px; color: #182230; font-weight: 500; }
+.cc-application-open { display: inline-flex; justify-self: end; align-items: center; gap: 14px; color: #2f7df6; font-size: 13px; font-weight: 600; text-decoration: none; }
+.cc-application-open svg { width: 9px; height: 14px; }
+.cc-applications .cc-app-folder-placement { display: block; margin: 0; color: #182230; font-size: 13px; }
+.cc-app-folder-placement > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; }
+.cc-app-folder-placement > summary svg { color: #65758a; width: 10px; height: 10px; flex: none; }
+.cc-app-popover { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; display: grid; align-items: stretch; gap: 14px; width: 270px; padding: 16px; background: #fff; color: #182230; border: 1px solid #dfe6f0; border-radius: 12px; box-shadow: 0 12px 30px rgba(24, 34, 48, .12); }
+.cc-app-popover form, .cc-applications .cc-app-folder-placement form { display: grid; gap: 12px; }
+.cc-app-popover label { display: grid; gap: 6px; width: auto; color: #65758a; font-size: 12px; }
+.cc-app-popover input, .cc-app-popover select { box-sizing: border-box; width: 100%; max-width: 100%; font: inherit; font-size: 13px; padding: 10px 12px; border: 1px solid #dfe6f0; border-radius: 8px; }
+.cc-app-popover p { font-size: 12px; line-height: 1.4; color: #65758a; margin: 0; }
+.cc-app-popover .ops-button { width: 100%; }
+.cc-app-search-empty { color: #65758a; font-size: 14px; text-align: center; padding: 24px; }
+.cc-applications [hidden] { display: none !important; }
+.cc-applications .cc-app-observed-row { position: relative; }
+.cc-applications .cc-app-observed-row > .ops-project-row { grid-template-columns: 44px minmax(216px, 1.35fr) minmax(200px, 1.15fr) minmax(100px, .6fr) minmax(130px, .65fr) 70px; border: 0; border-radius: 0; box-shadow: none; background: transparent; min-height: 70px; }
+.cc-app-observed-row > .ops-project-row > :last-child { grid-column: 6; }
+.cc-app-observed-row > .cc-app-folder-placement { position: absolute; right: 106px; width: 130px; top: 18px; }
+/* Esci remains visible at the browser's top-right corner on every page. */
+.ops-shell .ops-logout-form { position: fixed; top: 18px; right: 24px; left: auto; bottom: auto; width: 48px; height: 48px; padding: 0; z-index: 60; background: transparent; align-self: auto; justify-content: center; }
+.ops-shell .ops-logout-button { width: 44px; height: 44px; }
+.ops-shell .ops-page-head { padding-right: 56px; }
+@media (max-width: 1180px) and (min-width: 921px) {
+  .cc-app-column-head, .cc-applications .cc-application-row { grid-template-columns: minmax(200px, 1.2fr) minmax(170px, 1.1fr) 95px 105px 55px; column-gap: 10px; }
+  .cc-application-identity { gap: 10px; }
+}
+/* Detail screen shares the catalog's light surfaces and compact rhythm. */
+.section-projects .cc-application-detail { --ops-project-border: 1px solid #e8edf4; --ops-project-radius: 12px; --ops-project-shadow: none; gap: 18px; min-height: 0; }
+.cc-app-detail-back { display: inline-flex; align-items: center; gap: 10px; color: #2f7df6; font-size: 14px; font-weight: 600; text-decoration: none; justify-self: start; }
+.cc-app-detail-back svg { width: 14px; height: 14px; }
+.cc-application-detail .ops-project-detail-hero { display: grid; grid-template-columns: 66px minmax(0, 1fr) auto; gap: 20px; padding: 20px 18px; min-height: 114px; margin-right: 0; }
+.cc-application-detail .ops-project-detail-hero > .ops-project-row-icon { width: 66px; height: 66px; border-radius: 14px; }
+.cc-app-detail-identity { min-width: 0; }
+.cc-app-detail-identity h1 { display: flex; align-items: center; gap: 12px; font-size: 26px; font-weight: 750; letter-spacing: -.7px; margin: 0 0 12px; line-height: 1.1; }
+.cc-app-detail-metadata { display: flex; align-items: center; gap: 24px; padding-left: 24px; }
+.cc-app-detail-metadata .ops-project-row-host { padding-right: 24px; border-right: 1px solid #dfe6f0; }
+.cc-app-detail-metadata small { color: #65758a; font-size: 12px; }
+.cc-app-detail-metadata .ops-project-row-host a, .cc-app-detail-metadata .ops-project-row-runtime strong { font-size: 14px; font-weight: 600; }
+.cc-application-detail .cc-app-remove { border: 1px solid #f04438; color: #d92d20; background: #fff; border-radius: 12px; font-size: 12px; }
+.cc-application-detail .ops-project-detail-focus { gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cc-application-detail .ops-project-detail-panel { padding: 18px; border-radius: 12px; border: 1px solid #e8edf4; box-shadow: none; }
+.cc-application-detail .ops-project-detail-panel h3 { font-size: 18px; font-weight: 650; letter-spacing: -.3px; text-transform: none; color: #182230; }
+.cc-application-detail #project-hosting, .cc-application-detail #project-databases { grid-column: auto; min-height: 284px; }
+.cc-application-detail #project-resources, .cc-application-detail #project-file-manager { grid-column: 1 / -1; }
+.cc-application-detail .cc-hosting-description { display: none; }
+.cc-application-detail .cc-hosting-current { margin: 12px 0; font-size: 13px; }
+.cc-application-detail .cc-hosting-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.cc-application-detail .cc-hosting-actions .ops-button { width: 100%; font-size: 13px; min-height: 40px; border-radius: 10px; }
+.cc-application-detail .cc-hosting-copy { display: flex; flex-direction: column; align-items: start; border-top: 1px solid #e8edf4; background: transparent; border-radius: 0; margin-top: 16px; padding: 16px 0 0; gap: 12px; }
+.cc-application-detail .cc-hosting-copy p { font-size: 12px; line-height: 1.5; margin: 4px 0 0; }
+.cc-application-detail .cc-hosting-copy strong { font-size: 14px; }
+.cc-application-detail .cc-hosting-message:empty { display: none; }
+.cc-application-detail .ops-project-detail-resource-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 16px; }
+.cc-application-detail .ops-project-detail-fact { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 18px; row-gap: 6px; padding: 4px 20px; border: 0; border-radius: 0; background: transparent; }
+.cc-application-detail .ops-project-detail-fact + .ops-project-detail-fact { border-left: 1px solid #dfe6f0; }
+.cc-application-detail .ops-project-detail-fact svg { grid-row: 1 / 3; width: 28px; height: 28px; }
+.cc-application-detail .ops-project-detail-fact span { color: #182230; font-size: 13px; }
+.cc-application-detail .ops-project-detail-fact strong { color: #182230; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.cc-application-detail .ops-file-explorer-head { margin-bottom: 8px; }
+.cc-application-detail .ops-file-breadcrumb { margin-bottom: 0; border-radius: 10px; }
+.cc-application-detail .ops-file-workspace { height: 252px; border-radius: 0 0 10px 10px; background: #fff; box-shadow: none; border: 1px solid #e8edf4; border-top: 0; }
+.cc-application-detail .ops-file-grid { display: block; padding: 0; background: #fff; }
+.cc-app-file-columns { display: grid; grid-template-columns: minmax(0, 1fr) 100px 100px 210px 12px; gap: 12px; background: #f8fafd; padding: 11px 14px; color: #65758a; border: 1px solid #e8edf4; border-radius: 10px 10px 0 0; font-size: 12px; }
+.cc-application-detail .ops-file-tile { grid-template-columns: 24px minmax(0, 1fr) 100px 100px 210px 12px; min-height: 42px; gap: 12px; border-radius: 0; padding: 8px 14px; }
+.cc-application-detail .ops-file-tile + .ops-file-tile { border-top: 1px solid #e8edf4; }
+.cc-application-detail .ops-file-tile-icon { width: 24px; height: 24px; color: #2f7df6; background: transparent; border-radius: 0; }
+.cc-application-detail .ops-file-tile-main small { display: none; }
+.cc-application-detail .ops-file-tile-main strong { font-size: 13px; font-weight: 600; }
+.cc-application-detail .ops-file-tile-meta { display: contents; }
+.cc-application-detail .ops-file-tile-meta small { font-size: 12px; font-weight: 400; color: #65758a; }
+.cc-app-file-open { display: inline-flex; align-items: center; justify-content: end; color: #2f7df6; }
+.cc-app-file-open svg { width: 8px; height: 12px; }
+.cc-application-detail .ops-file-statusbar { padding: 12px 0 0; font-size: 12px; color: #65758a; }
+.section-projects .ops-page { gap: 21px; }
+.section-projects .ops-page-head h1 { margin-bottom: 2px; }
+.cc-applications-toolbar .ops-button.primary { background: #2f7df6; border-color: #2f7df6; }
+.cc-app-folder-placement > summary { justify-content: flex-start; gap: 16px; }
+/* Shared route feedback plus quiet motion for local catalog interactions. */
+.ops-shell .ops-page { transition: opacity 140ms ease, transform 180ms ease; animation: cc-app-page-in 180ms ease-out; }
+body[data-cc-navigation="loading"] .ops-shell .ops-page { opacity: .62; transform: translateY(2px); }
+.cc-applications .cc-app-folder-entry { animation: cc-app-row-in 160ms ease-out; }
+.cc-applications details[open] > .cc-app-popover { animation: cc-app-popover-in 150ms ease-out; transform-origin: top right; }
+.cc-app-folder-tab { transition: color 140ms ease, border-color 160ms ease; }
+.cc-applications .ops-button, .cc-applications summary, .cc-application-open, .cc-app-detail-back, .cc-application-detail .ops-button { transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, transform 120ms ease; }
+.cc-applications .ops-button:active, .cc-application-detail .ops-button:active { transform: translateY(1px); }
+.cc-app-folder-tab:hover, .cc-application-open:hover, .cc-app-detail-back:hover { color: #155eef; }
+.cc-applications .cc-app-folder-placement summary:hover { color: #2f7df6; }
+.cc-applications [aria-busy="true"], .cc-applications button:disabled { opacity: .6; }
+@keyframes cc-app-page-in { from { opacity: .5; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes cc-app-row-in { from { opacity: .3; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes cc-app-popover-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .ops-shell .ops-page, .cc-applications .cc-app-folder-entry, .cc-applications details[open] > .cc-app-popover { animation: none; }
+  .ops-shell .ops-page, .cc-applications .ops-button, .cc-applications summary, .cc-app-folder-tab, .cc-application-open, .cc-app-detail-back, .cc-application-detail .ops-button { transition: none; }
+  body[data-cc-navigation="loading"] .ops-shell .ops-page, .cc-applications .ops-button:active, .cc-application-detail .ops-button:active { transform: none; }
+}
+.cc-app-column-head { padding-left: 16px; }
+.cc-app-column-head > span:first-child { padding-left: 6px; }
+@supports (transition-behavior: allow-discrete) {
+  .cc-applications details::details-content { opacity: 0; transition: opacity 150ms ease, content-visibility 150ms allow-discrete; }
+  .cc-applications details[open]::details-content { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-applications details::details-content { transition: none; }
+}
+.cc-application-detail .cc-app-database-manage, .cc-application-detail .cc-app-database-create { margin-top: 12px; }
+.cc-application-detail .cc-app-database-manage > summary, .cc-application-detail .cc-app-database-create > summary { display: flex; width: max-content; margin-left: auto; list-style: none; cursor: pointer; font-size: 12px; }
+.cc-application-detail .cc-app-database-manage summary::-webkit-details-marker, .cc-application-detail .cc-app-database-create summary::-webkit-details-marker { display: none; }
+.cc-application-detail .ops-project-database-row { padding: 12px; border: 1px solid #e8edf4; border-radius: 10px; background: #fff; }
+.cc-application-detail .ops-project-detail-item-icon { width: 40px; height: 40px; border-radius: 10px; }
+.cc-application-detail .ops-project-database-main strong { font-size: 14px; }
+.cc-application-detail .ops-project-database-main small { font-size: 11px; font-weight: 400; }
+.cc-application-detail details[open] > :not(summary) { animation: cc-app-popover-in 150ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .cc-application-detail details[open] > :not(summary) { animation: none; } }
+.cc-application-detail .ops-project-detail-fact strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+/* Override legacy detail minimums so primary controls remain above the file list. */
+.cc-application-detail #project-hosting,
+.cc-application-detail #project-hosting + #project-databases { min-height: 306px; height: auto; align-content: start; }
+.cc-application-detail #project-databases { grid-template-rows: auto auto auto; }
+.cc-application-detail .cc-project-hosting { gap: 10px; }
+.cc-application-detail .cc-hosting-current { border: 0; padding: 0; background: transparent; margin: 6px 0; }
+.cc-application-detail .cc-hosting-copy { margin-top: 4px; padding-top: 12px; gap: 8px; }
+.cc-application-detail .ops-project-detail-fact { min-height: 44px; }
+.cc-application-detail .ops-project-detail-resource-grid { margin-top: 10px; }
+.cc-application-detail .ops-file-explorer { gap: 0; }
+.cc-application-detail .ops-file-breadcrumb { min-height: 32px; padding: 6px 10px; }

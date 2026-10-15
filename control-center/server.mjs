@@ -6014,7 +6014,8 @@ function renderControlCenter(context, params) {
   const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "overview";
   const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : context.projects[0]?.slug || "";
   const currentProject = context.projects.find((project) => project.slug === selectedProject) || null;
-  const activeProject = section === "projects" && params.has("project") ? currentProject : null;
+  const requestedProject = sanitizeIdentifier(params.get("project") || "");
+  const activeProject = section === "projects" && requestedProject ? context.projects.find(project => project.slug === requestedProject || project.id === requestedProject) || null : null;
   const title = sections.find((item) => item.id === section)?.label || "Applicazioni";
   const body = renderOperationsSection(section, context, params, currentProject);
   const hidePageHead = Boolean(activeProject);
@@ -6049,11 +6050,11 @@ ${controlCenterScriptTags()}
   <button class="ops-button primary compact" type="button" data-cc-preload-retry hidden>Riprova</button>
 </div>
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
+  ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Esci" title="Esci">${controlIcon("logout")}</button></form>` : ""}
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
       <a class="ops-brand" href="/?section=overview" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
       ${renderOperationsNav(sections, section, context, activeProject, params)}
-      ${controlAuth.enabled ? `<form action="/logout" method="post" class="ops-logout-form"><button class="ops-logout-button" type="submit" aria-label="Logout" title="Logout">${controlIcon("logout")}</button></form>` : ""}
     </aside>
     <section class="ops-page" ${pageLabel}>
       ${pageHead}
@@ -6117,25 +6118,8 @@ function renderOperationsNavChild(child) {
   </a>`;
 }
 
-function operationsNavChildren(section, context, activeProject, params = new URLSearchParams(), currentSection = false) {
-  if (section === "projects") {
-    return [
-      {
-        active: currentSection && !activeProject,
-        href: "/?section=projects",
-        label: "Tutte",
-      },
-      ...sortedOpsProjects(context.projects).map((project) => {
-        const state = projectOpsState(project);
-        return {
-          active: activeProject?.slug === project.slug,
-          href: `/?section=projects&project=${encodeURIComponent(project.slug)}`,
-          label: project.name,
-          tone: projectStatusTone(project, state),
-        };
-      }),
-    ];
-  }
+function operationsNavChildren() {
+  // Applications are reached directly; their catalog owns folder navigation.
   return [];
 }
 
@@ -6169,7 +6153,7 @@ function operationsPortalSections() {
 
 function operationPageHint(section, context) {
   const hints = {
-    projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
+    projects: "Host, runtime e organizzazione delle applicazioni.",
     secrets: "Vault cifrato e inventario centralizzato dei secret.",
     overview: "Risorse della VPS in tempo reale.",
     settings: "Impostazioni del server e controllo dei backup.",
@@ -6508,24 +6492,24 @@ function renderOpsProjects(context, params = new URLSearchParams()) {
   const requested = params.get("folder") || "all";
   const selected = ["all", "unfiled", ...catalog.folders.map(folder => folder.id)].includes(requested) ? requested : "unfiled";
   const activeFolder = catalog.folders.find(folder => folder.id === selected);
-  const folderLink = (id, name, count) => `<a class="ops-button ${selected === id ? "primary" : "secondary"} compact" href="/?section=projects&folder=${encodeURIComponent(id)}" ${selected === id ? 'aria-current="page"' : ""}>${escapeHtml(name)} <span>${count}</span></a>`;
+  const folderLink = (id, name, count) => `<a class="cc-app-folder-tab${selected === id ? " active" : ""}" href="/?section=projects&folder=${encodeURIComponent(id)}" ${selected === id ? 'aria-current="page"' : ""}>${escapeHtml(name)} <span>${count}</span></a>`;
   const groups = [...catalog.folders, { id: "unfiled", name: "Senza cartella" }];
   const rows = groups.filter(folder => selected === "all" || folder.id === selected).map(folder => {
     const members = apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id);
     if (!members.length && selected === "all") return "";
-    return `<section class="cc-app-folder-group" aria-label="${escapeHtml(folder.name)}"><h2>${escapeHtml(folder.name)} <small>${members.length}</small></h2><div class="ops-project-list">${members.map(app => {
+    const management = folder.id === "unfiled" ? "" : `<details class="cc-app-folder-menu"><summary aria-label="Gestisci cartella ${escapeHtml(folder.name)}" title="Gestisci cartella">⋮</summary><div class="cc-app-popover"><form data-app-folder-form action="/control/project-folders/${escapeHtml(folder.id)}/rename"><label>Nome cartella<input name="name" maxlength="80" required value="${escapeHtml(folder.name)}"></label><button type="submit" class="ops-button secondary compact">Rinomina</button></form><form data-app-folder-form data-folder-delete action="/control/project-folders/${escapeHtml(folder.id)}/delete"><p>Le applicazioni restano disponibili in Senza cartella.</p><button type="submit" class="ops-button danger compact">Elimina cartella</button></form></div></details>`;
+    return `<section class="cc-app-folder-group" data-app-folder-group aria-label="${escapeHtml(folder.name)}"><header class="cc-app-folder-heading"><h2>${controlIcon("folder")} ${escapeHtml(folder.name)} <small>${members.length}</small></h2>${management}</header><div class="cc-app-column-head" aria-hidden="true"><span>Applicazione</span><span>Host</span><span>Runtime</span><span>Cartella</span><span></span></div><div class="ops-project-list">${members.map(app => {
       const options = `<option value="">Senza cartella</option>` + catalog.folders.map(item => `<option value="${escapeHtml(item.id)}" ${catalog.memberships[app.key] === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
-      return `<div class="cc-app-folder-entry">${app.source === "project" ? renderOpsProjectRow(app.record) : renderObservedApplicationRow(app.record, controlIcon)}<form class="cc-app-folder-placement" data-app-folder-form action="/control/project-folders/membership"><input type="hidden" name="applicationKey" value="${escapeHtml(app.key)}"><label>Cartella di ${escapeHtml(app.record.name || app.record.id)}<select name="folderId">${options}</select></label><button type="submit" class="ops-button secondary compact">Sposta</button></form></div>`;
+      const placement = `<details class="cc-app-folder-placement"><summary aria-label="Cartella di ${escapeHtml(app.record.name || app.record.id)}">${escapeHtml(folder.name)} ${controlIcon("chevron-down")}</summary><form class="cc-app-popover" data-app-folder-form action="/control/project-folders/membership"><input type="hidden" name="applicationKey" value="${escapeHtml(app.key)}"><label>Cartella di ${escapeHtml(app.record.name || app.record.id)}<select name="folderId">${options}</select></label><button type="submit" class="ops-button secondary compact">Sposta</button></form></details>`;
+      const search = [app.record.name, app.record.id, app.record.host, app.record.runtime].filter(Boolean).join(" ");
+      return `<div class="cc-app-folder-entry" data-application-row data-application-search="${escapeHtml(search)}">${app.source === "project" ? renderOpsProjectRow(app.record, { placement }) : `<div class="cc-app-observed-row">${renderObservedApplicationRow(app.record, controlIcon)}${placement}</div>`}</div>`;
     }).join("") || empty("Cartella vuota", "Sposta qui le applicazioni usando il menu Cartella nella vista Tutte.")}</div></section>`;
   }).join("");
-  return `<section class="ops-section ops-projects-redesign" data-app-folders>
-    <div class="cc-app-folders-toolbar"><div><h2>Cartelle applicazioni</h2><p>Organizza le app nei gruppi che preferisci.</p></div>
-
-      <form class="cc-app-folder-create" data-app-folder-form data-folder-create action="/control/project-folders"><label>Nuova cartella<input name="name" maxlength="80" required placeholder="Nome cartella" autocomplete="off"></label><button type="submit" class="ops-button primary compact">Crea cartella</button></form>
-    </div>
+  return `<section class="ops-section ops-projects-redesign cc-applications" data-app-folders>
+    <div class="cc-applications-toolbar"><label class="cc-app-search">${controlIcon("search")}<input type="search" data-application-search-input placeholder="Cerca applicazione…" aria-label="Cerca applicazione per nome, host o runtime"></label><details class="cc-app-folder-create"><summary class="ops-button primary">${controlIcon("plus")} Nuova cartella</summary><form class="cc-app-popover" data-app-folder-form data-folder-create action="/control/project-folders"><label>Nome cartella<input name="name" maxlength="80" required placeholder="Nome cartella" autocomplete="off"></label><button type="submit" class="ops-button primary compact">Crea cartella</button></form></details></div>
     <nav class="cc-app-folder-filters" aria-label="Cartelle applicazioni">${folderLink("all", "Tutte", apps.length)}${groups.map(folder => folderLink(folder.id, folder.name, apps.filter(app => (catalog.memberships[app.key] || "unfiled") === folder.id).length)).join("")}</nav>
-    ${activeFolder ? `<div class="cc-app-folder-management"><form data-app-folder-form action="/control/project-folders/${escapeHtml(activeFolder.id)}/rename"><label>Nome cartella<input name="name" maxlength="80" required value="${escapeHtml(activeFolder.name)}"></label><button type="submit" class="ops-button secondary compact">Rinomina</button></form><form data-app-folder-form data-folder-delete action="/control/project-folders/${escapeHtml(activeFolder.id)}/delete"><button type="submit" class="ops-button danger compact">Elimina cartella</button><small>Le app torneranno in Senza cartella.</small></form></div>` : ""}
     <div class="cc-app-folder-groups" aria-label="Applicazioni">${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}</div>
+    <p class="cc-app-search-empty" data-application-search-empty hidden role="status">Nessuna applicazione corrisponde alla ricerca.</p>
   </section>`;
 }
 
@@ -6857,24 +6841,15 @@ function sortedOpsProjects(projects) {
   return [...(projects || [])].sort((a, b) => projectRuntimeSort(a.runtime) - projectRuntimeSort(b.runtime) || a.name.localeCompare(b.name));
 }
 
-function renderOpsProjectRow(project) {
+function renderOpsProjectRow(project, { placement = "" } = {}) {
   const state = projectOpsState(project);
   const detailHref = `/?section=projects&project=${encodeURIComponent(project.slug)}`;
-  return `<div class="ops-project-row" id="project-${escapeHtml(project.slug)}" role="link" tabindex="0" data-project-row-link="${escapeHtml(detailHref)}" aria-label="Apri dettagli ${escapeHtml(project.name)}">
-    <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
-    <span class="ops-project-row-name">
-      <span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span>
-      <strong>${escapeHtml(project.name)}</strong>
-    </span>
-    <span class="ops-project-row-host">
-      <small>Host</small>
-      <a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a>
-    </span>
-    <span class="ops-project-row-runtime">
-      <small>Runtime</small>
-      <strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong>
-    </span>
-    <span class="ops-project-row-arrow" aria-hidden="true">${controlIcon("chevron")}</span>
+  return `<div class="ops-project-row cc-application-row" id="project-${escapeHtml(project.slug)}" role="link" tabindex="0" data-project-row-link="${escapeHtml(detailHref)}" aria-label="Apri dettagli ${escapeHtml(project.name)}">
+    <span class="cc-application-identity"><span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span><span class="ops-project-row-name"><span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span><strong>${escapeHtml(project.name)}</strong></span></span>
+    <span class="ops-project-row-host"><a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a></span>
+    <span class="ops-project-row-runtime"><strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong></span>
+    ${placement || '<span></span>'}
+    <a class="cc-application-open" href="${escapeHtml(detailHref)}" aria-label="Apri dettagli ${escapeHtml(project.name)}">Apri ${controlIcon("chevron")}</a>
   </div>`;
 }
 
@@ -6886,33 +6861,18 @@ function renderOpsProjectDetailScreen(project, context, resourceSummary, params 
   const databaseList = renderProjectDetailDatabaseList(context, project, databases, params);
   const resourcePanel = renderProjectDetailResources(summary, project);
   const removeConfirm = `REMOVE-FROM-LIST:${project.slug}`;
-  return `<section class="ops-section ops-projects-redesign ops-project-detail-screen" id="project-${escapeHtml(project.slug)}">
-    <div class="ops-project-detail-hero">
+  return `<section class="ops-section ops-projects-redesign ops-project-detail-screen cc-application-detail" id="project-${escapeHtml(project.slug)}">
+    <a class="cc-app-detail-back" href="/?section=projects">${controlIcon("arrow-left")} Applicazioni</a>
+    <header class="ops-project-detail-hero">
       <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
-      <span class="ops-project-row-name">
-        <span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span>
-        <strong>${escapeHtml(project.name)}</strong>
-      </span>
-      <span class="ops-project-row-host">
-        <small>Host</small>
-        <a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a>
-      </span>
-      <span class="ops-project-row-runtime">
-        <small>Runtime</small>
-        <strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong>
-      </span>
-      <form method="post" action="/actions/project-remove-from-list" data-passkey-submit data-passkey-success-url="/?section=projects">
-        <input type="hidden" name="id" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="confirm" value="${escapeHtml(removeConfirm)}">
-        <button class="ops-button danger compact" type="submit" aria-label="Rimuovi ${escapeHtml(project.name)} dalla lista Applicazioni">${controlIcon("trash")} Rimuovi dalla lista</button>
-      </form>
-    </div>
-
+      <div class="cc-app-detail-identity"><h1><span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span>${escapeHtml(project.name)}</h1><div class="cc-app-detail-metadata"><span class="ops-project-row-host"><small>Host</small><a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a></span><span class="ops-project-row-runtime"><small>Runtime</small><strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong></span></div></div>
+      <form method="post" action="/actions/project-remove-from-list" data-passkey-submit data-passkey-success-url="/?section=projects"><input type="hidden" name="id" value="${escapeHtml(project.slug)}"><input type="hidden" name="confirm" value="${escapeHtml(removeConfirm)}"><button class="ops-button danger compact cc-app-remove" type="submit" aria-label="Rimuovi ${escapeHtml(project.name)} dalla lista Applicazioni">${controlIcon("trash")} Rimuovi dalla lista</button></form>
+    </header>
     <div class="ops-project-detail-focus">
-      ${fileManager}
       <section class="ops-project-detail-panel" id="project-hosting" data-project-hosting-slot aria-busy="true"><h3>Visibilità e copia privata</h3><p>Caricamento dei controlli hosting…</p></section>
       ${databaseList}
       ${resourcePanel}
+      ${fileManager}
     </div>
   </section>`;
 }
@@ -6929,7 +6889,7 @@ function renderProjectDetailDatabaseList(context, project, databases, params = n
       <span class="ops-state ${databases.length ? "good" : "warn"}">${escapeHtml(databases.length ? `${databases.length} collegati` : "Nessuno")}</span>
     </div>
     <div class="ops-project-database-list">${databaseItems || empty("Nessun database", "Crea metadata database per questa applicazione.")}</div>
-    ${project.slug === trustedExternalDatabase?.projectId ? "" : renderProjectDetailDatabaseCreateForm(project)}
+    ${project.slug === trustedExternalDatabase?.projectId ? "" : `<details class="cc-app-database-create"><summary class="ops-button secondary compact">Crea database ${controlIcon("chevron-down")}</summary>${renderProjectDetailDatabaseCreateForm(project)}</details>`}
   </div>`;
 }
 
@@ -6951,6 +6911,7 @@ function renderProjectDetailDatabaseRow(context, project, database, params = new
       </span>
       <a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a>
     </div>
+    <details class="cc-app-database-manage"><summary class="ops-button secondary compact">Gestisci ${controlIcon("chevron-down")}</summary>
     <form class="ops-project-database-edit-form" method="post" action="/actions/database-command">
       <input type="hidden" name="action" value="update">
       <input type="hidden" name="id" value="${escapeHtml(database.id)}">
@@ -6980,6 +6941,7 @@ function renderProjectDetailDatabaseRow(context, project, database, params = new
         <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
       </form>
     </div>
+    </details>
   </div>`;
 }
 
@@ -7052,18 +7014,14 @@ function databaseCredentialDisplayLabel(database, project) {
 }
 
 function renderProjectDetailResources(summary) {
-  const resourceRows = [
-    ["CPU", summary.cpu],
-    ["RAM", summary.memory],
-    ["Disco", summary.disk],
-    ["Container", summary.containers],
-  ].map(([label, value]) => `<div class="ops-project-detail-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
-  return `<div class="ops-project-detail-panel" id="project-resources">
-    <div class="ops-project-detail-panel-head ops-project-resource-head">
-      <h3>Risorse utilizzate</h3>
-    </div>
-    <div class="ops-project-detail-resource-grid">${resourceRows}</div>
-  </div>`;
+  const icons = [
+    '<rect x="6" y="6" width="12" height="12" rx="1"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/>',
+    '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 10v4m4-4v4m4-4v4m3-4v4"/>',
+    '<path d="M6 3h12l3 9v8H3v-8zM3 12h18M16 16h2"/>',
+    '<path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10"/>',
+  ];
+  const resourceRows = [["CPU", summary.cpu], ["RAM", summary.memory], ["Disco", summary.disk], ["Container", summary.containerCount ? `${summary.runningContainerCount}/${summary.containerCount} in esecuzione` : "Non disponibili"]].map(([label, value], index) => `<div class="ops-project-detail-fact"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[index]}</svg><span>${escapeHtml(label)}</span><strong title="${escapeHtml(label === "Container" ? summary.containers : value)}">${escapeHtml(value)}</strong></div>`).join("");
+  return `<div class="ops-project-detail-panel cc-app-resources" id="project-resources"><div class="ops-project-detail-panel-head ops-project-resource-head"><h3>Risorse applicazione</h3></div><div class="ops-project-detail-resource-grid">${resourceRows}</div></div>`;
 }
 
 function renderProjectDetailBackups(context, project, params = new URLSearchParams()) {
@@ -7162,6 +7120,7 @@ function renderProjectFileExplorerEntry(entry, projectHref) {
       <small>${escapeHtml(entry.sizeLabel || "-")}</small>
       <small>${escapeHtml(entry.modifiedAt || "-")}</small>
     </span>
+    <span class="cc-app-file-open" aria-hidden="true">${controlIcon("chevron")}</span>
   </${tag}>`;
 }
 
@@ -7194,7 +7153,7 @@ function renderProjectDetailFileManager(context, project, params) {
       </div>
     </div>
     ${renderProjectFileBreadcrumb(snapshot, projectHref)}
-    ${snapshot.available ? `<div class="ops-file-workspace">
+    ${snapshot.available ? `<div class="cc-app-file-columns" aria-hidden="true"><span>Nome</span><span>Tipo</span><span>Dimensione</span><span>Modificato</span><span></span></div><div class="ops-file-workspace">
       <div class="ops-file-grid" role="listbox" aria-label="File di ${escapeHtml(project.name)}">
         ${entries || `<div class="ops-file-empty">${empty("Cartella vuota", "Nessun elemento navigabile trovato in questo path.")}</div>`}
         <div class="ops-file-search-empty" data-file-search-empty hidden>${empty("Nessun risultato", "La ricerca vale solo per la cartella aperta.")}</div>
@@ -7261,6 +7220,8 @@ function projectResourceSummary(context, project) {
     cpu: measuredContainers.length ? measuredCpuLabel(measuredContainers, hostCores) : usage.cpuMessage || "Metriche container non disponibili",
     memory: memoryBytes != null ? usageBytesLabel(memoryBytes) : usage.memoryMessage || "Metriche container non disponibili",
     disk: usage.diskAvailable ? `${usageBytesLabel(usage.diskBytes)} (${Number(usage.files || 0)} file)` : "Non disponibile",
+    containerCount: containers.length,
+    runningContainerCount: containers.filter(item => String(item.runtimeStatus || "").toLowerCase() === "running").length,
     containers: containers.length ? containers.map((item) => `${item.container}:${item.runtimeStatus || "unknown"}`).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
   };
 }
