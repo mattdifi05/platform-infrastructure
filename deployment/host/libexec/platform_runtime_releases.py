@@ -179,6 +179,10 @@ def resolve_release(component, current_version):
         else:
             if not official and not github:
                 raise ValueError('release listing exceeds pagination limit')
+        if repository == 'library/nginx':
+            # NGINX's documented stable channel uses even minor versions;
+            # odd minor versions are mainline, despite having numeric tags.
+            tags = {name: tag for name, tag in tags.items() if _version(tag['_version'])[1] % 2 == 0}
         ordered = sorted(tags.values(), key=lambda item: (_version(item['_version']), item['name']), reverse=True)
         latest = None
         for tag in ordered:

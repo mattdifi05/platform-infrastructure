@@ -107,6 +107,17 @@ class ReleasesTests(unittest.TestCase):
         with patch.object(m._Client, 'get', side_effect=[({'results': [tag('8.5.12-apache', digest=None)], 'next': None}, {}), ({'token': 'public-token'}, {}), ({'manifests': [{'platform': {'os': 'linux', 'architecture': 'amd64'}, 'digest': D}]}, {'Docker-Content-Digest': D})]):
             self.assertEqual(m.resolve_release(self.component, '8.5.10')['candidateRelease']['imageDigest'], D)
 
+    def test_nginx_stable_channel_excludes_mainline_and_updates_directly(self):
+        self.component.update(repository='library/nginx', tagSuffix='-alpine', compatibility='latest')
+        tags = [tag('1.28.9-alpine'), tag('1.30.6-alpine'), tag('1.31.8-alpine')]
+        result = self.resolve(tags, '1.28.0')
+        self.assertEqual(result['latestStable']['version'], '1.30.6')
+        self.assertEqual(result['candidateRelease'], result['latestStable'])
+        self.assertEqual(result['candidateRelease']['imageReference'], 'docker.io/library/nginx:1.30.6-alpine')
+        mainline_current = self.resolve(tags, '1.31.8')
+        self.assertEqual(mainline_current['latestStable']['version'], '1.30.6')
+        self.assertIsNone(mainline_current['candidateRelease'])
+
     def test_official_images_exact_lookup(self):
         self.component['repository'] = 'library/php'
         result = self.resolve([tag('8.5.%d-apache' % n) for n in range(10, 20)] + [tag('9.0.0-rc1-apache')])
