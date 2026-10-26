@@ -34,7 +34,7 @@ def discover(rows, infra):
         if not row['State']['Running'] and ((labels.get('com.docker.compose.project'), service) in active or name not in {service, 'enterprise-' + service, labels.get('com.docker.compose.project', '') + '-' + service + '-1'}):
             continue
         image = official.get(row['Image'], image)
-        entry = {'strategy': 'observe', 'category': 'Piattaforma', 'compatibility': 'minor', 'tagSuffix': '', 'tagPrefix': '', 'architecture': 'amd64'}
+        entry = {'strategy': 'observe', 'category': 'Piattaforma', 'compatibility': 'latest', 'tagSuffix': '', 'tagPrefix': '', 'architecture': 'amd64'}
         if 'phpmyadmin' in name:
             entry.update(label='phpMyAdmin', category='Amministrazione', repository='library/phpmyadmin', strategy='reviewed-build', dockerfile=str(infra / 'deployment/docker/phpmyadmin-remediated.Dockerfile'), probe=['php', '-r', 'define("VERSION_SUFFIX", ""); require "/var/www/html/libraries/classes/Version.php"; echo \\PhpMyAdmin\\Version::VERSION;'])
         elif 'phppgadmin' in name:
@@ -43,9 +43,9 @@ def discover(rows, infra):
             entry.update(label='PHP', category='Runtime', repository='library/php', strategy='php-build', tagSuffix='-apache', versionEnv='PHP_VERSION', dockerfile=str(infra / 'docker/php-apache.Dockerfile'), probe=['php', '-r', 'echo PHP_VERSION;'])
         elif 'NODE_VERSION' in env:
             # One Node family; preserve every application's exact image in its runtime layer.
-            entry.update(label='Node.js', category='Runtime', repository='library/node', strategy='node-layer', compatibility='major', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
+            entry.update(label='Node.js', category='Runtime', repository='library/node', strategy='node-layer', compatibility='latest', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
         elif 'PG_VERSION' in env:
-            entry.update(label='PostgreSQL', category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='major', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
+            entry.update(label='PostgreSQL', category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='latest', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'MARIADB_VERSION' in env:
             entry.update(label='MariaDB', category='Database', repository='library/mariadb', strategy='reviewed-build', versionEnv='MARIADB_VERSION', dockerfile=str(infra / 'deployment/docker/mariadb-remediated.Dockerfile'), probe=['mariadbd', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'REDIS_VERSION' in env:
@@ -86,7 +86,7 @@ def discover(rows, infra):
         key = ('supplier', repository) if family else ('dedicated', row['Image'], entry['label'])
         if key not in groups:
             identity = family or (re.sub('[^a-z0-9-]', '-', entry['label'].lower()).strip('-')[:48] + '-' + row['Image'][-10:])
-            groups[key] = {**entry, 'id': identity, 'containers': [], 'initialImages': [], 'familyPolicy': 'single-version-v1' if family else None}
+            groups[key] = {**entry, 'id': identity, 'containers': [], 'initialImages': [], 'familyPolicy': 'single-version-v1' if family else None, 'targetPolicy': 'latest-stable-direct-v1' if family else None}
         group = groups[key]
         if group['strategy'] != entry['strategy']:
             group.update(strategy='observe', blockedReason='Le istanze della famiglia richiedono un builder comune verificato.')
@@ -97,6 +97,19 @@ def discover(rows, infra):
     for group in groups.values():
         group['containers'].sort()
     return list(groups.values())
+
+
+def preserve_enrollment_policy(components, previous):
+    # Keep root-admitted HTTP probes when enrollment discovers new image IDs.
+    by_membership = {tuple(sorted(x['containers'])): x for x in previous}
+    for row in components:
+        prior = by_membership.get(tuple(sorted(row['containers'])))
+        if row.get('repository') == 'library/traefik':
+            prior_family = next((entry for entry in previous if entry.get('repository') == 'library/traefik'), None)
+            if prior_family and 'routeProbes' in prior_family:
+                row['routeProbes'] = prior_family['routeProbes']
+        if prior and row.get('familyPolicy') != 'single-version-v1':
+            row['id'] = prior['id']
 
 
 def main():
@@ -113,12 +126,7 @@ def main():
     config = CONFIG / 'config.json'
     if config.exists():
         old = json.loads(config.read_text())
-        # Stable IDs/policy survive installer reruns and runtime replacements.
-        by_membership = {tuple(sorted(x['containers'])): x for x in old['components']}
-        for row in value['components']:
-            prior = by_membership.get(tuple(sorted(row['containers'])))
-            if prior and row.get('familyPolicy') != 'single-version-v1':
-                row['id'] = prior['id']
+        preserve_enrollment_policy(value['components'], old['components'])
     config.write_text(json.dumps(value, indent=2) + '\n')
     config.chmod(0o600)
     key = CONFIG / 'bridge-key'
@@ -127,7 +135,7 @@ def main():
             f.write(os.urandom(32))
     os.chown(key, 0, 1000)
     key.chmod(0o640)
-    for name in ['platform_runtime_updates.py', 'platform_runtime_releases.py']:
+    for name in ['platform_runtime_updates.py', 'platform_runtime_releases.py', 'platform_host_updates.py']:
         shutil.copy2(SOURCE / 'deployment/host/libexec' / name, pathlib.Path('/usr/local/libexec') / name)
         (pathlib.Path('/usr/local/libexec') / name).chmod(0o755)
     shutil.copy2(SOURCE / 'deployment/host/systemd/platform-runtime-updates.service', '/etc/systemd/system/platform-runtime-updates.service')

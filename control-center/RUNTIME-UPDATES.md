@@ -19,17 +19,30 @@ The root-owned policy is `/etc/platform-infrastructure/updates/config.json`; loc
 
 * Catalog reads require a viewer; checking stable releases requires an administrator. Reviewing/applying a plan requires an owner with fresh passkey authentication and CSRF protection.
 * Plans expire after 15 minutes and bind the container/configuration fingerprint, catalog revision, candidate version and registry digest. State is checked again after downloading/building, immediately before changing a service. Idempotency is committed before starting the worker.
+* “Update all” reviews one immutable plan containing every eligible family and its latest stable target. All candidate images are prepared before the first service is stopped. The worker then reports the current service, verified/completed service counts and a durable result for every service. A failure stops the batch; already committed families remain updated, while the current stateless family is rolled back.
 * PHP rebuilds the reviewed Apache image so installed extensions are retained. Each runtime family has one shared target version for all enrolled services. Node prepares a separate layer over each exact deployed application image, checks declared engine compatibility and native addons in isolation, then updates the whole family; an incompatible image blocks the group before any service is stopped. Isolated binary/configuration checks and service health verify the result.
 * Database updates stay within the admitted series. Before starting a new database or stateful tool image, the worker stops the old service and creates an ownership-preserving consistent copy of its persistent directories. Recovery copies count toward a 20 GiB default maintenance quota; inadequate space rejects the update. This is an explicit maintenance recovery point, not a recurring backup.
 * An old database is never automatically started over data that the new version may have written. Such a failure remains visible and blocks new mutations until an operator reconciles the protected journal. A restart with an unfinished mutation journal also blocks new mutations.
 * Stateless failure restores the original container identity, mounts, network membership, restart policy and running/stopped state. The old image/container remains retained for recovery. Successful updates refresh only affected signed admission references and keep generation/predecessor continuity.
 * Runtime changes persist in Docker and in the protected desired-image record. A later independent Compose/source deployment must deliberately retain or reconcile those image choices; the updater never silently overwrites a new application deployment.
 
-Official Docker library metadata and curated upstream GitHub releases supply explicit stable tags. The registry manifest digest and architecture are verified; prereleases, floating tags, downgrades, unsupported series and incomplete/failed lookups do not become an update candidate. Custom platform builds or tools without a verified release path remain visible with an explicit assisted-maintenance reason.
+Official Docker library metadata and curated upstream GitHub releases supply explicit stable tags. The destination is the latest verified stable version, without forcing intermediate patch/minor releases. A database major migration or a component without a verified update path is shown as requiring assisted maintenance rather than silently selecting an older destination. The registry manifest digest and architecture are verified; prereleases, floating tags, downgrades and incomplete/failed lookups do not become an update candidate.
+
+While a job runs, the UI polls only its inexpensive status endpoint every two seconds, retains the job through temporary connection failures and refreshes inventory when it finishes. Background inventory refreshes do not display a fake update progress state. Service verification and final family registration are shown separately; the bar reaches completion only after the operation succeeds.
+
+## Operating system
+
+A separate panel above runtime updates shows APT status and counts without listing packages. Checking refreshes APT metadata and simulates the upgrade. An owner with fresh passkey authentication reviews an expiring plan before applying the exact package versions; automatic/manual package flags and existing configuration files are preserved. Changes to installed versions or package candidates invalidate the plan. Host maintenance shares the global operation lock with container updates.
+
+The bridge keeps its filesystem sandbox. Fixed, root-owned companion workers execute APT through transient systemd units; neither the browser nor the bridge API accepts a command or arbitrary worker path. Package failures never claim automatic rollback. Reboot is separately confirmed with `REBOOT`, available only when the OS requires it, journaled before acknowledgement, and scheduled after the HTTP response. A changed boot ID and service health establish completion after reconnection. Installing this feature and opening the panel do not run an upgrade or reboot.
+
+Traefik updates additionally require all effective file-provider configuration to live on read-only persistent mounts. Plans bind its contents and require a root-configured HTTP route probe after startup: a healthy ping with a missing portal route is a failed update.
 
 ## Verification
 
 `python3 -m unittest discover -s deployment/host/tests -p 'test_runtime_*.py'`
+
+`python3 -m unittest discover -s deployment/host/tests -p 'test_host_updates.py'`
 
 `npm --prefix control-center test`
 

@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import json
+import io
 import os
 import pathlib
 import stat
@@ -55,6 +56,8 @@ class DockerFixture:
 
     def docker(self, method, endpoint, body=None):
         self.calls.append((method, endpoint, copy.deepcopy(body)))
+        if endpoint == '/containers/json?all=true':
+            return [{'Id': row['Id'], 'Names': [row['Name']], 'ImageID': row['Image'], 'State': 'running' if row['State']['Running'] else 'exited'} for row in self.rows.values()]
         if endpoint.startswith('/images/'):
             return self.images.get(endpoint[len('/images/'):-len('/json')], {'Id': NEW_IMAGE, 'Config': {'Env': ['PHP_VERSION=8.5.12']}})
         if endpoint.startswith('/containers/create?'):
@@ -373,6 +376,552 @@ class UpdatesTests(unittest.TestCase):
         item = m.catalog()['components'][0]
         self.assertTrue(item['canUpdate']); self.assertEqual(item['candidateRelease']['version'], '18.5')
 
+    def traefik_fixture(self, mounted_routes=True):
+        old = self.docker.rows['old-container']
+        old['Name'] = '/edge-router'
+        old['Config'].update(Entrypoint=['traefik'], Cmd=['--configFile=/etc/traefik/traefik.yml'])
+        old['Mounts'] = [{'Type': 'bind', 'Source': '/fixture/' + name, 'Destination': destination, 'RW': False}
+                         for name, destination in [('static', '/etc/traefik/traefik.yml'), ('middleware', '/etc/traefik/dynamic/middleware.yml')]]
+        if mounted_routes:
+            old['Mounts'].append({'Type': 'bind', 'Source': '/fixture/routes', 'Destination': '/etc/traefik/dynamic/routes.yml', 'RW': False})
+        old['State']['Health'] = {'Status': 'healthy'}
+        self.route_docs = {'/etc/traefik/traefik.yml': 'providers:\n  file:\n    directory: /etc/traefik/dynamic\n',
+                           '/etc/traefik/dynamic/middleware.yml': 'http:\n  middlewares: {}\n',
+                           '/etc/traefik/dynamic/routes.yml': 'http:\n  routers:\n    portal:\n      rule: "Host(`portal.example.test`)"\n'}
+        row = {'id': 'traefik', 'label': 'Traefik', 'category': 'Rete', 'repository': 'library/traefik',
+               'strategy': 'image', 'containers': ['edge-router'], 'probe': ['traefik', 'version'],
+               'routeProbes': [{'host': 'portal.example.test', 'port': 8080, 'path': '/', 'expectedStatuses': [200, 401]}]}
+        self.config['components'] = [row]; self.config_path.write_text(json.dumps(self.config))
+        target = dict(self.release, version='3.7.16')
+        m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'traefik': {'candidateRelease': target, 'latestStable': target}}})
+        def commands(argv, **kwargs):
+            self.assertEqual(argv[:2], ['docker', 'exec'])
+            if argv[3:] == ['traefik', 'version']:
+                return 'Version: ' + ('3.7.16' if argv[2].startswith('new-container') else '3.7.5')
+            if argv[3] == 'cat':
+                return self.route_docs[argv[4]]
+            if argv[3:] == ['find', '/etc/traefik/dynamic', '-type', 'l']:
+                return ''
+            if argv[3:] == ['find', '/etc/traefik/dynamic', '-type', 'f']:
+                return '/etc/traefik/dynamic/middleware.yml\n/etc/traefik/dynamic/routes.yml\n'
+            raise AssertionError(argv)
+        patch.object(m, 'run', side_effect=commands).start()
+        self.http_status = 401
+        self.http_requests = []
+        self.http_calls = []
+        def connection(address, port, timeout):
+            self.http_requests.append((address, port))
+            client = unittest.mock.Mock()
+            client.request.side_effect = lambda method, path, headers: self.http_calls.append((method, path, headers))
+            client.getresponse.side_effect = lambda: types.SimpleNamespace(status=self.http_status)
+            return client
+        patch.object(m.http.client, 'HTTPConnection', side_effect=connection).start()
+        return row, old
+
+    def test_traefik_writable_layer_routes_block_plan_and_queued_update_before_stop(self):
+        row, old = self.traefik_fixture(mounted_routes=False)
+        with self.assertRaises(m.Rejected) as refused:
+            m.plan('traefik', m.catalog()['revision'])
+        self.assertEqual(refused.exception.status, 422)
+        stored = {'component': row, 'target': dict(self.release, version='3.7.16'), 'fingerprint': m.fingerprint([old]),
+                  'public': {'affectedServices': ['edge-router']}}
+        self.prepare_job()
+        with patch.object(m, 'image_candidate') as image, patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        image.assert_not_called(); admission.assert_not_called()
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'failed')
+
+    def test_traefik_file_or_directory_readonly_mounts_and_exact_http_route_are_required(self):
+        row, old = self.traefik_fixture()
+        checks = m.traefik_routing_configuration(old, row)
+        self.assertIn('/etc/traefik/dynamic/routes.yml', checks['files'])
+        self.assertEqual(self.http_requests[-1], ('127.0.0.1', 8080))
+        self.assertEqual(self.http_calls[-1], ('GET', '/', {'Host': 'portal.example.test', 'Connection': 'close'}))
+        old['Mounts'] = [{'Type': 'bind', 'Source': '/fixture/whole-config', 'Destination': '/etc/traefik', 'RW': False}]
+        self.assertEqual(m.traefik_routing_configuration(old, row), checks)
+        for mutation in [lambda: old['Mounts'][0].update(RW=True),
+                         lambda: row['routeProbes'][0].update(host='unknown.example.test'),
+                         lambda: row['routeProbes'][0].update(expectedStatuses=[404])]:
+            row, old = self.traefik_fixture()
+            mutation()
+            with self.assertRaises(m.Rejected):
+                m.traefik_routing_configuration(old, row)
+
+    def test_traefik_dynamic_file_change_after_plan_prevents_image_preparation(self):
+        row, old = self.traefik_fixture()
+        public = m.plan('traefik', m.catalog()['revision']); stored = m.load('plan', public['planId'])
+        self.route_docs['/etc/traefik/dynamic/routes.yml'] += '# external configuration change\n'
+        self.prepare_job()
+        with patch.object(m, 'image_candidate') as image:
+            m.apply_job('job-1', stored)
+        image.assert_not_called()
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+
+    def test_traefik_healthy_ping_with_portal_404_rolls_back_instead_of_claiming_success(self):
+        row, old = self.traefik_fixture()
+        public = m.plan('traefik', m.catalog()['revision']); stored = m.load('plan', public['planId'])
+        self.prepare_job(); verify = m.verify
+        def check_router(*args):
+            self.http_status = 404
+            return verify(*args)
+        with patch.object(m, 'image_candidate', return_value=NEW_IMAGE), patch.object(m, 'verify', side_effect=check_router), patch.object(m.time, 'sleep'), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        admission.assert_not_called()
+        record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'rolled-back')
+        self.assertEqual(self.docker.inspect('edge-router')['Id'], 'old-container')
+        self.assertTrue(self.docker.inspect('edge-router')['State']['Running'])
+
+    def test_traefik_preserved_routes_and_expected_portal_401_allow_verified_commit(self):
+        row, old = self.traefik_fixture()
+        public = m.plan('traefik', m.catalog()['revision']); stored = m.load('plan', public['planId'])
+        self.prepare_job()
+        with patch.object(m, 'image_candidate', return_value=NEW_IMAGE), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        admission.assert_called_once()
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'succeeded')
+        self.assertNotEqual(self.docker.inspect('edge-router')['Id'], 'old-container')
+
+    def batch_fixture(self):
+        self.node_group()
+        php = container(); php['Image'] = 'sha256:' + 'e' * 64; php['Config']['Image'] = php['Image']
+        self.docker.rows[php['Id']] = php
+        self.batch_php_before = copy.deepcopy(php)
+        self.config['components'].append({'id': 'php', 'label': 'PHP', 'category': 'Runtime', 'containers': ['php-service'], 'strategy': 'image', 'versionEnv': 'PHP_VERSION', 'probe': ['php', '-r', 'echo PHP_VERSION;']})
+        self.config_path.write_text(json.dumps(self.config))
+        cached = m.load('cache', 'releases')
+        cached['components']['php'] = {'candidateRelease': self.release, 'latestStable': self.release}
+        m.save('cache', 'releases', cached)
+        self.batch_php_candidate = 'sha256:' + 'f' * 64
+        self.docker.images[self.batch_php_candidate] = {'Id': self.batch_php_candidate, 'Config': {'Env': ['PHP_VERSION=8.5.12']}}
+        public = m.handle({'action': 'plan', 'componentId': 'all', 'revision': m.catalog()['revision']})
+        return m.load('plan', public['planId'])
+
+    def batch_build(self, row, target, directory, source=None):
+        return self.node_candidates[source] if row['id'] == 'node' else self.batch_php_candidate
+
+    def test_legacy_intermediate_cache_cannot_override_latest_direct_catalog_target(self):
+        self.docker.rows['old-container']['Config']['Env'] = ['PHP_VERSION=8.6.7']
+        intermediate = dict(self.release, version='8.6.8')
+        latest = dict(self.release, version='8.10.3')
+        for candidate in [intermediate, None]:
+            with self.subTest(candidate=candidate):
+                m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'php': {'candidateRelease': candidate, 'latestStable': latest}}})
+                item = m.catalog()['components'][0]
+                self.assertTrue(item['canUpdate'])
+                self.assertEqual(item['candidateRelease'], latest)
+                self.assertEqual(self.stored()['public']['targetVersion'], '8.10.3')
+        m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'php': {'candidateRelease': intermediate, 'latestStable': None}}})
+        self.assertFalse(m.catalog()['components'][0]['canUpdate'])
+        self.assertIsNone(m.catalog()['components'][0]['candidateRelease'])
+
+    def test_cached_database_major_and_dedicated_builds_remain_explicitly_blocked(self):
+        self.docker.rows['old-container']['Config']['Env'] = ['PHP_VERSION=8.6.7']
+        latest = dict(self.release, version='9.0.0')
+        for category, repository in [('Database', 'example/database'), ('Runtime', 'library/redis')]:
+            self.config['components'][0].update(category=category, repository=repository, recoveryPolicy='offline-snapshot-v1')
+            self.config_path.write_text(json.dumps(self.config))
+            for candidate in [None, dict(self.release, version='8.6.8')]:
+                m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'php': {'candidateRelease': candidate, 'latestStable': latest}}})
+                item = m.catalog()['components'][0]
+                self.assertFalse(item['canUpdate']); self.assertIsNone(item['candidateRelease'])
+                self.assertEqual(item['status'], 'unsupported'); self.assertIn('migrazione', item['blockedReason'])
+        self.config['components'][0].update(category='Runtime', repository='example/dedicated', strategy='observe', blockedReason='Builder dedicato: manutenzione assistita.')
+        self.config_path.write_text(json.dumps(self.config))
+        item = m.catalog()['components'][0]
+        self.assertFalse(item['canUpdate']); self.assertIsNone(item['candidateRelease'])
+        self.assertEqual(item['blockedReason'], 'Builder dedicato: manutenzione assistita.')
+
+    def test_batch_plan_binds_all_eligible_families_and_no_arbitrary_selection(self):
+        stored = self.batch_fixture(); public = stored['public']
+        self.assertEqual(public['componentId'], 'all'); self.assertEqual(public['kind'], 'batch')
+        self.assertEqual([x['id'] for x in public['components']], ['node', 'php'])
+        self.assertEqual(len(public['affectedServices']), 4)
+        self.assertEqual(public['targetDigest'], 'sha256:' + m.digest(public['components']))
+        self.assertNotIn(SECRET, json.dumps(public))
+        with self.assertRaises(m.Rejected) as invalid:
+            m.handle({'action': 'plan', 'componentId': 'all', 'revision': public['revision'], 'components': ['node']})
+        self.assertEqual(invalid.exception.status, 400)
+        self.docker.rows['old-container']['HostConfig']['Memory'] += 1024
+        with patch.object(m.EXECUTOR, 'submit') as executor, self.assertRaises(m.Rejected) as stale:
+            m.handle(dict(self.apply_body(public), componentId='all'))
+        self.assertEqual(stale.exception.code, 'stale_revision'); executor.assert_not_called()
+
+    def test_batch_no_eligible_updates_rejects_without_a_job(self):
+        self.docker.rows['old-container']['Config']['Env'] = ['PHP_VERSION=8.5.12']
+        with self.assertRaises(m.Rejected) as result:
+            m.handle({'action': 'plan', 'componentId': 'all', 'revision': m.catalog()['revision']})
+        self.assertEqual(result.exception.status, 422)
+        self.assertEqual(m.records('operation'), [])
+
+    def test_batch_idempotency_and_service_inventory_are_durable_before_scheduling(self):
+        stored = self.batch_fixture(); public = stored['public']; seen = []
+        def schedule(function, identity, plan):
+            record = m.load('operation', identity)
+            with m.db() as connection:
+                prior = connection.execute('SELECT job FROM idempotency WHERE id=?', ('batch-request',)).fetchone()
+            seen.append((record, prior['job']))
+        body = dict(self.apply_body(public, 'batch-request'), componentId='all')
+        with patch.object(m.EXECUTOR, 'submit', side_effect=schedule) as executor:
+            first = m.handle(body); second = m.handle(body)
+        self.assertEqual(first, second); executor.assert_called_once()
+        record, job = seen[0]
+        self.assertEqual(job, first['operationId']); self.assertEqual(record['totalServices'], 4)
+        self.assertEqual(record['completedServices'], 0)
+        self.assertEqual(len(record['serviceResults']), 4)
+        self.assertTrue(all(x['status'] == 'queued' for x in record['serviceResults']))
+        self.assertNotIn(SECRET, json.dumps(record))
+
+    def test_batch_prepares_every_family_before_first_stop_and_reports_each_service(self):
+        stored = self.batch_fixture(); self.prepare_job()
+        builds, checks, updates = [], [], []
+        recreate = m.recreate
+        def build(*args):
+            self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+            builds.append(args[0]['id'])
+            return self.batch_build(*args)
+        def preflight(old, *args):
+            checks.append(old['Id'])
+        def update(*args, **kwargs):
+            self.assertEqual(builds, ['node', 'node', 'php']); self.assertEqual(len(checks), 3)
+            record = m.load('operation', 'job-1')
+            self.assertEqual(record['currentService'], args[0]['Name'].lstrip('/'))
+            updates.append(record['currentService'])
+            return recreate(*args, **kwargs)
+        with patch.object(m, 'image_candidate', side_effect=build), patch.object(m, 'node_preflight', side_effect=preflight), patch.object(m, 'recreate', side_effect=update), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'succeeded'); self.assertEqual(admission.call_count, 2)
+        self.assertEqual(record['completedServices'], 4); self.assertEqual(record['totalServices'], 4)
+        self.assertEqual(record['completedSteps'], 4); self.assertEqual(record['totalSteps'], 4)
+        self.assertEqual(len(updates), 4); self.assertIsNone(record['currentService'])
+        self.assertTrue(all(x['status'] == 'succeeded' for x in record['serviceResults']))
+        self.assertTrue(all(x['status'] == 'succeeded' for x in record['componentResults']))
+        self.assertNotIn(SECRET, json.dumps(record))
+
+    def test_batch_detects_later_family_drift_before_building_any_image(self):
+        stored = self.batch_fixture(); self.prepare_job()
+        self.docker.rows['old-container']['HostConfig']['Memory'] += 1024
+        with patch.object(m, 'image_candidate') as build, patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        build.assert_not_called(); admission.assert_not_called()
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'failed')
+
+    def test_signed_unix_http_supports_batch_plan_apply_and_durable_service_readback(self):
+        self.batch_fixture(); _, request = self.http_server()
+        status, catalog = request({'action': 'catalog'})
+        self.assertEqual(status, 200)
+        status, public = request({'action': 'plan', 'componentId': 'all', 'revision': catalog['revision']})
+        self.assertEqual(status, 200); self.assertEqual(public['kind'], 'batch')
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            status, accepted = request(dict(self.apply_body(public, 'http-batch'), componentId='all'))
+        self.assertEqual(status, 200); executor.assert_called_once()
+        status, record = request({'action': 'operation', 'operationId': accepted['operationId']})
+        self.assertEqual(status, 200); self.assertEqual(record['status'], 'queued')
+        self.assertEqual(record['totalServices'], 4); self.assertEqual(len(record['serviceResults']), 4)
+        self.assertNotIn(SECRET, json.dumps(record))
+
+    def test_later_family_build_failure_prevents_every_service_mutation(self):
+        stored = self.batch_fixture(); self.prepare_job()
+        def build(*args):
+            if args[0]['id'] == 'php':
+                raise m.Rejected('unsupported', 'Fixture second family preparation failure', 422)
+            return self.batch_build(*args)
+        before = copy.deepcopy(self.docker.rows)
+        with patch.object(m, 'image_candidate', side_effect=build), patch.object(m, 'node_preflight'), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        self.assertEqual(self.docker.rows, before); admission.assert_not_called()
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+        record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'failed'); self.assertEqual(record['completedServices'], 0)
+        self.assertTrue(all(x['status'] == 'skipped' for x in record['serviceResults']))
+
+    def test_batch_later_family_failure_keeps_prior_success_and_restores_only_current_family(self):
+        stored = self.batch_fixture(); self.prepare_job()
+        deferred = copy.deepcopy(stored['families'][-1])
+        deferred['component'].update(id='zzz', label='Deferred runtime', containers=['deferred-service'])
+        deferred['public'].update(componentId='zzz', affectedServices=['deferred-service'])
+        old_deferred = copy.deepcopy(self.batch_php_before)
+        old_deferred.update(Id='old-deferred', Name='/deferred-service')
+        self.docker.rows['old-deferred'] = copy.deepcopy(old_deferred)
+        deferred['fingerprint'] = m.fingerprint([old_deferred])
+        stored['families'].append(deferred)
+        verify = m.verify
+        def verify_services(old, identity, row, version):
+            if row['id'] == 'php':
+                raise m.Rejected('updates_unavailable', 'Fixture later family failure', 503)
+            return verify(old, identity, row, version)
+        with patch.object(m, 'image_candidate', side_effect=self.batch_build), patch.object(m, 'node_preflight'), patch.object(m, 'verify', side_effect=verify_services), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        admission.assert_called_once()
+        record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'failed'); self.assertEqual(record['completedServices'], 3)
+        self.assertEqual(record['componentResults'], [{'componentId': 'node', 'status': 'succeeded'}, {'componentId': 'php', 'status': 'failed'}, {'componentId': 'zzz', 'status': 'skipped'}])
+        self.assertEqual(record['serviceResults'][-2]['status'], 'rolled-back')
+        self.assertEqual(record['serviceResults'][-1]['status'], 'skipped')
+        self.assertEqual(self.docker.rows['old-deferred'], old_deferred)
+        self.assertEqual(self.docker.rows['old-container'], self.batch_php_before)
+        for old in self.node_before.values():
+            self.assertNotEqual(self.docker.inspect(old['Name'])['Id'], old['Id'])
+        self.assertIsNotNone(m.load('desired', 'node')); self.assertIsNone(m.load('desired', 'php'))
+
+    def test_batch_data_failure_never_downgrades_newly_started_database(self):
+        stored = self.batch_fixture(); stored['families'][-1]['component'].update(category='Database', recoveryPolicy='offline-snapshot-v1')
+        self.prepare_job(); verify = m.verify
+        def verify_services(old, identity, row, version):
+            if row['id'] == 'php':
+                raise m.Rejected('updates_unavailable', 'Fixture database failure', 503)
+            return verify(old, identity, row, version)
+        with patch.object(m, 'image_candidate', side_effect=self.batch_build), patch.object(m, 'node_preflight'), patch.object(m, 'snapshot_database'), patch.object(m, 'verify', side_effect=verify_services), patch.object(m, 'refresh_admission'):
+            m.apply_job('job-1', stored)
+        record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'failed'); self.assertTrue(record['recoveryRequired'])
+        self.assertEqual(record['completedServices'], 3)
+        self.assertFalse(self.docker.rows['old-container']['State']['Running'])
+        self.assertNotIn(('POST', '/containers/old-container/start', None), self.docker.calls)
+        self.assertTrue(m.recovery_required())
+
+    def test_restart_recovery_finds_batch_family_journal_and_retains_prior_results(self):
+        stored = self.batch_fixture(); self.prepare_job(); verify = m.verify
+        def crash(old, identity, row, version):
+            if row['id'] == 'php':
+                raise SystemExit('Fixture worker crash')
+            return verify(old, identity, row, version)
+        with patch.object(m, 'image_candidate', side_effect=self.batch_build), patch.object(m, 'node_preflight'), patch.object(m, 'verify', side_effect=crash), patch.object(m, 'refresh_admission'), self.assertRaises(SystemExit):
+            m.apply_job('job-1', stored)
+        self.assertTrue((self.state / 'job-1' / 'rollback.json').exists())
+        self.assertTrue((self.state / 'job-1' / 'php' / 'rollback.json').exists())
+        m.initialize(); record = m.load('operation', 'job-1')
+        self.assertEqual(record['status'], 'interrupted'); self.assertTrue(record['recoveryRequired'])
+        self.assertEqual(record['componentResults'][0], {'componentId': 'node', 'status': 'succeeded'})
+        self.assertEqual(record['completedServices'], 3)
+
+    def host_fixture(self, reboot=True):
+        self.host_inventory = {'bootId': 'fixture-boot-before', 'rebootRequired': reboot, 'rebootPackages': ['fixture-package'], 'maintenanceRunning': False}
+        self.host_check_result = {**self.host_inventory, 'checkedAt': int(time.time()),
+                                  'packages': [{'name': 'fixture-package', 'currentVersion': '1.0', 'targetVersion': '1.1'}],
+                                  'keptBack': ['fixture-held'], 'installedFingerprint': 'a' * 64, 'candidateFingerprint': 'b' * 64}
+        m.save('cache', 'host-releases', self.host_check_result)
+        self.host = unittest.mock.Mock()
+        self.host.HostUpdateError = type('FixtureHostError', (RuntimeError,), {})
+        self.host.inventory.side_effect = lambda: copy.deepcopy(self.host_inventory)
+        def native_plan(value=None):
+            return {'planId': uuid.uuid4().hex, 'expiresAt': int(time.time()) + 300,
+                    'bootId': self.host_inventory['bootId'], 'packages': value['packages'] if value else [],
+                    'steps': ['Prepare', 'Verify'], 'risks': ['Services restart'], 'confirmationRequired': 'UPDATE' if value else 'REBOOT'}
+        self.host.plan.side_effect = native_plan
+        self.host.reboot_plan.side_effect = native_plan
+        def prepare(value, persist, confirmation):
+            self.assertEqual(confirmation, 'REBOOT')
+            intent = {'schema': 'platform-host-reboot-intent/v1', 'state': 'queued', 'bootIdBefore': value['bootId'], 'planId': value['planId']}
+            persist(intent); return intent
+        self.host.prepare_reboot.side_effect = prepare
+        self.host.schedule_reboot.side_effect = lambda intent: {**intent, 'state': 'waiting-reboot'}
+        def reconcile(intent, health_check=None):
+            if self.host_inventory['bootId'] == intent['bootIdBefore']:
+                return {**intent, 'state': 'waiting-reboot'}
+            healthy = health_check()
+            return {**intent, 'bootIdAfter': self.host_inventory['bootId'], 'state': 'succeeded' if healthy else 'verifying-services'}
+        self.host.reconcile_reboot.side_effect = reconcile
+        patch.object(m, 'host_updates', self.host).start()
+        patch.object(m, 'host_os_release', return_value={'id': 'ubuntu', 'name': 'Ubuntu', 'version': '24.04', 'kernel': 'fixture-kernel'}).start()
+        return self.host
+
+    def host_public_plan(self, reboot=False):
+        return m.handle({'action': 'host-reboot-plan' if reboot else 'host-plan', 'revision': m.host_catalog()['revision']})
+
+    def host_apply_body(self, public, reboot=False):
+        return {'action': 'host-reboot-apply' if reboot else 'host-apply', 'revision': public['revision'], 'planId': public['planId'],
+                'confirmation': 'REBOOT' if reboot else 'UPDATE', 'idempotencyKey': 'fixture-host-request'}
+
+    def test_host_public_catalog_and_plan_expose_counts_without_package_arrays_or_apt_writes(self):
+        host = self.host_fixture(); catalog = m.handle({'action': 'host-catalog'})
+        self.assertEqual(catalog['schema'], 'host-updates/v1'); self.assertEqual(catalog['updateCount'], 1)
+        self.assertEqual(catalog['keptBackCount'], 1); self.assertTrue(catalog['canApply'])
+        public = self.host_public_plan()
+        self.assertEqual(public['kind'], 'host-upgrade'); self.assertEqual(public['packageCount'], 1)
+        self.assertNotIn('fixture-package', json.dumps(catalog) + json.dumps(public))
+        self.assertNotIn('packages', public)
+        self.assertEqual(m.load('host-plan', public['planId'])['native']['packages'], self.host_check_result['packages'])
+        host.plan.assert_called_once_with(self.host_check_result); host.run_transient.assert_not_called()
+
+    def test_host_catalog_and_runtime_catalog_keep_operation_streams_separate(self):
+        self.host_fixture()
+        m.save('operation', 'runtime-record', {'id': 'runtime-record', 'kind': 'apply', 'status': 'succeeded'})
+        m.save('operation', 'os-record', {'id': 'os-record', 'kind': 'host-check', 'status': 'succeeded'})
+        self.assertEqual([item['id'] for item in m.catalog()['operations']], ['runtime-record'])
+        self.assertEqual([item['id'] for item in m.host_catalog()['operations']], ['os-record'])
+
+    def test_host_apply_is_idempotent_durable_and_uses_one_global_executor(self):
+        self.host_fixture(); public = self.host_public_plan(); seen = []
+        def scheduled(function, identity, kind, stored):
+            with m.db() as connection:
+                prior = connection.execute('SELECT job FROM idempotency WHERE id=?', ('fixture-host-request',)).fetchone()
+            seen.append((m.load('operation', identity), prior['job'], function, kind))
+        with patch.object(m.EXECUTOR, 'submit', side_effect=scheduled) as executor:
+            first = m.handle(self.host_apply_body(public)); second = m.handle(self.host_apply_body(public))
+        self.assertEqual(first, second); executor.assert_called_once()
+        record, binding, function, kind = seen[0]
+        self.assertEqual(binding, record['id']); self.assertEqual(function, m.host_job); self.assertEqual(kind, 'host-upgrade')
+        with self.assertRaises(m.Rejected) as blocked:
+            m.handle({'action': 'check'})
+        self.assertEqual(blocked.exception.code, 'operation_conflict')
+        self.host.run_transient.assert_not_called()
+
+    def test_host_schema_confirmation_stale_expiry_and_cross_kind_replay_fail_before_scheduling(self):
+        self.host_fixture(); public = self.host_public_plan()
+        body = self.host_apply_body(public)
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            for change in [{'command': 'apt-get upgrade'}, {'confirmation': 'REBOOT'}, {'revision': 'changed'}]:
+                with self.subTest(change=change), self.assertRaises(m.Rejected):
+                    m.handle({**body, **change})
+            executor.assert_not_called()
+            stored = m.load('host-plan', public['planId']); stored['native']['expiresAt'] = int(time.time()) - 1
+            m.save('host-plan', public['planId'], stored)
+            with self.assertRaises(m.Rejected) as expired:
+                m.handle(body)
+            self.assertEqual(expired.exception.status, 410)
+
+    def test_host_upgrade_dispatches_fixed_transient_worker_and_real_progress_without_docker_apply(self):
+        host = self.host_fixture(); public = self.host_public_plan(); stored = m.load('host-plan', public['planId'])
+        identity = uuid.uuid4().hex
+        m.save('operation', identity, {'id': identity, 'kind': 'host-upgrade', 'status': 'queued', 'stage': 'Queued', 'completedSteps': 0, 'totalSteps': 100})
+        host.write_plan_file.return_value = '/fixture/root-only-plan.json'
+        def transient(action, **kwargs):
+            self.assertEqual(action, 'apply'); self.assertEqual(kwargs['plan_file'], '/fixture/root-only-plan.json')
+            kwargs['progress']({'stage': 'upgrade', 'state': 'running'})
+            kwargs['progress']({'stage': 'packages', 'percent': 37.5, 'package': 'fixture-package', 'state': 'running'})
+            self.assertEqual(m.load('operation', identity)['completedSteps'], 37)
+            return {'state': 'succeeded', 'packages': self.host_check_result['packages'], 'rebootRequired': True}
+        host.run_transient.side_effect = transient
+        with patch.object(m, 'apply_job') as docker_apply:
+            m.host_job(identity, 'host-upgrade', stored)
+        docker_apply.assert_not_called(); host.write_plan_file.assert_called_once_with(stored['native'])
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'succeeded'); self.assertEqual(record['completedSteps'], 100)
+        self.assertTrue(record['rebootRequired']); self.assertNotIn('fixture-package', json.dumps(record))
+
+    def test_failed_host_upgrade_never_claims_docker_rollback_and_requires_apt_recovery(self):
+        host = self.host_fixture(); public = self.host_public_plan(); identity = uuid.uuid4().hex
+        m.save('operation', identity, {'id': identity, 'kind': 'host-upgrade', 'status': 'queued', 'stage': 'Queued', 'completedSteps': 0, 'totalSteps': 100})
+        def failing(action, **kwargs):
+            kwargs['progress']({'stage': 'upgrade'})
+            raise host.HostUpdateError(SECRET)
+        host.run_transient.side_effect = failing
+        m.host_job(identity, 'host-upgrade', m.load('host-plan', public['planId']))
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'failed'); self.assertTrue(record['recoveryRequired'])
+        self.assertNotIn(SECRET, json.dumps(record)); self.assertIn('APT', record['stage'])
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+
+    def test_reboot_intent_persists_before_ack_and_is_scheduled_once_only_after_callback(self):
+        host = self.host_fixture(); public = self.host_public_plan(reboot=True); callbacks = []
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            accepted = m.handle(self.host_apply_body(public, reboot=True), after_response=callbacks.append)
+            private = m.load('host-reboot', accepted['operationId'])
+            self.assertFalse(private['acknowledged']); self.assertEqual(private['intent']['state'], 'queued')
+            executor.assert_not_called(); host.schedule_reboot.assert_not_called()
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0](); callbacks[0]()
+            executor.assert_called_once_with(m.host_reboot_job, accepted['operationId'])
+        self.assertTrue(m.load('host-reboot', accepted['operationId'])['acknowledged'])
+        m.host_reboot_job(accepted['operationId'])
+        host.schedule_reboot.assert_called_once()
+        self.assertEqual(m.load('operation', accepted['operationId'])['status'], 'running')
+
+    def test_reboot_wrong_confirmation_or_upgrade_action_cannot_ack_existing_reboot_intent(self):
+        self.host_fixture(); public = self.host_public_plan(reboot=True); callbacks = []
+        m.handle(self.host_apply_body(public, reboot=True), after_response=callbacks.append)
+        body = self.host_apply_body(public, reboot=True)
+        with self.assertRaises(m.Rejected):
+            m.handle({**body, 'confirmation': 'UPDATE'}, after_response=callbacks.append)
+        with self.assertRaises(m.Rejected):
+            m.handle({**body, 'action': 'host-apply', 'confirmation': 'UPDATE'}, after_response=callbacks.append)
+        self.assertEqual(len(callbacks), 1)
+
+    def test_reboot_reconciles_only_new_boot_and_all_previous_running_services_healthy(self):
+        self.host_fixture(); public = self.host_public_plan(reboot=True); callbacks = []
+        accepted = m.handle(self.host_apply_body(public, reboot=True), after_response=callbacks.append)
+        with patch.object(m.EXECUTOR, 'submit'):
+            callbacks[0]()
+        m.initialize(); m.reconcile_host_reboots(force=True)
+        self.assertEqual(m.load('operation', accepted['operationId'])['status'], 'running')
+        self.host_inventory['bootId'] = 'fixture-boot-after'
+        self.docker.rows['old-container']['State']['Running'] = False
+        m.reconcile_host_reboots(force=True)
+        self.assertEqual(m.load('operation', accepted['operationId'])['completedSteps'], 2)
+        self.docker.rows['old-container']['State']['Running'] = True
+        m.reconcile_host_reboots(force=True)
+        record = m.load('operation', accepted['operationId'])
+        self.assertEqual(record['status'], 'succeeded'); self.assertEqual(record['completedSteps'], 3)
+
+    def test_reboot_scheduler_runs_after_http_response_body_flush_and_never_before(self):
+        self.host_fixture(); public = self.host_public_plan(reboot=True)
+        events, scheduled = [], threading.Event()
+        class Handler(m.Handler):
+            def do_POST(self):
+                stream = self.wfile
+                class Writer:
+                    def write(self, value):
+                        events.append('write'); return stream.write(value)
+                    def flush(self):
+                        events.append('flush'); return stream.flush()
+                    def __getattr__(self, key):
+                        return getattr(stream, key)
+                self.wfile = Writer()
+                return super().do_POST()
+        _, request = self.http_server(Handler)
+        def schedule(function, identity):
+            events.append('schedule')
+            self.assertTrue(m.load('host-reboot', identity)['acknowledged'])
+            scheduled.set()
+        with patch.object(m.EXECUTOR, 'submit', side_effect=schedule):
+            status, accepted = request(self.host_apply_body(public, reboot=True))
+            self.assertTrue(scheduled.wait(1))
+        self.assertEqual(status, 200); self.assertEqual(accepted['status'], 'queued')
+        index = events.index('schedule')
+        self.assertEqual(events[index - 1], 'flush')
+        self.host.schedule_reboot.assert_not_called()
+
+    def test_failed_http_flush_retains_intent_without_scheduling_or_acknowledgment(self):
+        self.host_fixture(); public = self.host_public_plan(reboot=True)
+        handler = m.Handler.__new__(m.Handler)
+        body = self.host_apply_body(public, reboot=True)
+        raw = m.encode({'body': body, 'timestamp': int(time.time() * 1000), 'nonce': uuid.uuid4().hex})
+        key = b'x' * 32
+        handler.connection = unittest.mock.Mock()
+        handler.server = types.SimpleNamespace(key=key)
+        handler.headers = {'Content-Length': str(len(raw)), 'x-platform-signature': hmac.new(key, raw, hashlib.sha256).hexdigest()}
+        handler.path = '/v1/updates'; handler.rfile = io.BytesIO(raw)
+        class BrokenWriter(io.BytesIO):
+            def flush(self):
+                raise BrokenPipeError('fixture response delivery failed')
+        handler.wfile = BrokenWriter()
+        handler.send_response = handler.send_header = handler.end_headers = unittest.mock.Mock()
+        with patch.object(m.EXECUTOR, 'submit') as executor, self.assertRaises(BrokenPipeError):
+            handler.do_POST()
+        executor.assert_not_called(); self.host.schedule_reboot.assert_not_called()
+        record = next(item for item in m.records('operation') if item['kind'] == 'host-reboot')
+        self.assertFalse(m.load('host-reboot', record['id'])['acknowledged'])
+        m.initialize(); m.reconcile_host_reboots(force=True)
+        self.assertEqual(m.load('operation', record['id'])['status'], 'queued')
+
+    def test_restart_of_host_upgrade_marks_apt_interruption_without_fake_runtime_recovery(self):
+        self.host_fixture()
+        m.save('operation', 'host-interrupted', {'id': 'host-interrupted', 'kind': 'host-upgrade', 'status': 'running', 'stage': 'Upgrade', 'completedSteps': 40, 'totalSteps': 100})
+        m.initialize(); record = m.load('operation', 'host-interrupted')
+        self.assertEqual(record['status'], 'interrupted'); self.assertTrue(record['recoveryRequired'])
+        self.assertIn('APT', record['stage']); self.assertIn('nessun rollback', record['stage'])
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            for body in [{'action': 'host-check'}, {'action': 'host-plan', 'revision': m.host_catalog()['revision']}, {'action': 'plan', 'componentId': 'php', 'revision': m.catalog()['revision']}]:
+                with self.subTest(body=body), self.assertRaises(m.Rejected) as blocked:
+                    m.handle(body)
+                self.assertEqual(blocked.exception.code, 'operation_conflict')
+            executor.assert_not_called()
+        self.host.run_transient.assert_not_called()
+
     def test_revision_stale_plan_rejected_without_mutation(self):
         before = m.catalog()['revision']
         self.docker.rows['old-container']['HostConfig']['Memory'] += 1024
@@ -570,9 +1119,9 @@ class UpdatesTests(unittest.TestCase):
             self.plan()
         self.assertEqual(error.exception.status, 409)
 
-    def http_server(self):
+    def http_server(self, handler=None):
         endpoint = self.root / 'u.sock'
-        server = m.Server(str(endpoint), m.Handler)
+        server = m.Server(str(endpoint), handler or m.Handler)
         server.key = b'x' * 32
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -734,6 +1283,15 @@ class InstallerDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(components[0]['initialImages']), 2)
         rerun = copy.deepcopy(rows); rerun[0]['Image'] = NEW_IMAGE
         self.assertEqual(self.installer.discover(rerun, pathlib.Path('/fixture/platform'))[0]['id'], 'node')
+
+    def test_traefik_root_route_probes_survive_enrollment_with_new_image_identity(self):
+        row = self.runtime('web-proxy', 'traefik:v3.7.16')
+        components = self.installer.discover([row], pathlib.Path('/fixture/platform'))
+        probes = [{'host': 'portal.example.test', 'port': 8080, 'path': '/', 'expectedStatuses': [200, 401]}]
+        previous = [{'id': 'legacy-traefik-oldimage', 'repository': 'library/traefik', 'containers': ['previous-router-name'], 'routeProbes': probes}]
+        self.installer.preserve_enrollment_policy(components, previous)
+        self.assertEqual(components[0]['id'], 'traefik')
+        self.assertEqual(components[0]['routeProbes'], probes)
 
     def test_completed_initialization_helpers_are_not_runtime_update_targets(self):
         rows = [self.runtime('web-proxy', 'nginx:1.30.5-alpine'),

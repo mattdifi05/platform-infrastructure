@@ -35,24 +35,39 @@ class ReleasesTests(unittest.TestCase):
     def test_stable_suffix_and_compatibility(self):
         result = self.resolve([tag(n) for n in ['8.5.12-apache', '9.0.0-apache', '8.5.99-rc1-apache', '8.5.50-alpine', 'latest', '8.5.13-beta-apache']])
         self.assertEqual(result['latestStable']['version'], '9.0.0')
-        self.assertEqual(result['candidateRelease']['version'], '8.5.12')
-        self.assertEqual(result['candidateRelease']['imageReference'], 'docker.io/example/php:8.5.12-apache')
+        self.assertEqual(result['candidateRelease']['version'], '9.0.0')
+        self.assertEqual(result['candidateRelease']['imageReference'], 'docker.io/example/php:9.0.0-apache')
         self.assertEqual(result['candidateRelease']['imageDigest'], D)
 
     def test_no_downgrade(self):
         self.assertIsNone(self.resolve([tag('8.5.9-apache')])['candidateRelease'])
 
-    def test_alignment_can_reuse_exact_maximum_only_when_explicitly_requested(self):
+    def test_alignment_targets_latest_and_reuses_current_only_when_explicit(self):
         tags = [tag('8.5.12-apache'), tag('8.6.0-apache'), tag('8.5.11-apache')]
-        self.assertIsNone(self.resolve(tags, '8.5.12')['candidateRelease'])
+        self.assertEqual(self.resolve(tags, '8.5.12')['candidateRelease']['version'], '8.6.0')
+        self.assertIsNone(self.resolve(tags, '8.6.0')['candidateRelease'])
         self.component['includeCurrent'] = True
-        result = self.resolve(tags, '8.5.12')
-        self.assertEqual(result['latestStable']['version'], '8.6.0')
-        self.assertEqual(result['candidateRelease']['version'], '8.5.12')
-        self.assertEqual(result['candidateRelease']['imageDigest'], D)
+        result = self.resolve(tags, '8.6.0')
+        self.assertEqual(result['candidateRelease'], result['latestStable'])
         self.assertIsNone(self.resolve([tag('8.5.11-apache')], '8.5.12')['candidateRelease'])
         self.component['includeCurrent'] = 'true'
-        self.assertIsNone(self.resolve(tags, '8.5.12')['candidateRelease'])
+        self.assertIsNone(self.resolve(tags, '8.6.0')['candidateRelease'])
+
+    def test_database_major_requires_migration_without_patch_fallback(self):
+        self.component.update(repository='library/postgres', category='Database', tagSuffix='-alpine')
+        result = self.resolve([tag('18.6-alpine'), tag('19.0-alpine')], '18.5')
+        self.assertEqual(result['latestStable']['version'], '19.0')
+        self.assertIsNone(result['candidateRelease'])
+        self.assertIn('migration required', result['reason'])
+        result = self.resolve([tag('18.6-alpine')], '18.5')
+        self.assertEqual(result['candidateRelease'], result['latestStable'])
+
+    def test_observe_remains_assisted(self):
+        self.component['strategy'] = 'observe'
+        result = self.resolve([tag('9.0.0-apache')])
+        self.assertEqual(result['latestStable']['version'], '9.0.0')
+        self.assertIsNone(result['candidateRelease'])
+        self.assertIn('assisted', result['reason'])
 
     def test_architecture_and_duplicates(self):
         same = tag('8.5.12-apache')
@@ -120,7 +135,7 @@ class ReleasesTests(unittest.TestCase):
         with patch.object(m._Client, 'get', get):
             result = m.resolve_release(self.component, '3.8.0')
         self.assertEqual(result['latestStable']['version'], '4.0.0')
-        self.assertEqual(result['candidateRelease']['version'], '3.9.0')
+        self.assertEqual(result['candidateRelease']['version'], '4.0.0')
         self.assertTrue(any('/prometheus/prometheus/releases?' in url for url in calls))
         self.assertFalse(any('page_size=' in url for url in calls))
 
@@ -140,6 +155,23 @@ class ReleasesTests(unittest.TestCase):
         with patch.object(m.urllib.request, 'build_opener', return_value=opener):
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):
                 m._Client().get('https://registry-1.docker.io/v2/prom/prometheus/manifests/v3.9.0')
+
+    def test_installer_enrolls_direct_latest_policy_for_runtime_families(self):
+        installer_path = PATH.parents[3] / 'scripts/install-runtime-updates.py'
+        installer_spec = importlib.util.spec_from_file_location('runtime_installer', installer_path)
+        installer = importlib.util.module_from_spec(installer_spec)
+        installer_spec.loader.exec_module(installer)
+        row = {
+            'Name': '/app', 'Image': 'sha256:' + 'b' * 64,
+            'State': {'Running': True}, 'Mounts': [],
+            'Config': {'Image': 'platform/app:deployed', 'Env': ['NODE_VERSION=24.22.0'],
+                       'Labels': {'com.docker.compose.project': 'app', 'com.docker.compose.service': 'app'}},
+        }
+        component, = installer.discover([row], PATH.parents[3])
+        self.assertEqual(component['compatibility'], 'latest')
+        self.assertEqual(component['targetPolicy'], 'latest-stable-direct-v1')
+        self.assertEqual(component['strategy'], 'node-layer')
+        self.assertEqual(component['familyPolicy'], 'single-version-v1')
 
     def test_compare(self):
         self.assertEqual(m.compare_versions('18.6', '18.6.0'), 0)
