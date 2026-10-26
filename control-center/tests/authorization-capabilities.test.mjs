@@ -116,8 +116,10 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
   const updatesAdapter = new Set([
     "runtime-updates.catalog", "runtime-updates.check", "runtime-updates.plan", "runtime-updates.apply", "runtime-updates.operation",
     "runtime-updates.host.catalog", "runtime-updates.host.check", "runtime-updates.host.plan", "runtime-updates.host.apply", "runtime-updates.host.reboot.plan", "runtime-updates.host.reboot.apply",
+    "server-events.read",
   ]);
   assert.match(source, /if \(requestOperation\.operationId\?\.startsWith\("runtime-updates\."\)\) \{\s*await handleRuntimeUpdatesApi\(/);
+  assert.match(source, /if \(requestOperation\.operationId === "server-events\.read"\) \{/);
   for (const id of updatesAdapter) assert.equal(definitions.filter(item => item.operationId === id).length, 1, `external update dispatcher ${id} must be cataloged exactly once`);
 
 

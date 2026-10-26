@@ -80,6 +80,7 @@ import { executeStatusChecks } from "./status/executor.mjs";
 import { createRuntimeUpdatesClient } from "./updates/client.mjs";
 import { handleRuntimeUpdatesApi } from "./updates/api.mjs";
 import { renderRuntimeUpdates } from "./updates/ui.mjs";
+import { renderServerEvents } from "./events/ui.mjs";
 const runtimeUpdatesClient = createRuntimeUpdatesClient();
 import {
   createStatusEventBroker,
@@ -526,6 +527,14 @@ const server = createServer(async (req, res) => {
       requestId: rid(),
       operation: requestOperation,
     }, async () => {
+      if (requestOperation.operationId === "server-events.read") {
+        try {
+          json(res, await runtimeUpdatesClient.serverEvents());
+        } catch {
+          json(res, { error: "server_events_unavailable", message: "Errori e avvisi del server temporaneamente non disponibili." }, 503);
+        }
+        return;
+      }
       if (requestOperation.operationId?.startsWith("runtime-updates.")) {
         await handleRuntimeUpdatesApi(req, res, url, { readJson: readPayload, json, client: runtimeUpdatesClient });
         return;
@@ -6186,6 +6195,7 @@ function statusNavChildren(context, params = new URLSearchParams(), currentSecti
 function operationsPortalSections() {
   return [
     { id: "overview", label: "Panoramica", icon: "server" },
+    { id: "events", label: "Errori e avvisi", icon: "warning" },
     { id: "projects", label: "Applicazioni", icon: "projects" },
     { id: "secrets", label: "Secret", icon: "shield" },
     { id: "settings", label: "Impostazioni", icon: "settings" },
@@ -6199,6 +6209,7 @@ function operationPageHint(section, context) {
     projects: "Host, runtime e organizzazione delle applicazioni.",
     secrets: "Credenziali cifrate, organizzate per applicazione.",
     overview: "Risorse della VPS in tempo reale.",
+    events: "Problemi attuali ed eventi recenti della VPS.",
     settings: "Impostazioni del server e controllo dei backup.",
     files: "Inventario file applicazione in sola lettura.",
     databases: "Database collegati alle applicazioni e azioni metadata.",
@@ -6208,6 +6219,7 @@ function operationPageHint(section, context) {
 
 function renderOperationsSection(section, context, params, currentProject) {
   if (section === "overview") return renderOverview();
+  if (section === "events") return renderServerEvents();
   if (section === "projects") return renderOpsProjects(context, params);
   if (section === "secrets") return renderOpsVault(context);
   if (section === "settings") return renderOpsSettings();

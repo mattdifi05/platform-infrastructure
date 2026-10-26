@@ -163,7 +163,7 @@ def main():
             f.write(os.urandom(32))
     os.chown(key, 0, 1000)
     key.chmod(0o640)
-    for name in ['platform_runtime_updates.py', 'platform_runtime_releases.py', 'platform_host_updates.py']:
+    for name in ['platform_runtime_updates.py', 'platform_runtime_releases.py', 'platform_host_updates.py', 'platform_server_events.py']:
         shutil.copy2(SOURCE / 'deployment/host/libexec' / name, pathlib.Path('/usr/local/libexec') / name)
         (pathlib.Path('/usr/local/libexec') / name).chmod(0o755)
     shutil.copy2(SOURCE / 'deployment/host/systemd/platform-runtime-updates.service', '/etc/systemd/system/platform-runtime-updates.service')

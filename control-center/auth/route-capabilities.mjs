@@ -115,6 +115,7 @@ const CONTROL_ROUTES = Object.freeze([
   admin("identity.access-review.plan", "control", "identity", "access-reviews"),
 
   viewer("runtime-updates.catalog", "control", "runtime-updates"),
+  viewer("server-events.read", "control", "server-events"),
   admin("runtime-updates.check", "control", "runtime-updates", "check"),
   viewer("runtime-updates.host.catalog", "control", "runtime-updates", "system"),
   admin("runtime-updates.host.check", "control", "runtime-updates", "system", "check"),

@@ -158,6 +158,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(overviewHome, /section-overview/);
   assert.match(overviewHome, /data-overview-page/);
   assert.ok(overviewHome.indexOf('data-ops-nav-group="overview"') < overviewHome.indexOf('data-ops-nav-group="projects"'));
+  assert.match(overviewHome, /data-ops-nav-group="events"/);
+  const eventsPage = await getText(`${baseUrl}/?section=events`);
+  assert.match(eventsPage, /<h1 id="control-page-title">Errori e avvisi<\/h1>/);
+  assert.match(eventsPage, /data-server-events/);
+  assert.match(eventsPage, /data-fa-icon="triangle-exclamation"/);
   const html = await getText(`${baseUrl}/?section=projects`);
   assert.match(html, /Admin Control Center/);
   assert.match(html, /<body data-cc-theme="light" data-cc-preloading="true">/);

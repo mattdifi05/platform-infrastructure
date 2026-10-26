@@ -21,6 +21,7 @@ export const controlCenterCssEntrypoints = [
   "/assets/control-center/applications.css",
   "/assets/control-center/secrets.css",
   "/assets/control-center/runtime-updates.css",
+  "/assets/control-center/server-events.css",
 ];
 
 export const controlCenterScriptEntrypoints = [
@@ -28,6 +29,7 @@ export const controlCenterScriptEntrypoints = [
   "/assets/control-center/overview.js",
   "/assets/control-center/secrets.js",
   "/assets/control-center/runtime-updates.js",
+  "/assets/control-center/server-events.js",
 ];
 
 // Derive each cache token from the exact asset bytes. A stale environment
@@ -43,6 +45,8 @@ const assetVersionByHref = new Map([
   ["/assets/control-center/secrets.js", "../../styles/secrets.js"],
   ["/assets/control-center/runtime-updates.css", "../../styles/runtime-updates.css"],
   ["/assets/control-center/runtime-updates.js", "../../styles/runtime-updates.js"],
+  ["/assets/control-center/server-events.css", "../../styles/server-events.css"],
+  ["/assets/control-center/server-events.js", "../../styles/server-events.js"],
 ].map(([href, relativePath]) => [
   href,
   createHash("sha256").update(readFileSync(new URL(relativePath, import.meta.url))).digest("hex").slice(0, 20),

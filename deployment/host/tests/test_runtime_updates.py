@@ -1339,6 +1339,17 @@ class UpdatesTests(unittest.TestCase):
                 conn.close()
         return endpoint, request
 
+    def test_server_events_is_a_nofields_hmac_read_without_queued_mutations(self):
+        payload = {'schema': 'server-events/v1', 'available': True, 'partial': False, 'checkedAt': m.stamp(),
+                   'issues': [], 'events': [], 'sources': [{'id': 'host', 'available': True}]}
+        _, request = self.http_server()
+        with patch.object(m, 'SERVER_EVENTS_COLLECTOR', return_value=payload) as collector, patch.object(m.EXECUTOR, 'submit') as submit:
+            status, value = request({'action': 'server-events'})
+            self.assertEqual(status, 200); self.assertEqual(value, payload)
+            self.assertEqual(request({'action': 'server-events', 'url': 'https://example.test'})[0], 400)
+            self.assertEqual(request({'action': 'server-events'}, signature='0' * 64)[0], 403)
+        collector.assert_called_once(); submit.assert_not_called()
+
     def test_unix_http_signature_replay_and_typed_rejections(self):
         _, request = self.http_server()
         body = {'action': 'catalog'}

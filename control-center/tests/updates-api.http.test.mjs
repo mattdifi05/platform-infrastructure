@@ -20,6 +20,7 @@ test('real server authorizes updates before payload/context/bridge and enforces 
     const { body } = JSON.parse(Buffer.concat(chunks)); calls.push(body);
     let value;
     if (body.action === 'catalog') value = { schema: 'runtime-updates/v1', available: true, canCheck: true, revision, checkedAt: new Date().toISOString(), components: [], operations: [] };
+    else if (body.action === 'server-events') value = { schema: 'server-events/v1', available: true, partial: false, checkedAt: new Date().toISOString(), issues: [], events: [], sources: [{ id: 'host', available: true }] };
     else if (body.action === 'host-catalog') value = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 2, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [] };
     else if (body.action === 'host-plan' || body.action === 'host-reboot-plan') value = { planId: 'host-plan', revision, expiresAt: new Date(Date.now() + 60000).toISOString(), kind: body.action === 'host-plan' ? 'host-upgrade' : 'host-reboot', packageCount: 2, steps: ['Verifica'], risks: ['Fermo temporaneo'], confirmationRequired: body.action === 'host-plan' ? 'UPDATE' : 'REBOOT' };
     else if (body.action === 'plan') value = { planId: 'plan-1', revision, componentId: 'php', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '8.5.12', targetDigest, affectedServices: ['php-app'], steps: ['verify'], risks: [], confirmationRequired: 'UPDATE' };
@@ -72,6 +73,12 @@ test('real server authorizes updates before payload/context/bridge and enforces 
   }
   assert.equal(calls.length, 0, 'Rejected requests must not reach the native bridge');
   const viewerCatalog = await request('GET', '/control/runtime-updates', 'viewer');
+  assert.equal((await request('GET', '/control/server-events', null)).status, 401);
+  for (const prefix of ['/control', '/control/v1']) {
+    const events = await request('GET', prefix + '/server-events', 'viewer');
+    assert.equal(events.status, 200); assert.equal((await events.json()).schema, 'server-events/v1');
+    assert.notEqual((await request('POST', prefix + '/server-events', 'owner', {})).status, 200);
+  }
   assert.equal(viewerCatalog.status, 200); assert.equal((await viewerCatalog.json()).available, true);
   assert.equal((await request('POST', '/control/v1/runtime-updates/check', 'admin', {})).status, 202);
   assert.equal((await request('POST', '/control/runtime-updates/php/plan', 'owner', { revision })).status, 200);

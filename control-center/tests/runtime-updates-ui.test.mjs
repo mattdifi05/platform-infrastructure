@@ -7,28 +7,33 @@ const source = readFileSync(new URL('../styles/runtime-updates.js', import.meta.
 const tick = () => new Promise(resolve => setImmediate(resolve));
 class Node {
   constructor(tag = 'div') { this.tagName = tag; this.children = []; this.listeners = {}; this.attributes = {}; this.value = ''; this.disabled = false; this.hidden = false; this.textContent = ''; this.open = false; }
-  append(...nodes) { this.children.push(...nodes); }
+  append(...nodes) { for (const node of nodes) { if (node.parent) node.remove(); node.parent = this; this.children.push(node); } }
+  insertBefore(node, next) { if (node.parent) node.remove(); const index = next ? this.children.indexOf(next) : this.children.length; node.parent = this; this.children.splice(index < 0 ? this.children.length : index, 0, node); }
+  remove() { if (this.parent) { const index = this.parent.children.indexOf(this); if (index >= 0) this.parent.children.splice(index, 1); this.parent = null; } }
   replaceChildren(...nodes) { this.children = nodes; }
   addEventListener(type, callback) { this.listeners[type] = callback; }
   setAttribute(key, value) { this.attributes[key] = value; }
   removeAttribute(key) { delete this.attributes[key]; }
   get options() { return this.children; }
+  get parentElement() { return this.parent; }
   showModal() { this.open = true; }
   close() { this.open = false; }
 }
-function fixture(request, host = false) {
-  const nodes = new Map(), calls = [], timers = new Map(); let timer = 0, scan;
+function fixture(request, host = false, options = {}) {
+  const nodes = new Map(), calls = [], timers = new Map(), animations = []; let timer = 0, scan;
+  const create = tag => { const node = new Node(tag); node.getBoundingClientRect = () => ({ top: node.parent ? node.parent.children.indexOf(node) * 48 : 0 }); node.animate = frames => { animations.push({ node, frames }); return { finished: Promise.resolve(), cancel() {} }; }; return node; };
   const root = new Node(); root.isConnected = true;
-  root.querySelector = selector => { if (selector === '[data-updates-search]') throw Error('Search control was removed'); if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); };
-  root.querySelector('[data-updates-category]').value = 'all';
+  root.querySelector = selector => { if (['[data-updates-search]', '[data-updates-category]'].includes(selector)) throw Error('Search control was removed'); if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); };
   root.querySelector('[data-updates-progress]').querySelector = () => root.querySelector('progress');
   root.querySelector('[data-host-updates-progress]').querySelector = () => root.querySelector('progress');
-  const document = { readyState: 'complete', hidden: false, body: {}, createElement: tag => new Node(tag), querySelectorAll: selector => root.isConnected && selector === (host ? '[data-host-updates]' : '[data-runtime-updates]') ? [root] : [], addEventListener() {} };
+  const track = new Node('span'), fill = new Node('span'); fill.style = {}; track.querySelector = () => fill; track.append(root.querySelector('progress'), fill);
+  nodes.set('[data-progress-fill]', fill); nodes.set('[data-progress-track]', track);
+  const document = { readyState: 'complete', hidden: false, body: {}, createElement: create, querySelectorAll: selector => root.isConnected && selector === (host ? '[data-host-updates]' : '[data-runtime-updates]') ? [root] : [], addEventListener() {} };
   const context = { document, Headers, Date, Set, WeakSet, Number, Array, String, Error, encodeURIComponent, crypto: { randomUUID: () => 'fixture-uuid' }, clearTimeout: id => timers.delete(id), setTimeout: (callback, delay) => { timers.set(++timer, { callback, delay }); return timer; } };
-  context.window = { addEventListener() {}, MutationObserver: class {} , controlCenterRuntimeUpdates: { authenticate: async () => calls.push('authenticate'), request: async (path, payload) => { calls.push({ path, payload }); return request(path, payload); } } };
+  context.window = { addEventListener() {}, matchMedia: () => ({ matches: !options.motion }), MutationObserver: class {} , controlCenterRuntimeUpdates: { authenticate: async () => calls.push('authenticate'), request: async (path, payload) => { calls.push({ path, payload }); return request(path, payload); } } };
   context.MutationObserver = class { constructor(callback) { scan = callback; } observe() {} };
   vm.runInNewContext(source, context);
-  return { root, nodes, calls, timers, document, scan: () => scan(), node: selector => root.querySelector(selector), context };
+  return { root, nodes, calls, timers, document, animations, scan: () => scan(), node: selector => root.querySelector(selector), context };
 }
 const component = { id: 'php', label: 'PHP', category: 'Runtime', installed: true, current: { version: '8.5.11' }, latestStable: { version: '8.5.12', imageDigest: 'sha256:fixture' }, candidateRelease: { version: '8.5.12', imageDigest: 'sha256:fixture' }, status: 'update-available', canUpdate: true, services: ['php-apache'] };
 const catalog = { available: true, revision: 'revision', components: [component], operations: [] };
@@ -36,7 +41,7 @@ test('settings markup has accessible update controls and uses existing vendored 
   const html = renderRuntimeUpdates();
   const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
   assert.match(css, /\.cc-settings > \.ops-project-detail-panel\{border-radius:var\(--cc-radius-2xl,16px\)\}/);
-  assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|type="search"|https:\/\//);
+  assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|data-updates-category|Tutte le categorie|type="search"|https:\/\//);
   assert.ok(html.indexOf('data-host-updates aria-labelledby') < html.indexOf('data-runtime-updates aria-labelledby'), 'OS is a separate panel above runtime updates');
 });
 test('check remains queued until operation readback and polls pending operations at two seconds', async () => {
@@ -71,7 +76,7 @@ test('closing a plan before passkey returns prevents the plan request and apply'
   assert.equal(h.calls.some(call => call.path?.endsWith('/plan')), false); assert.equal(h.node('[data-updates-apply]').disabled, true);
 });
 test('unavailable, missing and unsupported components cannot start an update', async () => {
-  const h = fixture(() => ({ ...catalog, components: ['unavailable', 'not-installed', 'unsupported'].map(status => ({ ...component, status, blockedReason: 'Migrazione richiesta' })) }));
+  const h = fixture(() => ({ ...catalog, components: ['unavailable', 'not-installed', 'unsupported'].map(status => ({ ...component, id: status, status, blockedReason: 'Migrazione richiesta' })) }));
   await tick();
   assert.equal(h.node('[data-updates-list]').children.length, 3);
   for (const row of h.node('[data-updates-list]').children) assert.equal(row.children.find(node => node.tagName === 'button').disabled, true);
@@ -87,7 +92,7 @@ test('compatible candidate is separate from a newer major and apply requires a f
   const plan = { planId: 'p1', revision: 'revision', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '8.5.12', targetDigest: 'sha256:fixture', affectedServices: ['php-apache'], steps: ['Scarica', 'Verifica'], risks: ['Riavvio breve'], confirmationRequired: 'UPDATE' };
   const h = fixture(path => path.endsWith('/plan') ? plan : path.endsWith('/apply') ? { operationId: 'apply1', status: 'queued' } : { ...catalog, components: [{ ...component, latestStable: { version: '9.0.1' } }] });
   await tick(); const row = h.node('[data-updates-list]').children[0];
-  assert.ok(row.children.some(node => node.textContent.includes('Aggiornamento compatibile: 8.5.12')));
+  assert.ok(row.children[4].children[1].textContent.includes('Aggiornamento compatibile: 8.5.12'));
   row.children.find(node => node.tagName === 'button').listeners.click(); await tick();
   assert.equal(h.node('[data-updates-apply]').disabled, true);
   h.node('[data-updates-confirm]').value = 'UPDATE'; h.node('[data-updates-confirm]').listeners.input();
@@ -215,4 +220,46 @@ test('reboot control stays hidden when the server does not require a reboot', as
   assert.equal(h.node('[data-host-updates-reboot]').hidden, true); assert.equal(h.node('[data-host-updates-reboot]').disabled, true);
   await h.node('[data-host-updates-reboot]').listeners.click();
   assert.equal(h.calls.length, 1); assert.equal(h.node('[data-host-updates-dialog]').open, false);
+});
+test('keyed rows preserve disclosure state and identity through reorder; unchanged idle refresh does not animate', async () => {
+  let aligned = false;
+  const node = { ...component, id: 'node', label: 'Node.js' };
+  const h = fixture(() => ({ ...catalog, components: [{ ...component, status: aligned ? 'current' : 'update-available', canUpdate: !aligned }, { ...node, status: aligned ? 'update-available' : 'current', canUpdate: aligned }] }), false, { motion: true }); await tick();
+  const list = h.node('[data-updates-list]'), phpRow = list.children[0], nodeRow = list.children[1];
+  phpRow.children[4].open = true;
+  const before = h.animations.length;
+  aligned = true; await poll(h);
+  assert.equal(list.children[0], nodeRow); assert.equal(list.children[1], phpRow); assert.equal(phpRow.children[4].open, true);
+  assert.ok(h.animations.slice(before).some(animation => animation.frames.some(frame => /translateY\((?:48|-48)px\)/.test(frame.transform || ''))), 'reorder animates actual old-to-new geometry');
+  const after = h.animations.length; await poll(h);
+  assert.equal(h.animations.length, after); assert.equal(list.children[0], nodeRow); assert.equal(list.children[1], phpRow);
+  assert.equal(h.node('[data-updates-status]').hidden, true);
+  assert.ok(!phpRow.children[0].children.some(child => child.textContent === 'Runtime'), 'category labels are absent');
+});
+test('service rows update in place and successful results collapse while failure evidence stays open', async () => {
+  let phase = 'running';
+  const operation = () => ({ id: 'services-op', status: phase, stage: 'Verifica', totalServices: 1, completedServices: phase === 'succeeded' ? 1 : 0, serviceResults: [{ componentId: 'php', service: 'php-app', status: phase === 'running' ? 'verifying' : phase === 'succeeded' ? 'verified' : 'failed', stage: 'Verifica HTTP' }] });
+  const h = fixture(path => path.includes('/operations/') ? operation() : { ...catalog, operations: phase === 'running' ? [operation()] : [] }); await tick();
+  const row = h.node('[data-updates-services]').children[0]; assert.equal(h.node('[data-updates-results]').open, true);
+  await poll(h); assert.equal(h.node('[data-updates-services]').children[0], row);
+  phase = 'succeeded'; await poll(h); assert.equal(h.node('[data-updates-services]').children[0], row); assert.equal(h.node('[data-updates-results]').open, false);
+  const failed = fixture(path => path.includes('/operations/') ? { ...operation(), status: 'failed' } : { ...catalog, operations: [{ ...operation(), status: 'running' }] }); await tick(); await poll(failed);
+  assert.equal(failed.node('[data-updates-results]').open, true);
+});
+test('reduced motion preserves keyed updates without calling the animation API', async () => {
+  let phase = false;
+  const h = fixture(() => ({ ...catalog, components: [{ ...component, status: phase ? 'current' : 'update-available' }] })); await tick();
+  const row = h.node('[data-updates-list]').children[0]; phase = true; await poll(h);
+  assert.equal(h.node('[data-updates-list]').children[0], row); assert.equal(h.animations.length, 0);
+});
+test('decorative progress targets interpolate while native values stay exact and unknown totals remain indeterminate', async () => {
+  let completed = 1, total = 4;
+  const operation = () => ({ id: 'bar', status: 'running', stage: 'Verifica', completedServices: completed, totalServices: total });
+  const h = fixture(path => path.includes('/operations/') ? operation() : { ...catalog, operations: [operation()] }); await tick();
+  assert.equal(h.node('progress').value, 1); assert.equal(h.node('[data-progress-fill]').style.transform, 'scaleX(0.25)');
+  completed = 2; await poll(h); assert.equal(h.node('progress').value, 2); assert.equal(h.node('[data-progress-fill]').style.transform, 'scaleX(0.5)');
+  completed = 4; await poll(h); assert.equal(h.node('[data-progress-track]').attributes['data-progress-state'], 'indeterminate', 'full visual target requires terminal success');
+  total = 0; completed = 0; await poll(h); assert.equal(h.node('[data-progress-fill]').style.transform, '');
+  const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
+  assert.match(css, /transition:transform 400ms/); assert.match(css, /prefers-reduced-motion:reduce\)\{\.cc-progress-fill\{transition:none/);
 });

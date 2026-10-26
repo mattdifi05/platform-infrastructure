@@ -27,6 +27,10 @@ import uuid
 
 from platform_runtime_releases import resolve_release, compare_versions
 try:
+    from platform_server_events import create_collector as create_server_events_collector
+except ImportError:
+    create_server_events_collector = None
+try:
     import platform_host_updates as host_updates
 except ImportError:
     host_updates = None
@@ -39,6 +43,8 @@ EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 GATE = threading.Lock()
 HOST_JOB_GUARD = threading.Lock()
 HOST_JOB_THREADS = set()
+SERVER_EVENTS_GUARD = threading.Lock()
+SERVER_EVENTS_COLLECTOR = None
 DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
 IDENTIFIER = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$')
 
@@ -1363,8 +1369,20 @@ def handle_host(body, after_response=None):
         return result
 
 
+def server_events():
+    global SERVER_EVENTS_COLLECTOR
+    with SERVER_EVENTS_GUARD:
+        if SERVER_EVENTS_COLLECTOR is None and create_server_events_collector is not None:
+            SERVER_EVENTS_COLLECTOR = create_server_events_collector(read_operations=lambda: records('operation'))
+        collector = SERVER_EVENTS_COLLECTOR
+    if collector is None:
+        return {'schema': 'server-events/v1', 'available': False, 'partial': True, 'checkedAt': stamp(), 'issues': [], 'events': [],
+                'sources': [{'id': identity, 'available': False, 'reason': 'Raccoglitore diagnostico non disponibile.'} for identity in ['host', 'systemd', 'docker', 'journal', 'updates']]}
+    return collector()
+
+
 def handle(body, after_response=None):
-    allowed = {'catalog': set(), 'check': set(), 'plan': {'componentId', 'revision'}, 'apply': {'componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'operation': {'operationId'}}
+    allowed = {'server-events': set(), 'catalog': set(), 'check': set(), 'plan': {'componentId', 'revision'}, 'apply': {'componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'operation': {'operationId'}}
     allowed.update({'host-catalog': set(), 'host-check': set(), 'host-plan': {'revision'}, 'host-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'host-reboot-plan': {'revision'}, 'host-reboot-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}})
     if not isinstance(body, dict) or not isinstance(body.get('action'), str) or body.get('action') not in allowed or set(body) != allowed[body['action']] | {'action'}:
         raise Rejected('invalid_request', 'Richiesta non valida.', 400)
@@ -1375,6 +1393,8 @@ def handle(body, after_response=None):
     for key in ['revision', 'idempotencyKey']:
         if key in body and (not isinstance(body[key], str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}', body[key])):
             raise Rejected('invalid_request', 'Richiesta non valida.', 400)
+    if action == 'server-events':
+        return server_events()
     if action.startswith('host-'):
         return handle_host(body, after_response)
     if action == 'catalog':
