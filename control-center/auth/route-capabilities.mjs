@@ -114,6 +114,12 @@ const CONTROL_ROUTES = Object.freeze([
   admin("identity.session-policy.plan", "control", "identity", "sessions"),
   admin("identity.access-review.plan", "control", "identity", "access-reviews"),
 
+  viewer("runtime-updates.catalog", "control", "runtime-updates"),
+  admin("runtime-updates.check", "control", "runtime-updates", "check"),
+  ownerFresh("POST", "runtime-updates.plan", "control", "runtime-updates", parameter("componentId"), "plan"),
+  ownerFresh("POST", "runtime-updates.apply", "control", "runtime-updates", parameter("componentId"), "apply"),
+  viewer("runtime-updates.operation", "control", "runtime-updates", "operations", parameter("operationId")),
+
   viewer("resources.host.read", "control", "resources", "host"),
   viewer("resources.summary.read", "control", "resources", "summary"),
   admin("resources.limits.plan", "control", "resources", "limits"),

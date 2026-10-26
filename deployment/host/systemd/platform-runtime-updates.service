@@ -1,0 +1,31 @@
+[Unit]
+Description=Owner-operated runtime updates
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/libexec/platform_runtime_updates.py
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=platform-updates
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+StateDirectory=platform-updates
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+TasksMax=256
+MemoryMax=768M
+TimeoutStopSec=infinity
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

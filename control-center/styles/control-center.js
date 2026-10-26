@@ -1934,10 +1934,12 @@
     }).then(async function (response) {
       var value = await response.json().catch(function () { return {}; });
       if (redirectForReauthentication(response, value)) throw reauthenticationRedirectError();
-      if (!response.ok || value.ok === false) throw Error(value.message || value.error || "Richiesta non riuscita.");
+      if (!response.ok || value.ok === false) throw Error(value.message || value.error?.message || value.error || "Richiesta non riuscita.");
       return value;
     });
   }
+
+  window.controlCenterRuntimeUpdates = Object.freeze({ request: hostingRequest, authenticate: authenticateWithSystemPasskey });
 
   function hostingModeLabel(mode) {
     return ({ public: "Pubblico", private: "Privato", offline: "Offline" })[mode] || "Da verificare";
