@@ -14,6 +14,49 @@
     return text(item.current && item.current.version, versions.length === 1 ? versions[0] : 'Non verificata');
   }
   function element(tag, value) { var node = document.createElement(tag); if (value !== undefined) node.textContent = value; return node; }
+  var motions = new WeakMap(), visibilityGenerations = new WeakMap();
+  function reducedMotion() { return !window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  function animate(node, frames, duration) {
+    var previous = motions.get(node); if (previous) previous.cancel();
+    if (reducedMotion() || !node.animate) return null;
+    var animation = node.animate(frames, { duration: duration || 200, easing: 'cubic-bezier(.22,1,.36,1)' }); motions.set(node, animation);
+    animation.finished.then(function () { if (motions.get(node) === animation) motions.delete(node); }, function () {}); return animation;
+  }
+  function setText(node, value) { if (node.textContent !== value) node.textContent = value; }
+  function setProgress(progress, total, completed, successful) {
+    var measured = Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) && completed >= 0 && completed <= total && (completed < total || successful);
+    if (measured) { progress.max = total; progress.value = completed; } else progress.removeAttribute('value');
+    // The native element keeps the exact verified value for assistive tools.
+    // Only the decorative fill interpolates visually between server targets.
+    var track = progress.parentElement, fill = track && track.querySelector('[data-progress-fill]');
+    if (fill) { track.setAttribute('data-progress-state', measured ? 'measured' : 'indeterminate'); fill.style.transform = measured ? 'scaleX(' + completed / total + ')' : ''; }
+  }
+  function panelVisible(node, visible) {
+    if (node.hidden === !visible) return;
+    var generation = (visibilityGenerations.get(node) || 0) + 1; visibilityGenerations.set(node, generation);
+    if (visible) { node.hidden = false; animate(node, [{ opacity: 0, height: '0px' }, { opacity: 1, height: node.scrollHeight + 'px' }]); }
+    else { var animation = animate(node, [{ opacity: 1, height: node.scrollHeight + 'px' }, { opacity: 0, height: '0px' }], 140); if (animation) animation.finished.then(function () { if (visibilityGenerations.get(node) === generation) node.hidden = true; }, function () {}); else node.hidden = true; }
+  }
+  function openDialog(dialog) { visibilityGenerations.set(dialog, (visibilityGenerations.get(dialog) || 0) + 1); if (!dialog.open) dialog.showModal(); animate(dialog, [{ opacity: 0, transform: 'translateY(8px) scale(.985)' }, { opacity: 1, transform: 'translateY(0) scale(1)' }]); }
+  function closeDialog(dialog) {
+    var generation = (visibilityGenerations.get(dialog) || 0) + 1; visibilityGenerations.set(dialog, generation);
+    if (!dialog.open) return;
+    var animation = animate(dialog, [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(5px)' }], 130);
+    if (animation) animation.finished.then(function () { if (visibilityGenerations.get(dialog) === generation && dialog.open) dialog.close(); }, function () {}); else dialog.close();
+  }
+  function reconcile(container, records, views, keyFor, create, update) {
+    var before = new Map(), present = new Set();
+    views.forEach(function (view, key) { if (view.row.getBoundingClientRect) before.set(key, view.row.getBoundingClientRect().top); });
+    records.forEach(function (record, index) {
+      var key = keyFor(record); present.add(key); var view = views.get(key), fresh = !view;
+      if (!view) { view = create(record); views.set(key, view); }
+      update(view, record);
+      if (container.children[index] !== view.row) container.insertBefore(view.row, container.children[index] || null);
+      if (fresh) animate(view.row, [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'translateY(0)' }]);
+      else if (before.has(key) && view.row.getBoundingClientRect) { var delta = before.get(key) - view.row.getBoundingClientRect().top; if (Math.abs(delta) > 1) animate(view.row, [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'translateY(0)' }]); }
+    });
+    views.forEach(function (view, key) { if (!present.has(key)) { view.row.remove(); views.delete(key); } });
+  }
   function operationId(value) { return value && (value.operationId || value.id || value.operation && value.operation.id); }
   function mount(root) {
     if (mounted.has(root)) return;
@@ -23,6 +66,8 @@
     var list = select('[data-updates-list]'), status = select('[data-updates-status]'), check = select('[data-updates-check]'), refresh = select('[data-updates-refresh]');
     var dialog = select('[data-updates-dialog]'), confirm = select('[data-updates-confirm]'), apply = select('[data-updates-apply]'), planStatus = select('[data-updates-plan-status]');
     var updateAll = select('[data-updates-all]');
+    var componentViews = new Map(), serviceViews = new Map(), resultsOperation = null, resultsPending = null;
+    select('[data-updates-results]').addEventListener('toggle', function () { if (this.open) { var services = select('[data-updates-services]'); animate(services, [{ opacity: 0, height: '0px' }, { opacity: 1, height: services.scrollHeight + 'px' }]); } });
     function alive(generation) { return !state.stopped && root.isConnected && generation === state.generation; }
     function request(path, payload) {
       var bridge = window.controlCenterRuntimeUpdates;
@@ -49,38 +94,45 @@
       var updateCount = components.filter(function (item) { return item.status === 'update-available'; }).length;
       select('[data-updates-summary]').textContent = components.length + (components.length === 1 ? ' componente · ' : ' componenti · ') + updateCount + (updateCount === 1 ? ' aggiornamento disponibile' : ' aggiornamenti disponibili') + (value && value.checkedAt ? ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : ' · Versioni stabili non ancora verificate');
       var progressBox = select('[data-updates-progress]'), progress = progressBox.querySelector('progress');
-      progressBox.hidden = !working && !operation;
+      panelVisible(progressBox, working || Boolean(operation));
       var total = operation && operation.totalServices, completed = operation && operation.completedServices;
       var barTotal = Number.isSafeInteger(total) && total > 0 ? total : operation && operation.totalSteps;
       var barCompleted = Number.isSafeInteger(total) && total > 0 ? completed : operation && operation.completedSteps;
       var successful = operation && ['succeeded', 'completed'].includes(operation.status);
-      if (Number.isSafeInteger(barTotal) && barTotal > 0 && Number.isSafeInteger(barCompleted) && barCompleted >= 0 && barCompleted <= barTotal && (barCompleted < barTotal || successful)) { progress.max = barTotal; progress.value = barCompleted; }
-      else progress.removeAttribute('value');
+      setProgress(progress, barTotal, barCompleted, successful);
       select('[data-updates-stage]').textContent = operation ? text(operation.stage, serviceLabels[operation.status] || labels[operation.status] || 'Operazione in corso…') + (operation.currentService ? ' · ' + operation.currentService : operation.currentComponent ? ' · ' + operation.currentComponent : '') + (Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) ? ' · ' + completed + ' di ' + total + ' servizi' : '') : 'Verifica in corso…';
-      var services = select('[data-updates-services]'); services.replaceChildren();
-      (operation && Array.isArray(operation.serviceResults) ? operation.serviceResults : []).forEach(function (service) {
-        var row = element('li'); row.className = 'cc-update-service'; row.setAttribute('data-service-status', service.status || 'queued');
-        row.append(element('strong', text(service.service, 'Servizio')), element('span', serviceLabels[service.status] || labels[service.status] || 'Stato non disponibile'));
-        if (service.stage) row.append(element('small', service.stage));
-        services.append(row);
+      var services = operation && Array.isArray(operation.serviceResults) ? operation.serviceResults : [];
+      reconcile(select('[data-updates-services]'), services, serviceViews, function (service) { return service.componentId + ':' + service.service; }, function () {
+        var row = element('li'), name = element('strong'), status = element('span'), stage = element('small'); row.className = 'cc-update-service'; row.append(name, status, stage); return { row: row, name: name, status: status, stage: stage };
+      }, function (view, service) {
+        var changed = view.phase !== service.status; view.row.setAttribute('data-service-status', service.status || 'queued'); setText(view.name, text(service.service, 'Servizio')); setText(view.status, serviceLabels[service.status] || labels[service.status] || 'Stato non disponibile'); setText(view.stage, text(service.stage, '')); view.stage.hidden = !service.stage;
+        if (view.phase && changed) animate(view.status, [{ opacity: .35 }, { opacity: 1 }], 180); view.phase = service.status;
       });
-      var category = select('[data-updates-category]').value;
-      list.replaceChildren(); var count = 0;
-      components.slice().sort(function (a, b) { return Number(updatable(b)) - Number(updatable(a)); }).forEach(function (item) {
-        if (category !== 'all' && item.category !== category) return;
-        count++;
-        var row = element('article'); row.className = 'cc-update-row';
-        var name = element('div'); name.append(element('strong', text(item.label, item.id)), element('small', text(item.category, 'Componente'))); row.append(name);
-        var current = element('div'); current.append(element('small', 'Versione installata'), element('strong', currentVersion(item))); row.append(current);
-        var latest = element('div'); latest.append(element('small', 'Ultima stabile'), element('strong', text(item.latestStable && item.latestStable.version, 'Non disponibile'))); row.append(latest);
+      var results = select('[data-updates-results]'); results.hidden = !services.length;
+      setText(select('[data-updates-results-summary]'), services.length + ' servizi · Dettagli');
+      if (operation && (resultsOperation !== operation.id || resultsPending !== pending(operation))) { results.open = pending(operation) || !successful; resultsOperation = operation.id; resultsPending = pending(operation); }
+      reconcile(list, components.slice().sort(function (a, b) { return Number(updatable(b)) - Number(updatable(a)); }), componentViews, function (item) { return item.id; }, function (item) {
+        var row = element('article'); row.className = 'cc-update-row'; row.setAttribute('data-update-id', item.id);
+        var name = element('div'), title = element('strong'), badge = element('small'); name.append(title, badge);
+        var current = element('div'), currentValue = element('strong'); current.className = 'cc-update-current'; current.append(element('small', 'Installata'), currentValue);
+        var latest = element('div'), latestValue = element('strong'); latest.className = 'cc-update-latest'; latest.append(element('small', 'Stabile'), latestValue);
         var button = element('button', 'Aggiorna'); button.type = 'button'; button.className = 'ops-button secondary compact';
-        button.disabled = working || value.available !== true || value.canApply === false || !updatable(item);
-        button.addEventListener('click', function () { openPlan(item); }); row.append(button);
-        if (item.candidateRelease && item.candidateRelease.version && item.latestStable && item.latestStable.version && item.candidateRelease.version !== item.latestStable.version) row.append(element('p', 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · Ultima stabile: ' + item.latestStable.version + (item.compatibilityReason ? ' · ' + item.compatibilityReason : ' · La serie più recente richiede una verifica di compatibilità.')));
-        row.append(element('p', (labels[item.status] || 'Stato non disponibile') + (item.blockedReason ? ' · ' + item.blockedReason : item.installed !== false && !item.candidateRelease && item.status !== 'current' ? ' · Nessun aggiornamento compatibile verificato.' : '') + ((item.services || []).length ? ' · Servizi: ' + item.services.join(', ') : '')));
-        list.append(row);
+        var details = element('details'), summary = element('summary', 'Dettagli'), reason = element('p'); details.className = 'cc-update-detail'; details.append(summary, reason);
+        details.addEventListener('toggle', function () { if (details.open) animate(reason, [{ opacity: 0, height: '0px' }, { opacity: 1, height: reason.scrollHeight + 'px' }]); });
+        row.append(name, current, latest, button, details);
+        var view = { row: row, title: title, badge: badge, current: currentValue, latest: latestValue, button: button, details: details, reason: reason, item: item };
+        button.addEventListener('click', function () { openPlan(view.item); }); return view;
+      }, function (view, item) {
+        view.item = item; setText(view.title, text(item.label, item.id)); setText(view.badge, labels[item.status] || 'Stato non disponibile'); setText(view.current, currentVersion(item)); setText(view.latest, text(item.latestStable && item.latestStable.version, 'Non disponibile'));
+        view.button.disabled = working || value.available !== true || value.canApply === false || !updatable(item);
+        var reason = item.blockedReason || (item.installed !== false && !item.candidateRelease && item.status !== 'current' ? 'Nessun aggiornamento compatibile verificato.' : '');
+        if (item.candidateRelease && item.candidateRelease.version && item.latestStable && item.latestStable.version && item.candidateRelease.version !== item.latestStable.version) reason += (reason ? ' · ' : '') + 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · ' + text(item.compatibilityReason, 'La serie più recente richiede una verifica di compatibilità.');
+        if ((item.services || []).length) reason += (reason ? ' · ' : '') + 'Servizi: ' + item.services.join(', ');
+        setText(view.reason, reason); view.details.hidden = !reason;
+        if (view.phase && view.phase !== item.status) animate(view.badge, [{ opacity: .35 }, { opacity: 1 }], 180); view.phase = item.status;
       });
-      select('[data-updates-empty]').hidden = count > 0;
+      status.hidden = !status.textContent;
+      select('[data-updates-empty]').hidden = components.length > 0;
       updateApply();
     }
     function schedule() {
@@ -102,12 +154,8 @@
         if (!alive(generation)) return;
         state.value = value;
         if (!pending(state.operation)) state.operation = (value.operations || []).find(pending) || state.operation;
-        var category = select('[data-updates-category]'), selected = category.value;
-        category.replaceChildren(); var all = element('option', 'Tutte le categorie'); all.value = 'all'; category.append(all);
-        Array.from(new Set((value.components || []).map(function (item) { return item.category; }).filter(Boolean))).sort().forEach(function (name) { var option = element('option', name); option.value = name; category.append(option); });
-        category.value = Array.from(category.options).some(function (option) { return option.value === selected; }) ? selected : 'all';
         if (value.available !== true) status.textContent = text(value.unavailableReason, 'Aggiornamenti non disponibili su questo server.');
-        else if (!state.operation) status.textContent = 'Le versioni installate sono confermate dal server.';
+        else if (!state.operation) status.textContent = '';
       } catch (error) { if (alive(generation)) status.textContent = pending(state.operation) ? 'Connessione temporaneamente interrotta. Riconnessione automatica; verifica dell’operazione in corso…' : text(error.message, 'Impossibile verificare gli aggiornamenti.'); }
       finally { if (alive(generation)) { state.loading = false; render(); schedule(); } }
     }
@@ -123,12 +171,12 @@
       finally { if (alive(generation)) { state.busy = false; render(); schedule(); } }
     });
     updateAll.addEventListener('click', function () { if (!updateAll.disabled) openPlan({ id: 'all', label: 'Tutti i componenti aggiornabili' }); });
-    function close() { if (state.applying) return; state.dialogGeneration++; state.plan = null; state.component = null; confirm.value = ''; updateApply(); if (dialog.open) dialog.close(); }
+    function close() { if (state.applying) return; state.dialogGeneration++; state.plan = null; state.component = null; confirm.value = ''; updateApply(); closeDialog(dialog); }
     async function openPlan(item) {
       if (state.busy || pending(state.operation)) return;
       var generation = state.generation, dialogGeneration = ++state.dialogGeneration;
       state.plan = null; state.component = item; confirm.value = ''; select('[data-updates-confirm-label]').hidden = true;
-      select('[data-updates-plan-details]').replaceChildren(); planStatus.textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); dialog.showModal();
+      select('[data-updates-plan-details]').replaceChildren(); planStatus.textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); openDialog(dialog);
       try {
         await authenticate();
         if (!alive(generation) || dialogGeneration !== state.dialogGeneration || !dialog.open) return;
@@ -169,7 +217,6 @@
     select('[data-updates-close]').addEventListener('click', close);
     dialog.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
     refresh.addEventListener('click', load);
-    select('[data-updates-category]').addEventListener('change', render);
     var lifecycle = { root: root, stop: function () { state.stopped = true; state.generation++; state.dialogGeneration++; clearTimeout(state.timer); state.plan = null; if (dialog.open) dialog.close(); }, resume: load, pause: function () { clearTimeout(state.timer); } };
     active.add(lifecycle); load();
   }
@@ -194,10 +241,11 @@
       select('os').textContent = value && value.os ? [text(value.os.name, value.os.id), value.os.version].filter(Boolean).join(' ') : 'Sistema non disponibile';
       select('summary').textContent = value ? (value.checkedAt ? (Number.isSafeInteger(value.updateCount) ? value.updateCount : 0) + ' aggiornamenti disponibili' + (Number.isSafeInteger(value.keptBackCount) && value.keptBackCount > 0 ? ' · ' + value.keptBackCount + ' mantenuti alla versione attuale' : '') + ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : 'Aggiornamenti non ancora verificati') + (value.rebootRequired ? ' · Riavvio richiesto' : '') : '';
       var box = select('progress'), progress = box.querySelector('progress'), operation = state.operation;
-      box.hidden = !working && !operation;
+      panelVisible(box, working || Boolean(operation));
       var total = operation && operation.totalSteps, completed = operation && operation.completedSteps;
-      if (Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) && completed >= 0 && completed <= total && (completed < total || ['succeeded', 'completed'].includes(operation.status))) { progress.max = total; progress.value = completed; } else progress.removeAttribute('value');
+      setProgress(progress, total, completed, operation && ['succeeded', 'completed'].includes(operation.status));
       select('stage').textContent = operation ? text(operation.stage, labels[operation.status] || serviceLabels[operation.status] || 'Manutenzione in corso…') : 'Preparazione…';
+      status.hidden = !status.textContent;
       updateApply();
     }
     function schedule() { clearTimeout(state.timer); if (pending(state.operation) && !state.stopped && root.isConnected && !document.hidden) state.timer = setTimeout(load, 2000); }
@@ -215,7 +263,7 @@
         if (!alive(generation)) return; state.value = value;
         if (!pending(state.operation)) state.operation = (value.operations || []).find(pending) || state.operation;
         if (!value.available) status.textContent = text(value.unavailableReason, 'Gestione del sistema non disponibile su questo server.');
-        else if (!state.operation) status.textContent = 'La manutenzione del sistema richiede una conferma esplicita.';
+        else if (!state.operation) status.textContent = '';
       } catch (error) { if (alive(generation)) status.textContent = pending(state.operation) ? 'Server temporaneamente non raggiungibile. Riconnessione automatica dopo la manutenzione o il riavvio…' : text(error.message, 'Impossibile verificare il sistema.'); }
       finally { if (alive(generation)) { state.loading = false; render(); schedule(); } }
     }
@@ -226,13 +274,13 @@
       catch (error) { if (alive(generation)) status.textContent = error.message; }
       finally { if (alive(generation)) { state.busy = false; render(); schedule(); } }
     });
-    function close() { if (state.applying) return; state.review++; state.plan = null; confirm.value = ''; updateApply(); if (dialog.open) dialog.close(); }
+    function close() { if (state.applying) return; state.review++; state.plan = null; confirm.value = ''; updateApply(); closeDialog(dialog); }
     async function review(rebooting) {
       if (state.busy || pending(state.operation)) return;
       var generation = state.generation, review = ++state.review, expected = rebooting ? 'REBOOT' : 'UPDATE';
       state.plan = null; state.rebooting = rebooting; confirm.value = ''; select('confirm-label').hidden = true; select('plan-details').replaceChildren();
       select('review-title').textContent = rebooting ? 'Rivedi riavvio del server' : 'Rivedi aggiornamento del sistema';
-      select('plan-status').textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); dialog.showModal();
+      select('plan-status').textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); openDialog(dialog);
       try {
         await authenticate(); if (!alive(generation) || review !== state.review || !dialog.open) return;
         var value = await request('/control/runtime-updates/system/' + (rebooting ? 'reboot/' : '') + 'plan', { revision: state.value.revision });

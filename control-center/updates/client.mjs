@@ -3,12 +3,13 @@ import { openSync, closeSync, fstatSync, readFileSync, lstatSync, constants } fr
 import { createHmac, randomBytes } from 'node:crypto';
 import path from 'node:path';
 
-const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation', 'host-catalog', 'host-check', 'host-plan', 'host-apply', 'host-reboot-plan', 'host-reboot-apply']);
+const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation', 'host-catalog', 'host-check', 'host-plan', 'host-apply', 'host-reboot-plan', 'host-reboot-apply', 'server-events']);
 const fields = {
   catalog: [], check: [], plan: ['componentId', 'revision'],
   apply: ['componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'], operation: ['operationId'],
   'host-catalog': [], 'host-check': [], 'host-plan': ['revision'], 'host-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
   'host-reboot-plan': ['revision'], 'host-reboot-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
+  'server-events': [],
 };
 const token = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value);
 export const validRuntimeUpdatesId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value);
@@ -90,6 +91,28 @@ function operation(value) {
 }
 function sanitizeResult(body, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RuntimeUpdatesError(503, 'invalid_response');
+  if (body.action === 'server-events') {
+    const sources = new Set(['host', 'systemd', 'docker', 'updates', 'journal']);
+    if (value.schema !== 'server-events/v1' || typeof value.available !== 'boolean' || typeof value.partial !== 'boolean' || !timestamp(value.checkedAt)
+        || !Array.isArray(value.issues) || !Array.isArray(value.events) || value.issues.length > 200 || value.events.length > 200
+        || !Array.isArray(value.sources) || value.sources.length > 10) throw new RuntimeUpdatesError(503, 'invalid_response');
+    const seen = new Set();
+    const entries = (items, active) => items.map(item => {
+      if (!validRuntimeUpdatesId(item?.id) || seen.has(item.id) || !['error', 'warning'].includes(item.severity) || !sources.has(item.source)
+          || !text(item.service, 160) || !text(item.message, 1000) || !text(item.code, 100) || item.active !== active
+          || !Number.isSafeInteger(item.count) || item.count < 1 || !timestamp(item.firstSeen) || !timestamp(item.lastSeen)) throw new RuntimeUpdatesError(503, 'invalid_response');
+      seen.add(item.id);
+      return { id: item.id, severity: item.severity, source: item.source, service: item.service, message: item.message, code: item.code,
+        count: item.count, firstSeen: item.firstSeen, lastSeen: item.lastSeen, active };
+    });
+    const result = { schema: value.schema, available: value.available, partial: value.partial, checkedAt: value.checkedAt,
+      issues: entries(value.issues, true), events: entries(value.events, false), sources: value.sources.map(item => {
+        if (!sources.has(item.id) || typeof item.available !== 'boolean') throw new RuntimeUpdatesError(503, 'invalid_response');
+        return { id: item.id, available: item.available, ...(text(item.reason, 200) ? { reason: item.reason } : {}) };
+      }) };
+    if (result.available !== result.sources.some(item => item.available) || !result.partial && result.sources.some(item => !item.available)) throw new RuntimeUpdatesError(503, 'invalid_response');
+    return result;
+  }
   if (['check', 'apply', 'host-check', 'host-apply', 'host-reboot-apply'].includes(body.action)) return accepted(value);
   if (body.action === 'host-catalog') {
     const count = item => Number.isSafeInteger(item) && item >= 0 && item <= 100000;
@@ -207,6 +230,7 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
     plan: (componentId, payload) => call({ ...payload, action: 'plan', componentId }),
     apply: (componentId, payload) => call({ ...payload, action: 'apply', componentId }),
     operation: operationId => call({ action: 'operation', operationId }),
+    serverEvents: () => call({ action: 'server-events' }),
     hostCatalog: () => call({ action: 'host-catalog' }), hostCheck: () => call({ action: 'host-check' }),
     hostPlan: payload => call({ ...payload, action: 'host-plan' }), hostApply: payload => call({ ...payload, action: 'host-apply' }),
     hostRebootPlan: payload => call({ ...payload, action: 'host-reboot-plan' }), hostRebootApply: payload => call({ ...payload, action: 'host-reboot-apply' }),

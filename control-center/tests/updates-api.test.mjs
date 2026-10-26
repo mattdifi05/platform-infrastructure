@@ -78,6 +78,23 @@ test('mixed family versions and alignment remain known through the public projec
   assert.equal(result.components[0].candidateRelease.version, '26.12.1');
 });
 
+test('server events are read only, bounded metadata with active and historical events kept distinct', async t => {
+  const event = { id: 'event-one', severity: 'warning', source: 'journal', service: 'kernel', code: 'journal-warning', message: '<literal warning>', count: 2, firstSeen: plan.expiresAt, lastSeen: plan.expiresAt, active: false, raw: 'PRIVATE_LOG' };
+  let source = { schema: 'server-events/v1', available: true, partial: true, checkedAt: plan.expiresAt, issues: [], events: [event], sources: [{ id: 'journal', available: true }, { id: 'systemd', available: false, reason: 'Unavailable' }], env: 'PRIVATE_ENV' };
+  const { client, requests } = await fixture(t, (_body, res) => send(res, source));
+  const result = await client.serverEvents();
+  assert.equal(result.events[0].active, false); assert.equal(result.events[0].count, 2); assert.equal(result.partial, true);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE/); assert.equal(result.events[0].message, '<literal warning>');
+  assert.deepEqual(requests[0].envelope.body, { action: 'server-events' });
+  assert.throws(() => validateRuntimeUpdatesRequest({ action: 'server-events', command: 'journalctl' }), error => error.status === 400);
+  source.partial = false;
+  await assert.rejects(client.serverEvents(), error => error.code === 'invalid_response');
+  source.partial = true; source.sources = [{ id: 'journal', available: true }];
+  assert.equal((await client.serverEvents()).partial, true); // A bounded feed can be truncated even when every source responds.
+  source.partial = true; source.issues = [{ ...event, id: 'active-wrong', active: false }];
+  await assert.rejects(client.serverEvents(), error => error.code === 'invalid_response');
+});
+
 test('catalog never enables updates for absent components or unavailable native inventory', async t => {
   const source = catalog(); source.components[0].installed = false;
   const { client } = await fixture(t, (_body, res) => send(res, source));

@@ -30,6 +30,14 @@ Official Docker library metadata and curated upstream GitHub releases supply exp
 
 While a job runs, the UI polls only its inexpensive status endpoint every two seconds, retains the job through temporary connection failures and refreshes inventory when it finishes. Background inventory refreshes do not display a fake update progress state. Service verification and final family registration are shown separately; the bar reaches completion only after the operation succeeds.
 
+The compact list places available updates first, without category filters. Stable keyed rows preserve open details and focus during polling; only changed states and actual row movements animate, respecting reduced motion. Per-service details remain available without expanding completed results by default.
+
+## Server errors and warnings
+
+The separate “Errori e avvisi” navigation page is a read-only viewer capability. It uses the authenticated native bridge without loading the application catalog and refreshes every fifteen seconds only while visible. The collector coalesces requests for twelve seconds and reads bounded systemd, Docker, update-journal and host-capacity metadata. System journal events are limited to the current boot, the last twenty-four hours and an explicit infrastructure-unit/kernel allowlist; application logs and environment variables are not read.
+
+Active observations and recent history are distinct. Historical journal entries do not imply that a problem is still active or has been resolved. Failed sources, truncated feeds and stale cached results are explicit and never produce an all-clear. Messages are redacted and bounded before leaving the host; the HTTP projection returns only documented fields and the frontend renders them as text. This page cannot acknowledge, delete, restart or repair services.
+
 ## Operating system
 
 A separate panel above runtime updates shows APT status and counts without listing packages. Checking refreshes APT metadata and simulates the upgrade. An owner with fresh passkey authentication reviews an expiring plan before applying the exact package versions; automatic/manual package flags and existing configuration files are preserved. Changes to installed versions or package candidates invalidate the plan. Host maintenance shares the global operation lock with container updates.
@@ -47,6 +55,8 @@ When syncing infrastructure source, preserve deployment-private activation input
 `python3 -m unittest discover -s deployment/host/tests -p 'test_runtime_*.py'`
 
 `python3 -m unittest discover -s deployment/host/tests -p 'test_host_updates.py'`
+
+`python3 -m unittest discover -s deployment/host/tests -p 'test_server_events.py'`
 
 `npm --prefix control-center test`
 
