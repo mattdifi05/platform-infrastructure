@@ -113,7 +113,7 @@ const command = process.argv[2] ?? "help";
 const argv = parseArgs(process.argv.slice(3));
 const configuredSourceRoot = process.env.PROJECT_SOURCE_ROOT ?? process.env.PROJECT_SOURCE_DIR ?? argv.sourceRoot;
 const sourceRoot = configuredSourceRoot ? path.resolve(infraRoot, configuredSourceRoot) : path.resolve(infraRoot, "..", "src");
-const defaultNodeImage = "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606";
+const defaultNodeImage = "node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797";
 const defaultPlaywrightImage = "mcr.microsoft.com/playwright:v1.60.0-noble@sha256:9bd26ad900bb5e0f4dee75839e957a89ae89c2b7ab1e76050e559790e946b948";
 
 function parseArgs(args) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-NODE_IMAGE="${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}"
+NODE_IMAGE="${NODE_IMAGE:-node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797}"
 TMP=$(mktemp -d)
 cleanup() {
   rm -rf "$TMP"

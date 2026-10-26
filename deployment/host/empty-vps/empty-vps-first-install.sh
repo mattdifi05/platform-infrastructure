@@ -86,7 +86,7 @@ install -d -m 0700 "$ROOT/../src"
 }
 # Run the repository's existing secret manager inside a pinned Node image.
 # The checkout is read-only; only the ignored secrets directory is writable.
-NODE_IMAGE='node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
+NODE_IMAGE='node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797'
 if [[ ! -e "$ROOT/secrets/infra-secret-manager-master.key" ]]; then
   docker run --rm --network none --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$ROOT,dst=/workspace,readonly" \
