@@ -40,12 +40,12 @@ def discover(rows, infra):
         elif 'phppgadmin' in name:
             entry.update(label='phpPgAdmin', category='Amministrazione', blockedReason='Il pacchetto usa un builder dedicato senza una release stabile numerata verificabile. Richiede manutenzione assistita.')
         elif 'PHP_VERSION' in env:
-            entry.update(label='PHP ' + '.'.join(env['PHP_VERSION'].split('.')[:2]), category='Runtime', repository='library/php', strategy='php-build', tagSuffix='-apache', versionEnv='PHP_VERSION', dockerfile=str(infra / 'docker/php-apache.Dockerfile'), probe=['php', '-r', 'echo PHP_VERSION;'])
+            entry.update(label='PHP', category='Runtime', repository='library/php', strategy='php-build', tagSuffix='-apache', versionEnv='PHP_VERSION', dockerfile=str(infra / 'docker/php-apache.Dockerfile'), probe=['php', '-r', 'echo PHP_VERSION;'])
         elif 'NODE_VERSION' in env:
-            # Same-major Node binary layered over the exact existing application image.
-            entry.update(label='Node.js · ' + name, category='Runtime', repository='library/node', strategy='node-layer', compatibility='major', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
+            # One Node family; preserve every application's exact image in its runtime layer.
+            entry.update(label='Node.js', category='Runtime', repository='library/node', strategy='node-layer', compatibility='major', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
         elif 'PG_VERSION' in env:
-            entry.update(label='PostgreSQL ' + env.get('PG_MAJOR', ''), category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='major', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
+            entry.update(label='PostgreSQL', category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='major', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'MARIADB_VERSION' in env:
             entry.update(label='MariaDB', category='Database', repository='library/mariadb', strategy='reviewed-build', versionEnv='MARIADB_VERSION', dockerfile=str(infra / 'deployment/docker/mariadb-remediated.Dockerfile'), probe=['mariadbd', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'REDIS_VERSION' in env:
@@ -79,12 +79,23 @@ def discover(rows, infra):
                 entry.update(strategy='observe', blockedReason='Builder del componente non disponibile su questo server.')
         if entry['strategy'] in ['image', 'reviewed-build'] and any(m.get('RW') and m['Type'] in ['bind', 'volume'] for m in row.get('Mounts', [])):
             entry.update(requiresRecovery=True, recoveryPolicy='offline-snapshot-v1')
-        # Distinct deployed application images are separate Node update targets.
-        key = (row['Image'], entry['label'].split(' · ')[0])
+        # Known suppliers form one family regardless of application or image digest.
+        # Dedicated/unrecognized builds remain separate and cannot become plain images.
+        repository = entry.get('repository')
+        family = repository.replace('library/', '').replace('/', '-') if repository else None
+        key = ('supplier', repository) if family else ('dedicated', row['Image'], entry['label'])
         if key not in groups:
-            identity = re.sub('[^a-z0-9-]', '-', entry['label'].lower()).strip('-')[:48] + '-' + row['Image'][-10:]
-            groups[key] = {**entry, 'id': identity, 'containers': [], 'initialImage': row['Image']}
-        groups[key]['containers'].append(name)
+            identity = family or (re.sub('[^a-z0-9-]', '-', entry['label'].lower()).strip('-')[:48] + '-' + row['Image'][-10:])
+            groups[key] = {**entry, 'id': identity, 'containers': [], 'initialImages': [], 'familyPolicy': 'single-version-v1' if family else None}
+        group = groups[key]
+        if group['strategy'] != entry['strategy']:
+            group.update(strategy='observe', blockedReason='Le istanze della famiglia richiedono un builder comune verificato.')
+        if entry.get('requiresRecovery'):
+            group.update(requiresRecovery=True, recoveryPolicy='offline-snapshot-v1')
+        group['containers'].append(name)
+        group['initialImages'] = sorted(set(group['initialImages'] + [row['Image']]))
+    for group in groups.values():
+        group['containers'].sort()
     return list(groups.values())
 
 
@@ -106,7 +117,7 @@ def main():
         by_membership = {tuple(sorted(x['containers'])): x for x in old['components']}
         for row in value['components']:
             prior = by_membership.get(tuple(sorted(row['containers'])))
-            if prior:
+            if prior and row.get('familyPolicy') != 'single-version-v1':
                 row['id'] = prior['id']
     config.write_text(json.dumps(value, indent=2) + '\n')
     config.chmod(0o600)
