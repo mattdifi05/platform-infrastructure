@@ -13,7 +13,7 @@ import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
 import { hostExtension } from "./host-extension.mjs";
-const { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, assertExternalDatabaseAction } = hostExtension;
+const { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, externalDatabaseCapabilities, assertExternalDatabaseAction, TRUSTED_EXTERNAL_DATABASE_IDS = [], TRUSTED_EXTERNAL_PROJECT_IDS = [] } = hostExtension;
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -77,6 +77,10 @@ import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { applicationFolderCatalog, updateApplicationFolders, ApplicationFolderError } from "./state/application-folders.mjs";
 import { executeStatusChecks } from "./status/executor.mjs";
+import { createRuntimeUpdatesClient } from "./updates/client.mjs";
+import { handleRuntimeUpdatesApi } from "./updates/api.mjs";
+import { renderRuntimeUpdates } from "./updates/ui.mjs";
+const runtimeUpdatesClient = createRuntimeUpdatesClient();
 import {
   createStatusEventBroker,
   pumpStatusEventStream,
@@ -98,10 +102,41 @@ const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-st
 const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
 const databaseDeleteOperationsFile = process.env.PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE || "/var/www/project-state/database-destructive-operations.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
-if (process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE && !readTrustedExternalDatabase) throw new Error("Trusted database configuration requires the reviewed host extension");
-const trustedExternalDatabase = process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE
-  ? readTrustedExternalDatabase(process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE, { approvedDigest: process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_SHA256 })
-  : null;
+function additionalTrustedDatabaseAdmissions(raw) {
+  if (!raw) return [];
+  if (typeof raw !== "string" || raw.length > 8192) throw new Error("Invalid additional trusted database admissions");
+  let admissions;
+  try { admissions = JSON.parse(raw); } catch { throw new Error("Invalid additional trusted database admissions"); }
+  if (!Array.isArray(admissions) || admissions.length > 8) throw new Error("Invalid additional trusted database admissions");
+  return admissions.map(admission => {
+    if (!admission || typeof admission !== "object" || Array.isArray(admission) || Object.keys(admission).sort().join() !== "digest,file" || typeof admission.file !== "string" || !path.isAbsolute(admission.file) || admission.file.length > 1024 || typeof admission.digest !== "string" || !/^[a-f0-9]{64}$/.test(admission.digest)) throw new Error("Invalid additional trusted database admissions");
+    return { file: admission.file, digest: admission.digest, additional: true };
+  });
+}
+const trustedExternalDatabaseAdmissions = [
+  ...(process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE ? [{ file: process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_FILE, digest: process.env.CONTROL_CENTER_TRUSTED_EXTERNAL_DATABASE_SHA256, additional: false }] : []),
+  ...additionalTrustedDatabaseAdmissions(process.env.CONTROL_CENTER_ADDITIONAL_TRUSTED_DATABASES),
+];
+if (trustedExternalDatabaseAdmissions.length && !readTrustedExternalDatabase) throw new Error("Trusted database configuration requires the reviewed host extension");
+const trustedExternalDatabases = new Map();
+for (const admission of trustedExternalDatabaseAdmissions) {
+  const profile = readTrustedExternalDatabase(admission.file, { approvedDigest: admission.digest, ...(admission.additional ? { expectedId: null } : {}) });
+  if (trustedExternalDatabases.has(profile.id)) throw new Error("Duplicate trusted database admission");
+  trustedExternalDatabases.set(profile.id, profile);
+}
+const trustedExternalDatabaseIds = new Set([...TRUSTED_EXTERNAL_DATABASE_IDS, ...trustedExternalDatabases.keys()]);
+
+function trustedExternalDatabaseFor(id) {
+  const databaseId = slugify(id || "");
+  const profile = trustedExternalDatabases.get(databaseId);
+  if (!profile && trustedExternalDatabaseIds.has(databaseId)) throw new RejectedOperationError("Il collegamento dedicato del database non è disponibile.");
+  return profile || null;
+}
+
+function projectUsesTrustedExternalDatabase(project) {
+  const ids = typeof project === "string" ? [project] : [project?.id, project?.slug, ...(project?.aliases || [])];
+  return ids.some(id => TRUSTED_EXTERNAL_PROJECT_IDS.includes(id) || [...trustedExternalDatabases.values()].some(profile => profile.projectId === id));
+}
 const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
 const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || "";
 const vaultActiveKeyId = process.env.CONTROL_CENTER_VAULT_ACTIVE_KEY_ID || "";
@@ -491,6 +526,10 @@ const server = createServer(async (req, res) => {
       requestId: rid(),
       operation: requestOperation,
     }, async () => {
+      if (requestOperation.operationId?.startsWith("runtime-updates.")) {
+        await handleRuntimeUpdatesApi(req, res, url, { readJson: readPayload, json, client: runtimeUpdatesClient });
+        return;
+      }
       if (requestOperation.operationId?.startsWith("ai.") || requestOperation.operationId === "resources.host.read") {
         return handleApi(req, res, url, null, requestOperation);
       }
@@ -1371,6 +1410,7 @@ async function handlePhpPgAdminLogin(req, res, url, context) {
   try {
     const database = databaseId ? findById(context.databases, databaseId, "Database") : null;
     if (!database || database.engine !== "postgres") throw new ValidationError("phpPgAdmin e disponibile solo per database PostgreSQL.");
+    assertExternalDatabaseOperation(database.id, "browse");
     const confirmation = `OPEN-PHPPGADMIN:${database.id}`;
     if (confirm !== confirmation) throw new ValidationError("Missing phpPgAdmin confirmation token.");
     const project = resolveContextProject(context, database.projectId);
@@ -1859,8 +1899,8 @@ async function buildContext({ projects, state }) {
   ];
   const databaseNameHints = discoverProjectDatabaseHints(projects);
   const databasePrincipalBindings = readDatabasePrincipalsState().bindings;
-  const databaseRows = Object.values(readDatabasesState()).filter(database => database?.id !== trustedExternalDatabase?.id);
-  if (trustedExternalDatabase) databaseRows.push(externalDatabaseRecord(trustedExternalDatabase));
+  const databaseRows = Object.values(readDatabasesState()).filter(database => !trustedExternalDatabaseIds.has(database?.id));
+  for (const profile of trustedExternalDatabases.values()) databaseRows.push(externalDatabaseRecord(profile));
   const databases = databaseRows
     .filter((database) => database && !database.deletedAt)
     .map((database) => {
@@ -5595,6 +5635,7 @@ function createDirectDatabaseBackupArtifact(resource, context, job, index) {
   const database = context.databases.find((item) => item.id === resource.externalId
     || (item.engine === resource.engine && item.name === resource.name));
   if (!database) throw new RejectedOperationError(`Database ${resource.name} non presente nel catalogo applicazione.`);
+  assertExternalDatabaseOperation(database.id, "backup");
   const stamp = directBackupTimestamp();
   const extension = resource.engine === "postgres" ? "dump" : "sql.gz";
   const relativePath = joinRelativePath(resource.engine, `${resource.projectId}-${resource.name}-${stamp}-${job.id.slice(-8)}.${extension}`);
@@ -6177,6 +6218,7 @@ function renderOperationsSection(section, context, params, currentProject) {
 
 function renderOpsSettings() {
   return `<section class="cc-settings" data-settings-page>
+    ${renderRuntimeUpdates()}
     <section class="ops-project-detail-panel cc-settings-backups" aria-labelledby="cc-backup-settings-title"><h2 id="cc-backup-settings-title">Backup</h2>
       <aside class="cc-global-backup-control" data-global-backup-control aria-label="Controllo backup del server"><div><strong>Backup del server</strong><small>Copie locali e FTP</small><p data-backup-control-status role="status" aria-live="polite">Verifica dello stato…</p></div><button class="cc-backup-switch" type="button" role="switch" aria-label="Backup del server" aria-checked="false" data-backup-control-toggle disabled hidden><span class="cc-backup-switch-track" aria-hidden="true"><span></span></span><span data-backup-control-label>Verifica…</span></button><button class="ops-button secondary compact" type="button" data-backup-control-refresh hidden>Ricontrolla</button></aside>
     </section>
@@ -6839,14 +6881,17 @@ function renderProjectDetailDatabaseList(context, project, databases, params = n
       <span class="ops-state ${databases.length ? "good" : "warn"}">${escapeHtml(databases.length ? `${databases.length} collegati` : "Nessuno")}</span>
     </div>
     <div class="ops-project-database-list">${databaseItems || empty("Nessun database", "Crea metadata database per questa applicazione.")}</div>
-    ${project.slug === trustedExternalDatabase?.projectId ? "" : `<details class="cc-app-database-create"><summary class="ops-button secondary compact">Crea database ${controlIcon("chevron-down")}</summary>${renderProjectDetailDatabaseCreateForm(project)}</details>`}
+    ${projectUsesTrustedExternalDatabase(project) ? "" : `<details class="cc-app-database-create"><summary class="ops-button secondary compact">Crea database ${controlIcon("chevron-down")}</summary>${renderProjectDetailDatabaseCreateForm(project)}</details>`}
   </div>`;
 }
 
 function renderProjectDetailDatabaseRow(context, project, database, params = new URLSearchParams()) {
   const adminAction = databaseAdminAction(database);
-  if (database.id === trustedExternalDatabase?.id) {
-    return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}"><div class="ops-project-database-main"><span class="ops-project-detail-item-icon">${controlIcon("databases")}</span><span><strong>${escapeHtml(databaseDisplayName(database))}</strong><small>${escapeHtml(database.name)} · PostgreSQL · utente dedicato ${escapeHtml(database.ownerRole)}</small><small>Database in uso · connessione TLS verificata · credenziali protette</small></span><a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a></div></div>`;
+  const externalProfile = trustedExternalDatabaseFor(database.id);
+  if (externalProfile) {
+    const target = externalDatabaseAdminTarget(externalProfile);
+    const access = target.username !== externalProfile.ownerRole ? "Accesso gestito ai dati" : "Database in uso";
+    return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}"><div class="ops-project-database-main"><span class="ops-project-detail-item-icon">${controlIcon("databases")}</span><span><strong>${escapeHtml(databaseDisplayName(database))}</strong><small>${escapeHtml(database.name)} · PostgreSQL · utente dedicato ${escapeHtml(target.username)}</small><small>${access} · connessione TLS verificata · credenziali protette</small></span><a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a></div></div>`;
   }
   const updateConfirm = `UPDATE-DATABASE:${database.id}`;
   const credentialConfirm = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
@@ -7327,19 +7372,21 @@ function renderDatabaseActions(databases) {
   if (!databases.length) return '<span class="ops-muted">Nessuna azione</span>';
   return `<div class="ops-db-actions">${databases.map((database) => {
     const adminAction = databaseAdminAction(database);
+    const externalProfile = trustedExternalDatabaseFor(database.id);
+    const capabilities = externalProfile ? externalDatabaseCapabilities(externalProfile) : null;
     return `<div class="ops-row-actions">
     <a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a>
-    <form method="post" action="/actions/database-command">
+    ${!capabilities || capabilities.backup ? `<form method="post" action="/actions/database-command">
       <input type="hidden" name="id" value="${escapeHtml(database.id)}">
       <input type="hidden" name="action" value="backup">
       <button class="ops-icon-button" type="submit" aria-label="Plan backup for ${escapeHtml(databaseDisplayName(database))}">${controlIcon("backups")}</button>
-    </form>
-    <form method="post" action="/actions/database-command">
+    </form>` : ""}
+    ${!capabilities || capabilities.restore ? `<form method="post" action="/actions/database-command">
       <input type="hidden" name="id" value="${escapeHtml(database.id)}">
       <input type="hidden" name="action" value="restore">
       <input type="hidden" name="backupRef" value="latest">
       <button class="ops-icon-button" type="submit" aria-label="Plan restore drill for ${escapeHtml(databaseDisplayName(database))}">${controlIcon("refresh")}</button>
-    </form>
+    </form>` : ""}
   </div>`;
   }).join("")}</div>`;
 }
@@ -7348,10 +7395,12 @@ function databaseAdminAction(database) {
   const admin = databaseAdminTool(database);
   const confirmation = `${admin.confirmPrefix}:${database.id}`;
   const href = `${admin.loginPath}?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(confirmation)}`;
+  const externalProfile = trustedExternalDatabaseFor(database.id);
+  const readOnly = externalProfile && externalDatabaseAdminTarget(externalProfile).readOnly;
   return {
     ...admin,
     href,
-    ariaLabel: `Apri ${databaseDisplayName(database)} in ${admin.label} con accesso amministrativo protetto`,
+    ariaLabel: `Apri ${databaseDisplayName(database)} in ${admin.label} con accesso ${readOnly ? "in sola lettura" : "amministrativo protetto"}`,
   };
 }
 
@@ -7390,14 +7439,16 @@ function resolvePostgresCredential(database, project) {
 }
 
 function assertExternalDatabaseOperation(id, action) {
-  if (slugify(id) !== trustedExternalDatabase?.id) return;
-  try { assertExternalDatabaseAction(trustedExternalDatabase, action); }
+  const profile = trustedExternalDatabaseFor(id);
+  if (!profile) return;
+  try { assertExternalDatabaseAction(profile, action); }
   catch { throw new RejectedOperationError("Il database dell’applicazione usa un collegamento dedicato: questa operazione non è disponibile nel gestore dei principal della piattaforma."); }
 }
 
 function databaseAdminCredentials(database, project) {
-  if (database.id === trustedExternalDatabase?.id) {
-    return externalDatabaseAdminCredentials(trustedExternalDatabase, file => readCredentialPasswordFile(file, null));
+  const externalProfile = trustedExternalDatabaseFor(database.id);
+  if (externalProfile) {
+    return externalDatabaseAdminCredentials(externalProfile, file => readCredentialPasswordFile(file, null));
   }
   const primary = database.engine === "postgres"
     ? resolvePostgresCredential(database, project)
@@ -7667,7 +7718,8 @@ function phpPgAdminSessionLooksAuthenticated(response, databaseName) {
 }
 
 function phpPgAdminServerId(database) {
-  if (database?.id === trustedExternalDatabase?.id && trustedExternalDatabase) return externalDatabaseAdminTarget(trustedExternalDatabase).serverId;
+  const externalProfile = trustedExternalDatabaseFor(database?.id);
+  if (externalProfile) return externalDatabaseAdminTarget(externalProfile).serverId;
   return `${postgresHost}:${postgresPort}:allow`;
 }
 
@@ -10444,7 +10496,7 @@ function planDatabaseCreate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
   const project = findById(context.projects, projectId, "Project");
-  if (trustedExternalDatabase && [projectId, project.slug, ...(project.aliases || [])].includes(trustedExternalDatabase.projectId)) throw new RejectedOperationError("Il database dell’applicazione è già collegato; la creazione di un principal parallelo non è disponibile.");
+  if (projectUsesTrustedExternalDatabase(project)) throw new RejectedOperationError("Il database dell’applicazione è già collegato; la creazione di un principal parallelo non è disponibile.");
   const engine = choice(String(payload.engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
   const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
   ownershipPolicy(() => assertManagedDatabaseName(engine, name));
@@ -10563,12 +10615,14 @@ function validateDatabasePasswordInput(value) {
 }
 
 function applyLiveDatabaseCreate(database, password, registry) {
+  assertExternalDatabaseOperation(database.id, "create");
   if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
   if (database.engine === "postgres") return applyLivePostgresCreate(database, password, registry);
   return applyLiveMariaDbCreate(database, password, registry);
 }
 
 function applyLiveDatabaseCredential(database, password, registry) {
+  assertExternalDatabaseOperation(database.id, "credential");
   if (!databaseLiveApply) return { applied: false, mode: "metadata-only", action: "none" };
   const binding = principalBindingFor(registry, database);
   if (!binding) throw new RejectedOperationError("Database principal has no exact managed ownership binding.");
@@ -10579,12 +10633,14 @@ function applyLiveDatabaseCredential(database, password, registry) {
 }
 
 function applyLiveDatabaseDelete(database, state = {}, registry = {}) {
+  assertExternalDatabaseOperation(database.id, "delete");
   if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
   if (database.engine === "postgres") return applyLivePostgresDelete(database, state, registry);
   return applyLiveMariaDbDelete(database, state, registry);
 }
 
 function applyLiveDatabasePrincipalCleanup(database, state = {}, registry = {}) {
+  assertExternalDatabaseOperation(database.id, "cleanup-principal");
   if (!databaseLiveApply || !databaseOwnerRoleIsExclusive(database, state, registry)) {
     return { applied: false, mode: databaseLiveApply ? "shared-principal-preserved" : "metadata-only" };
   }
@@ -10851,6 +10907,7 @@ function databaseOwnerRoleIsExclusive(database, state = {}, registry = {}) {
 }
 
 function removeDatabaseCredentialFile(database) {
+  assertExternalDatabaseOperation(database.id, "credential");
   const candidates = new Set();
   if (database.credentialFile) candidates.add(database.credentialFile);
   try {
@@ -11037,6 +11094,7 @@ function databaseDeleteWaiverEvidence(database) {
 
 function deleteDatabaseNow(id, payload, context) {
   const database = findById(context.databases, id, "Database");
+  assertExternalDatabaseOperation(database.id, "delete-now");
   if (payload.confirm !== `DELETE-DATABASE-NOW:${database.id}`) throw new RejectedOperationError("Database deletion confirmation is invalid.");
   const requested = planDatabaseDelete(database.id, {
     ...payload,
@@ -11054,6 +11112,7 @@ function deleteDatabaseNow(id, payload, context) {
 function approveDatabaseDelete(operationId, payload, context) {
   const state = readDatabaseDeleteOperationsState();
   const operation = findDatabaseDeleteOperation(state, operationId);
+  assertExternalDatabaseOperation(operation.database.id, "delete-approve");
   const database = findById(context.databases, operation.database.id, "Database");
   if (payload.confirm !== databaseDeleteConfirmation(database, "APPROVE", operation.id)) throw new RejectedOperationError("Database delete approval confirmation is invalid.");
   if (operation.status === "approved") return databaseDeleteOperationResponse("database.delete.approved", operation, context, true);
@@ -11073,6 +11132,7 @@ function approveDatabaseDelete(operationId, payload, context) {
 function executeDatabaseDelete(operationId, payload, context) {
   const operationState = readDatabaseDeleteOperationsState();
   const operation = findDatabaseDeleteOperation(operationState, operationId);
+  assertExternalDatabaseOperation(operation.database.id, "delete-execute");
   if (operation.status === "completed") return databaseDeleteOperationResponse("database.delete.completed", operation, context, true);
   if (operation.status !== "approved") throw new RejectedOperationError(`Database delete execution requires approved state, not ${operation.status}.`);
   if (payload.confirm !== databaseDeleteConfirmation(operation.database, "EXECUTE", operation.id)) throw new RejectedOperationError("Database delete execution confirmation is invalid.");

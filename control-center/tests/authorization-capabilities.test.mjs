@@ -113,12 +113,18 @@ test("the explicit catalog remains cardinality-bound to every dispatcher branch"
     "projects.hosting.clone", "projects.hosting.cancel",
   ]);
   for (const id of directOnly) assert.equal([...dispatcher.matchAll(new RegExp(`case "${id}":`, "g"))].length, 1);
+  const updatesAdapter = new Set([
+    "runtime-updates.catalog", "runtime-updates.check", "runtime-updates.plan", "runtime-updates.apply", "runtime-updates.operation",
+  ]);
+  assert.match(source, /if \(requestOperation\.operationId\?\.startsWith\("runtime-updates\."\)\) \{\s*await handleRuntimeUpdatesApi\(/);
+  for (const id of updatesAdapter) assert.equal(definitions.filter(item => item.operationId === id).length, 1, `external update dispatcher ${id} must be cataloged exactly once`);
+
 
   for (const method of ["GET", "POST"]) {
     const branchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}"`, "g"))].length;
     const aiBranchCount = [...dispatcher.matchAll(new RegExp(`if \\(method === "${method}" && operation\\.operationId (?:===|\\.startsWith\\()`, "g"))].length;
     assert.equal(
-      definitions.filter((definition) => definition.method === method && !definition.operationId.startsWith("ai.") && !directOnly.has(definition.operationId)).length,
+      definitions.filter((definition) => definition.method === method && !definition.operationId.startsWith("ai.") && !directOnly.has(definition.operationId) && !updatesAdapter.has(definition.operationId)).length,
       branchCount - aiBranchCount,
       `${method} ordinary dispatcher branches and catalog entries must change together`,
     );
