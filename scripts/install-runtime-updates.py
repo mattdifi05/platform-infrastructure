@@ -48,6 +48,8 @@ def discover(rows, infra):
             entry.update(label='MariaDB', category='Database', repository='library/mariadb', strategy='reviewed-build', versionEnv='MARIADB_VERSION', dockerfile=str(infra / 'deployment/docker/mariadb-remediated.Dockerfile'), probe=['mariadbd', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'REDIS_VERSION' in env:
             entry.update(label='Redis', category='Database', repository='library/redis', strategy='image', tagSuffix='-alpine', versionEnv='REDIS_VERSION', probe=['redis-server', '--version'], recoveryPolicy='offline-snapshot-v1')
+        elif image.startswith('quay.io/keycloak/keycloak:'):
+            entry.update(label='Keycloak', category='Identità', versionLabel='org.opencontainers.image.version', blockedReason='L’aggiornamento di Keycloak richiede anche il piano di recupero del database esterno.')
         else:
             providers = [
                 ('nginx', 'Nginx', 'library/nginx', ['nginx', '-v'], '', '-alpine', 'Rete'),
@@ -64,6 +66,8 @@ def discover(rows, infra):
                 expected = repository.removeprefix('library/')
                 if image.removeprefix('docker.io/').startswith(expected + ':'):
                     entry.update(label=label, category=category, repository=repository, probe=probe, tagPrefix=prefix, tagSuffix=suffix, strategy='image')
+                    if repository == 'library/nginx':
+                        entry['versionEnv'] = 'NGINX_VERSION'
                     break
             if entry['strategy'] == 'observe':
                 entry.update(label=name, blockedReason='Componente della piattaforma con rilascio dedicato: aggiornamento assistito per preservare le personalizzazioni.')

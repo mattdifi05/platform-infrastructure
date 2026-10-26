@@ -216,11 +216,13 @@ def observed(row):
                 version = match.group(1) if match else ''
             except Rejected:
                 version = ''
-        if not version:
+        if not version and row.get('versionLabel'):
             labels = docker('GET', '/images/' + r['Image'] + '/json')['Config'].get('Labels') or {}
-            version = labels.get('org.opencontainers.image.version', '')
+            version = labels.get(row['versionLabel'], '')
         versions.append(version)
-    unique = sorted(set(versions))
+    unique = sorted(set(v for v in versions if v))
+    if len({r['Image'] for r in rows}) > 1 and any(not v for v in versions):
+        return rows, None
     return rows, unique[0] if len(unique) == 1 and unique[0] else None
 
 
@@ -248,6 +250,12 @@ def catalog():
             reason = 'Versione non verificabile o versioni diverse fra le istanze.'
         elif latest and release and latest['version'] != release['version']:
             reason = 'Una serie diversa richiede un percorso di compatibilità separato.'
+        if status == 'current':
+            reason = None
+        elif latest and version and not release and compare_versions(latest['version'], version) > 0:
+            status, reason = 'unsupported', 'La nuova serie richiede una verifica di compatibilità dedicata.'
+        elif isinstance(reason, str) and reason.startswith('unavailable:'):
+            reason = 'Fonte ufficiale non disponibile o release non pubblicata per questo componente.'
         output.append({'id': row['id'], 'label': row['label'], 'category': row['category'], 'installed': bool(actual), 'current': {'version': version, 'imageDigest': actual[0]['Image'] if actual else None, 'verifiedAt': stamp()}, 'latestStable': latest, 'candidateRelease': release, 'services': [r['Name'].lstrip('/') for r in actual], 'status': status, 'canUpdate': eligible, 'blockedReason': reason, '_fingerprint': fingerprint(actual)})
     revision = digest({'components': [{k: v for k, v in x.items() if k != 'current'} | {'version': x['current']['version'], 'image': x['current']['imageDigest']} for x in output], 'checkedAt': checked.get('checkedAt')})
     for item in output:
