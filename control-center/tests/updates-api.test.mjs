@@ -227,12 +227,14 @@ test('batch plans bind every target and service without exposing native fields o
 
 test('per-service progress retains partial success and rollback while redacting errors and rejecting false totals', async t => {
   const source = { id: 'batch-1', status: 'failed', stage: 'Interrotto', completedSteps: 1, totalSteps: 2,
+    error: 'protected failure detail SECRET',
     currentComponent: 'redis', currentService: 'redis-app', completedServices: 1, totalServices: 2,
     serviceResults: [{ componentId: 'php', service: 'php-app', status: 'succeeded', stage: 'Aggiornato' }, { componentId: 'redis', service: 'redis-app', status: 'rolled-back', stage: 'Ripristinato', error: '/etc/SECRET' }],
     componentResults: [{ componentId: 'php', status: 'succeeded' }, { componentId: 'redis', status: 'failed' }] };
   const { client } = await fixture(t, (_body, res) => send(res, source));
   const result = await client.operation('batch-1');
   assert.equal(result.currentService, 'redis-app'); assert.equal(result.completedServices, 1);
+  assert.match(result.error, /Operazione non riuscita/);
   assert.deepEqual(result.serviceResults.map(item => item.status), ['succeeded', 'rolled-back']);
   assert.doesNotMatch(JSON.stringify(result), /SECRET/);
   source.totalServices = 3;

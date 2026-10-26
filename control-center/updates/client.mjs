@@ -188,7 +188,7 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
             if (settled) return;
             try {
               const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-              if (![200, 202].includes(res.statusCode) || value.error) {
+              if (![200, 202].includes(res.statusCode)) {
                 const status = Number.isInteger(value.error?.status) && value.error.status >= 400 && value.error.status <= 599 ? value.error.status : res.statusCode >= 400 ? res.statusCode : 503;
                 finish(new RuntimeUpdatesError(status, value.error?.code));
               } else finish(null, sanitizeResult(body, value));
