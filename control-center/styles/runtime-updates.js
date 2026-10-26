@@ -42,10 +42,10 @@
       if (Number.isFinite(total) && total > 0 && Number.isFinite(completed) && completed >= 0 && completed <= total) { progress.max = total; progress.value = completed; }
       else progress.removeAttribute('value');
       select('[data-updates-stage]').textContent = operation ? text(operation.stage, labels[operation.status] || 'Verifica in corso…') : 'Verifica in corso…';
-      var query = select('[data-updates-search]').value.trim().toLocaleLowerCase('it'), category = select('[data-updates-category]').value;
+      var category = select('[data-updates-category]').value;
       list.replaceChildren(); var count = 0;
       components.forEach(function (item) {
-        if (category !== 'all' && item.category !== category || !(String(item.label || '') + ' ' + item.id + ' ' + (item.services || []).join(' ')).toLocaleLowerCase('it').includes(query)) return;
+        if (category !== 'all' && item.category !== category) return;
         count++;
         var row = element('article'); row.className = 'cc-update-row';
         var name = element('div'); name.append(element('strong', text(item.label, item.id)), element('small', text(item.category, 'Componente'))); row.append(name);
@@ -138,7 +138,6 @@
     select('[data-updates-close]').addEventListener('click', close);
     dialog.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
     refresh.addEventListener('click', load);
-    select('[data-updates-search]').addEventListener('input', render);
     select('[data-updates-category]').addEventListener('change', render);
     var lifecycle = { root: root, stop: function () { state.stopped = true; state.generation++; state.dialogGeneration++; clearTimeout(state.timer); state.plan = null; if (dialog.open) dialog.close(); }, resume: load, pause: function () { clearTimeout(state.timer); } };
     active.add(lifecycle); load();

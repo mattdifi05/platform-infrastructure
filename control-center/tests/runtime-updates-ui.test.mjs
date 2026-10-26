@@ -19,7 +19,7 @@ class Node {
 function fixture(request) {
   const nodes = new Map(), calls = [], timers = new Map(); let timer = 0, scan;
   const root = new Node(); root.isConnected = true;
-  root.querySelector = selector => { if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); };
+  root.querySelector = selector => { if (selector === '[data-updates-search]') throw Error('Search control was removed'); if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); };
   root.querySelector('[data-updates-category]').value = 'all';
   root.querySelector('[data-updates-progress]').querySelector = () => root.querySelector('progress');
   const document = { readyState: 'complete', hidden: false, body: {}, createElement: tag => new Node(tag), querySelectorAll: () => root.isConnected ? [root] : [], addEventListener() {} };
@@ -33,7 +33,9 @@ const component = { id: 'php', label: 'PHP', category: 'Runtime', installed: tru
 const catalog = { available: true, revision: 'revision', components: [component], operations: [] };
 test('settings markup has accessible update controls and uses existing vendored icons', () => {
   const html = renderRuntimeUpdates();
-  assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|https:\/\//);
+  const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
+  assert.match(css, /\.cc-settings > \.ops-project-detail-panel\{border-radius:var\(--cc-radius-2xl,16px\)\}/);
+  assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|type="search"|https:\/\//);
 });
 test('check remains queued until operation readback and polls pending operations at two seconds', async () => {
   const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' } : catalog);
