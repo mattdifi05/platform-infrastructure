@@ -17,10 +17,32 @@ def command(args):
     return subprocess.check_output(args, text=True)
 
 
-def discover(rows, infra):
+def official_provider_repository(reference):
+    if not isinstance(reference, str):
+        return None
+    normalized = reference.removeprefix('docker.io/').removeprefix('index.docker.io/')
+    match = re.fullmatch(r'([a-z0-9/-]+)(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})', normalized)
+    if not match:
+        return None
+    repository = match.group(1)
+    if repository in ['nginx', 'traefik', 'nats']:
+        repository = 'library/' + repository
+    return repository if repository in {'library/nginx', 'library/traefik', 'library/nats', 'prom/prometheus', 'prom/alertmanager', 'prom/node-exporter', 'grafana/grafana', 'grafana/promtail', 'grafana/loki'} else None
+
+
+def image_provider_identities(image_metadata):
+    identities = {}
+    for image in image_metadata:
+        repositories = {repository for reference in image.get('RepoDigests') or [] if isinstance(reference, str) and '@sha256:' in reference and (repository := official_provider_repository(reference))}
+        if len(repositories) == 1:
+            identities[image['Id']] = next(iter(repositories))
+    return identities
+
+
+def discover(rows, infra, image_metadata=None):
     groups = {}
     active = {(x['Config'].get('Labels', {}).get('com.docker.compose.project'), x['Config'].get('Labels', {}).get('com.docker.compose.service')) for x in rows if x['State']['Running']}
-    official = {x['Image']: x['Config']['Image'] for x in rows if re.match(r'^(?:docker.io/)?(?:nginx|traefik|nats|prom/(?:prometheus|alertmanager|node-exporter)|grafana/(?:grafana|promtail|loki)):', x['Config']['Image'])}
+    official = image_provider_identities(image_metadata) if image_metadata is not None else {x['Image']: repository for x in rows if (repository := official_provider_repository(x['Config']['Image']))}
     for row in rows:
         labels = row['Config'].get('Labels') or {}
         if not labels.get('com.docker.compose.project') or '-rollback-' in row['Name'] or '-update-' in row['Name']:
@@ -33,7 +55,6 @@ def discover(rows, infra):
             continue
         if not row['State']['Running'] and ((labels.get('com.docker.compose.project'), service) in active or name not in {service, 'enterprise-' + service, labels.get('com.docker.compose.project', '') + '-' + service + '-1'}):
             continue
-        image = official.get(row['Image'], image)
         entry = {'strategy': 'observe', 'category': 'Piattaforma', 'compatibility': 'latest', 'tagSuffix': '', 'tagPrefix': '', 'architecture': 'amd64'}
         if 'phpmyadmin' in name:
             entry.update(label='phpMyAdmin', category='Amministrazione', repository='library/phpmyadmin', strategy='reviewed-build', dockerfile=str(infra / 'deployment/docker/phpmyadmin-remediated.Dockerfile'), probe=['php', '-r', 'define("VERSION_SUFFIX", ""); require "/var/www/html/libraries/classes/Version.php"; echo \\PhpMyAdmin\\Version::VERSION;'])
@@ -65,8 +86,7 @@ def discover(rows, infra):
                 ('loki', 'Loki', 'grafana/loki', ['/usr/bin/loki', '--version'], '', '', 'Monitoraggio'),
             ]
             for match, label, repository, probe, prefix, suffix, category in providers:
-                expected = repository.removeprefix('library/')
-                if image.removeprefix('docker.io/').startswith(expected + ':'):
+                if official.get(row['Image']) == repository:
                     entry.update(label=label, category=category, repository=repository, probe=probe, tagPrefix=prefix, tagSuffix=suffix, strategy='image')
                     if repository == 'library/nginx':
                         entry['versionEnv'] = 'NGINX_VERSION'
@@ -120,7 +140,15 @@ def main():
     ids = command(['docker', 'ps', '-aq']).split()
     rows = json.loads(command(['docker', 'inspect', *ids])) if ids else []
     # Include stopped tools, while excluding retained rollback snapshots.
-    components = discover(rows, infra)
+    image_ids = sorted({row['Image'] for row in rows})
+    image_metadata = []
+    if image_ids:
+        # Fetch only identity metadata, never image ENV or application configuration.
+        metadata = command(['docker', 'image', 'inspect', '--format', '{{json .Id}}|{{json .RepoDigests}}', *image_ids])
+        for line in metadata.splitlines():
+            identity, references = line.split('|', 1)
+            image_metadata.append({'Id': json.loads(identity), 'RepoDigests': json.loads(references)})
+    components = discover(rows, infra, image_metadata=image_metadata)
     CONFIG.mkdir(mode=0o750, parents=True, exist_ok=True)
     value = {'schema': 'platform-runtime-updates/v1', 'recoveryLimitBytes': 20 * 1024 ** 3, 'components': components}
     config = CONFIG / 'config.json'

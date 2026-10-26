@@ -1293,6 +1293,41 @@ class InstallerDiscoveryTests(unittest.TestCase):
         self.assertEqual(components[0]['id'], 'traefik')
         self.assertEqual(components[0]['routeProbes'], probes)
 
+    def test_reenrollment_keeps_traefik_family_after_recreate_sets_only_image_sha(self):
+        old = self.runtime('web-proxy', 'traefik:v3.7.5')
+        previous = self.installer.discover([old], pathlib.Path('/fixture/platform'))
+        previous[0]['routeProbes'] = [{'host': 'portal.example.test', 'port': 8080, 'path': '/', 'expectedStatuses': [200, 401]}]
+        fresh = copy.deepcopy(old)
+        fresh.update(Id='updated-router', Image=NEW_IMAGE)
+        fresh['Config']['Image'] = NEW_IMAGE  # Exact updater recreate() output.
+        metadata = [{'Id': NEW_IMAGE, 'RepoDigests': ['traefik@' + NEW_IMAGE]}]
+        components = self.installer.discover([fresh], pathlib.Path('/fixture/platform'), image_metadata=metadata)
+        self.installer.preserve_enrollment_policy(components, previous)
+        self.assertEqual(len(components), 1)
+        self.assertEqual(components[0]['id'], 'traefik'); self.assertEqual(components[0]['repository'], 'library/traefik')
+        self.assertEqual(components[0]['strategy'], 'image'); self.assertEqual(components[0]['probe'], ['traefik', 'version'])
+        self.assertEqual(components[0]['containers'], previous[0]['containers'])
+        self.assertEqual(components[0]['routeProbes'], previous[0]['routeProbes'])
+
+    def test_official_repo_digests_restore_providers_but_unverified_sha_or_foreign_images_do_not(self):
+        for reference, expected in [('docker.io/library/nginx@' + NEW_IMAGE, 'library/nginx'),
+                                    ('prom/prometheus@' + NEW_IMAGE, 'prom/prometheus'),
+                                    ('grafana/loki@' + NEW_IMAGE, 'grafana/loki')]:
+            with self.subTest(reference=reference):
+                row = self.runtime('generic-service', NEW_IMAGE)
+                metadata = [{'Id': row['Image'], 'RepoDigests': [reference]}]
+                result = self.installer.discover([row], pathlib.Path('/fixture/platform'), image_metadata=metadata)
+                self.assertEqual(result[0]['repository'], expected); self.assertEqual(result[0]['strategy'], 'image')
+        row = self.runtime('generic-nginx', NEW_IMAGE)
+        for references in [[], ['owasp/modsecurity-crs@' + NEW_IMAGE], ['evil.test/library/nginx@' + NEW_IMAGE], ['nginx@' + NEW_IMAGE, 'traefik@' + NEW_IMAGE]]:
+            with self.subTest(references=references):
+                result = self.installer.discover([row], pathlib.Path('/fixture/platform'), image_metadata=[{'Id': row['Image'], 'RepoDigests': references}])
+                self.assertEqual(result[0]['strategy'], 'observe'); self.assertNotIn('repository', result[0])
+        # A local official-looking tag alone cannot override foreign provenance.
+        row['Config']['Image'] = 'nginx:1.30.5'
+        result = self.installer.discover([row], pathlib.Path('/fixture/platform'), image_metadata=[{'Id': row['Image'], 'RepoDigests': ['owasp/modsecurity-crs@' + NEW_IMAGE]}])
+        self.assertEqual(result[0]['strategy'], 'observe')
+
     def test_completed_initialization_helpers_are_not_runtime_update_targets(self):
         rows = [self.runtime('web-proxy', 'nginx:1.30.5-alpine'),
                 self.runtime('storage-volume-init', 'nginx:1.30.5-alpine', running=False),
