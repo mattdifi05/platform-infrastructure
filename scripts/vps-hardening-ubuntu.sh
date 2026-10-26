@@ -312,6 +312,7 @@ net.ipv4.tcp_syncookies = 1
 net.ipv4.ip_forward = 0
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0"
+write_file /etc/sysctl.d/99-zz-platform-redis.conf 0644 "vm.overcommit_memory = 1"
 run sysctl --system
 
 echo "==> Unattended security updates"

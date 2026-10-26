@@ -17,11 +17,9 @@ def queue_command(*args):
 def main():
  if os.geteuid()!=0 or len(sys.argv)!=1:raise RuntimeError('Root queue consumer only')
  os.umask(0o077);b.private(b.WORK,True)
- p,_=b.profile()
  with (b.WORK/'operation.lock').open('a') as lock:
   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   except BlockingIOError:return
-  b.settle_restore_journal()
   running=queue_command('claim')
   if not running:return
   jobpath=pathlib.Path(running);root=QUEUE/'running'
@@ -36,8 +34,15 @@ def main():
   ledger=b.WORK/'operations';ledger.mkdir(mode=0o700,exist_ok=True);record=ledger/(ident+'.json')
   if record.exists():
    queue_command('mark-unknown','--jobId',ident,'--summary','Operation already has a persistent root outcome; reconcile before replay','--exitCode','74');return
+  p=None
   try:
    if job.get('schema')!='platform.backup-job/v1' or job.get('status')!='running' or job.get('scope')!={'kind':'platform','id':'platform'} or not job.get('requestedBy'):raise RuntimeError('Only authenticated full platform queue jobs are supported')
+   if job.get('operation')=='backup' and b.backup_control().capture_disabled(b):
+    b.save(record,{'jobId':ident,'status':'failed','operation':'backup','reason':'backup-disabled','finishedAt':b.now()})
+    queue_command('finish','--jobId',ident,'--status','failed','--summary','Backup disabled by root control; no capture or offsite action performed','--exitCode','1')
+    return
+   p,_=b.profile()
+   b.settle_restore_journal()
    wanted=sorted(b.enrolled_resources(p),key=lambda r:r['id'])
    if sorted(job.get('resources',[]),key=lambda r:r['id'])!=wanted:raise RuntimeError('Queue resource set differs from signed VPS profile')
    b.save(record,{'jobId':ident,'requestSha256':__import__('hashlib').sha256(b.canonical(job)).hexdigest(),'status':'running','startedAt':b.now(),'profileSha256':b.sha(b.PROFILE)})
@@ -63,7 +68,9 @@ def main():
   except Exception:
    control_failure={}
    if job.get('operation')=='backup-control':
-    try:control_failure={'backupControlAfterFailure':b.backup_control().status(b,p)}
+    try:
+     if p is None:raise RuntimeError('Backup admission was not verified')
+     control_failure={'backupControlAfterFailure':b.backup_control().status(b,p)}
     except Exception:control_failure={'backupControlAfterFailure':{'state':'unreadable','requiresRootReconciliation':True}}
     try:b.publish_catalog()  # Readback must reflect a committed OFF even if scheduling failed.
     except Exception:pass

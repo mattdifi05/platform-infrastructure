@@ -67,6 +67,7 @@ jobs:
           python3 -m unittest discover -s deployment/host/tests -p 'test_runtime_*.py'
           python3 -m unittest discover -s deployment/host/tests -p 'test_host_updates.py'
           python3 -m unittest discover -s deployment/host/tests -p 'test_server_events.py'
+          python3 -m unittest discover -s deployment/vps-backup/tests -p 'test_backup_control.py'
       - name: Install locked Control Center test dependencies
         working-directory: control-center
         run: npm ci --ignore-scripts --no-audit --no-fund

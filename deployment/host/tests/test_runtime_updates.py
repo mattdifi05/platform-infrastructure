@@ -1192,6 +1192,15 @@ class UpdatesTests(unittest.TestCase):
             self.assertEqual(new['Config']['Env'], ['PHP_VERSION=8.5.12', 'DB_PASSWORD=' + SECRET])
             self.assertNotIn(SECRET, json.dumps(m.catalog()))
 
+    def test_recreation_preserves_security_and_canonicalizes_deprecated_no_new_privileges(self):
+        old = self.docker.inspect('php-service')
+        old['HostConfig']['SecurityOpt'] = ['no-new-privileges:true', 'apparmor=platform-profile']
+        with patch.object(m, 'docker', self.docker.docker):
+            new_id = m.recreate(old, NEW_IMAGE, [])
+        fresh = self.docker.inspect(new_id)
+        self.assertEqual(fresh['HostConfig'], {**old['HostConfig'], 'SecurityOpt': ['no-new-privileges=true', 'apparmor=platform-profile']})
+        self.assertEqual(old['HostConfig']['SecurityOpt'][0], 'no-new-privileges:true')
+
     def test_failed_new_runtime_rolls_back_same_old_container_identity(self):
         stored = self.stored()
         self.prepare_job()

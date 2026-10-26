@@ -5,15 +5,22 @@ TIMERS=('platform-vps-backup.timer',)
 QUEUE_TIMER='platform-vps-backup-queue.timer'
 def state_path(b):return b.CONFIG/'backup-control.json'
 def revision(b,body):return hashlib.sha256(b.canonical(body)).hexdigest()
-def status(b,profile):
- available=isinstance(profile,dict) and profile.get('captureAuthorized') is True and profile.get('offsiteAuthorized') is True
+def read_protected_state(b):
  path=state_path(b)
  if not path.exists() and not path.is_symlink():
-  return {'available':available,'enabled':available,'revision':revision(b,{'schema':SCHEMA,'legacyProfileSha256':b.sha(b.PROFILE) if profile else ''}),'updatedAt':'','requestId':''}
+  return None
  value=json.loads(b.private(path).read_text())
  if not isinstance(value,dict) or set(value)!={'schema','enabled','revision','updatedAt','requestId'} or value['schema']!=SCHEMA or type(value['enabled']) is not bool or not isinstance(value['updatedAt'],str) or not isinstance(value['requestId'],str) or not isinstance(value.get('revision'),str) or not re.fullmatch('[a-f0-9]{64}',value.get('revision','')):raise RuntimeError('Invalid protected backup control state')
  body={k:v for k,v in value.items() if k!='revision'}
  if revision(b,body)!=value['revision']:raise RuntimeError('Backup control state revision differs')
+ return value
+def capture_disabled(b):
+ value=read_protected_state(b)
+ return value is not None and value['enabled'] is False
+def status(b,profile):
+ available=isinstance(profile,dict) and profile.get('captureAuthorized') is True and profile.get('offsiteAuthorized') is True
+ value=read_protected_state(b)
+ if value is None:return {'available':available,'enabled':available,'revision':revision(b,{'schema':SCHEMA,'legacyProfileSha256':b.sha(b.PROFILE) if profile else ''}),'updatedAt':'','requestId':''}
  return {'available':available,'enabled':available and value['enabled'],'revision':value['revision'],'updatedAt':value['updatedAt'],'requestId':value['requestId']}
 def require_enabled(b,profile):
  path=state_path(b)

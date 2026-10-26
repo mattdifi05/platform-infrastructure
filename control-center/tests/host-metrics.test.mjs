@@ -136,12 +136,15 @@ test("query and snapshot errors return unavailable blocks without breaking the r
   assert.equal(result.network.totals.rxBytesPerSecond, null);
 });
 
-test("host metrics overlay limits collectors to finite read-only proc files", async () => {
+test("host metrics overlay limits collectors to finite read-only proc files and udev device metadata", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../../deployment/host/empty-vps/compose.host-metrics.yaml", import.meta.url), "utf8");
-  const expected = ["/proc/stat", "/proc/meminfo", "/proc/1/mountinfo", "/proc/loadavg", "/proc/uptime", "/proc/diskstats", "/proc/1/net/dev", "/proc/pressure/cpu", "/proc/pressure/io", "/proc/pressure/memory", "/proc/sys/fs/file-nr", "/proc/sys/fs/file-max", "/var/lib/platform-host-metrics/rootfs"];
+  const expected = ["/proc/stat", "/proc/meminfo", "/proc/1/mountinfo", "/proc/loadavg", "/proc/uptime", "/proc/diskstats", "/proc/1/net/dev", "/proc/pressure/cpu", "/proc/pressure/io", "/proc/pressure/memory", "/proc/sys/fs/file-nr", "/proc/sys/fs/file-max", "/run/udev/data", "/var/lib/platform-host-metrics/rootfs"];
   assert.deepEqual([...source.matchAll(/^        source: (.+)$/gm)].map(match => match[1]).sort(), expected.sort());
   for (const block of source.split("      - type: bind\n").slice(1)) { assert.match(block, /read_only: true/); assert.match(block, /create_host_path: false/); }
+  const udev = source.split("      - type: bind\n").find(block => /^        source: \/run\/udev\/data$/m.test(block));
+  assert.match(udev, /target: \/run\/udev\/data\n/);
+  assert.doesNotMatch(udev, /propagation:/, "udev bind keeps Docker's default private propagation");
   for (const collector of ["stat", "time", "loadavg", "diskstats", "netdev", "pressure", "filefd"]) assert.ok(source.includes(`      - --collector.${collector}\n`));
   assert.match(source, /--no-collector.netdev.netlink/);
   assert.match(source, /pid: !reset null/); assert.match(source, /cap_drop: \[ALL\]/); assert.match(source, /ports: !reset \[\]/);

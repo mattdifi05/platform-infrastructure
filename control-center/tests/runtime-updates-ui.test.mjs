@@ -44,6 +44,13 @@ test('settings markup has accessible update controls and uses existing vendored 
   assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|data-updates-category|Tutte le categorie|type="search"|https:\/\//);
   assert.ok(html.indexOf('data-host-updates aria-labelledby') < html.indexOf('data-runtime-updates aria-labelledby'), 'OS is a separate panel above runtime updates');
 });
+test('settings update surfaces inherit the shared panel inset instead of introducing a different edge', () => {
+  const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
+  const shared = readFileSync(new URL('../styles/control-center.css', import.meta.url), 'utf8');
+  assert.match(shared, /\.ops-project-detail-panel \{[^}]*padding: 15px;/s);
+  const overrides = css.match(/\.cc-settings > \.cc-updates,\.cc-settings > \.cc-host-updates\{([^}]*)\}/);
+  assert.ok(overrides); assert.doesNotMatch(overrides[1], /padding|border|background|box-shadow/);
+});
 test('check remains queued until operation readback and polls pending operations at two seconds', async () => {
   const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' } : catalog);
   await tick(); assert.equal(h.node('[data-updates-check]').disabled, false);

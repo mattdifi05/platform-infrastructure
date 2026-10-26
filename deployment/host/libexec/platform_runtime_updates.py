@@ -671,6 +671,9 @@ def recreate(old, image, backups, journal=lambda: None, before_start=None, on_st
     runtime_keys = {'PHP_VERSION', 'PHP_URL', 'PHP_ASC_URL', 'PHP_SHA256', 'NODE_VERSION', 'PG_VERSION', 'PG_MAJOR', 'MARIADB_VERSION', 'REDIS_VERSION'}
     config['Env'] = [x.split('=', 1)[0] + '=' + fresh_env[x.split('=', 1)[0]] if x.split('=', 1)[0] in runtime_keys and x.split('=', 1)[0] in fresh_env else x for x in config.get('Env', [])]
     config['HostConfig'] = copy.deepcopy(old['HostConfig'])
+    if isinstance(config['HostConfig'].get('SecurityOpt'), list):
+        config['HostConfig']['SecurityOpt'] = ['no-new-privileges=true' if value == 'no-new-privileges:true' else value
+                                               for value in config['HostConfig']['SecurityOpt']]
     config['NetworkingConfig'] = {'EndpointsConfig': endpoints(old)}
     on_stage('Creazione del servizio aggiornato')
     result = docker('POST', '/containers/create?name=' + name, config)
