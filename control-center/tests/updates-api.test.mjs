@@ -214,14 +214,15 @@ test('route capabilities require viewer for reads, admin for checks, fresh owner
 });
 
 test('system API exposes counts only and binds separate UPDATE and REBOOT confirmations', async t => {
-  let source = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 1, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [], packages: [{ name: 'private-package' }] };
+  let source = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 1, autoremoveCount: 2, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [], packages: [{ name: 'private-package' }], autoremove: [{ name: 'private-removal' }] };
   const { client, requests } = await fixture(t, (_body, res) => send(res, source));
   const inventory = await client.hostCatalog();
-  assert.equal(inventory.updateCount, 1); assert.equal(inventory.canReboot, true);
-  assert.doesNotMatch(JSON.stringify(inventory), /private-package|packages/);
-  source = { planId: 'host-plan', revision, expiresAt: plan.expiresAt, kind: 'host-upgrade', packageCount: 1, steps: ['Installa'], risks: ['Fermo temporaneo'], confirmationRequired: 'UPDATE', packages: [{ name: 'private-package' }] };
+  assert.equal(inventory.updateCount, 1); assert.equal(inventory.canReboot, true); assert.equal(inventory.autoremoveCount, 2);
+  assert.doesNotMatch(JSON.stringify(inventory), /private-package|private-removal|packages/);
+  source.autoremoveCount = -1; await assert.rejects(client.hostCatalog(), error => error.code === 'invalid_response');
+  source = { planId: 'host-plan', revision, expiresAt: plan.expiresAt, kind: 'host-upgrade', packageCount: 1, autoremoveCount: 2, steps: ['Installa'], risks: ['Fermo temporaneo'], confirmationRequired: 'UPDATE', packages: [{ name: 'private-package' }], autoremove: [{ name: 'private-removal' }] };
   const approved = await client.hostPlan({ revision });
-  assert.equal(approved.packageCount, 1); assert.doesNotMatch(JSON.stringify(approved), /private-package|packages/);
+  assert.equal(approved.packageCount, 1); assert.equal(approved.autoremoveCount, 2); assert.doesNotMatch(JSON.stringify(approved), /private-package|private-removal|packages/);
   assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision });
   const fields = { revision, planId: 'host-plan', confirmation: 'UPDATE', idempotencyKey: 'host-1' };
   await assert.rejects(client.hostRebootApply(fields), error => error.status === 400);

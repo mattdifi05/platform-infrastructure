@@ -42,9 +42,13 @@ The separate “Errori e avvisi” navigation page is a read-only viewer capabil
 
 Active observations and recent history are distinct. Historical journal entries do not imply that a problem is still active or has been resolved. Failed sources, truncated feeds and stale cached results are explicit and never produce an all-clear. Messages are redacted and bounded before leaving the host; the HTTP projection returns only documented fields and the frontend renders them as text. This page cannot acknowledge, delete, restart or repair services.
 
+After an explicit root log purge, `/var/lib/platform-updates/server-events-history-cutoff.json` can record the new diagnostic-history boundary. This private, bounded root metadata filters only older historical events; current problems remain visible. Package-operation, idempotency and recovery records are retained, rather than being erased to empty the diagnostics page.
+
 ## Operating system
 
 A separate panel above runtime updates shows APT status and counts without listing packages. Checking refreshes APT metadata and simulates the upgrade. An owner with fresh passkey authentication reviews an expiring plan before applying the exact package versions; automatic/manual package flags and existing configuration files are preserved. Changes to installed versions or package candidates invalidate the plan. Host maintenance shares the global operation lock with container updates.
+
+The same plan includes verified `autoremove` after the upgrade, without `purge`. A combined simulation anticipates dependencies made obsolete by the upgrade; the worker restores package marks and rechecks the exact removal set before cleanup. All non-approved names, manual and essential packages, host-critical components, installed kernels and multiarch siblings are protected. A fixed root hook checks versions, marks and service ownership under APT's lock immediately before dpkg. The screen exposes only counts, supports cleanup-only plans, and confirms success only after removal and service verification.
 
 The bridge keeps its filesystem sandbox. Fixed, root-owned companion workers execute APT through transient systemd units; neither the browser nor the bridge API accepts a command or arbitrary worker path. Package failures never claim automatic rollback. Reboot is separately confirmed with `REBOOT`, available only when the OS requires it, journaled before acknowledgement, and scheduled after the HTTP response. A changed boot ID and service health establish completion after reconnection. Installing this feature and opening the panel do not run an upgrade or reboot.
 

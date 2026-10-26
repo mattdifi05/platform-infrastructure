@@ -117,10 +117,10 @@ function sanitizeResult(body, value) {
   if (body.action === 'host-catalog') {
     const count = item => Number.isSafeInteger(item) && item >= 0 && item <= 100000;
     if (value.schema !== 'host-updates/v1' || typeof value.available !== 'boolean' || value.available && !token(value.revision)
-        || !count(value.updateCount) || !count(value.keptBackCount) || !Array.isArray(value.operations)) throw new RuntimeUpdatesError(503, 'invalid_response');
+        || !count(value.updateCount) || !count(value.keptBackCount) || value.autoremoveCount !== undefined && !count(value.autoremoveCount) || !Array.isArray(value.operations)) throw new RuntimeUpdatesError(503, 'invalid_response');
     return { schema: value.schema, available: value.available, revision: token(value.revision) ? value.revision : null,
       os: { id: text(value.os?.id, 80), name: text(value.os?.name, 128), version: text(value.os?.version, 80), kernel: text(value.os?.kernel, 128) },
-      checkedAt: timestamp(value.checkedAt), updateCount: value.updateCount, keptBackCount: value.keptBackCount,
+      checkedAt: timestamp(value.checkedAt), updateCount: value.updateCount, autoremoveCount: value.autoremoveCount ?? 0, keptBackCount: value.keptBackCount,
       rebootRequired: value.rebootRequired === true, canReboot: value.available && value.rebootRequired === true && value.canReboot === true, canCheck: value.available && value.canCheck === true, canApply: value.available && value.canApply === true,
       operations: value.operations.map(operation) };
   }
@@ -128,8 +128,9 @@ function sanitizeResult(body, value) {
     const reboot = body.action === 'host-reboot-plan';
     if (!validRuntimeUpdatesId(value.planId) || value.revision !== body.revision || !timestamp(value.expiresAt)
         || value.confirmationRequired !== (reboot ? 'REBOOT' : 'UPDATE') || value.kind !== (reboot ? 'host-reboot' : 'host-upgrade')
-        || !Array.isArray(value.steps) || !Array.isArray(value.risks) || !Number.isSafeInteger(value.packageCount) || value.packageCount < 0) throw new RuntimeUpdatesError(503, 'invalid_response');
-    return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, kind: value.kind, packageCount: value.packageCount,
+        || !Array.isArray(value.steps) || !Array.isArray(value.risks) || !Number.isSafeInteger(value.packageCount) || value.packageCount < 0
+        || value.autoremoveCount !== undefined && (!Number.isSafeInteger(value.autoremoveCount) || value.autoremoveCount < 0 || value.autoremoveCount > 100000)) throw new RuntimeUpdatesError(503, 'invalid_response');
+    return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, kind: value.kind, packageCount: value.packageCount, autoremoveCount: value.autoremoveCount ?? 0,
       steps: strings(value.steps), risks: strings(value.risks), confirmationRequired: value.confirmationRequired };
   }
   if (body.action === 'operation') {

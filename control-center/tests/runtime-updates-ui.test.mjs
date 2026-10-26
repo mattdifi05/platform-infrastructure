@@ -195,6 +195,16 @@ test('OS catalog loads independently once and never applies upgrades or reboots 
   assert.doesNotMatch(renderRuntimeUpdates(), /data-host-updates-packages/);
   assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
 });
+test('OS cleanup-only plans show removal counts and keep typed confirmation without listing packages', async () => {
+  const plan = { kind: 'host-upgrade', planId: 'cleanup-plan', revision: 'host-revision', expiresAt: new Date(Date.now() + 60000).toISOString(), packageCount: 0, autoremoveCount: 2, steps: ['Autoremove verificato'], risks: [], confirmationRequired: 'UPDATE' };
+  const h = fixture(path => path.endsWith('/plan') ? plan : { ...hostCatalog, updateCount: 0, autoremoveCount: 2, rebootRequired: false }, true);
+  await tick(); assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
+  assert.match(h.node('[data-host-updates-summary]').textContent, /2 dipendenze da rimuovere/);
+  h.node('[data-host-updates-upgrade]').listeners.click(); await tick();
+  assert.match(h.node('[data-host-updates-plan-details]').children[0].textContent, /0 pacchetti da aggiornare.*2 dipendenze/);
+  assert.equal(h.node('[data-host-updates-apply]').disabled, true);
+  assert.ok(!h.calls.some(call => call.path?.endsWith('/apply')));
+});
 test('OS upgrade and reboot require distinct reviewed confirmation and recover connection after server maintenance', async () => {
   for (const rebooting of [false, true]) {
     let polls = 0;
