@@ -322,7 +322,7 @@ def image_candidate(row, target, directory):
         # Keep the exact deployed application and its native dependencies. Same major only.
         base_tag = 'platform/runtime-base:' + directory.name
         run(['docker', 'image', 'tag', actual[0]['Image'], base_tag])
-        content = 'FROM ' + ref + ' AS runtime\nFROM ' + base_tag + '\nCOPY --from=runtime /usr/local/bin/node /usr/local/bin/node\nCOPY --from=runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nENV NODE_VERSION=' + target['version'] + '\n'
+        content = 'FROM ' + ref + ' AS runtime\nRUN mkdir /platform-runtime-libs && if [ -f /usr/lib/libatomic.so.1 ]; then cp -L /usr/lib/libatomic.so.1 /platform-runtime-libs/; fi\nFROM ' + base_tag + '\nCOPY --from=runtime /usr/local/bin/node /usr/local/bin/node\nCOPY --from=runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nCOPY --from=runtime /platform-runtime-libs/ /usr/lib/\nENV NODE_VERSION=' + target['version'] + '\n'
         (directory / 'Dockerfile').write_text(content)
         command = ['docker', 'build', '--tag', 'platform/runtime-update:' + directory.name, str(directory)]
     else:
@@ -691,6 +691,9 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 def main():
     configuration()
     initialize()
+    docker_config = ROOT / 'docker-config'
+    docker_config.mkdir(mode=0o700, exist_ok=True)
+    os.environ.setdefault('DOCKER_CONFIG', str(docker_config))
     key = protected(KEY).read_bytes()
     if len(key) != 32:
         raise RuntimeError('Invalid updates capability')

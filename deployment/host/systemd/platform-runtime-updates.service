@@ -16,6 +16,7 @@ RuntimeDirectoryPreserve=restart
 StateDirectory=platform-updates
 StateDirectoryMode=0700
 UMask=0077
+Environment=DOCKER_CONFIG=/var/lib/platform-updates/docker-config
 NoNewPrivileges=yes
 ProtectHome=read-only
 ProtectKernelTunables=yes
