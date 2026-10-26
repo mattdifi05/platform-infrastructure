@@ -146,7 +146,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result, {'packages': []})
         self.assertIn('--property=NoNewPrivileges=yes', command)
         self.assertIn('--property=PrivateTmp=yes', command)
-        self.assertEqual(command[-4:], ['/usr/bin/python3', '/usr/local/libexec/platform_host_updates.py', '--worker', 'check'])
+        self.assertEqual(command[-6:], ['/usr/bin/python3', '/usr/local/libexec/platform_host_updates.py', '--worker', 'check', '--operation-id', 'a' * 32])
         with patch.object(m, '_run') as run:
             for action in ['reboot;sh', 'shell', '/bin/sh']:
                 with self.assertRaises(m.HostUpdateError):
@@ -235,6 +235,59 @@ class HostTests(unittest.TestCase):
         self.assertIn('libsystemd0:amd64=259.5-0ubuntu3.5', run.call_args_list[-2].args[0])
         self.assertEqual(run.call_args_list[-1].args[0], ['apt-mark', 'auto', '--', 'libsystemd0:amd64'])
         self.assertEqual(self.recovery.call_args.args[1], ['libsystemd0:amd64'])
+
+    def test_worker_closed_stdout_continues_apply_and_persists_verified_result(self):
+        value, persisted, stages = self.make_plan(), [], []
+        def apply(plan, progress):
+            progress({'stage': 'upgrade', 'state': 'running'})
+            stages.append('packages configured')
+            progress({'stage': 'restore-package-marks', 'state': 'running'})
+            stages.append('automatic marks restored')
+            return {'state': 'succeeded', 'packages': [{**value['packages'][0], 'state': 'succeeded'}]}
+        def persist(record):
+            persisted.append(copy.deepcopy(record))
+        with patch.object(m, '_read_plan_file', return_value=value), patch.object(m, '_persist_worker_status', side_effect=persist), patch.object(m, 'apply', side_effect=apply), patch.object(m, '_run', return_value='') as run, patch('builtins.print', side_effect=BrokenPipeError), patch.object(m, '_silence_stdout') as silence:
+            result = m._execute_worker('apply', 'a' * 32, '/root/private-plan')
+        self.assertEqual(stages, ['packages configured', 'automatic marks restored'])
+        self.assertEqual(persisted[0]['state'], 'running')
+        self.assertEqual(persisted[-1]['state'], 'succeeded')
+        self.assertEqual(persisted[-1]['result'], result)
+        self.assertTrue(result['packageVersionsVerified'])
+        self.assertTrue(result['dpkgAuditClean'])
+        self.assertTrue(result['marksRestored'])
+        self.assertEqual(result['planId'], value['planId'])
+        self.assertEqual(run.call_args.args[0], ['dpkg', '--audit'])
+        self.assertEqual(silence.call_count, 3)
+
+    def test_real_broken_stdout_flush_exits_zero_without_apt(self):
+        import subprocess
+        import sys
+        code = ('import importlib.util,os;'
+                's=importlib.util.spec_from_file_location("host",' + repr(str(PATH)) + ');'
+                'm=importlib.util.module_from_spec(s);s.loader.exec_module(m);'
+                'r,w=os.pipe();os.close(r);os.dup2(w,1);os.close(w);'
+                'm._worker_print({"type":"progress"});m._worker_print({"type":"result"})')
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_worker_dirty_dpkg_audit_persists_failure_not_success(self):
+        persisted = []
+        with patch.object(m, '_read_plan_file', return_value=self.make_plan()), patch.object(m, '_persist_worker_status', side_effect=lambda value: persisted.append(copy.deepcopy(value))), patch.object(m, 'apply', return_value={'state': 'succeeded', 'packages': []}), patch.object(m, '_run', return_value='half configured package'), patch.object(m, '_worker_print'):
+            with self.assertRaisesRegex(m.HostUpdateError, 'audit is not clean'):
+                m._execute_worker('apply', 'a' * 32, '/root/private-plan')
+        self.assertEqual(persisted[-1]['state'], 'failed')
+        self.assertNotIn('result', persisted[-1])
+
+    def test_worker_alive_checks_unit_without_relaunch(self):
+        with patch.object(m, '_run', return_value='active\n') as run:
+            self.assertIs(m.worker_alive('a' * 32), True)
+            self.assertEqual(run.call_args.args[0][0], 'systemctl')
+        with patch.object(m, '_run', return_value='inactive\n'):
+            self.assertIs(m.worker_alive('a' * 32), False)
+        with patch.object(m, '_run', return_value='inactive\n'), patch.object(m, 'package_manager_busy', return_value=True):
+            self.assertIsNone(m.worker_alive('a' * 32))
+        with patch.object(m, '_run', side_effect=m.HostUpdateError('query unavailable')):
+            self.assertIsNone(m.worker_alive('a' * 32))
 
     def test_running_maintenance_blocks_reboot(self):
         with patch.object(m, 'active_maintenance', return_value=True):

@@ -37,6 +37,8 @@ SOCKET = os.environ.get('PLATFORM_UPDATES_SOCKET', '/run/platform-updates/update
 KEY = pathlib.Path(os.environ.get('PLATFORM_UPDATES_KEY', '/etc/platform-infrastructure/updates/bridge-key'))
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 GATE = threading.Lock()
+HOST_JOB_GUARD = threading.Lock()
+HOST_JOB_THREADS = set()
 DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
 IDENTIFIER = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$')
 
@@ -109,9 +111,13 @@ def initialize():
         if item['status'] in ['queued', 'running']:
             if item.get('kind') == 'host-reboot' and load('host-reboot', item['id']):
                 continue  # Boot identity and service health decide completion below.
+            if item.get('kind') in ['host-upgrade', 'host-check']:
+                continue  # A root transient worker may survive this bridge process.
             host_upgrade = item.get('kind') == 'host-upgrade'
             item.update(status='interrupted', recoveryRequired=host_upgrade or (ROOT / item['id'] / 'rollback.json').exists(), stage='Aggiornamento OS interrotto: verificare lo stato APT; nessun rollback' if host_upgrade else 'Interrotta: verifica lo stato reale prima di riprovare', finishedAt=stamp())
             save('operation', item['id'], item)
+
+    reconcile_host_jobs(force=True)
 
 
 def save(kind, key, value):
@@ -804,7 +810,8 @@ def apply_job(job_id, stored):
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
     with lock_path.open('a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            wait_operation_lock(lock, job_id, stored['public'].get('expiresAt'))
+            operation_update(job_id, status='running', stage='Verifica dello stato attuale')
             prepared = []
             # Bind every selected family before preparing any image.
             for family in families:
@@ -892,7 +899,7 @@ def apply_job(job_id, stored):
                 report('Famiglia aggiornata: ' + row['label'])
             current_component = current_service = None
             report('Aggiornamento verificato', status='succeeded', **({} if batch else {'completedSteps': 5}), finishedAt=stamp())
-        except Exception:
+        except Exception as error:
             atomic(directory / 'error.log', traceback.format_exc().encode())
             failed_rollback = False
             if not committed:
@@ -923,10 +930,12 @@ def apply_job(job_id, stored):
                 if result['status'] != 'succeeded':
                     result['status'] = 'failed' if result['componentId'] == current_component else 'skipped'
             success = committed and completed_families == len(families)
-            report('Runtime aggiornato; registro locale da verificare' if success else 'Intervento assistito richiesto' if failed_rollback else 'Aggiornamento interrotto; consulta il risultato dei servizi',
+            busy = isinstance(error, Rejected) and error.code == 'operation_conflict'
+            expired = isinstance(error, Rejected) and error.code == 'plan_expired'
+            report('Host occupato: nessun servizio modificato' if busy else 'Piano scaduto: nessun servizio modificato' if expired else 'Runtime aggiornato; registro locale da verificare' if success else 'Intervento assistito richiesto' if failed_rollback else 'Aggiornamento interrotto; consulta il risultato dei servizi',
                    status='succeeded' if success else 'rolled-back' if backups and not failed_rollback and not completed_families else 'failed',
                    recoveryRequired=failed_rollback, **({} if batch else {'completedSteps': 5} if success else {}),
-                   **({} if success else {'error': 'Verifica non riuscita. Consulta il registro protetto della manutenzione.'}), finishedAt=stamp())
+                   **({} if success else {'error': 'Host occupato da altra manutenzione. Riprova più tardi.' if busy else 'Verifica non riuscita. Consulta il registro protetto della manutenzione.'}), finishedAt=stamp())
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -1054,45 +1063,199 @@ def host_plan(kind, revision):
     return public
 
 
+def verify_host_result(native, result):
+    if not isinstance(result, dict) or result.get('state') != 'succeeded' or result.get('planId') != native.get('planId'):
+        return False
+    if not all(result.get(key) is True for key in ['packageVersionsVerified', 'dpkgAuditClean', 'marksRestored']):
+        return False
+    rows = result.get('packages')
+    if not isinstance(rows, list):
+        return False
+    expected = {item['name']: item['targetVersion'] for item in native['packages']}
+    actual = {item.get('name'): item.get('targetVersion') for item in rows if isinstance(item, dict) and item.get('state') == 'succeeded'}
+    return len(actual) == len(rows) == len(expected) and actual == expected
+
+
+def stored_host_execution(record):
+    value = load('host-execution', record['id'])
+    if value:
+        return value
+    with db() as connection:
+        binding = connection.execute('SELECT plan FROM idempotency WHERE job=?', (record['id'],)).fetchone()
+    stored = load('host-plan', binding['plan']) if binding else None
+    return {'kind': record['kind'], 'native': stored['native'] if stored else None, 'dispatched': True}
+
+
+def host_progress(job_id, kind, event):
+    stages = {'refresh': 'Aggiornamento delle fonti APT', 'inventory': 'Verifica pacchetti installati', 'verify': 'Verifica del piano OS',
+              'upgrade': 'Aggiornamento pacchetti OS', 'packages': 'Configurazione pacchetti OS', 'complete': 'Verifica finale dei pacchetti OS'}
+    changes = {'stage': stages.get(event.get('stage'), 'Manutenzione del sistema operativo')}
+    percent = event.get('percent')
+    if kind == 'host-upgrade' and isinstance(percent, (int, float)) and not isinstance(percent, bool) and 0 <= percent <= 100:
+        changes.update(completedSteps=min(99, int(percent)), totalSteps=100)
+    operation_update(job_id, **changes)
+
+
+def finish_host_upgrade(job_id, execution, result):
+    native = execution.get('native')
+    if not native or not verify_host_result(native, result):
+        raise Rejected('updates_unavailable', 'Verifiche finali dei pacchetti OS incomplete.', 503)
+    # Keep the verified result durable while Docker and ingress restart. This is
+    # evidence from the fixed root worker, never a browser-supplied package list.
+    execution['verifiedResult'] = result
+    execution.setdefault('serviceVerificationStartedAt', time.time())
+    save('host-execution', job_id, execution)
+    baseline = execution.get('services')
+    if not isinstance(baseline, list):
+        operation_update(job_id, status='interrupted', recoveryRequired=True, completedSteps=99, totalSteps=100,
+                         stage='Pacchetti verificati; baseline servizi assente: verifica assistita',
+                         error='Serve una verifica amministrativa dei servizi precedenti.', lastHostReconcileAt=time.time(), finishedAt=stamp())
+        return
+    if not reboot_services_healthy(baseline):
+        expired = time.time() - execution['serviceVerificationStartedAt'] >= 60
+        operation_update(job_id, status='failed' if expired else 'running', recoveryRequired=expired or load('operation', job_id).get('recoveryRequired') is True,
+                         stage='Pacchetti aggiornati; servizi non verificati: intervento richiesto' if expired else 'Pacchetti verificati; attesa avvio e verifica dei servizi',
+                         completedSteps=99, totalSteps=100, lastHostReconcileAt=time.time(),
+                         **({'error': 'Verifica amministrativa richiesta per i servizi del server.', 'finishedAt': stamp()} if expired else {'finishedAt': None}))
+        return
+    save('cache', 'host-releases', None)
+    operation_update(job_id, status='succeeded', recoveryRequired=False, error=None,
+                     stage='Aggiornamento OS e servizi verificati', completedSteps=100, totalSteps=100,
+                     rebootRequired=result.get('rebootRequired') is True, lastHostReconcileAt=time.time(), finishedAt=stamp())
+
+
+def reconcile_host_jobs(operation_id=None, force=False):
+    if host_updates is None:
+        return False
+    reconciled = False
+    for record in records('operation'):
+        if record.get('kind') not in ['host-upgrade', 'host-check'] or record['status'] == 'succeeded':
+            continue
+        if record['status'] not in ['queued', 'running'] and not record.get('recoveryRequired'):
+            continue
+        if operation_id and record['id'] != operation_id:
+            continue
+        if not force and time.time() - record.get('lastHostReconcileAt', 0) < 5:
+            continue
+        job_id, kind = record['id'], record['kind']
+        with HOST_JOB_GUARD:
+            local = job_id in HOST_JOB_THREADS
+        try:
+            status = host_updates.worker_status(job_id)
+            alive = host_updates.worker_alive(job_id)
+            if not isinstance(status, dict):
+                status = None
+            execution = stored_host_execution(record)
+            native = execution.get('native')
+            if kind == 'host-upgrade' and isinstance(execution.get('verifiedResult'), dict):
+                finish_host_upgrade(job_id, execution, execution['verifiedResult'])
+                reconciled = True
+                continue
+            valid = status and status.get('schema') == 'platform-host-worker-status/v1' and status.get('operationId') == job_id and status.get('action') == ('apply' if kind == 'host-upgrade' else 'check')
+            valid = valid and (kind != 'host-upgrade' or native and status.get('planId') == native.get('planId'))
+            if valid and status.get('state') == 'succeeded':
+                result = status.get('result')
+                if kind == 'host-upgrade':
+                    finish_host_upgrade(job_id, execution, result)
+                    reconciled = True
+                    continue
+                if not isinstance(result, dict) or not isinstance(result.get('packages'), list) or not isinstance(result.get('checkedAt'), int):
+                    raise Rejected('updates_unavailable', 'Verifica OS incompleta.', 503)
+                save('cache', 'host-releases', result)
+                operation_update(job_id, status='succeeded', recoveryRequired=False, error=None,
+                                 stage='Verifica OS completata' if kind == 'host-check' else 'Aggiornamento OS verificato',
+                                 completedSteps=1 if kind == 'host-check' else 100, totalSteps=1 if kind == 'host-check' else 100,
+                                 rebootRequired=result.get('rebootRequired') is True, lastHostReconcileAt=time.time(), finishedAt=stamp())
+                reconciled = True
+                continue
+            if alive is True:
+                if valid and isinstance(status.get('progress'), dict):
+                    host_progress(job_id, kind, status['progress'])
+                operation_update(job_id, status='running', recoveryRequired=record.get('recoveryRequired') is True or status is not None and not valid, error=None, finishedAt=None,
+                                 lastHostReconcileAt=time.time(), **({} if valid and status.get('progress') else {'stage': 'Worker OS ancora attivo; riconnessione al progresso'}))
+                reconciled = True
+                continue
+            if valid and status.get('state') == 'running' and alive is None:
+                operation_update(job_id, status='running', recoveryRequired=True, stage='Stato worker OS non confermato; attesa esito persistente', lastHostReconcileAt=time.time())
+                reconciled = True
+                continue
+            if local and not valid:
+                continue  # Dispatch may not have created its first spool record yet.
+            operation_update(job_id, status='failed' if valid and status.get('state') == 'failed' else 'interrupted', recoveryRequired=kind == 'host-upgrade',
+                             stage='Aggiornamento OS interrotto: verificare lo stato APT; nessun rollback' if kind == 'host-upgrade' else 'Verifica OS interrotta; riprovare',
+                             error='Verifica amministrativa richiesta: manca un esito OS completo e verificato.', lastHostReconcileAt=time.time(), finishedAt=stamp())
+            reconciled = True
+        except Exception:
+            if not local:
+                operation_update(job_id, status='interrupted', recoveryRequired=kind == 'host-upgrade', stage='Stato OS non verificabile: verifica amministrativa richiesta',
+                                 error='Impossibile confermare tutte le verifiche finali OS.', lastHostReconcileAt=time.time(), finishedAt=stamp())
+                reconciled = True
+    return reconciled
+
+
+def wait_operation_lock(lock, job_id, expires_at=None, timeout=60):
+    deadline = time.monotonic() + timeout
+    while True:
+        if expires_at is not None:
+            expires = datetime.datetime.fromisoformat(expires_at).timestamp() if isinstance(expires_at, str) else expires_at
+            if time.time() >= expires:
+                raise Rejected('plan_expired', 'Piano scaduto durante l’attesa della manutenzione.', 410)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            operation_update(job_id, waitingForMaintenance=False)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise Rejected('operation_conflict', 'Host occupato da altra manutenzione. Riprova più tardi.', 409)
+            operation_update(job_id, status='queued', stage='In attesa della manutenzione host in corso', waitingForMaintenance=True)
+            time.sleep(1)
+
+
 def host_job(job_id, kind, stored=None):
     lock_path = pathlib.Path('/var/lib/platform-vps-backup/operation.lock')
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
     began_upgrade = False
+    with HOST_JOB_GUARD:
+        HOST_JOB_THREADS.add(job_id)
+    if not load('host-execution', job_id):
+        save('host-execution', job_id, {'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False})
     with lock_path.open('a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored else None)
             operation_update(job_id, status='running', stage='Verifica degli aggiornamenti OS' if kind == 'host-check' else 'Preparazione aggiornamento OS')
             def progress(event):
                 nonlocal began_upgrade
-                phase = event.get('stage')
-                if phase == 'upgrade':
+                if event.get('stage') == 'upgrade':
                     began_upgrade = True
-                stages = {'refresh': 'Aggiornamento delle fonti APT', 'inventory': 'Verifica pacchetti installati', 'verify': 'Verifica del piano OS',
-                          'upgrade': 'Aggiornamento pacchetti OS', 'packages': 'Configurazione pacchetti OS', 'complete': 'Verifica finale dei pacchetti OS'}
-                changes = {'stage': stages.get(phase, 'Manutenzione del sistema operativo')}
-                percent = event.get('percent')
-                if kind == 'host-upgrade' and isinstance(percent, (int, float)) and not isinstance(percent, bool) and 0 <= percent <= 100:
-                    changes.update(completedSteps=min(99, int(percent)), totalSteps=100)
-                operation_update(job_id, **changes)
+                host_progress(job_id, kind, event)
+            execution = load('host-execution', job_id)
+            if kind == 'host-upgrade':
+                execution['services'] = snapshot_running_services()
+            execution['dispatched'] = True
+            save('host-execution', job_id, execution)
             if kind == 'host-check':
                 result = host_updates.run_transient('check', progress=progress, operation_id=job_id)
                 save('cache', 'host-releases', result)
             else:
                 path = host_updates.write_plan_file(stored['native'])
                 result = host_updates.run_transient('apply', plan_file=path, progress=progress, operation_id=job_id)
-                if result.get('state') != 'succeeded':
-                    raise host_updates.HostUpdateError('host upgrade did not verify success')
-                save('cache', 'host-releases', None)
-            operation_update(job_id, status='succeeded', stage='Verifica OS completata' if kind == 'host-check' else 'Aggiornamento OS verificato',
+                finish_host_upgrade(job_id, execution, result)
+                return
+            operation_update(job_id, status='succeeded', recoveryRequired=False, error=None, stage='Verifica OS completata' if kind == 'host-check' else 'Aggiornamento OS verificato',
                              completedSteps=1 if kind == 'host-check' else 100, totalSteps=1 if kind == 'host-check' else 100,
                              rebootRequired=result.get('rebootRequired') is True, finishedAt=stamp())
-        except Exception:
+        except Exception as error:
             logs = ROOT / 'logs'; logs.mkdir(mode=0o700, exist_ok=True)
             atomic(logs / (job_id + '-host.log'), traceback.format_exc().encode())
-            operation_update(job_id, status='failed', recoveryRequired=began_upgrade,
-                             stage='Aggiornamento OS non riuscito: verificare lo stato APT' if began_upgrade else 'Manutenzione OS non riuscita',
-                             error='Verifica amministrativa richiesta; nessun rollback automatico dei pacchetti OS.' if began_upgrade else 'Verifica OS non riuscita. Riprova dopo aver controllato lo stato del server.', finishedAt=stamp())
+            if not reconcile_host_jobs(job_id, force=True):
+                busy = isinstance(error, Rejected) and error.code == 'operation_conflict'
+                expired = isinstance(error, Rejected) and error.code == 'plan_expired'
+                operation_update(job_id, status='failed', recoveryRequired=began_upgrade or kind == 'host-upgrade' and load('host-execution', job_id, {}).get('dispatched') is True,
+                                 stage='Host occupato: nessun aggiornamento eseguito' if busy else 'Piano OS scaduto: nessun aggiornamento eseguito' if expired else 'Aggiornamento OS non riuscito: verificare lo stato APT' if began_upgrade else 'Manutenzione OS non riuscita',
+                                 error='Host occupato da altra manutenzione. Riprova più tardi.' if busy else 'Verifica amministrativa richiesta; nessun rollback automatico dei pacchetti OS.' if began_upgrade else 'Verifica OS non riuscita. Riprova dopo aver controllato lo stato del server.', finishedAt=stamp())
         finally:
+            with HOST_JOB_GUARD:
+                HOST_JOB_THREADS.discard(job_id)
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
@@ -1101,13 +1264,17 @@ def host_reboot_job(job_id):
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
     with lock_path.open('a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             private = load('host-reboot', job_id)
+            stored = load('host-plan', private['intent']['planId'])
+            wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored else None)
             private['intent'] = host_updates.schedule_reboot(private['intent'])
             save('host-reboot', job_id, private)
             operation_update(job_id, status='running', stage='Riavvio programmato; attesa nuova connessione', completedSteps=1, totalSteps=3)
-        except Exception:
-            operation_update(job_id, status='failed', recoveryRequired=True, stage='Riavvio non confermato: verifica amministrativa richiesta', error='Verifica lo stato del server prima di riprovare.', finishedAt=stamp())
+        except Exception as error:
+            blocked = isinstance(error, Rejected) and error.code in ['operation_conflict', 'plan_expired']
+            operation_update(job_id, status='failed', recoveryRequired=not blocked,
+                             stage='Host occupato o piano scaduto: riavvio non programmato' if blocked else 'Riavvio non confermato: verifica amministrativa richiesta',
+                             error='Riprova con un piano aggiornato dopo la manutenzione.' if blocked else 'Verifica lo stato del server prima di riprovare.', finishedAt=stamp())
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -1131,6 +1298,8 @@ def submit_host(kind, stored=None, idempotency_key=None):
     def persist(intent=None):
         with db() as connection:
             connection.execute('INSERT INTO records VALUES(?,?,?)', ('operation', job_id, json.dumps(job)))
+            if kind in ['host-upgrade', 'host-check']:
+                connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-execution', job_id, json.dumps({'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False})))
             if intent is not None:
                 connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-reboot', job_id, json.dumps({'intent': intent, 'services': services, 'acknowledged': False})))
             if idempotency_key:
@@ -1149,6 +1318,7 @@ def submit_host(kind, stored=None, idempotency_key=None):
 def handle_host(body, after_response=None):
     action = body['action']
     if action == 'host-catalog':
+        reconcile_host_jobs()
         reconcile_host_reboots()
         return host_catalog()
     if host_updates is None:
@@ -1210,6 +1380,7 @@ def handle(body, after_response=None):
     if action == 'catalog':
         return catalog()
     if action == 'operation':
+        reconcile_host_jobs(operation_id=body['operationId'])
         reconcile_host_reboots()
         value = load('operation', body['operationId'])
         if value is None:
@@ -1299,6 +1470,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 def main():
     configuration()
     initialize()
+    reconcile_host_jobs(force=True)
     reconcile_host_reboots(force=True)
     docker_config = ROOT / 'docker-config'
     docker_config.mkdir(mode=0o700, exist_ok=True)

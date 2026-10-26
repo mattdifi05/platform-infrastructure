@@ -705,6 +705,8 @@ class UpdatesTests(unittest.TestCase):
                                   'keptBack': ['fixture-held'], 'installedFingerprint': 'a' * 64, 'candidateFingerprint': 'b' * 64}
         m.save('cache', 'host-releases', self.host_check_result)
         self.host = unittest.mock.Mock()
+        self.host.worker_status.return_value = None
+        self.host.worker_alive.return_value = False
         self.host.HostUpdateError = type('FixtureHostError', (RuntimeError,), {})
         self.host.inventory.side_effect = lambda: copy.deepcopy(self.host_inventory)
         def native_plan(value=None):
@@ -794,7 +796,9 @@ class UpdatesTests(unittest.TestCase):
             kwargs['progress']({'stage': 'upgrade', 'state': 'running'})
             kwargs['progress']({'stage': 'packages', 'percent': 37.5, 'package': 'fixture-package', 'state': 'running'})
             self.assertEqual(m.load('operation', identity)['completedSteps'], 37)
-            return {'state': 'succeeded', 'packages': self.host_check_result['packages'], 'rebootRequired': True}
+            return {'state': 'succeeded', 'planId': stored['native']['planId'],
+                    'packages': [{**item, 'state': 'succeeded'} for item in self.host_check_result['packages']], 'rebootRequired': True,
+                    'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True}
         host.run_transient.side_effect = transient
         with patch.object(m, 'apply_job') as docker_apply:
             m.host_job(identity, 'host-upgrade', stored)
@@ -907,6 +911,193 @@ class UpdatesTests(unittest.TestCase):
         self.assertFalse(m.load('host-reboot', record['id'])['acknowledged'])
         m.initialize(); m.reconcile_host_reboots(force=True)
         self.assertEqual(m.load('operation', record['id'])['status'], 'queued')
+
+    def durable_host_upgrade(self):
+        self.host_fixture(); public = self.host_public_plan()
+        with patch.object(m.EXECUTOR, 'submit'):
+            accepted = m.handle(self.host_apply_body(public))
+        identity = accepted['operationId']
+        m.operation_update(identity, status='running', completedSteps=96, totalSteps=100)
+        native = m.load('host-plan', public['planId'])['native']
+        execution = m.load('host-execution', identity)
+        execution.update(services=m.snapshot_running_services(), dispatched=True)
+        m.save('host-execution', identity, execution)
+        result = {'state': 'succeeded', 'planId': native['planId'], 'packages': [{**item, 'state': 'succeeded'} for item in native['packages']],
+                  'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True, 'rebootRequired': True}
+        self.host_spool = {'schema': 'platform-host-worker-status/v1', 'operationId': identity, 'action': 'apply', 'planId': native['planId'],
+                           'state': 'running', 'progress': {'stage': 'packages', 'percent': 96}, 'updatedAt': int(time.time()), 'result': result}
+        self.host.worker_status.side_effect = lambda value: copy.deepcopy(self.host_spool)
+        return identity, public, native
+
+    def test_restart_retains_running_host_upgrade_with_durable_progress_and_never_reissues_apt(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host.worker_alive.return_value = True
+        m.initialize()
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'running'); self.assertEqual(record['completedSteps'], 96)
+        self.assertFalse(record['recoveryRequired']); self.assertTrue(m.host_catalog()['busy'])
+        self.host.run_transient.assert_not_called()
+        self.host_spool['progress']['percent'] = 97
+        m.operation_update(identity, lastHostReconcileAt=0)
+        record = m.handle({'action': 'operation', 'operationId': identity})
+        self.assertEqual(record['completedSteps'], 97); self.assertEqual(record['status'], 'running')
+        self.host.run_transient.assert_not_called()
+
+    def test_missing_consumer_output_recovers_from_complete_persisted_worker_result(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host_spool['state'] = 'succeeded'
+        self.host.run_transient.side_effect = self.host.HostUpdateError('consumer disappeared')
+        m.host_job(identity, 'host-upgrade', m.load('host-plan', public['planId']))
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'succeeded'); self.assertEqual(record['completedSteps'], 100)
+        self.assertFalse(record['recoveryRequired']); self.assertIsNone(record['error'])
+        self.host.run_transient.assert_called_once()
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+
+    def test_running_worker_survives_consumer_exception_without_false_failed_operation(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host.worker_alive.return_value = True
+        self.host.run_transient.side_effect = self.host.HostUpdateError('broken pipe')
+        m.host_job(identity, 'host-upgrade', m.load('host-plan', public['planId']))
+        self.assertEqual(m.load('operation', identity)['status'], 'running')
+        self.assertEqual(m.load('operation', identity)['completedSteps'], 96)
+        self.host.run_transient.assert_called_once()
+
+    def test_only_exact_all_package_targets_clean_dpkg_and_restored_marks_clear_recovery(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host_spool['state'] = 'succeeded'
+        good = copy.deepcopy(self.host_spool['result'])
+        cases = [{**good, key: False} for key in ['packageVersionsVerified', 'dpkgAuditClean', 'marksRestored']]
+        cases += [{**good, 'packages': []}, {**good, 'packages': [{**good['packages'][0], 'targetVersion': 'wrong'}]}, {**good, 'planId': 'wrong-plan'}]
+        for result in cases:
+            with self.subTest(result=result):
+                self.host_spool['result'] = result
+                m.operation_update(identity, status='interrupted', recoveryRequired=True, lastHostReconcileAt=0)
+                m.reconcile_host_jobs(force=True)
+                record = m.load('operation', identity)
+                self.assertNotEqual(record['status'], 'succeeded'); self.assertTrue(record['recoveryRequired'])
+        self.host_spool['result'] = good
+        m.reconcile_host_jobs(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+        self.assertFalse(m.load('operation', identity)['recoveryRequired'])
+        self.host.run_transient.assert_not_called()
+
+    def test_old_bridge_job_recovers_plan_binding_and_live_worker_without_a_new_dispatch(self):
+        identity, public, native = self.durable_host_upgrade()
+        with m.db() as connection:
+            connection.execute('DELETE FROM records WHERE kind=? AND id=?', ('host-execution', identity))
+        self.host.worker_alive.return_value = True
+        m.initialize()
+        self.assertEqual(m.load('operation', identity)['status'], 'running')
+        self.host_spool['state'] = 'succeeded'; self.host.worker_alive.return_value = False
+        m.reconcile_host_jobs(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'interrupted')
+        self.assertTrue(m.load('operation', identity)['recoveryRequired'])
+        self.assertIn('baseline', m.load('operation', identity)['stage'])
+        self.host.run_transient.assert_not_called()
+
+    def test_worker_status_wrong_job_or_plan_never_clears_host_recovery(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host_spool.update(state='succeeded', planId='wrong-plan')
+        m.initialize()
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'interrupted'); self.assertTrue(record['recoveryRequired'])
+        self.host_spool.update(planId=native['planId'], operationId='wrong-job')
+        m.reconcile_host_jobs(force=True)
+        self.assertTrue(m.load('operation', identity)['recoveryRequired'])
+        self.host.run_transient.assert_not_called()
+
+    def test_maintenance_lock_wait_is_queued_bounded_and_plan_expiry_prevents_dispatch(self):
+        self.prepare_job()
+        calls = 0
+        def acquire(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise BlockingIOError('maintenance busy')
+            self.assertEqual(m.load('operation', 'job-1')['status'], 'queued')
+            self.assertIn('attesa', m.load('operation', 'job-1')['stage'])
+        with patch.object(m.fcntl, 'flock', side_effect=acquire), patch.object(m.time, 'sleep') as sleep:
+            m.wait_operation_lock(object(), 'job-1', time.time() + 100)
+        sleep.assert_called_once_with(1)
+        with patch.object(m.fcntl, 'flock', side_effect=BlockingIOError), patch.object(m.time, 'monotonic', side_effect=[0, 1, 61]), patch.object(m.time, 'sleep'), self.assertRaises(m.Rejected) as busy:
+            m.wait_operation_lock(object(), 'job-1')
+        self.assertEqual(busy.exception.code, 'operation_conflict')
+        with patch.object(m.fcntl, 'flock') as acquire, self.assertRaises(m.Rejected) as expired:
+            m.wait_operation_lock(object(), 'job-1', time.time() - 1)
+        self.assertEqual(expired.exception.code, 'plan_expired'); acquire.assert_not_called()
+
+    def test_lock_collision_and_expired_host_plan_report_truthful_no_dispatch(self):
+        self.host_fixture(); public = self.host_public_plan(); stored = m.load('host-plan', public['planId'])
+        for code, expected in [('operation_conflict', 'Host occupato'), ('plan_expired', 'Piano OS scaduto')]:
+            identity = uuid.uuid4().hex
+            m.save('operation', identity, {'id': identity, 'kind': 'host-upgrade', 'status': 'queued', 'stage': 'Queued', 'completedSteps': 0, 'totalSteps': 100})
+            with patch.object(m, 'wait_operation_lock', side_effect=m.Rejected(code, expected)):
+                m.host_job(identity, 'host-upgrade', stored)
+            record = m.load('operation', identity)
+            self.assertEqual(record['status'], 'failed'); self.assertIn(expected, record['stage'])
+            self.assertFalse(record['recoveryRequired'])
+        self.host.run_transient.assert_not_called(); self.host.write_plan_file.assert_not_called()
+
+    def test_finished_busy_or_expired_jobs_are_not_resurrected_by_unrelated_package_activity(self):
+        self.host_fixture()
+        identity = uuid.uuid4().hex
+        m.save('operation', identity, {'id': identity, 'kind': 'host-upgrade', 'status': 'failed', 'stage': 'Host occupato: nessun aggiornamento eseguito', 'completedSteps': 0, 'totalSteps': 100, 'recoveryRequired': False})
+        self.host.worker_alive.return_value = True
+        m.reconcile_host_jobs(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'failed')
+        self.assertFalse(m.load('operation', identity)['recoveryRequired'])
+        self.host.worker_status.assert_not_called(); self.host.worker_alive.assert_not_called()
+
+    def test_verified_host_packages_wait_for_all_baseline_services_and_route_health(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host_spool['state'] = 'succeeded'
+        m.operation_update(identity, recoveryRequired=True)
+        self.docker.rows['old-container']['State']['Running'] = False
+        m.reconcile_host_jobs(force=True)
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'running'); self.assertEqual(record['completedSteps'], 99)
+        self.assertIn('servizi', record['stage']); self.assertTrue(record['recoveryRequired'])
+        self.assertIn('verifiedResult', m.load('host-execution', identity))
+        self.docker.rows['old-container']['State']['Running'] = True
+        with patch.object(m, 'reboot_services_healthy', return_value=False) as health:
+            m.reconcile_host_jobs(force=True)
+        health.assert_called_once(); self.assertEqual(m.load('operation', identity)['status'], 'running')
+        m.reconcile_host_jobs(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+        self.assertFalse(m.load('operation', identity)['recoveryRequired'])
+        self.host.run_transient.assert_not_called()
+
+    def test_unhealthy_post_upgrade_services_expire_to_assisted_without_apt_retry(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host_spool['state'] = 'succeeded'
+        execution = m.load('host-execution', identity)
+        execution['serviceVerificationStartedAt'] = time.time() - 61
+        m.save('host-execution', identity, execution)
+        self.docker.rows['old-container']['State']['Running'] = False
+        m.reconcile_host_jobs(force=True)
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'failed'); self.assertTrue(record['recoveryRequired'])
+        self.assertEqual(record['completedSteps'], 99); self.assertIn('servizi', record['stage'])
+        self.host.run_transient.assert_not_called()
+
+    def test_unconfirmed_running_worker_remains_pending_and_failclosed(self):
+        identity, public, native = self.durable_host_upgrade()
+        self.host.worker_alive.return_value = None
+        m.initialize()
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'running'); self.assertTrue(record['recoveryRequired'])
+        self.host.run_transient.assert_not_called()
+
+    def test_busy_reboot_wait_never_schedules_or_claims_uncertain_host_mutation(self):
+        self.host_fixture(); public = self.host_public_plan(reboot=True)
+        accepted = m.handle(self.host_apply_body(public, reboot=True))
+        with patch.object(m, 'wait_operation_lock', side_effect=m.Rejected('operation_conflict', 'Host busy')):
+            m.host_reboot_job(accepted['operationId'])
+        self.host.schedule_reboot.assert_not_called()
+        record = m.load('operation', accepted['operationId'])
+        self.assertEqual(record['status'], 'failed'); self.assertFalse(record['recoveryRequired'])
+        self.assertIn('Host occupato', record['stage'])
 
     def test_restart_of_host_upgrade_marks_apt_interruption_without_fake_runtime_recovery(self):
         self.host_fixture()

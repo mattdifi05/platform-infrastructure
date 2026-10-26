@@ -38,6 +38,10 @@ The bridge keeps its filesystem sandbox. Fixed, root-owned companion workers exe
 
 Traefik updates additionally require all effective file-provider configuration to live on read-only persistent mounts. Plans bind its contents and require a root-configured HTTP route probe after startup: a healthy ping with a missing portal route is a failed update.
 
+Host package maintenance runs independently of the bridge connection. The worker persists progress and its final result before attempting to send output; a closed pipe must not interrupt dpkg or automatic-package flag restoration. After a bridge restart, the service reads that durable result and verifies package versions, a clean dpkg audit, restored package flags and the original service baseline before declaring success. It never silently retries an interrupted upgrade.
+
+When syncing infrastructure source, preserve deployment-private activation inputs even when an older installation stores them inside the checkout. In particular, do not overlay an active router's workload lock with the repository's factory template or change its expected digest, owner or private file mode. Inspect active mounts and activation receipts first; deploy code separately from those runtime inputs and retain their existing permissions.
+
 ## Verification
 
 `python3 -m unittest discover -s deployment/host/tests -p 'test_runtime_*.py'`

@@ -455,7 +455,7 @@ def run_transient(action, plan_file=None, progress=None, operation_id=None):
     identity = operation_id or uuid.uuid4().hex
     if not re.fullmatch(r'[a-f0-9]{32}', identity):
         raise HostUpdateError('invalid host operation identity')
-    arguments = ['/usr/bin/python3', _WORKER, '--worker', action]
+    arguments = ['/usr/bin/python3', _WORKER, '--worker', action, '--operation-id', identity]
     if action == 'apply':
         _read_plan_file(plan_file)  # Reject paths before crossing the unit boundary.
         arguments.extend(['--plan-file', str(plan_file)])
@@ -478,28 +478,135 @@ def run_transient(action, plan_file=None, progress=None, operation_id=None):
     return result
 
 
+def _operation_path(operation_id):
+    if not re.fullmatch(r'[a-f0-9]{32}', str(operation_id)):
+        raise HostUpdateError('invalid host operation identity')
+    return _PLAN_DIRECTORY / ('worker-' + operation_id + '.json')
+
+
+def _persist_worker_status(value):
+    _private_directory()
+    target = _operation_path(value['operationId'])
+    temporary = _PLAN_DIRECTORY / (target.name + '.' + uuid.uuid4().hex + '.tmp')
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, 'w') as handle:
+            json.dump(value, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        descriptor = os.open(_PLAN_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def worker_status(operation_id):
+    """Read the producer-owned record; a disconnected consumer is not failure."""
+    import stat
+    target = _operation_path(operation_id)
+    _private_directory()
+    try:
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 4 * 1024 * 1024:
+            raise HostUpdateError('invalid private host worker record')
+        value = json.load(handle)
+    if value.get('schema') != 'platform-host-worker-status/v1' or value.get('operationId') != operation_id:
+        raise HostUpdateError('host worker record identity mismatch')
+    return value
+
+
+def worker_alive(operation_id):
+    _operation_path(operation_id)
+    try:
+        state = _run(['systemctl', 'show', '--property=ActiveState', '--value',
+                      'platform-host-updates-' + operation_id + '.service'], timeout=15).strip()
+        if state in ('active', 'activating', 'deactivating', 'reloading'):
+            return True
+        if state not in ('inactive', 'failed', ''):
+            return None
+        return None if package_manager_busy() else False
+    except (HostUpdateError, OSError):
+        return None
+
+
+def _silence_stdout():
+    # Replace fd 1 as well as swallowing the exception: Python's final flush of
+    # the broken buffered stream would otherwise terminate with exit status 120.
+    import sys
+    descriptor = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(descriptor, sys.stdout.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def _worker_print(event):
+    try:
+        print(json.dumps(event), flush=True)
+    except BrokenPipeError:
+        _silence_stdout()
+
+
+def _execute_worker(action, operation_id, plan_file=None):
+    _operation_path(operation_id)
+    value = _read_plan_file(plan_file) if action == 'apply' else None
+    state = {'schema': 'platform-host-worker-status/v1', 'operationId': operation_id,
+             'action': action, 'planId': value['planId'] if value else None,
+             'state': 'running', 'updatedAt': int(time.time())}
+    _persist_worker_status(state)
+    def progress(event):
+        state.update(progress=event, updatedAt=int(time.time()))
+        try:
+            _persist_worker_status(state)
+        except (OSError, HostUpdateError):
+            # Keep draining apt/dpkg even if storage fails. A final durable write
+            # is still mandatory before the worker may report success.
+            state['spoolWriteFailed'] = True
+        _worker_print({'type': 'progress', 'value': event})
+    try:
+        if action == 'check':
+            result = check(progress)
+        else:
+            result = apply(value, progress)
+            if _run(['dpkg', '--audit'], timeout=60).strip():
+                raise HostUpdateError('dpkg audit is not clean; package recovery required')
+            result.update(planId=value['planId'], packageVersionsVerified=True,
+                          dpkgAuditClean=True, marksRestored=True)
+        state.update(state='succeeded', result=result, updatedAt=int(time.time()))
+        _persist_worker_status(state)
+        _worker_print({'type': 'result', 'value': result})
+        return result
+    except (HostUpdateError, OSError, ValueError):
+        state.update(state='failed', error='Host maintenance requires verification; no rollback claimed.', updatedAt=int(time.time()))
+        _persist_worker_status(state)
+        _worker_print({'type': 'error', 'error': state['error']})
+        raise
+
+
 def _main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--worker', choices=['check', 'apply'], required=True)
+    parser.add_argument('--operation-id', required=True)
     parser.add_argument('--plan-file')
     arguments = parser.parse_args()
     if os.geteuid() != 0:
         raise HostUpdateError('host maintenance worker requires root')
-    def progress(value):
-        print(json.dumps({'type': 'progress', 'value': value}), flush=True)
-    if arguments.worker == 'check':
-        if arguments.plan_file:
-            raise HostUpdateError('check does not accept a plan pathname')
-        result = check(progress)
-    else:
-        result = apply(_read_plan_file(arguments.plan_file), progress)
-    print(json.dumps({'type': 'result', 'value': result}), flush=True)
+    if arguments.worker == 'check' and arguments.plan_file:
+        raise HostUpdateError('check does not accept a plan pathname')
+    return _execute_worker(arguments.worker, arguments.operation_id, arguments.plan_file)
 
 
 if __name__ == '__main__':
     try:
         _main()
-    except (HostUpdateError, OSError, ValueError) as error:
-        print(json.dumps({'type': 'error', 'error': str(error)}), flush=True)
+    except (HostUpdateError, OSError, ValueError):
         raise SystemExit(1)
