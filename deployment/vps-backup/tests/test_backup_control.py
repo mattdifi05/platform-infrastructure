@@ -80,6 +80,36 @@ class BackupControl(unittest.TestCase):
   self.b.save=partially_committed_save
   with self.assertRaisesRegex(RuntimeError,'root reconciliation'):c.apply(self.b,self.profile,self.job(True,identity='control-job-00000000000006'))
   self.assertTrue(c.status(self.b,self.profile)['enabled']);self.assertEqual(self.timer_calls[-2:],[True,False])
+ def queue_fixture(self,operation='backup',queued=True):
+  q=load('queue_guard_fixture','panel-queue.py');work=self.root/'guard-work';running=work/'queue/running';running.mkdir(parents=True);(work/'operation.lock').touch();identity='backup-job-00000000000009';file=running/(identity+'.json')
+  resource={'id':'platform-state:host-config','externalId':'host-config','kind':'platform-state','projectId':'platform','name':'host-config'}
+  job={'id':identity,'schema':'platform.backup-job/v1','status':'running','scope':{'kind':'platform','id':'platform'},'requestedBy':'authenticated-owner','operation':operation,'resources':[resource]};file.write_text(json.dumps(job))
+  b=types.SimpleNamespace(**vars(self.b));b.WORK=work;b.profile=mock.Mock(side_effect=RuntimeError('Unexpected running container blocks capture'));b.private=lambda path,*args:path;b.settle_restore_journal=mock.Mock();b.enrolled_resources=mock.Mock(return_value=[resource]);b.backup_control=lambda:c;b.capture=mock.Mock(side_effect=AssertionError('capture must not run'));b.assert_backup_enabled=lambda profile:c.require_enabled(b,profile)
+  calls=[]
+  def command(*args):calls.append(args);return str(file) if queued and args[0]=='claim' else ''
+  stat=types.SimpleNamespace(st_uid=1000,st_mode=0o100600,st_nlink=1,st_size=file.stat().st_size)
+  return q,b,work,file,calls,command,stat
+ def run_queue_fixture(self,values):
+  q,b,work,file,calls,command,stat=values
+  with mock.patch.object(q,'b',b),mock.patch.object(q,'QUEUE',work/'queue'),mock.patch.object(q,'queue_command',side_effect=command),mock.patch.object(q.os,'geteuid',return_value=0),mock.patch.object(q.os,'fstat',return_value=stat),mock.patch.object(q.sys,'argv',['panel-queue.py']):q.main()
+ def test_idle_off_queue_never_runs_capture_admission_or_recovery(self):
+  self.disable();values=self.queue_fixture(queued=False);self.run_queue_fixture(values);q,b,work,file,calls,command,stat=values
+  b.profile.assert_not_called();b.settle_restore_journal.assert_not_called();b.capture.assert_not_called();self.assertEqual(calls,[('claim',)])
+ def test_queued_backup_off_is_denied_before_stale_runtime_admission_and_no_capture(self):
+  self.disable();values=self.queue_fixture();self.run_queue_fixture(values);q,b,work,file,calls,command,stat=values
+  b.profile.assert_not_called();b.settle_restore_journal.assert_not_called();b.enrolled_resources.assert_not_called();b.capture.assert_not_called()
+  record=json.loads((work/'operations'/(file.stem+'.json')).read_text());self.assertEqual(record['status'],'failed');self.assertEqual(record['reason'],'backup-disabled')
+  finish=next(call for call in calls if call[0]=='finish');self.assertIn('failed',finish);self.assertTrue(any('no capture or offsite' in field for field in finish))
+  self.assertFalse(c.status(self.b,self.profile)['enabled']);self.assertEqual(self.timer_calls,[False])
+ def test_on_queue_still_requires_full_runtime_admission_and_never_bypasses_capture_guard(self):
+  values=self.queue_fixture()
+  with self.assertRaisesRegex(RuntimeError,'Unexpected running'):self.run_queue_fixture(values)
+  q,b,work,file,calls,command,stat=values;b.profile.assert_called_once();b.capture.assert_not_called()
+  self.assertTrue(any(call[0]=='finish' and 'failed' in call for call in calls))
+ def test_raw_off_guard_requires_valid_protected_state_and_preserves_legacy_default(self):
+  self.assertFalse(c.capture_disabled(self.b));self.disable();self.assertTrue(c.capture_disabled(self.b))
+  file=self.root/'backup-control.json';value=json.loads(file.read_text());value['enabled']=True;file.write_text(json.dumps(value))
+  with self.assertRaisesRegex(RuntimeError,'revision differs'):c.capture_disabled(self.b)
  def test_existing_queue_handles_control_while_off_without_capture(self):
   before=self.disable();q=load('queue_fixture','panel-queue.py');work=self.root/'work';running=work/'queue/running';running.mkdir(parents=True);(work/'operation.lock').touch();identity='control-job-00000000000003';file=running/(identity+'.json')
   resource={'id':'platform-state:host-config','externalId':'host-config','kind':'platform-state','projectId':'platform','name':'host-config'}

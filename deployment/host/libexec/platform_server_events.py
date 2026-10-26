@@ -3,6 +3,8 @@ import copy
 import datetime
 import hashlib
 import json
+import math
+import stat
 import os
 import re
 import selectors
@@ -30,6 +32,27 @@ DOCKER_FORMAT = ('{"id":{{json .Id}},"name":{{json .Name}},"state":{{json .State
 
 class SourceUnavailable(RuntimeError):
     pass
+
+
+def read_history_cutoff():
+    try:
+        fd = os.open('/var/lib/platform-updates/server-events-history-cutoff.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 8192:
+                raise SourceUnavailable('history cutoff is not private root metadata')
+            raw = handle.read(8193)
+        if len(raw) > 8192:
+            raise SourceUnavailable('history cutoff exceeds limit')
+        value = json.loads(raw)
+        epoch = value.get('clearedAtEpoch')
+        if value.get('schema') != 'server-events-history-cutoff/v1' or isinstance(epoch, bool) or not isinstance(epoch, (int, float)) or not math.isfinite(epoch) or not 0 <= epoch <= time.time() + 300:
+            raise SourceUnavailable('invalid history cutoff metadata')
+        return epoch
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError) as error:
+        raise SourceUnavailable('history cutoff unavailable') from error
 
 
 def read_command(arguments, timeout=3, max_bytes=262144):
@@ -129,8 +152,9 @@ def operation_scopes(row):
 
 
 class ServerEventsCollector:
-    def __init__(self, run=read_command, read_operations=lambda: [], metrics=host_metrics, now=time.time, ttl=12):
+    def __init__(self, run=read_command, read_operations=lambda: [], metrics=host_metrics, now=time.time, ttl=12, history_since=read_history_cutoff):
         self.run, self.read_operations, self.metrics, self.now, self.ttl = run, read_operations, metrics, now, ttl
+        self.history_since = history_since
         self.lock, self.cached, self.cached_at = threading.Lock(), None, 0
         self.active, self.resolved = {}, []
 
@@ -139,6 +163,7 @@ class ServerEventsCollector:
             observed = self.now()
             if self.cached is not None and 0 <= observed - self.cached_at < self.ttl:
                 return copy.deepcopy(self.cached)
+            cutoff = self.history_since()
             issues, events, sources, available = [], [], [], set()
             def collect(identity, reader):
                 try:
@@ -178,7 +203,7 @@ class ServerEventsCollector:
             # Use merged firstSeen/count without returning unverified old source state.
             current_rows = [copy.deepcopy(current[row['id']]) for row in deduplicate(current_rows)]
             self.resolved = [row for row in self.resolved if row['lastSeen'] >= iso(observed - 86400)][-50:]
-            recent = deduplicate(events + self.resolved)
+            recent = [row for row in deduplicate(events + self.resolved) if datetime.datetime.fromisoformat(row['lastSeen']).timestamp() >= cutoff]
             current_rows.sort(key=lambda row: (row['severity'] != 'error', row['source'], row['service']))
             recent.sort(key=lambda row: row['lastSeen'], reverse=True)
             partial = len(available) != len(sources) or len(current_rows) > 40 or len(recent) > 80

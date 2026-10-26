@@ -234,12 +234,12 @@
       if (!root.isConnected) return;
       var value = state.value, working = state.busy || pending(state.operation), available = value && value.available === true;
       check.disabled = Boolean(working || available && value.canCheck === false);
-      upgrade.disabled = !available || value.canApply === false || !(Number.isSafeInteger(value.updateCount) && value.updateCount > 0) || working;
+      upgrade.disabled = !available || value.canApply === false || !(Number.isSafeInteger(value.updateCount) && value.updateCount > 0 || Number.isSafeInteger(value.autoremoveCount) && value.autoremoveCount > 0) || working;
       reboot.hidden = !available || value.rebootRequired !== true;
       reboot.disabled = !available || value.canReboot === false || value.rebootRequired !== true || working;
       root.setAttribute('aria-busy', working ? 'true' : 'false');
       select('os').textContent = value && value.os ? [text(value.os.name, value.os.id), value.os.version].filter(Boolean).join(' ') : 'Sistema non disponibile';
-      select('summary').textContent = value ? (value.checkedAt ? (Number.isSafeInteger(value.updateCount) ? value.updateCount : 0) + ' aggiornamenti disponibili' + (Number.isSafeInteger(value.keptBackCount) && value.keptBackCount > 0 ? ' · ' + value.keptBackCount + ' mantenuti alla versione attuale' : '') + ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : 'Aggiornamenti non ancora verificati') + (value.rebootRequired ? ' · Riavvio richiesto' : '') : '';
+      select('summary').textContent = value ? (value.checkedAt ? (Number.isSafeInteger(value.updateCount) ? value.updateCount : 0) + ' aggiornamenti disponibili' + (Number.isSafeInteger(value.autoremoveCount) && value.autoremoveCount > 0 ? ' · ' + value.autoremoveCount + ' dipendenze da rimuovere' : '') + (Number.isSafeInteger(value.keptBackCount) && value.keptBackCount > 0 ? ' · ' + value.keptBackCount + ' mantenuti alla versione attuale' : '') + ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : 'Aggiornamenti non ancora verificati') + (value.rebootRequired ? ' · Riavvio richiesto' : '') : '';
       var box = select('progress'), progress = box.querySelector('progress'), operation = state.operation;
       panelVisible(box, working || Boolean(operation));
       var total = operation && operation.totalSteps, completed = operation && operation.completedSteps;
@@ -289,7 +289,7 @@
         if (!plan.planId || !plan.revision || plan.kind !== (rebooting ? 'host-reboot' : 'host-upgrade') || plan.confirmationRequired !== expected) throw Error('Piano di manutenzione non valido.');
         state.plan = plan; state.idempotencyKey = crypto.randomUUID();
         var details = select('plan-details');
-        if (!rebooting) details.append(element('p', (Number.isSafeInteger(plan.packageCount) ? plan.packageCount : 0) + ' pacchetti previsti dal piano verificato.'));
+        if (!rebooting) details.append(element('p', (Number.isSafeInteger(plan.packageCount) ? plan.packageCount : 0) + ' pacchetti da aggiornare · ' + (Number.isSafeInteger(plan.autoremoveCount) ? plan.autoremoveCount : 0) + ' dipendenze non più necessarie da rimuovere.'));
         ['steps', 'risks'].forEach(function (key) { details.append(element('h3', key === 'steps' ? 'Passaggi' : 'Impatto e rischi')); var list = element('ul'); (plan[key] || []).forEach(function (item) { list.append(element('li', typeof item === 'string' ? item : text(item.label || item.description, 'Passaggio'))); }); details.append(list); });
         select('confirm-prompt').textContent = 'Scrivi ' + expected + ' per confermare'; select('confirm-label').hidden = false;
         select('plan-status').textContent = rebooting ? 'Il portale sarà temporaneamente non raggiungibile durante il riavvio.' : 'Rivedi i pacchetti e l’impatto prima di aggiornare.';

@@ -32,15 +32,23 @@ While a job runs, the UI polls only its inexpensive status endpoint every two se
 
 The compact list places available updates first, without category filters. Stable keyed rows preserve open details and focus during polling; only changed states and actual row movements animate, respecting reduced motion. Per-service details remain available without expanding completed results by default.
 
+Settings panels inherit the same surface padding and border tokens as other portal sections. Grafana's offline profile disables remote plugin checks and key retrieval while retaining embedded-key signature verification; runtime upgrades remain host-managed. The optional host-metrics overlay includes only a read-only udev metadata directory alongside its finite proc-file bindings. Redis hosts persist the kernel overcommit policy needed for background persistence.
+
+An idle native backup queue performs no capture admission. Explicit, protected OFF state denies queued backup work before capture, upload or recovery side effects; activation and restore still require the full signed inventory. Runtime recreation uses the canonical Docker no-new-privileges syntax without weakening the existing protection.
+
 ## Server errors and warnings
 
 The separate “Errori e avvisi” navigation page is a read-only viewer capability. It uses the authenticated native bridge without loading the application catalog and refreshes every fifteen seconds only while visible. The collector coalesces requests for twelve seconds and reads bounded systemd, Docker, update-journal and host-capacity metadata. System journal events are limited to the current boot, the last twenty-four hours and an explicit infrastructure-unit/kernel allowlist; application logs and environment variables are not read.
 
 Active observations and recent history are distinct. Historical journal entries do not imply that a problem is still active or has been resolved. Failed sources, truncated feeds and stale cached results are explicit and never produce an all-clear. Messages are redacted and bounded before leaving the host; the HTTP projection returns only documented fields and the frontend renders them as text. This page cannot acknowledge, delete, restart or repair services.
 
+After an explicit root log purge, `/var/lib/platform-updates/server-events-history-cutoff.json` can record the new diagnostic-history boundary. This private, bounded root metadata filters only older historical events; current problems remain visible. Package-operation, idempotency and recovery records are retained, rather than being erased to empty the diagnostics page.
+
 ## Operating system
 
 A separate panel above runtime updates shows APT status and counts without listing packages. Checking refreshes APT metadata and simulates the upgrade. An owner with fresh passkey authentication reviews an expiring plan before applying the exact package versions; automatic/manual package flags and existing configuration files are preserved. Changes to installed versions or package candidates invalidate the plan. Host maintenance shares the global operation lock with container updates.
+
+The same plan includes verified `autoremove` after the upgrade, without `purge`. A combined simulation anticipates dependencies made obsolete by the upgrade; the worker restores package marks and rechecks the exact removal set before cleanup. All non-approved names, manual and essential packages, host-critical components, installed kernels and multiarch siblings are protected. A fixed root hook checks versions, marks and service ownership under APT's lock immediately before dpkg. The screen exposes only counts, supports cleanup-only plans, and confirms success only after removal and service verification.
 
 The bridge keeps its filesystem sandbox. Fixed, root-owned companion workers execute APT through transient systemd units; neither the browser nor the bridge API accepts a command or arbitrary worker path. Package failures never claim automatic rollback. Reboot is separately confirmed with `REBOOT`, available only when the OS requires it, journaled before acknowledgement, and scheduled after the HTTP response. A changed boot ID and service health establish completion after reconnection. Installing this feature and opening the panel do not run an upgrade or reboot.
 

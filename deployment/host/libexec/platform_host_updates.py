@@ -15,6 +15,8 @@ import time
 import uuid
 
 PLAN_TTL = 900
+_CLEANUP_FIELDS = ('autoremove', 'automaticPackages', 'protectedPackages', 'automaticFingerprint',
+                   'protectedPackageFingerprint', 'autoremoveFingerprint')
 _ACTIVE_CHILD = None
 _PACKAGE = re.compile(r'^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?$')
 _VERSION = re.compile(r'^[a-zA-Z0-9.+:~_-]+$')
@@ -202,7 +204,7 @@ def _canonical_package(name, installed):
 def _simulation(text, installed):
     packages, kept, collecting = [], [], False
     for line in text.splitlines():
-        if line.startswith('Remv '):
+        if line.startswith(('Remv ', 'Purg ')):
             raise HostUpdateError('package plan would remove packages')
         if line.startswith('The following packages have been kept back:'):
             collecting = True
@@ -233,6 +235,135 @@ def _simulation(text, installed):
     return sorted(packages, key=lambda row: row['name']), sorted(set(kept))
 
 
+def _automatic_packages(installed):
+    names = _run(['apt-mark', 'showauto'], timeout=60).splitlines()
+    if any(not _PACKAGE.fullmatch(name) for name in names):
+        raise HostUpdateError('invalid automatic package metadata')
+    return sorted({_canonical_package(name, installed) for name in names})
+
+
+def _protected_packages(installed):
+    # Keep every installed kernel, including fallback kernels. Priority alone is
+    # insufficient: boot, remote administration and container runtime packages
+    # can legitimately be optional/automatically installed.
+    critical = re.compile(r'^(?:linux-|kernel|apt(?:-|$)|dpkg(?:-|$)|systemd(?:-|$)|libsystemd|libpam|libc6|libgcc|libstdc|init(?:-|$)|udev|openssl|openssh|sudo|grub|shim|ubuntu-(?:minimal|standard)|debian-archive-keyring|ubuntu-keyring|docker|containerd|runc|nftables|iptables|iproute2|netplan|network-manager|cloud-init|python3(?:\.|-|$)|ca-certificates|curl|util-linux|mount|coreutils|bash|dash|procps|kmod|e2fsprogs|lvm2|cryptsetup|zfs)')
+    protected = {name for name in installed if critical.match(name.partition(':')[0])}
+    # NeverAutoRemove is package-base scoped. Retain all installed architectures
+    # of a multi-arch family up front, so planning and mutation use one policy.
+    counts = {}
+    for name in installed:
+        base = name.partition(':')[0]
+        counts[base] = counts.get(base, 0) + 1
+    protected.update(name for name in installed if counts[name.partition(':')[0]] > 1)
+    rows = _run(['dpkg-query', '-W', '-f=${binary:Package}\t${Essential}\t${Protected}\t${Priority}\n'], timeout=60)
+    seen = set()
+    for line in rows.splitlines():
+        fields = line.split('\t')
+        if len(fields) != 4 or not _PACKAGE.fullmatch(fields[0]):
+            raise HostUpdateError('package protection metadata unavailable')
+        if fields[0] not in installed:
+            continue
+        seen.add(fields[0])
+        if fields[1] == 'yes' or fields[2] == 'yes' or fields[3] in ('required', 'important'):
+            protected.add(fields[0])
+    if seen != set(installed):
+        raise HostUpdateError('package protection metadata incomplete')
+    return sorted(protected)
+
+
+def _cleanup_options(protected):
+    options = ['-o', 'DPkg::Lock::Timeout=30', '-o', 'APT::Get::Purge=false',
+               '-o', 'APT::Get::allow-remove-essential=false']
+    # APT's NeverAutoRemove matcher uses pkg.Name(), without Multi-Arch suffix.
+    # Protect every architecture conservatively when any identity is retained.
+    for name in sorted({name.partition(':')[0] for name in protected}):
+        options += ['-o', 'APT::NeverAutoRemove::=^' + re.escape(name) + '$']
+    return options
+
+
+def _removals(text, installed, automatic, protected):
+    result = []
+    for line in text.splitlines():
+        if line.startswith('Purg '):
+            raise HostUpdateError('purge is forbidden during autoremove')
+        if not line.startswith('Remv '):
+            continue
+        match = re.fullmatch(r'Remv ([^ ]+) \[([^]]+)\](?: .*)?', line)
+        if not match or not _PACKAGE.fullmatch(match[1]) or not _VERSION.fullmatch(match[2]):
+            raise HostUpdateError('unsupported autoremove simulation output')
+        name = _canonical_package(match[1], installed)
+        if installed[name] != match[2] or name not in automatic or name in protected:
+            raise HostUpdateError('autoremove would remove a protected/manual package or changed version')
+        result.append({'name': name, 'installedVersion': match[2]})
+    if len({row['name'] for row in result}) != len(result):
+        raise HostUpdateError('duplicate autoremove candidate')
+    for row in result:
+        files = _run(['dpkg-query', '-L', row['name']], timeout=60)
+        if not files.strip() or any(re.search(r'/(?:systemd/(?:system|user)/[^/]+\.(?:service|socket|timer|target)|init\.d/[^/]+)$', path) for path in files.splitlines()):
+            raise HostUpdateError('autoremove contains a host service provider; assisted cleanup required')
+    return sorted(result, key=lambda row: row['name'])
+
+
+def _autoremove_plan(installed, packages):
+    automatic = _automatic_packages(installed)
+    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
+    # Unlike explicit `install pkg=version`, upgrade preserves automatic marks.
+    # This models orphan dependencies AFTER the upgrade, not before it. The
+    # ordinary and exact-pin simulations separately bind every upgrade version.
+    text = _run(['apt-get', '-s', *_cleanup_options(protected), '--autoremove', 'upgrade'], timeout=120)
+    removals = _removals(text, installed, automatic, protected)
+    upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed)
+    removed = {row['name'] for row in removals}
+    expected = [row for row in packages if row['name'] not in removed]
+    if upgrades != expected:
+        raise HostUpdateError('combined upgrade/autoremove differs from approved upgrade candidates')
+    return {'packages': upgrades, 'autoremove': removals, 'automaticPackages': automatic,
+            'protectedPackages': protected, 'automaticFingerprint': _digest(automatic),
+            'protectedPackageFingerprint': _digest(protected), 'autoremoveFingerprint': _digest(removals)}
+
+
+def _apply_autoremove(value, installed, progress):
+    _emit(progress, stage='autoremove', state='running', packageCount=len(value['autoremove']))
+    automatic = _automatic_packages(installed)
+    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
+    if _digest(automatic) != value['automaticFingerprint'] or _digest(protected) != value['protectedPackageFingerprint']:
+        raise HostUpdateError('autoremove protection/automatic flags changed; no cleanup performed; create a fresh plan')
+    approved_names = {row['name'] for row in value['autoremove']}
+    options = _cleanup_options(sorted(set(protected) | (set(installed) - approved_names)))
+    text = _run(['apt-get', '-s', *options, 'autoremove'], timeout=120)
+    upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed)
+    removals = _removals(text, installed, automatic, protected)
+    if upgrades or removals != value['autoremove']:
+        raise HostUpdateError('post-upgrade autoremove candidates changed; no cleanup performed; create a fresh plan')
+    if removals:
+        _persist_package_recovery(value, value['automaticPackages'], 'autoremove-prepared')
+        guard_path = _write_autoremove_guard(value, installed, automatic, protected)
+        try:
+            def cleanup_progress(event):
+                _emit(progress, **{**event, 'stage': 'autoremove' if event.get('stage') == 'packages' else event.get('stage')})
+            import shlex
+            hook = '/usr/bin/python3 ' + shlex.quote(_WORKER) + ' --autoremove-guard ' + shlex.quote(str(guard_path))
+            _run(['apt-get', '-y', *options, '-o', 'DPkg::Pre-Invoke::=' + hook,
+                  '-o', 'APT::Status-Fd=1', 'autoremove'], cleanup_progress, timeout=3600)
+        except HostUpdateError:
+            _persist_package_recovery(value, value['automaticPackages'], 'autoremove-failed')
+            raise
+        finally:
+            # Keep the guard if dpkg outlives a consumer timeout: a detached APT
+            # process must still be able to execute its pre-invoke validation.
+            if not active_maintenance():
+                guard_path.unlink(missing_ok=True)
+    _emit(progress, stage='verify-autoremove', state='running')
+    actual = _installed()
+    expected = {name: version for name, version in installed.items() if name not in {row['name'] for row in removals}}
+    if actual != expected or _automatic_packages(actual) != [name for name in automatic if name in actual]:
+        raise HostUpdateError('autoremove installed package/automatic mark verification failed; recovery required')
+    if _run(['dpkg', '--audit'], timeout=120).strip():
+        raise HostUpdateError('post-autoremove dpkg audit is not clean; recovery required')
+    _persist_package_recovery(value, value['automaticPackages'], 'autoremove-verified')
+    return len(removals)
+
+
 def check(progress=None):
     _emit(progress, stage='refresh', state='running')
     _run(['apt-get', '-o', 'DPkg::Lock::Timeout=30', 'update', '--error-on=any'], progress, timeout=600)
@@ -240,8 +371,10 @@ def check(progress=None):
     installed = _installed()
     text = _run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', 'upgrade'], timeout=120)
     packages, kept = _simulation(text, installed)
+    cleanup = _autoremove_plan(installed, packages)
     return {**inventory(), 'checkedAt': int(time.time()), 'packages': packages, 'keptBack': kept,
-            'installedFingerprint': _digest(installed), 'candidateFingerprint': _digest(packages)}
+            'installedFingerprint': _digest(installed), 'candidateFingerprint': _digest(packages),
+            **cleanup, 'autoremoveCount': len(cleanup['autoremove'])}
 
 
 def _seal(value):
@@ -251,6 +384,8 @@ def _seal(value):
 
 def plan(check_result=None, ttl=PLAN_TTL):
     value = check_result if check_result is not None else check()
+    if any(key not in value for key in _CLEANUP_FIELDS):
+        raise HostUpdateError('package check predates autoremove verification; run a fresh check')
     now = int(time.time())
     if now - value['checkedAt'] > 300 or value['checkedAt'] > now + 5:
         raise HostUpdateError('package check expired')
@@ -258,7 +393,9 @@ def plan(check_result=None, ttl=PLAN_TTL):
                   'createdAt': now, 'expiresAt': now + min(max(int(ttl), 1), PLAN_TTL),
                   'bootId': value['bootId'], 'packages': value['packages'], 'keptBack': value['keptBack'],
                   'installedFingerprint': value['installedFingerprint'], 'candidateFingerprint': value['candidateFingerprint'],
-                  'confirmationRequired': 'UPDATE', 'steps': ['Verify exact package versions', 'Upgrade planned packages', 'Verify installed versions'],
+                  **{key: value[key] for key in _CLEANUP_FIELDS},
+                  'autoremoveCount': len(value['autoremove']),
+                  'confirmationRequired': 'UPDATE', 'steps': ['Verify exact package versions and removals', 'Upgrade planned packages', 'Restore automatic package marks', 'Autoremove approved unused dependencies', 'Verify installed versions and removed packages'],
                   'risks': ['Services may restart during package configuration.', 'Package failures require host recovery; automatic rollback is unavailable.'],
                   'rebootRequired': value['rebootRequired']})
 
@@ -302,30 +439,35 @@ def _persist_package_recovery(value, automatic, state):
 
 def apply(value, progress=None):
     _validate(value, 'platform-host-package-plan/v1')
+    if any(key not in value for key in _CLEANUP_FIELDS):
+        raise HostUpdateError('host plan predates autoremove verification; create a fresh plan')
     _emit(progress, stage='verify', state='running')
     installed = _installed()
     if _digest(installed) != value['installedFingerprint']:
         raise HostUpdateError('installed package versions changed; create a fresh plan')
     packages, kept = _simulation(_run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', 'upgrade'], timeout=120), installed)
-    if _digest(packages) != value['candidateFingerprint'] or packages != value['packages'] or kept != value['keptBack']:
+    if _digest(packages) != value['candidateFingerprint'] or kept != value['keptBack']:
         raise HostUpdateError('package candidates changed; create a fresh plan')
-    if not packages:
-        return {'state': 'succeeded', 'packages': [], 'rebootRequired': inventory()['rebootRequired']}
+    cleanup = _autoremove_plan(installed, packages)
+    if any(cleanup[key] != value[key] for key in cleanup):
+        raise HostUpdateError('autoremove plan or package protection changed; create a fresh plan')
+    packages = cleanup['packages']
     pins = [row['name'] + '=' + row['targetVersion'] for row in packages]
     command = ['apt-get', '-o', 'DPkg::Lock::Timeout=30', '--no-remove', '--only-upgrade', 'install', *pins]
-    exact, _ = _simulation(_run(command[:1] + ['-s'] + command[1:], timeout=120), installed)
-    if exact != packages:
-        raise HostUpdateError('exact package upgrade differs from approved plan')
-    automatic_before = _run(['apt-mark', 'showauto'], timeout=60).splitlines()
-    if any(not _PACKAGE.fullmatch(name) for name in automatic_before):
-        raise HostUpdateError('invalid automatic package metadata')
-    automatic_names = {_canonical_package(name, installed) for name in automatic_before}
+    if packages:
+        exact, _ = _simulation(_run(command[:1] + ['-s'] + command[1:], timeout=120), installed)
+        if exact != packages:
+            raise HostUpdateError('exact package upgrade differs from approved plan')
+    automatic_names = set(_automatic_packages(installed))
+    if sorted(automatic_names) != value['automaticPackages']:
+        raise HostUpdateError('automatic package marks changed; create a fresh plan')
     automatic = sorted({row['name'] for row in packages} & automatic_names)
     _persist_package_recovery(value, automatic, 'prepared')
     _emit(progress, stage='upgrade', state='running', packageCount=len(packages))
     upgrade_error = None
     try:
-        _run(command[:1] + ['-y', '-o', 'Dpkg::Options::=--force-confold', '-o', 'APT::Status-Fd=1'] + command[1:], progress, timeout=7200)
+        if packages:
+            _run(command[:1] + ['-y', '-o', 'Dpkg::Options::=--force-confold', '-o', 'APT::Status-Fd=1'] + command[1:], progress, timeout=7200)
     except HostUpdateError as error:
         upgrade_error = error
     if automatic:
@@ -341,10 +483,13 @@ def apply(value, progress=None):
         raise upgrade_error
     actual = _installed()
     results = [{**row, 'state': 'succeeded' if actual.get(row['name']) == row['targetVersion'] else 'failed'} for row in packages]
-    if any(row['state'] != 'succeeded' for row in results):
+    expected = {**installed, **{row['name']: row['targetVersion'] for row in packages}}
+    if any(row['state'] != 'succeeded' for row in results) or actual != expected:
         raise HostUpdateError('installed package verification failed; no rollback claimed')
+    removed_count = _apply_autoremove(value, actual, progress)
     _emit(progress, stage='complete', state='succeeded')
-    return {'state': 'succeeded', 'packages': results, 'rebootRequired': inventory()['rebootRequired']}
+    return {'state': 'succeeded', 'packages': results, 'rebootRequired': inventory()['rebootRequired'],
+            'removedCount': removed_count, 'autoremoveVerified': True}
 
 
 def reboot_plan(ttl=300):
@@ -446,6 +591,62 @@ def _read_plan_file(filename):
     if value.get('planId') != target.stem:
         raise HostUpdateError('host plan filename identity mismatch')
     return value
+
+
+def _write_autoremove_guard(value, installed, automatic, protected):
+    """Create a fixed-path, root-private approval for APT's lock-time hook."""
+    _private_directory()
+    identity = value['planId']
+    if not re.fullmatch(r'[a-f0-9]{32}', identity):
+        raise HostUpdateError('invalid autoremove guard identity')
+    target = _PLAN_DIRECTORY / (identity + '.autoremove-guard.json')
+    record = _seal({'schema': 'platform-host-autoremove-guard/v1', 'planId': identity,
+                    'bootId': _boot_id(), 'expiresAt': int(time.time()) + 3600,
+                    'installed': installed, 'automaticPackages': automatic,
+                    'protectedPackages': protected, 'autoremove': value['autoremove'],
+                    'approvedPlanRevision': value['revision']})
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, 'w') as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(_PLAN_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _autoremove_guard(filename):
+    """Read-only hook invoked by APT under its frontend lock, before dpkg."""
+    import stat
+    target = pathlib.Path(filename)
+    if target.parent != _PLAN_DIRECTORY or not re.fullmatch(r'[a-f0-9]{32}\.autoremove-guard\.json', target.name):
+        raise HostUpdateError('autoremove guard path outside private plan store')
+    _private_directory()
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 1024 * 1024:
+            raise HostUpdateError('autoremove guard must be a private root-owned regular file')
+        value = json.load(handle)
+    _validate(value, 'platform-host-autoremove-guard/v1')
+    if value['planId'] != target.name.split('.')[0]:
+        raise HostUpdateError('autoremove guard identity mismatch')
+    installed = _installed()
+    automatic = _automatic_packages(installed)
+    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
+    if installed != value['installed'] or automatic != value['automaticPackages'] or protected != value['protectedPackages']:
+        raise HostUpdateError('autoremove lock-time inventory/marks/protection changed; removal blocked')
+    text = '\n'.join('Remv ' + row['name'] + ' [' + row['installedVersion'] + ']' for row in value['autoremove'])
+    if _removals(text, installed, automatic, protected) != value['autoremove']:
+        raise HostUpdateError('autoremove lock-time approval mismatch; removal blocked')
+    return True
 
 
 def run_transient(action, plan_file=None, progress=None, operation_id=None):
@@ -594,12 +795,19 @@ def _execute_worker(action, operation_id, plan_file=None):
 def _main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker', choices=['check', 'apply'], required=True)
-    parser.add_argument('--operation-id', required=True)
+    parser.add_argument('--worker', choices=['check', 'apply'])
+    parser.add_argument('--operation-id')
     parser.add_argument('--plan-file')
+    parser.add_argument('--autoremove-guard')
     arguments = parser.parse_args()
     if os.geteuid() != 0:
         raise HostUpdateError('host maintenance worker requires root')
+    if arguments.autoremove_guard:
+        if arguments.worker or arguments.operation_id or arguments.plan_file:
+            raise HostUpdateError('autoremove guard does not accept worker arguments')
+        return _autoremove_guard(arguments.autoremove_guard)
+    if not arguments.worker or not arguments.operation_id:
+        raise HostUpdateError('worker action and operation identity required')
     if arguments.worker == 'check' and arguments.plan_file:
         raise HostUpdateError('check does not accept a plan pathname')
     return _execute_worker(arguments.worker, arguments.operation_id, arguments.plan_file)

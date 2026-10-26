@@ -97,6 +97,11 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
+        source: /run/udev/data
+        target: /run/udev/data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: /var/lib/platform-host-metrics/rootfs
         target: /host
         read_only: true

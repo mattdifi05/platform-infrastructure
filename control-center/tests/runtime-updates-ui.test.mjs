@@ -44,6 +44,13 @@ test('settings markup has accessible update controls and uses existing vendored 
   assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|data-updates-category|Tutte le categorie|type="search"|https:\/\//);
   assert.ok(html.indexOf('data-host-updates aria-labelledby') < html.indexOf('data-runtime-updates aria-labelledby'), 'OS is a separate panel above runtime updates');
 });
+test('settings update surfaces inherit the shared panel inset instead of introducing a different edge', () => {
+  const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
+  const shared = readFileSync(new URL('../styles/control-center.css', import.meta.url), 'utf8');
+  assert.match(shared, /\.ops-project-detail-panel \{[^}]*padding: 15px;/s);
+  const overrides = css.match(/\.cc-settings > \.cc-updates,\.cc-settings > \.cc-host-updates\{([^}]*)\}/);
+  assert.ok(overrides); assert.doesNotMatch(overrides[1], /padding|border|background|box-shadow/);
+});
 test('check remains queued until operation readback and polls pending operations at two seconds', async () => {
   const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' } : catalog);
   await tick(); assert.equal(h.node('[data-updates-check]').disabled, false);
@@ -187,6 +194,16 @@ test('OS catalog loads independently once and never applies upgrades or reboots 
   assert.equal(h.node('[data-host-updates-reboot]').hidden, false);
   assert.doesNotMatch(renderRuntimeUpdates(), /data-host-updates-packages/);
   assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
+});
+test('OS cleanup-only plans show removal counts and keep typed confirmation without listing packages', async () => {
+  const plan = { kind: 'host-upgrade', planId: 'cleanup-plan', revision: 'host-revision', expiresAt: new Date(Date.now() + 60000).toISOString(), packageCount: 0, autoremoveCount: 2, steps: ['Autoremove verificato'], risks: [], confirmationRequired: 'UPDATE' };
+  const h = fixture(path => path.endsWith('/plan') ? plan : { ...hostCatalog, updateCount: 0, autoremoveCount: 2, rebootRequired: false }, true);
+  await tick(); assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
+  assert.match(h.node('[data-host-updates-summary]').textContent, /2 dipendenze da rimuovere/);
+  h.node('[data-host-updates-upgrade]').listeners.click(); await tick();
+  assert.match(h.node('[data-host-updates-plan-details]').children[0].textContent, /0 pacchetti da aggiornare.*2 dipendenze/);
+  assert.equal(h.node('[data-host-updates-apply]').disabled, true);
+  assert.ok(!h.calls.some(call => call.path?.endsWith('/apply')));
 });
 test('OS upgrade and reboot require distinct reviewed confirmation and recover connection after server maintenance', async () => {
   for (const rebooting of [false, true]) {

@@ -1,5 +1,5 @@
 .cc-settings > .ops-project-detail-panel{border-radius:var(--cc-radius-2xl,16px)}
-.cc-settings > .cc-updates,.cc-settings > .cc-host-updates{padding:16px;gap:10px}
+.cc-settings > .cc-updates,.cc-settings > .cc-host-updates{gap:10px}
 .cc-updates-header,.cc-updates-actions{display:flex;align-items:center;gap:8px;justify-content:space-between}
 .cc-updates-header h2{font-size:16px}.cc-updates-header .cc-settings-note{margin:3px 0 0;font-size:11px}
 .cc-updates-actions{justify-content:flex-end;flex-wrap:wrap}.cc-updates-actions .ops-button{min-height:30px;padding:6px 10px;font-size:11px}

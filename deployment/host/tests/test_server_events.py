@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'libexec/platform_server_events.py'
 spec = importlib.util.spec_from_file_location('server_events_test_module', SOURCE)
@@ -25,7 +26,7 @@ class EventsTests(unittest.TestCase):
         self.host = {'diskPercent': 20, 'inodePercent': 10, 'memoryPercent': 40}
         self.fail = set()
         self.collector = m.create_collector(run=self.command, read_operations=lambda: copy.deepcopy(self.jobs),
-                                            metrics=lambda: self.host, now=lambda: self.at[0])
+                                            metrics=lambda: self.host, now=lambda: self.at[0], history_since=lambda: 0)
 
     def command(self, args, **options):
         self.calls.append((args, options))
@@ -236,6 +237,36 @@ func main(){
         values[0]['sources'].clear()
         self.assertEqual(len(self.collector()['sources']), 5)
         self.refresh(); self.assertEqual(len(self.calls), 6)
+
+    def test_history_cutoff_filters_all_recent_sources_without_hiding_active_issues(self):
+        self.units = [{'unit': 'docker.service', 'active': 'failed'}]
+        self.journal = [self.journal_row('old journal warning')]
+        self.jobs = [{'kind': 'host-upgrade', 'status': 'failed', 'finishedAt': m.iso(self.at[0] - 20)}]
+        cutoff = [self.at[0] - 1]
+        self.collector.history_since = lambda: cutoff[0]
+        first = self.collector()
+        self.assertTrue(any(row['source'] == 'systemd' for row in first['issues']))
+        self.assertTrue(any(row['source'] == 'updates' for row in first['issues']))
+        self.assertEqual(len(first['events']), 1)
+        self.units = []
+        resolved = self.refresh()
+        self.assertTrue(any(row['message'].startswith('Risolto:') for row in resolved['events']))
+        cutoff[0] = self.at[0] + 1
+        cleared = self.refresh()
+        self.assertEqual(cleared['events'], [])
+        self.assertTrue(any(row['source'] == 'updates' for row in cleared['issues']))
+        self.assertEqual(len(self.jobs), 1, 'operation records are untouched')
+
+    def test_history_cutoff_missing_is_legacy_and_invalid_metadata_is_unavailable(self):
+        with patch.object(m.os, 'open', side_effect=FileNotFoundError):
+            self.assertEqual(m.read_history_cutoff(), 0)
+        with patch.object(m.os, 'open', side_effect=PermissionError):
+            with self.assertRaises(m.SourceUnavailable):
+                m.read_history_cutoff()
+        self.collector.history_since = lambda: (_ for _ in ()).throw(m.SourceUnavailable('invalid cutoff'))
+        with self.assertRaises(m.SourceUnavailable):
+            self.collector()
+        self.assertEqual(self.calls, [], 'untrusted cutoff never produces a successful all-clear')
 
     def test_output_and_runtime_of_diagnostic_children_are_bounded(self):
         with self.assertRaises(m.SourceUnavailable):

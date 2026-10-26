@@ -41,7 +41,7 @@ fi
   exit 1
 }
 cd "$ROOT"
-export EMPTY_VPS_HOSTED_LOCK_SHA256=693a4f67bf8ae1ff55fdee5d1ed24ee21827ae630d1f278c9b6443cb1d1c4235
+export EMPTY_VPS_HOSTED_LOCK_SHA256=200594faaf46f0f17860e50c73184efd09cd38558681897732f9dcdc1a3c210b
 [[ $(sha256sum "$ROOT/config/no-hosted-workloads.lock.json" | cut -d ' ' -f 1) = "$EMPTY_VPS_HOSTED_LOCK_SHA256" ]] || {
   echo 'Empty-host workload lock differs from the reviewed candidate.' >&2
   exit 1

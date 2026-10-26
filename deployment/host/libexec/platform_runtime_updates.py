@@ -671,6 +671,9 @@ def recreate(old, image, backups, journal=lambda: None, before_start=None, on_st
     runtime_keys = {'PHP_VERSION', 'PHP_URL', 'PHP_ASC_URL', 'PHP_SHA256', 'NODE_VERSION', 'PG_VERSION', 'PG_MAJOR', 'MARIADB_VERSION', 'REDIS_VERSION'}
     config['Env'] = [x.split('=', 1)[0] + '=' + fresh_env[x.split('=', 1)[0]] if x.split('=', 1)[0] in runtime_keys and x.split('=', 1)[0] in fresh_env else x for x in config.get('Env', [])]
     config['HostConfig'] = copy.deepcopy(old['HostConfig'])
+    if isinstance(config['HostConfig'].get('SecurityOpt'), list):
+        config['HostConfig']['SecurityOpt'] = ['no-new-privileges=true' if value == 'no-new-privileges:true' else value
+                                               for value in config['HostConfig']['SecurityOpt']]
     config['NetworkingConfig'] = {'EndpointsConfig': endpoints(old)}
     on_stage('Creazione del servizio aggiornato')
     result = docker('POST', '/containers/create?name=' + name, config)
@@ -975,7 +978,7 @@ def host_os_release():
 def host_catalog():
     operations = [item for item in records('operation') if item.get('kind', '').startswith('host-')]
     unavailable = {'schema': 'host-updates/v1', 'available': False, 'revision': None, 'os': host_os_release(), 'checkedAt': None,
-                   'updateCount': 0, 'keptBackCount': 0, 'rebootRequired': False, 'canCheck': False, 'canApply': False, 'canReboot': False, 'operations': operations[:12]}
+                   'updateCount': 0, 'autoremoveCount': 0, 'keptBackCount': 0, 'rebootRequired': False, 'canCheck': False, 'canApply': False, 'canReboot': False, 'operations': operations[:12]}
     if host_updates is None:
         return unavailable
     try:
@@ -988,12 +991,16 @@ def host_catalog():
         revision = digest({'bootId': inventory['bootId'], 'rebootRequired': inventory['rebootRequired'],
                            'checkedAt': cached.get('checkedAt') if cached else None,
                            'installedFingerprint': cached.get('installedFingerprint') if cached else None,
-                           'candidateFingerprint': cached.get('candidateFingerprint') if cached else None})
+                           'candidateFingerprint': cached.get('candidateFingerprint') if cached else None,
+                           'autoremoveFingerprint': cached.get('autoremoveFingerprint') if cached else None,
+                           'automaticFingerprint': cached.get('automaticFingerprint') if cached else None,
+                           'protectedPackageFingerprint': cached.get('protectedPackageFingerprint') if cached else None})
         return {**unavailable, 'available': True, 'revision': revision,
                 'checkedAt': datetime.datetime.fromtimestamp(cached['checkedAt'], datetime.timezone.utc).isoformat() if cached else None,
-                'updateCount': len(cached['packages']) if cached else 0, 'keptBackCount': len(cached['keptBack']) if cached else 0,
+                'updateCount': len(cached['packages']) if cached else 0, 'autoremoveCount': len(cached.get('autoremove', [])) if cached else 0,
+                'keptBackCount': len(cached['keptBack']) if cached else 0,
                 'rebootRequired': inventory['rebootRequired'], 'canCheck': not busy,
-                'canApply': fresh and bool(cached['packages']) and not busy and not recovery_required(),
+                'canApply': fresh and bool(cached['packages'] or cached.get('autoremove')) and not busy and not recovery_required(),
                 'canReboot': inventory['rebootRequired'] and not busy and not recovery_required(), 'busy': busy}
     except Exception:
         return unavailable
@@ -1063,7 +1070,7 @@ def host_plan(kind, revision):
         raise Rejected('unsupported', 'Il piano OS non è applicabile; verifica nuovamente lo stato.', 422)
     public = {'kind': kind, 'planId': native['planId'], 'revision': revision,
               'expiresAt': datetime.datetime.fromtimestamp(native['expiresAt'], datetime.timezone.utc).isoformat(),
-              'packageCount': len(native.get('packages', [])), 'steps': native['steps'], 'risks': native['risks'],
+              'packageCount': len(native.get('packages', [])), 'autoremoveCount': len(native.get('autoremove', [])), 'steps': native['steps'], 'risks': native['risks'],
               'confirmationRequired': 'REBOOT' if kind == 'host-reboot' else 'UPDATE'}
     save('host-plan', public['planId'], {'public': public, 'native': native})
     return public
@@ -1073,6 +1080,8 @@ def verify_host_result(native, result):
     if not isinstance(result, dict) or result.get('state') != 'succeeded' or result.get('planId') != native.get('planId'):
         return False
     if not all(result.get(key) is True for key in ['packageVersionsVerified', 'dpkgAuditClean', 'marksRestored']):
+        return False
+    if 'autoremove' in native and (result.get('autoremoveVerified') is not True or type(result.get('removedCount')) is not int or result.get('removedCount') != len(native['autoremove'])):
         return False
     rows = result.get('packages')
     if not isinstance(rows, list):
@@ -1094,11 +1103,15 @@ def stored_host_execution(record):
 
 def host_progress(job_id, kind, event):
     stages = {'refresh': 'Aggiornamento delle fonti APT', 'inventory': 'Verifica pacchetti installati', 'verify': 'Verifica del piano OS',
-              'upgrade': 'Aggiornamento pacchetti OS', 'packages': 'Configurazione pacchetti OS', 'complete': 'Verifica finale dei pacchetti OS'}
+              'upgrade': 'Aggiornamento pacchetti OS', 'packages': 'Configurazione pacchetti OS',
+              'restore-package-marks': 'Ripristino classificazione delle dipendenze',
+              'autoremove': 'Rimozione delle dipendenze non più necessarie', 'verify-autoremove': 'Verifica della rimozione delle dipendenze',
+              'complete': 'Verifica finale dei pacchetti OS'}
     changes = {'stage': stages.get(event.get('stage'), 'Manutenzione del sistema operativo')}
     percent = event.get('percent')
     if kind == 'host-upgrade' and isinstance(percent, (int, float)) and not isinstance(percent, bool) and 0 <= percent <= 100:
-        changes.update(completedSteps=min(99, int(percent)), totalSteps=100)
+        previous = load('operation', job_id, {}).get('completedSteps', 0)
+        changes.update(completedSteps=max(previous if isinstance(previous, int) and 0 <= previous <= 99 else 0, min(99, int(percent))), totalSteps=100)
     operation_update(job_id, **changes)
 
 
@@ -1231,7 +1244,7 @@ def host_job(job_id, kind, stored=None):
             operation_update(job_id, status='running', stage='Verifica degli aggiornamenti OS' if kind == 'host-check' else 'Preparazione aggiornamento OS')
             def progress(event):
                 nonlocal began_upgrade
-                if event.get('stage') == 'upgrade':
+                if event.get('stage') in ['upgrade', 'autoremove']:
                     began_upgrade = True
                 host_progress(job_id, kind, event)
             execution = load('host-execution', job_id)

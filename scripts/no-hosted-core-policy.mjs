@@ -3174,6 +3174,12 @@ CORE_SEMANTIC_POLICY.externalVolumeNames = ["enterprise_mariadb_data"];
 
 const currentEnvironmentAuthority =
   CORE_SEMANTIC_POLICY.serviceEnvironmentAuthority.services;
+// Grafana remains on the isolated observability network. Verify plugin
+// signatures with the embedded key and leave update discovery to the host.
+Object.assign(currentEnvironmentAuthority.grafana.entries, {
+  GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: { literal: "false" },
+  GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: { literal: "true" },
+});
 currentEnvironmentAuthority["backup-scheduler"] = {
   present: true,
   entries: {

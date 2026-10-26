@@ -2608,7 +2608,7 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v2",
-    sha256: "0f26ccc73c3e84b026bd4bb251c8809115e65779f5b9e6113b2bf9f31f9caa4a",
+    sha256: "4e36a63d372d4fc8dc8e41a20c3bb13d93980cc46258e932c6bc5066c3197ff5",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
@@ -4052,6 +4052,9 @@ test("QA8 exact environment authority rejects same-name security and endpoint wi
       ["postgres trust", "postgres", "POSTGRES_HOST_AUTH_METHOD", "trust"],
       ["keycloak non-strict", "keycloak", "KC_HOSTNAME_STRICT", "false"],
       ["grafana anonymous", "grafana", "GF_AUTH_ANONYMOUS_ENABLED", "true"],
+      ["grafana remote plugin checks", "grafana", "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES", "true"],
+      ["grafana remote signing key retrieval", "grafana", "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED", "false"],
+      ["grafana unsigned plugin allowance", "grafana", "GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS", "unsigned-fixture"],
       [
         "control-center relying party",
         "control-center",

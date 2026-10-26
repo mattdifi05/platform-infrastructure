@@ -756,6 +756,38 @@ class UpdatesTests(unittest.TestCase):
         self.assertEqual([item['id'] for item in m.catalog()['operations']], ['runtime-record'])
         self.assertEqual([item['id'] for item in m.host_catalog()['operations']], ['os-record'])
 
+    def test_host_cleanup_only_plan_exposes_counts_and_binds_automatic_package_state(self):
+        host = self.host_fixture(reboot=False)
+        self.host_check_result.update(packages=[], autoremove=[{'name': 'unused-fixture', 'installedVersion': '1'}],
+                                      autoremoveFingerprint='c' * 64, automaticFingerprint='d' * 64, protectedPackageFingerprint='e' * 64)
+        m.save('cache', 'host-releases', self.host_check_result)
+        original = host.plan.side_effect
+        host.plan.side_effect = lambda value: {**original(value), 'autoremove': value['autoremove']}
+        catalog = m.host_catalog(); public = self.host_public_plan()
+        self.assertEqual(catalog['updateCount'], 0); self.assertEqual(catalog['autoremoveCount'], 1); self.assertTrue(catalog['canApply'])
+        self.assertEqual(public['packageCount'], 0); self.assertEqual(public['autoremoveCount'], 1)
+        self.assertNotIn('unused-fixture', json.dumps(public) + json.dumps(catalog))
+        self.host_check_result['automaticFingerprint'] = 'f' * 64
+        m.save('cache', 'host-releases', self.host_check_result)
+        self.assertNotEqual(catalog['revision'], m.host_catalog()['revision'])
+
+    def test_host_success_requires_verified_autoremove_and_exact_removed_count(self):
+        native = {'planId': 'host-fixture', 'packages': [], 'autoremove': [{'name': 'unused-fixture', 'installedVersion': '1'}]}
+        result = {'planId': 'host-fixture', 'state': 'succeeded', 'packages': [], 'packageVersionsVerified': True,
+                  'dpkgAuditClean': True, 'marksRestored': True, 'autoremoveVerified': True, 'removedCount': 1}
+        self.assertTrue(m.verify_host_result(native, result))
+        for changes in [{'autoremoveVerified': False}, {'removedCount': 0}, {'removedCount': True}]:
+            self.assertFalse(m.verify_host_result(native, {**result, **changes}))
+
+    def test_host_autoremove_progress_never_recedes_or_claims_completion_before_verification(self):
+        self.prepare_job()
+        m.host_progress('job-1', 'host-upgrade', {'stage': 'packages', 'percent': 83})
+        m.host_progress('job-1', 'host-upgrade', {'stage': 'autoremove', 'percent': 0})
+        self.assertEqual(m.load('operation', 'job-1')['completedSteps'], 83)
+        self.assertIn('dipendenze', m.load('operation', 'job-1')['stage'])
+        m.host_progress('job-1', 'host-upgrade', {'stage': 'verify-autoremove', 'percent': 100})
+        self.assertEqual(m.load('operation', 'job-1')['completedSteps'], 99)
+
     def test_host_apply_is_idempotent_durable_and_uses_one_global_executor(self):
         self.host_fixture(); public = self.host_public_plan(); seen = []
         def scheduled(function, identity, kind, stored):
@@ -1191,6 +1223,15 @@ class UpdatesTests(unittest.TestCase):
             self.assertEqual(new['HostConfig'], self.docker.old['HostConfig'])
             self.assertEqual(new['Config']['Env'], ['PHP_VERSION=8.5.12', 'DB_PASSWORD=' + SECRET])
             self.assertNotIn(SECRET, json.dumps(m.catalog()))
+
+    def test_recreation_preserves_security_and_canonicalizes_deprecated_no_new_privileges(self):
+        old = self.docker.inspect('php-service')
+        old['HostConfig']['SecurityOpt'] = ['no-new-privileges:true', 'apparmor=platform-profile']
+        with patch.object(m, 'docker', self.docker.docker):
+            new_id = m.recreate(old, NEW_IMAGE, [])
+        fresh = self.docker.inspect(new_id)
+        self.assertEqual(fresh['HostConfig'], {**old['HostConfig'], 'SecurityOpt': ['no-new-privileges=true', 'apparmor=platform-profile']})
+        self.assertEqual(old['HostConfig']['SecurityOpt'][0], 'no-new-privileges:true')
 
     def test_failed_new_runtime_rolls_back_same_old_container_identity(self):
         stored = self.stored()
