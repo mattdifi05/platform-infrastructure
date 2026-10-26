@@ -201,7 +201,7 @@ def data_sensitive(row):
     return row['category'] == 'Database' or row.get('requiresRecovery') is True
 
 
-def observed(row):
+def observed_versions(row):
     rows = [r for r in (inspect(x) for x in row['containers']) if r is not None]
     versions = []
     for r in rows:
@@ -219,45 +219,80 @@ def observed(row):
         if not version and row.get('versionLabel'):
             labels = docker('GET', '/images/' + r['Image'] + '/json')['Config'].get('Labels') or {}
             version = labels.get(row['versionLabel'], '')
-        versions.append(version)
-    unique = sorted(set(v for v in versions if v))
-    if len({r['Image'] for r in rows}) > 1 and any(not v for v in versions):
-        return rows, None
-    return rows, unique[0] if len(unique) == 1 and unique[0] else None
+        versions.append(version if re.fullmatch(r'(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?', str(version)) else '')
+    unique = sorted(set(v for v in versions if v), key=version_key)
+    known = bool(rows) and len(rows) == len(row['containers']) and all(versions)
+    return rows, unique, known
+
+
+def version_key(value):
+    return tuple(int(x) for x in value.split('.')[:3]) + (0,) * max(0, 3 - len(value.split('.')))
+
+
+def observed(row):
+    rows, versions, known = observed_versions(row)
+    return rows, versions[-1] if known else None
+
+
+def common_release(row, cached, version, alignment):
+    release, latest = cached.get('candidateRelease'), cached.get('latestStable')
+    # Node crosses major series only through the isolated native-addon gate below.
+    if row['strategy'] == 'node-layer':
+        release = latest
+    elif alignment and not release and latest and version:
+        compatibility = row.get('compatibility', 'minor')
+        width = 1 if compatibility == 'major' else 2
+        if version_key(latest['version'])[:width] == version_key(version)[:width]:
+            release = latest
+    return release, latest
 
 
 def fingerprint(rows):
-    return digest([{'id': r['Id'], 'image': r['Image'], 'config': r['Config'], 'host': r['HostConfig'], 'mounts': r['Mounts'], 'networks': {name: {'IPAMConfig': net.get('IPAMConfig'), 'Aliases': net.get('Aliases')} for name, net in r['NetworkSettings']['Networks'].items()}} for r in sorted(rows, key=lambda r: r['Name'])])
+    return digest([{'id': r['Id'], 'image': r['Image'], 'running': r['State']['Running'], 'config': r['Config'], 'host': r['HostConfig'], 'mounts': r['Mounts'], 'networks': {name: {'IPAMConfig': net.get('IPAMConfig'), 'Aliases': net.get('Aliases')} for name, net in r['NetworkSettings']['Networks'].items()}} for r in sorted(rows, key=lambda r: r['Name'])])
 
 
 def catalog():
     output = []
     checked = load('cache', 'releases', {})
     for row in configuration()['components']:
-        actual, version = observed(row)
+        actual, versions, known = observed_versions(row)
+        version = versions[-1] if known else None
+        alignment = known and len(versions) > 1
         cached = checked.get('components', {}).get(row['id'], {})
-        release, latest = cached.get('candidateRelease'), cached.get('latestStable')
-        eligible = bool(actual and len(actual) == len(row['containers']) and version and release and row['strategy'] != 'observe')
-        if release and version and compare_versions(release['version'], version) <= 0:
-            eligible = False
+        release, latest = common_release(row, cached, version, alignment)
+        eligible = bool(version and release and row['strategy'] != 'observe')
+        if release and version:
+            comparison = compare_versions(release['version'], version)
+            eligible = eligible and (comparison > 0 or comparison == 0 and alignment)
         reason = row.get('blockedReason') or cached.get('reason')
-        if data_sensitive(row) and row.get('recoveryPolicy') != 'offline-snapshot-v1':
+        mixed_db_major = row['category'] == 'Database' and len({version_key(v)[0] for v in versions}) > 1
+        db_major_change = row['category'] == 'Database' and version and release and version_key(release['version'])[0] != version_key(version)[0]
+        if mixed_db_major or db_major_change:
+            eligible, reason = False, 'Le istanze usano serie principali diverse: serve una migrazione dedicata prima dell’allineamento.'
+        elif data_sensitive(row) and row.get('recoveryPolicy') != 'offline-snapshot-v1':
             eligible, reason = False, 'Serve un percorso verificato di recupero dei dati prima di aggiornare il database.'
-        status = 'update-available' if eligible else 'current' if version and latest and compare_versions(version, latest['version']) >= 0 else 'unsupported' if row['strategy'] == 'observe' else 'unavailable'
+        status = 'update-available' if eligible else 'current' if version and latest and compare_versions(version, latest['version']) >= 0 and not alignment else 'unsupported' if row['strategy'] == 'observe' or mixed_db_major or db_major_change else 'alignment-required' if alignment else 'unavailable'
         if not actual:
             status, reason = 'not-installed', 'Componente non presente sulla VPS.'
-        elif version is None:
-            reason = 'Versione non verificabile o versioni diverse fra le istanze.'
+        elif not known:
+            reason = 'Versione non verificabile per tutte le istanze della famiglia.'
+        elif status == 'current':
+            reason = None
+        elif mixed_db_major or db_major_change:
+            pass
+        elif eligible:
+            reason = None
         elif latest and release and latest['version'] != release['version']:
             reason = 'Una serie diversa richiede un percorso di compatibilità separato.'
-        if status == 'current':
-            reason = None
         elif latest and version and not release and compare_versions(latest['version'], version) > 0:
             status, reason = 'unsupported', 'La nuova serie richiede una verifica di compatibilità dedicata.'
-        elif isinstance(reason, str) and reason.startswith('unavailable:'):
+        elif alignment and not eligible:
+            reason = reason or 'Nessuna versione stabile comune verificata uguale o successiva a tutte le istanze.'
+        if isinstance(reason, str) and reason.startswith('unavailable:'):
             reason = 'Fonte ufficiale non disponibile o release non pubblicata per questo componente.'
-        output.append({'id': row['id'], 'label': row['label'], 'category': row['category'], 'installed': bool(actual), 'current': {'version': version, 'imageDigest': actual[0]['Image'] if actual else None, 'verifiedAt': stamp()}, 'latestStable': latest, 'candidateRelease': release, 'services': [r['Name'].lstrip('/') for r in actual], 'status': status, 'canUpdate': eligible, 'blockedReason': reason, '_fingerprint': fingerprint(actual)})
-    revision = digest({'components': [{k: v for k, v in x.items() if k != 'current'} | {'version': x['current']['version'], 'image': x['current']['imageDigest']} for x in output], 'checkedAt': checked.get('checkedAt')})
+        images = {r['Image'] for r in actual}
+        output.append({'id': row['id'], 'label': row['label'], 'category': row['category'], 'installed': bool(actual), 'current': {'version': versions[0] if known and len(versions) == 1 else None, 'versions': versions if known else [], 'imageDigest': next(iter(images)) if len(images) == 1 else None, 'verifiedAt': stamp()}, 'needsAlignment': alignment, 'latestStable': latest, 'candidateRelease': release, 'services': [r['Name'].lstrip('/') for r in actual], 'status': status, 'canUpdate': eligible, 'blockedReason': reason, '_fingerprint': fingerprint(actual)})
+    revision = digest({'components': [{k: v for k, v in x.items() if k != 'current'} | {'version': x['current']['version'], 'versions': x['current']['versions'], 'image': x['current']['imageDigest']} for x in output], 'checkedAt': checked.get('checkedAt')})
     for item in output:
         item.pop('_fingerprint')
     operations = records('operation')
@@ -275,10 +310,11 @@ def check_job(job_id):
     operation_update(job_id, status='running', stage='Verifica delle fonti ufficiali', totalSteps=len(config), completedSteps=0)
     cache = {'checkedAt': stamp(), 'components': {}}
     def check(row):
-        actual, version = observed(row)
+        actual, versions, known = observed_versions(row)
+        version = versions[-1] if known else None
         if not actual or not version or not row.get('repository'):
             return row['id'], {'reason': row.get('blockedReason', 'Versione o fonte stabile non disponibile.')}
-        return row['id'], resolve_release(row, version)
+        return row['id'], resolve_release({**row, 'includeCurrent': len(versions) > 1}, version)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             for i, result in enumerate(pool.map(check, config)):
@@ -309,20 +345,22 @@ def plan(component_id, revision):
     return value
 
 
-def image_candidate(row, target, directory):
+def image_candidate(row, target, directory, source_image=None):
     ref = target['imageReference'] + '@' + target['imageDigest']
     run(['docker', 'pull', ref], timeout=600)
     if row['strategy'] == 'image':
         return docker('GET', '/images/' + ref.replace('/', '%2F') + '/json')['Id']
     if row['strategy'] == 'node-layer':
-        actual, _ = observed(row)
-        image_ids = {x['Image'] for x in actual}
-        if len(image_ids) != 1:
-            raise Rejected('unsupported', 'Le immagini applicative devono essere aggiornate separatamente.', 422)
-        # Keep the exact deployed application and its native dependencies. Same major only.
+        if source_image is None:
+            actual, _ = observed(row)
+            images = {x['Image'] for x in actual}
+            if len(images) != 1:
+                raise Rejected('unsupported', 'Immagine applicativa non univoca per la preparazione.', 422)
+            source_image = next(iter(images))
+        # Keep each exact deployed application and its native dependencies.
         base_tag = 'platform/runtime-base:' + directory.name
-        run(['docker', 'image', 'tag', actual[0]['Image'], base_tag])
-        content = 'FROM ' + ref + ' AS runtime\nFROM ' + base_tag + '\nCOPY --from=runtime /usr/local/bin/node /usr/local/bin/node\nCOPY --from=runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nENV NODE_VERSION=' + target['version'] + '\n'
+        run(['docker', 'image', 'tag', source_image, base_tag])
+        content = 'FROM ' + ref + ' AS runtime\nRUN mkdir /platform-runtime-libs && if [ -f /usr/lib/libatomic.so.1 ]; then cp -L /usr/lib/libatomic.so.1 /platform-runtime-libs/; fi\nFROM ' + base_tag + '\nCOPY --from=runtime /usr/local/bin/node /usr/local/bin/node\nCOPY --from=runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nCOPY --from=runtime /platform-runtime-libs/ /usr/lib/\nENV NODE_VERSION=' + target['version'] + '\n'
         (directory / 'Dockerfile').write_text(content)
         command = ['docker', 'build', '--tag', 'platform/runtime-update:' + directory.name, str(directory)]
     else:
@@ -341,6 +379,68 @@ def image_candidate(row, target, directory):
             command = ['docker', 'build', '--file', str(directory / 'Dockerfile'), '--tag', 'platform/runtime-update:' + directory.name, str(context)]
     run(command, timeout=1800)
     return run(['docker', 'image', 'inspect', '--format', '{{.Id}}', 'platform/runtime-update:' + directory.name]).strip()
+
+
+def node_preflight(old, image, version):
+    # Run only Node and direct .node loads, never application entrypoints or npm hooks.
+    # No service environment, real mounts, Docker socket or external network is passed.
+    workdir = old['Config'].get('WorkingDir') or '/'
+    module_root = os.path.normpath(workdir + '/node_modules')
+    image_config = docker('GET', '/images/' + image + '/json')['Config']
+    for mount in image_config.get('Volumes') or {}:
+        path = os.path.normpath(mount)
+        manifest = os.path.normpath(workdir + '/package.json')
+        if module_root == path or module_root.startswith(path.rstrip('/') + '/') or path.startswith(module_root.rstrip('/') + '/') or manifest == path or manifest.startswith(path.rstrip('/') + '/'):
+            raise Rejected('unsupported', 'Un volume nasconde le dipendenze native: serve una verifica assistita.', 422)
+    script = r"""
+const fs = require('node:fs'), path = require('node:path');
+if (process.versions.node !== process.argv[1]) process.exit(2);
+const manifest = path.resolve(process.cwd(), 'package.json');
+if (fs.existsSync(manifest)) {
+  if (fs.statSync(manifest).size > 1024 * 1024) throw new Error('Package manifest limit');
+  const pkg = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+  const engine = pkg.engines && pkg.engines.node;
+  if (engine !== undefined) {
+    if (typeof engine !== 'string' || !engine || engine.length > 512) throw new Error('Invalid Node engine declaration');
+    const semver = require('/usr/local/lib/node_modules/npm/node_modules/semver');
+    if (!semver.satisfies(process.versions.node, engine)) throw new Error('Declared Node engine is incompatible');
+  }
+}
+const start = path.resolve(process.cwd(), 'node_modules');
+let count = 0, entries = 0;
+if (fs.existsSync(start)) {
+  const root = fs.realpathSync(start), pending = [root], seen = new Set();
+  while (pending.length) {
+    const directory = pending.pop();
+    if (seen.has(directory)) continue;
+    seen.add(directory);
+    for (const name of fs.readdirSync(directory)) {
+      if (++entries > 100000) throw new Error('Dependency scan limit');
+      const item = fs.realpathSync(path.join(directory, name));
+      if (item !== root && !item.startsWith(root + path.sep)) throw new Error('Dependency outside module tree');
+      const stat = fs.statSync(item);
+      if (stat.isDirectory()) pending.push(item);
+      else if (stat.isFile() && item.endsWith('.node')) {
+        if (++count > 2048) throw new Error('Native dependency scan limit');
+        require(item);
+      }
+    }
+  }
+}
+console.log(JSON.stringify({version: process.versions.node, nativeModules: count}));
+"""
+    output = run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+                  '--security-opt', 'no-new-privileges', '--pids-limit', '64', '--memory', '512m', '--cpus', '1',
+                  '--env', 'NODE_OPTIONS=', '--env', 'NODE_PATH=', '--env', 'LD_PRELOAD=',
+                  '--user', old['Config'].get('User') or '0:0', '--workdir', workdir,
+                  '--entrypoint', 'node', image, '-e', script, version], timeout=60)
+    try:
+        result = json.loads(output)
+        valid = result['version'] == version and isinstance(result['nativeModules'], int) and result['nativeModules'] >= 0
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise Rejected('unsupported', 'Verifica isolata del runtime o delle dipendenze native non riuscita.', 422)
 
 
 def endpoints(row):
@@ -539,11 +639,18 @@ def apply_job(job_id, stored):
             # The complete snapshot stays root-only; never returned by the API.
             atomic(directory / 'before.json', encode(actual))
             operation_update(job_id, stage='Download e preparazione del runtime', completedSteps=1)
-            image = image_candidate(row, target, directory)
+            images = {}
             if row['strategy'] == 'node-layer':
-                output = run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--entrypoint', 'node', image, '--version'])
-                if target['version'] not in output:
-                    raise Rejected('updates_unavailable', 'Il runtime candidato non è compatibile con il sistema del servizio.', 503)
+                for source_image in sorted({old['Image'] for old in actual}):
+                    prepared = directory / (job_id + '-' + source_image[-12:])
+                    prepared.mkdir(mode=0o700)
+                    images[source_image] = image_candidate(row, target, prepared, source_image)
+                # Every image and every working directory must pass before the first stop.
+                for old in actual:
+                    node_preflight(old, images[old['Image']], target['version'])
+            else:
+                image = image_candidate(row, target, directory)
+                images = {old['Image']: image for old in actual}
             fresh, _ = observed(row)
             if fingerprint(fresh) != stored['fingerprint']:
                 raise Rejected('stale_plan', 'I servizi sono cambiati durante la preparazione del runtime.')
@@ -552,13 +659,13 @@ def apply_job(job_id, stored):
             for old in actual:
                 if row['strategy'] == 'php-build' and old['State']['Running']:
                     old['runtimeModules'] = run(['docker', 'exec', old['Id'], 'php', '-m']).splitlines()
-                new_id = recreate(old, image, backups, journal=lambda: atomic(directory / 'rollback.json', encode(backups)), before_start=(lambda previous: snapshot_database(previous, directory)) if data_sensitive(row) else None)
+                new_id = recreate(old, images[old['Image']], backups, journal=lambda: atomic(directory / 'rollback.json', encode(backups)), before_start=(lambda previous: snapshot_database(previous, directory)) if data_sensitive(row) else None)
                 new_rows.append(verify(old, new_id, row, target['version']))
             operation_update(job_id, stage='Verifica finale e autorizzazioni', completedSteps=4)
             refresh_admission(actual, new_rows)
             # After this boundary failures in logging must not undo a signed success.
             committed = True
-            save('desired', row['id'], {'version': target['version'], 'image': image, 'source': target, 'containers': [x['Name'] for x in new_rows], 'updatedAt': stamp()})
+            save('desired', row['id'], {'version': target['version'], 'image': next(iter(set(images.values()))) if len(set(images.values())) == 1 else None, 'images': images, 'source': target, 'containers': [x['Name'] for x in new_rows], 'updatedAt': stamp()})
             operation_update(job_id, status='succeeded', stage='Aggiornamento verificato', completedSteps=5, finishedAt=stamp())
         except Exception:
             atomic(directory / 'error.log', traceback.format_exc().encode())
@@ -691,6 +798,9 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 def main():
     configuration()
     initialize()
+    docker_config = ROOT / 'docker-config'
+    docker_config.mkdir(mode=0o700, exist_ok=True)
+    os.environ.setdefault('DOCKER_CONFIG', str(docker_config))
     key = protected(KEY).read_bytes()
     if len(key) != 32:
         raise RuntimeError('Invalid updates capability')

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import http.client
 import socket
+import shutil
 import threading
 import time
 import uuid
@@ -43,6 +44,8 @@ class DockerFixture:
         self.rows = {self.old['Id']: copy.deepcopy(self.old)}
         self.calls = []
         self.fail_create = False
+        self.created = 0
+        self.images = {}
 
     def inspect(self, identity):
         for key, row in self.rows.items():
@@ -53,13 +56,15 @@ class DockerFixture:
     def docker(self, method, endpoint, body=None):
         self.calls.append((method, endpoint, copy.deepcopy(body)))
         if endpoint.startswith('/images/'):
-            return {'Id': NEW_IMAGE, 'Config': {'Env': ['PHP_VERSION=8.5.12']}}
+            return self.images.get(endpoint[len('/images/'):-len('/json')], {'Id': NEW_IMAGE, 'Config': {'Env': ['PHP_VERSION=8.5.12']}})
         if endpoint.startswith('/containers/create?'):
             if self.fail_create:
                 raise m.Rejected('updates_unavailable', 'Simulated Docker failure', 503)
             name = endpoint.split('name=', 1)[1]
-            row = copy.deepcopy(self.old)
-            row.update(Id='new-container', Name='/' + name, Image=body['Image'])
+            source = next((x for x in self.rows.values() if x['Name'].startswith('/' + name + '-update-')), self.old)
+            row = copy.deepcopy(source)
+            self.created += 1
+            row.update(Id='new-container' if self.created == 1 else 'new-container-' + str(self.created), Name='/' + name, Image=body['Image'])
             row['Config'] = {k: copy.deepcopy(v) for k, v in body.items() if k not in ['HostConfig', 'NetworkingConfig']}
             row['HostConfig'] = copy.deepcopy(body['HostConfig'])
             row['NetworkSettings'] = {'Networks': copy.deepcopy(body['NetworkingConfig']['EndpointsConfig'])}
@@ -72,7 +77,7 @@ class DockerFixture:
             if endpoint.endswith('/disconnect'):
                 row['NetworkSettings']['Networks'].pop(network, None)
             else:
-                row['NetworkSettings']['Networks'][network] = copy.deepcopy(body['EndpointConfig'])
+                row['NetworkSettings']['Networks'][network] = {'IPAMConfig': None, 'Aliases': None, 'Links': None, 'DriverOpts': None, **copy.deepcopy(body['EndpointConfig'])}
             return None
         identity = endpoint.split('/')[2].split('?')[0]
         if method == 'DELETE':
@@ -119,6 +124,9 @@ class UpdatesTests(unittest.TestCase):
                 if row is not None and argv[3:] == ['php', '-r', 'echo PHP_VERSION;']:
                     environment = dict(value.split('=', 1) for value in row['Config'].get('Env', []) if '=' in value)
                     return environment['PHP_VERSION'] + '\n'
+                if row is not None and argv[3:] == ['node', '--version']:
+                    environment = dict(value.split('=', 1) for value in row['Config'].get('Env', []) if '=' in value)
+                    return 'v' + environment['NODE_VERSION'] + '\n'
             # Keep the actual error-redaction path and other deliberate mocks.
             return real_run(argv, **kwargs)
         patch.object(m, 'run', side_effect=fixture_run).start()
@@ -139,6 +147,231 @@ class UpdatesTests(unittest.TestCase):
 
     def prepare_job(self, key='job-1'):
         m.save('operation', key, {'id': key, 'status': 'queued', 'stage': 'queued', 'completedSteps': 0, 'totalSteps': 5})
+
+    def node_group(self):
+        images = [OLD_IMAGE, 'sha256:' + 'c' * 64, OLD_IMAGE]
+        self.docker.rows = {}
+        for i, (version, image) in enumerate(zip(['24.15.0', '26.12.1', '24.15.0'], images)):
+            old = container(running=i != 2)
+            old.update(Id='old-node-' + str(i), Name='/node-app-' + str(i), Image=image)
+            old['Config'].update(Image=image, Env=['NODE_VERSION=' + version, 'DB_PASSWORD=' + SECRET],
+                                 WorkingDir='/app-' + str(i), Entrypoint=['application-entrypoint'], Cmd=['server.js'])
+            self.docker.rows[old['Id']] = old
+        self.node_before = copy.deepcopy(self.docker.rows)
+        row = {'id': 'node', 'label': 'Node.js', 'category': 'Runtime', 'repository': 'library/node',
+               'compatibility': 'major', 'containers': ['node-app-' + str(i) for i in range(3)],
+               'strategy': 'node-layer', 'versionEnv': 'NODE_VERSION', 'probe': ['node', '--version']}
+        self.config['components'] = [row]
+        self.config_path.write_text(json.dumps(self.config))
+        target = dict(self.release, version='26.12.1', imageReference='docker.io/library/node:26.12.1-alpine')
+        m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'node': {
+            'candidateRelease': dict(target, version='26.12.2'), 'latestStable': target}}})
+        self.node_candidates = {OLD_IMAGE: NEW_IMAGE, images[1]: 'sha256:' + 'd' * 64}
+        for image in self.node_candidates.values():
+            self.docker.images[image] = {'Id': image, 'Config': {'Env': ['NODE_VERSION=26.12.1']}}
+        return row
+
+    def node_stored(self):
+        public = m.plan('node', m.catalog()['revision'])
+        return m.load('plan', public['planId'])
+
+    def test_mixed_family_is_known_and_aligns_to_one_latest_even_when_maximum_already_current(self):
+        row = self.node_group()
+        item = m.catalog()['components'][0]
+        self.assertIsNone(item['current']['version'])
+        self.assertEqual(item['current']['versions'], ['24.15.0', '26.12.1'])
+        self.assertIsNone(item['current']['imageDigest'])
+        self.assertTrue(item['needsAlignment']); self.assertTrue(item['canUpdate'])
+        self.assertEqual(item['status'], 'update-available')
+        self.assertEqual(item['candidateRelease']['version'], '26.12.1')
+        self.assertEqual(m.observed(row)[1], '26.12.1')
+        self.assertEqual(self.node_stored()['public']['affectedServices'], ['node-app-0', 'node-app-1', 'node-app-2'])
+
+    def test_discovery_uses_maximum_and_explicit_equal_policy_only_for_mixed_family(self):
+        self.node_group(); self.prepare_job()
+        result = {'latestStable': dict(self.release, version='26.12.1'), 'candidateRelease': None}
+        with patch.object(m, 'resolve_release', return_value=result) as discovery:
+            m.check_job('job-1')
+        policy, representative = discovery.call_args.args
+        self.assertEqual(representative, '26.12.1'); self.assertTrue(policy['includeCurrent'])
+        for old in self.docker.rows.values():
+            old['Config']['Env'] = ['NODE_VERSION=26.12.1']
+        with patch.object(m, 'resolve_release', return_value=result) as discovery:
+            m.check_job('job-1')
+        self.assertFalse(discovery.call_args.args[0]['includeCurrent'])
+        self.assertFalse(m.catalog()['components'][0]['canUpdate'])
+
+    def test_group_state_change_during_preflight_rejects_before_first_mutation(self):
+        self.node_group(); stored = self.node_stored(); self.prepare_job()
+        def preflight(*args):
+            self.docker.rows['old-node-2']['State']['Running'] = True
+        with patch.object(m, 'image_candidate', side_effect=lambda row, target, directory, source: self.node_candidates[source]), patch.object(m, 'node_preflight', side_effect=preflight):
+            m.apply_job('job-1', stored)
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'failed')
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+
+    def test_unknown_instance_does_not_masquerade_as_known_mixed_family(self):
+        self.node_group()
+        self.docker.rows['old-node-2']['Config']['Env'] = []
+        item = m.catalog()['components'][0]
+        self.assertFalse(item['canUpdate']); self.assertFalse(item['needsAlignment'])
+        self.assertEqual(item['current']['versions'], [])
+        self.assertIsNone(item['current']['version'])
+
+    def test_all_unique_images_prepare_and_all_abi_checks_pass_before_first_service_mutation(self):
+        self.node_group(); stored = self.node_stored(); self.prepare_job()
+        prepared, checked = [], []
+        def build(row, target, directory, source):
+            self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+            prepared.append(source)
+            self.assertEqual(target['version'], '26.12.1')
+            return self.node_candidates[source]
+        def preflight(old, image, version):
+            self.assertEqual(set(prepared), set(self.node_candidates))
+            self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+            self.assertEqual(image, self.node_candidates[old['Image']]); checked.append(old['Id'])
+        with patch.object(m, 'image_candidate', side_effect=build), patch.object(m, 'node_preflight', side_effect=preflight), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'succeeded')
+        self.assertEqual(len(prepared), 2); self.assertEqual(len(checked), 3)
+        admission.assert_called_once()
+        for old in self.node_before.values():
+            new = self.docker.inspect(old['Name'])
+            self.assertEqual(new['Image'], self.node_candidates[old['Image']])
+            self.assertEqual(new['State']['Running'], old['State']['Running'])
+            self.assertEqual(new['HostConfig'], old['HostConfig'])
+            self.assertEqual(new['Mounts'], old['Mounts'])
+            self.assertEqual(new['Config']['Entrypoint'], old['Config']['Entrypoint'])
+            self.assertIn('DB_PASSWORD=' + SECRET, new['Config']['Env'])
+            self.assertIn('NODE_VERSION=26.12.1', new['Config']['Env'])
+        self.assertEqual(m.load('desired', 'node')['images'], self.node_candidates)
+        self.assertNotIn(SECRET, json.dumps(m.catalog()))
+
+    def test_any_image_preparation_failure_leaves_entire_group_untouched(self):
+        self.node_group(); stored = self.node_stored(); self.prepare_job()
+        def build(row, target, directory, source):
+            if source != OLD_IMAGE:
+                raise m.Rejected('unsupported', 'Fixture build failure', 422)
+            return self.node_candidates[source]
+        with patch.object(m, 'image_candidate', side_effect=build), patch.object(m, 'node_preflight') as abi, patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        abi.assert_not_called(); admission.assert_not_called()
+        self.assertEqual(self.docker.rows, self.node_before)
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'failed')
+
+    def test_incompatible_native_binding_blocks_whole_group_before_any_stop(self):
+        self.node_group(); stored = self.node_stored(); self.prepare_job()
+        with patch.object(m, 'image_candidate', side_effect=lambda row, target, directory, source: self.node_candidates[source]), patch.object(m, 'node_preflight', side_effect=m.Rejected('unsupported', 'Native ABI incompatible', 422)):
+            m.apply_job('job-1', stored)
+        self.assertEqual(self.docker.rows, self.node_before)
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+
+    def test_failure_in_later_service_rolls_back_entire_stateless_family_to_original_ids(self):
+        self.node_group(); stored = self.node_stored(); self.prepare_job()
+        verify = m.verify
+        def verify_until_failure(old, identity, row, version):
+            if old['Id'] == 'old-node-2':
+                raise m.Rejected('updates_unavailable', 'Third service failure', 503)
+            return verify(old, identity, row, version)
+        with patch.object(m, 'image_candidate', side_effect=lambda row, target, directory, source: self.node_candidates[source]), patch.object(m, 'node_preflight'), patch.object(m, 'verify', side_effect=verify_until_failure), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        admission.assert_not_called()
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'rolled-back')
+        self.assertEqual(self.docker.rows, self.node_before)
+        self.assertIsNone(m.load('desired', 'node'))
+
+    def test_native_preflight_has_no_service_mounts_or_environment_and_rejects_shadowed_dependencies(self):
+        old = container(); old['Config']['WorkingDir'] = '/app'
+        with patch.object(m, 'run', return_value=json.dumps({'version': '26.12.1', 'nativeModules': 2})) as command:
+            m.node_preflight(old, NEW_IMAGE, '26.12.1')
+        args = command.call_args.args[0]
+        self.assertIn('--read-only', args); self.assertIn('--cap-drop', args)
+        self.assertEqual(args[args.index('--network') + 1], 'none')
+        self.assertEqual(args[args.index('--entrypoint') + 1], 'node')
+        self.assertNotIn(SECRET, json.dumps(args)); self.assertNotIn('--mount', args); self.assertNotIn('-v', args)
+        self.assertIn('require(item)', args[args.index('-e') + 1])
+        self.docker.images[NEW_IMAGE] = {'Config': {'Volumes': {'/app': {}}}}
+        with patch.object(m, 'run') as command, self.assertRaises(m.Rejected):
+            m.node_preflight(old, NEW_IMAGE, '26.12.1')
+        command.assert_not_called()
+
+    def test_real_preflight_scanner_never_executes_app_scripts_and_fails_on_bad_native_binding_or_engine(self):
+        binary = shutil.which('node')
+        if not binary:
+            self.skipTest('Node is required to execute the isolated scanner fixture')
+        version = subprocess.check_output([binary, '-p', 'process.versions.node'], text=True).strip()
+        working = self.root / 'fixture-app'; working.mkdir()
+        (working / 'node_modules').mkdir()
+        sentinel = working / 'must-not-run'
+        manifest = {'scripts': {'preinstall': 'touch ' + str(sentinel)}, 'main': 'must-not-run.js'}
+        (working / 'package.json').write_text(json.dumps(manifest))
+        (working / 'must-not-run.js').write_text('throw new Error("Application JS must never execute");')
+        old = container(); old['Config']['WorkingDir'] = str(working)
+        captured = []
+        bundled_semver = pathlib.Path(binary).resolve().parent.parent / 'lib/node_modules/npm/node_modules/semver'
+        def isolated_scanner(argv, **kwargs):
+            script = argv[argv.index('-e') + 1]
+            captured.append(script)
+            if bundled_semver.is_dir():
+                script = script.replace('/usr/local/lib/node_modules/npm/node_modules/semver', str(bundled_semver))
+            completed = subprocess.run([binary, '-e', script, version], cwd=working, capture_output=True, text=True, timeout=10)
+            if completed.returncode:
+                raise m.Rejected('unsupported', 'Fixture isolated ABI/engine check failed', 422)
+            return completed.stdout
+        with patch.object(m, 'run', side_effect=isolated_scanner):
+            m.node_preflight(old, NEW_IMAGE, version)
+            (working / 'node_modules' / 'broken.node').write_bytes(b'not a compatible native addon')
+            with self.assertRaises(m.Rejected):
+                m.node_preflight(old, NEW_IMAGE, version)
+            (working / 'node_modules' / 'broken.node').unlink()
+            if bundled_semver.is_dir():
+                manifest['engines'] = {'node': '>=22'}
+                (working / 'package.json').write_text(json.dumps(manifest))
+                m.node_preflight(old, NEW_IMAGE, version)
+                manifest['engines']['node'] = '<1'
+                (working / 'package.json').write_text(json.dumps(manifest))
+                with self.assertRaises(m.Rejected):
+                    m.node_preflight(old, NEW_IMAGE, version)
+            # An invalid declaration fails before semver is loaded, on every host.
+            manifest['engines'] = {'node': {'invalid': True}}
+            (working / 'package.json').write_text(json.dumps(manifest))
+            with self.assertRaises(m.Rejected):
+                m.node_preflight(old, NEW_IMAGE, version)
+        self.assertFalse(sentinel.exists())
+        self.assertIn("require('/usr/local/lib/node_modules/npm/node_modules/semver')", captured[0])
+
+    def test_node_layer_preserves_local_base_npm_and_libatomic_for_each_source_image(self):
+        self.node_group()
+        target = m.catalog()['components'][0]['candidateRelease']
+        directory = self.root / 'candidate'; directory.mkdir()
+        with patch.object(m, 'run', return_value=NEW_IMAGE) as command:
+            candidate = m.image_candidate(self.config['components'][0], target, directory, OLD_IMAGE)
+        self.assertEqual(candidate, NEW_IMAGE)
+        dockerfile = (directory / 'Dockerfile').read_text()
+        self.assertIn('FROM platform/runtime-base:candidate', dockerfile)
+        self.assertNotIn('FROM ' + OLD_IMAGE, dockerfile)
+        self.assertIn('cp -L /usr/lib/libatomic.so.1', dockerfile)
+        self.assertIn('/usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm', dockerfile)
+        self.assertIn('ENV NODE_VERSION=26.12.1', dockerfile)
+        self.assertIn(unittest.mock.call(['docker', 'image', 'tag', OLD_IMAGE, 'platform/runtime-base:candidate']), command.call_args_list)
+
+    def test_database_mixed_major_requires_migration_but_same_major_can_align(self):
+        self.node_group()
+        row = self.config['components'][0]
+        row.update(id='postgres', label='PostgreSQL', category='Database', strategy='image', recoveryPolicy='offline-snapshot-v1')
+        self.config_path.write_text(json.dumps(self.config))
+        for identity, version in zip(self.docker.rows, ['17.4', '18.5', '17.4']):
+            self.docker.rows[identity]['Config']['Env'] = ['NODE_VERSION=' + version]
+        target = dict(self.release, version='18.5')
+        m.save('cache', 'releases', {'checkedAt': m.stamp(), 'components': {'postgres': {'candidateRelease': None, 'latestStable': target}}})
+        item = m.catalog()['components'][0]
+        self.assertTrue(item['needsAlignment']); self.assertFalse(item['canUpdate'])
+        self.assertEqual(item['status'], 'unsupported'); self.assertIn('migrazione', item['blockedReason'])
+        for identity, version in zip(self.docker.rows, ['18.4', '18.5', '18.4']):
+            self.docker.rows[identity]['Config']['Env'] = ['NODE_VERSION=' + version]
+        item = m.catalog()['components'][0]
+        self.assertTrue(item['canUpdate']); self.assertEqual(item['candidateRelease']['version'], '18.5')
 
     def test_revision_stale_plan_rejected_without_mutation(self):
         before = m.catalog()['revision']
@@ -489,13 +722,26 @@ class InstallerDiscoveryTests(unittest.TestCase):
         self.assertEqual(components[0]['containers'], ['web-proxy'])
         self.assertEqual(self.installer.discover([], pathlib.Path('/fixture/platform')), [])
 
-    def test_node_application_keeps_its_custom_image_strategy_and_separate_image_targets(self):
+    def test_node_applications_form_one_stable_family_across_different_images(self):
         rows = [self.runtime('node-app-a', 'platform/custom-app-a:deployed', ['NODE_VERSION=26.10.0']),
                 self.runtime('node-app-b', 'platform/custom-app-b:deployed', ['NODE_VERSION=26.10.0'])]
         components = self.installer.discover(rows, pathlib.Path('/fixture/platform'))
-        self.assertEqual(len(components), 2)
-        self.assertTrue(all(x['strategy'] == 'node-layer' for x in components))
-        self.assertNotEqual(components[0]['id'], components[1]['id'])
+        self.assertEqual(len(components), 1)
+        self.assertEqual(components[0]['strategy'], 'node-layer')
+        self.assertEqual(components[0]['id'], 'node')
+        self.assertEqual(components[0]['label'], 'Node.js')
+        self.assertEqual(components[0]['containers'], ['node-app-a', 'node-app-b'])
+        self.assertEqual(len(components[0]['initialImages']), 2)
+        rerun = copy.deepcopy(rows); rerun[0]['Image'] = NEW_IMAGE
+        self.assertEqual(self.installer.discover(rerun, pathlib.Path('/fixture/platform'))[0]['id'], 'node')
+
+    def test_completed_initialization_helpers_are_not_runtime_update_targets(self):
+        rows = [self.runtime('web-proxy', 'nginx:1.30.5-alpine'),
+                self.runtime('storage-volume-init', 'nginx:1.30.5-alpine', running=False),
+                self.runtime('auth-bootstrap', 'platform/bootstrap:deployed', ['NODE_VERSION=26.10.0'], running=False)]
+        components = self.installer.discover(rows, pathlib.Path('/fixture/platform'))
+        self.assertEqual(len(components), 1)
+        self.assertEqual(components[0]['containers'], ['web-proxy'])
 
 
 if __name__ == '__main__':

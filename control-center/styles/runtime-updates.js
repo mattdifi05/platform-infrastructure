@@ -4,6 +4,12 @@
   var pending = function (operation) { return operation && ['queued', 'running'].includes(operation.status); };
   var labels = { current: 'Aggiornato', 'update-available': 'Aggiornamento disponibile', unsupported: 'Aggiornamento non supportato', unavailable: 'Versione non verificabile', 'not-installed': 'Non installato', queued: 'In coda', running: 'In corso', succeeded: 'Operazione completata', failed: 'Operazione non riuscita', 'rolled-back': 'Versione precedente ripristinata', completed: 'Operazione completata', rolled_back: 'Versione precedente ripristinata', rollback_failed: 'Ripristino non riuscito', interrupted: 'Operazione interrotta' };
   function text(value, fallback) { return typeof value === 'string' && value.trim() ? value : fallback; }
+  function currentVersion(item) {
+    if (item.installed === false) return 'Non installato';
+    var versions = item.current && Array.isArray(item.current.versions) ? Array.from(new Set(item.current.versions.filter(function (version) { return typeof version === 'string' && version.trim(); }))) : [];
+    if (item.needsAlignment && versions.length > 1) return 'Da uniformare: ' + versions.join(' / ');
+    return text(item.current && item.current.version, versions.length === 1 ? versions[0] : 'Non verificata');
+  }
   function element(tag, value) { var node = document.createElement(tag); if (value !== undefined) node.textContent = value; return node; }
   function operationId(value) { return value && (value.operationId || value.id || value.operation && value.operation.id); }
   function mount(root) {
@@ -35,7 +41,8 @@
       check.disabled = !value || value.available !== true || value.canCheck === false || working;
       refresh.disabled = state.busy;
       root.setAttribute('aria-busy', working ? 'true' : 'false');
-      select('[data-updates-summary]').textContent = components.length + ' componenti · ' + components.filter(function (item) { return item.status === 'update-available'; }).length + ' aggiornamenti disponibili' + (value && value.checkedAt ? ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : ' · Versioni stabili non ancora verificate');
+      var updateCount = components.filter(function (item) { return item.status === 'update-available'; }).length;
+      select('[data-updates-summary]').textContent = components.length + (components.length === 1 ? ' componente · ' : ' componenti · ') + updateCount + (updateCount === 1 ? ' aggiornamento disponibile' : ' aggiornamenti disponibili') + (value && value.checkedAt ? ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : ' · Versioni stabili non ancora verificate');
       var progressBox = select('[data-updates-progress]'), progress = progressBox.querySelector('progress');
       progressBox.hidden = !working;
       var total = operation && operation.totalSteps, completed = operation && operation.completedSteps;
@@ -49,12 +56,12 @@
         count++;
         var row = element('article'); row.className = 'cc-update-row';
         var name = element('div'); name.append(element('strong', text(item.label, item.id)), element('small', text(item.category, 'Componente'))); row.append(name);
-        var current = element('div'); current.append(element('small', 'In esecuzione'), element('strong', item.installed === false ? 'Non installato' : text(item.current && item.current.version, 'Non verificata'))); row.append(current);
+        var current = element('div'); current.append(element('small', 'Versione installata'), element('strong', currentVersion(item))); row.append(current);
         var latest = element('div'); latest.append(element('small', 'Ultima stabile'), element('strong', text(item.latestStable && item.latestStable.version, 'Non disponibile'))); row.append(latest);
-        var button = element('button', 'Rivedi aggiornamento'); button.type = 'button'; button.className = 'ops-button secondary compact';
+        var button = element('button', item.needsAlignment ? 'Uniforma runtime' : 'Rivedi aggiornamento'); button.type = 'button'; button.className = 'ops-button secondary compact';
         button.disabled = working || value.available !== true || value.canApply === false || !item.canUpdate || item.installed === false || item.status !== 'update-available' || !item.candidateRelease || !item.candidateRelease.imageDigest;
         button.addEventListener('click', function () { openPlan(item); }); row.append(button);
-        if (item.candidateRelease && item.latestStable && item.candidateRelease.version !== item.latestStable.version) row.append(element('p', 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · Ultima stabile: ' + item.latestStable.version + (item.compatibilityReason ? ' · ' + item.compatibilityReason : ' · La versione stabile più recente richiede una migrazione.')));
+        if (item.candidateRelease && item.candidateRelease.version && item.latestStable && item.latestStable.version && item.candidateRelease.version !== item.latestStable.version) row.append(element('p', 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · Ultima stabile: ' + item.latestStable.version + (item.compatibilityReason ? ' · ' + item.compatibilityReason : ' · La serie più recente richiede una verifica di compatibilità.')));
         row.append(element('p', (labels[item.status] || 'Stato non disponibile') + (item.blockedReason ? ' · ' + item.blockedReason : item.installed !== false && !item.candidateRelease && item.status !== 'current' ? ' · Nessun aggiornamento compatibile verificato.' : '') + ((item.services || []).length ? ' · Servizi: ' + item.services.join(', ') : '')));
         list.append(row);
       });
@@ -114,8 +121,9 @@
         if (!plan.planId || !plan.targetVersion || !plan.targetDigest || plan.confirmationRequired !== 'UPDATE') throw Error('Piano di aggiornamento non valido.');
         state.plan = plan; state.idempotencyKey = crypto.randomUUID();
         var details = select('[data-updates-plan-details]');
-        details.append(element('p', item.label + ': ' + text(item.current && item.current.version, 'Non verificata') + ' → ' + plan.targetVersion));
+        details.append(element('p', item.label + ': ' + currentVersion(item) + ' → ' + plan.targetVersion));
         details.append(element('p', 'Servizi interessati: ' + (plan.affectedServices || []).join(', ')));
+        if (item.needsAlignment || (item.current && Array.isArray(item.current.versions))) details.append(element('p', 'Versione unica per tutti i servizi elencati.'));
         ['steps', 'risks'].forEach(function (key) { details.append(element('h3', key === 'steps' ? 'Passaggi' : 'Impatto e rischi')); var ul = element('ul'); (plan[key] || []).forEach(function (entry) { ul.append(element('li', typeof entry === 'string' ? entry : text(entry.label || entry.description, 'Passaggio'))); }); details.append(ul); });
         select('[data-updates-confirm-label]').hidden = false; planStatus.textContent = 'Rivedi il piano prima di confermare.'; updateApply();
       } catch (error) { if (alive(generation) && dialogGeneration === state.dialogGeneration && dialog.open) planStatus.textContent = error.message; }

@@ -108,6 +108,7 @@ def resolve_release(component, current_version):
         if compatibility not in ('major', 'minor', 'exact') or component.get('versionScheme', 'semver') != 'semver' or architecture not in ('amd64', 'arm64', 'arm', '386', 'ppc64le', 's390x', 'riscv64'):
             raise ValueError('unsupported release policy')
         current = _version(current_version)
+        include_current = component.get('includeCurrent') is True
         client = _Client()
         path = '/v2/repositories/' + repository + '/tags/'
         url = _HUB + path + '?page_size=100&ordering=last_updated'
@@ -183,7 +184,8 @@ def resolve_release(component, current_version):
         for tag in ordered:
             version = _version(tag['_version'])
             compatible = (compatibility == 'major' and version[0] == current[0]) or (compatibility == 'minor' and version[:2] == current[:2]) or (compatibility == 'exact' and version == current)
-            if latest is not None and (candidate is not None or not compatible or version <= current):
+            candidate_allowed = version > current or include_current and version == current
+            if latest is not None and (candidate is not None or not compatible or not candidate_allowed):
                 continue
             if tag.get('_needsMetadata'):
                 metadata, _ = client.get(_HUB + path + urllib.parse.quote(tag['name'], safe='') + '/')
@@ -195,7 +197,7 @@ def resolve_release(component, current_version):
                 continue
             if latest is None:
                 latest = release
-            if compatible and version > current and candidate is None:
+            if compatible and candidate_allowed and candidate is None:
                 candidate = release
         if latest is None:
             return dict(unavailable, reason='unavailable: no stable release for architecture and tag policy')

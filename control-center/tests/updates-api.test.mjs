@@ -13,7 +13,7 @@ const revision = 'a'.repeat(64), imageDigest = 'sha256:' + 'b'.repeat(64);
 const plan = { planId: 'plan-1', revision, expiresAt: new Date(Date.now() + 60000).toISOString(), componentId: 'php', targetVersion: '8.5.12', targetDigest: imageDigest, affectedServices: ['php-app'], steps: ['preflight', 'apply', 'verify'], risks: ['Riavvio del runtime'], confirmationRequired: 'UPDATE' };
 function catalog() {
   return { schema: 'runtime-updates/v1', revision, checkedAt: new Date().toISOString(), available: true, canCheck: true,
-    components: [{ id: 'php', label: 'PHP', category: 'runtime', current: { version: '8.5.11', imageDigest, verifiedAt: new Date().toISOString() }, latestStable: { version: '9.0.0', imageDigest, sourceUrl: 'https://www.php.net/releases/' }, candidateRelease: { version: '8.5.12', imageDigest, sourceUrl: 'https://www.php.net/releases/' }, status: 'update_available', canUpdate: true, blockedReason: null, services: ['php-app'], installed: true }], operations: [] };
+    components: [{ id: 'php', label: 'PHP', category: 'runtime', current: { version: '8.5.11', versions: ['8.5.11'], imageDigest, verifiedAt: new Date().toISOString() }, latestStable: { version: '9.0.0', imageDigest, sourceUrl: 'https://www.php.net/releases/' }, candidateRelease: { version: '8.5.12', imageDigest, sourceUrl: 'https://www.php.net/releases/' }, status: 'update_available', canUpdate: true, blockedReason: null, services: ['php-app'], installed: true }], operations: [] };
 }
 async function fixture(t, handler, options = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'updates-api-'));
@@ -43,6 +43,39 @@ test('Unix client signs exact envelopes with unique nonces and retains compatibl
   assert.deepEqual(await client.plan('php', { revision }), plan);
   assert.notEqual(requests[0].envelope.nonce, requests[1].envelope.nonce);
   assert.deepEqual(requests[1].envelope.body, { action: 'plan', componentId: 'php', revision });
+});
+
+test('absent compatible or latest releases stay null while current inventory remains available', async t => {
+  const source = catalog(), item = source.components[0];
+  item.current.version = '8.5.12'; item.status = 'current'; item.canUpdate = false;
+  item.latestStable.version = '8.5.12';
+  const latest = { ...item.latestStable }, current = { ...item.current };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  for (const [candidate, stable] of [[null, latest], [null, null], [undefined, undefined]]) {
+    item.candidateRelease = candidate; item.latestStable = stable;
+    const actual = await client.catalog();
+    assert.equal(actual.available, true, 'Missing release metadata must not discard the verified inventory');
+    assert.equal(actual.revision, revision); assert.equal(actual.components.length, 1);
+    assert.deepEqual(actual.components[0].current, current);
+    assert.equal(actual.components[0].status, 'current'); assert.equal(actual.components[0].canUpdate, false);
+    assert.equal(actual.components[0].candidateRelease, null, 'An absent candidate must remain falsy for the UI');
+    assert.deepEqual(actual.components[0].latestStable, stable == null ? null : latest);
+  }
+});
+
+test('mixed family versions and alignment remain known through the public projection', async t => {
+  const source = catalog(), item = source.components[0];
+  item.id = 'node'; item.label = 'Node.js'; item.current.version = null;
+  item.current.versions = ['24.15.0', '26.12.1']; item.needsAlignment = true;
+  item.candidateRelease = { version: '26.12.1', imageDigest, sourceUrl: 'https://nodejs.org/en/download' };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  const result = await client.catalog();
+  assert.equal(result.available, true); assert.equal(result.components.length, 1);
+  assert.equal(result.components[0].current.version, null);
+  assert.deepEqual(result.components[0].current.versions, ['24.15.0', '26.12.1']);
+  assert.equal(result.components[0].needsAlignment, true);
+  assert.equal(result.components[0].canUpdate, true);
+  assert.equal(result.components[0].candidateRelease.version, '26.12.1');
 });
 
 test('catalog never enables updates for absent components or unavailable native inventory', async t => {

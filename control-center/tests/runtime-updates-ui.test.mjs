@@ -65,6 +65,13 @@ test('unavailable, missing and unsupported components cannot start an update', a
   assert.equal(h.node('[data-updates-list]').children.length, 3);
   for (const row of h.node('[data-updates-list]').children) assert.equal(row.children.find(node => node.tagName === 'button').disabled, true);
 });
+test('a current component with no candidate never renders a null version or a migration claim', async () => {
+  const h = fixture(() => ({ ...catalog, components: [{ ...component, status: 'current', canUpdate: false, candidateRelease: { version: null, imageDigest: null }, latestStable: { version: '8.5.12' }, current: { version: '8.5.12' } }] }));
+  await tick();
+  const row = h.node('[data-updates-list]').children[0];
+  assert.equal(row.children.some(node => node.textContent.includes('Aggiornamento compatibile:') || node.textContent.includes('migrazione')), false);
+  assert.equal(row.children.find(node => node.tagName === 'button').disabled, true);
+});
 test('compatible candidate is separate from a newer major and apply requires a fresh reviewed plan', async () => {
   const plan = { planId: 'p1', revision: 'revision', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '8.5.12', targetDigest: 'sha256:fixture', affectedServices: ['php-apache'], steps: ['Scarica', 'Verifica'], risks: ['Riavvio breve'], confirmationRequired: 'UPDATE' };
   const h = fixture(path => path.endsWith('/plan') ? plan : path.endsWith('/apply') ? { operationId: 'apply1', status: 'queued' } : { ...catalog, components: [{ ...component, latestStable: { version: '9.0.1' } }] });
@@ -80,4 +87,21 @@ test('compatible candidate is separate from a newer major and apply requires a f
   assert.equal(call.payload.planId, 'p1'); assert.equal(call.payload.confirmation, 'UPDATE');
   assert.equal(h.node('[data-updates-dialog]').open, false);
   assert.equal(h.node('[data-updates-check]').disabled, true);
+});
+test('one runtime family displays all known mixed versions and reviews a single target for every service', async () => {
+  const services = ['app-one', 'app-two', 'app-three', 'app-four', 'app-five', 'app-six'];
+  const family = { ...component, id: 'node', label: 'Node.js', current: { version: null, versions: ['24.22.0', '26.10.0'] }, needsAlignment: true, services, latestStable: { version: '26.12.1', imageDigest: 'sha256:fixture' }, candidateRelease: { version: '26.12.1', imageDigest: 'sha256:fixture' } };
+  const plan = { planId: 'family-plan', revision: 'revision', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '26.12.1', targetDigest: 'sha256:fixture', affectedServices: services, steps: ['Prepara tutti i servizi', 'Verifica e uniforma'], risks: [], confirmationRequired: 'UPDATE' };
+  const h = fixture(path => path.endsWith('/plan') ? plan : { ...catalog, components: [family] }); await tick();
+  const rows = h.node('[data-updates-list]').children; assert.equal(rows.length, 1);
+  const current = rows[0].children[1].children[1].textContent;
+  assert.equal(current, 'Da uniformare: 24.22.0 / 26.10.0'); assert.doesNotMatch(current, /Non verificata/);
+  assert.match(h.node('[data-updates-summary]').textContent, /^1 componente · 1 aggiornamento disponibile/);
+  const button = rows[0].children.find(node => node.tagName === 'button'); assert.equal(button.textContent, 'Uniforma runtime'); assert.equal(button.disabled, false);
+  button.listeners.click(); await tick();
+  const details = h.node('[data-updates-plan-details]').children.map(node => node.textContent).join('\n');
+  assert.match(details, /→ 26\.12\.1/); assert.match(details, /Versione unica per tutti i servizi elencati/);
+  for (const service of services) assert.ok(details.includes(service));
+  assert.equal(h.calls.filter(call => call.path?.endsWith('/plan')).length, 1);
+  assert.equal(h.calls.some(call => call.path?.endsWith('/apply')), false);
 });

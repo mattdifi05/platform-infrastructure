@@ -82,6 +82,7 @@ function sanitizeResult(body, value) {
       || value.components.length > 200 || value.operations.length > 100 || value.available && !token(value.revision)) throw new RuntimeUpdatesError(503, 'invalid_response');
   const seen = new Set();
   const release = value => {
+    if (value == null) return null;
     let sourceUrl = null;
     try { const url = new URL(value?.sourceUrl); if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash) sourceUrl = url.href; } catch {}
     return { version: text(value?.version, 128), imageDigest: digest(value?.imageDigest), sourceUrl };
@@ -90,7 +91,8 @@ function sanitizeResult(body, value) {
     if (!validRuntimeUpdatesId(item?.id) || seen.has(item.id) || !text(item.label) || !text(item.category, 64) || !text(item.status, 64)) throw new RuntimeUpdatesError(503, 'invalid_response');
     seen.add(item.id);
     return { id: item.id, label: item.label, category: item.category,
-      current: { version: text(item.current?.version, 128), imageDigest: digest(item.current?.imageDigest), verifiedAt: timestamp(item.current?.verifiedAt) },
+      current: { version: text(item.current?.version, 128), imageDigest: digest(item.current?.imageDigest), verifiedAt: timestamp(item.current?.verifiedAt), versions: strings(item.current?.versions) },
+      needsAlignment: item.needsAlignment === true,
       latestStable: release(item.latestStable), candidateRelease: release(item.candidateRelease),
       status: item.status, canUpdate: value.available === true && value.canApply !== false && item.installed === true && item.canUpdate === true,
       blockedReason: text(item.blockedReason, 512) || (value.canApply === false ? 'Una manutenzione interrotta richiede verifica amministrativa.' : null), services: strings(item.services), installed: item.installed === true };

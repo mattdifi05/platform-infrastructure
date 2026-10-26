@@ -42,6 +42,18 @@ class ReleasesTests(unittest.TestCase):
     def test_no_downgrade(self):
         self.assertIsNone(self.resolve([tag('8.5.9-apache')])['candidateRelease'])
 
+    def test_alignment_can_reuse_exact_maximum_only_when_explicitly_requested(self):
+        tags = [tag('8.5.12-apache'), tag('8.6.0-apache'), tag('8.5.11-apache')]
+        self.assertIsNone(self.resolve(tags, '8.5.12')['candidateRelease'])
+        self.component['includeCurrent'] = True
+        result = self.resolve(tags, '8.5.12')
+        self.assertEqual(result['latestStable']['version'], '8.6.0')
+        self.assertEqual(result['candidateRelease']['version'], '8.5.12')
+        self.assertEqual(result['candidateRelease']['imageDigest'], D)
+        self.assertIsNone(self.resolve([tag('8.5.11-apache')], '8.5.12')['candidateRelease'])
+        self.component['includeCurrent'] = 'true'
+        self.assertIsNone(self.resolve(tags, '8.5.12')['candidateRelease'])
+
     def test_architecture_and_duplicates(self):
         same = tag('8.5.12-apache')
         result = self.resolve([tag('8.5.99-apache', 'arm64'), same, same])
