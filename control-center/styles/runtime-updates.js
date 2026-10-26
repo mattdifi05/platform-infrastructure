@@ -51,8 +51,10 @@
       var progressBox = select('[data-updates-progress]'), progress = progressBox.querySelector('progress');
       progressBox.hidden = !working && !operation;
       var total = operation && operation.totalServices, completed = operation && operation.completedServices;
+      var barTotal = Number.isSafeInteger(total) && total > 0 ? total : operation && operation.totalSteps;
+      var barCompleted = Number.isSafeInteger(total) && total > 0 ? completed : operation && operation.completedSteps;
       var successful = operation && ['succeeded', 'completed'].includes(operation.status);
-      if (Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) && completed >= 0 && completed <= total && (completed < total || successful)) { progress.max = total; progress.value = completed; }
+      if (Number.isSafeInteger(barTotal) && barTotal > 0 && Number.isSafeInteger(barCompleted) && barCompleted >= 0 && barCompleted <= barTotal && (barCompleted < barTotal || successful)) { progress.max = barTotal; progress.value = barCompleted; }
       else progress.removeAttribute('value');
       select('[data-updates-stage]').textContent = operation ? text(operation.stage, serviceLabels[operation.status] || labels[operation.status] || 'Operazione in corso…') + (operation.currentService ? ' · ' + operation.currentService : operation.currentComponent ? ' · ' + operation.currentComponent : '') + (Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) ? ' · ' + completed + ' di ' + total + ' servizi' : '') : 'Verifica in corso…';
       var services = select('[data-updates-services]'); services.replaceChildren();

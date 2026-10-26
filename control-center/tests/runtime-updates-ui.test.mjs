@@ -54,6 +54,15 @@ test('late catalog response cannot render after navigation disconnects the panel
   h.root.isConnected = false; h.scan(); resolve(catalog); await tick();
   assert.equal(h.node('[data-updates-list]').children.length, 0); assert.equal(h.timers.size, 0);
 });
+test('metadata checks finish their real step progress instead of leaving an indeterminate bar', async () => {
+  const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' }
+    : path.includes('/operations/') ? { id: 'check1', status: 'succeeded', stage: 'Verifica completata', completedSteps: 19, totalSteps: 19 } : catalog);
+  await tick(); await h.node('[data-updates-check]').listeners.click();
+  await [...h.timers.values()][0].callback(); await tick();
+  assert.equal(h.node('progress').max, 19); assert.equal(h.node('progress').value, 19);
+  assert.match(h.node('[data-updates-stage]').textContent, /Verifica completata/);
+  assert.doesNotMatch(h.node('[data-updates-stage]').textContent, /19 servizi/);
+});
 test('closing a plan before passkey returns prevents the plan request and apply', async () => {
   const h = fixture(() => catalog); await tick();
   let finish; h.context.window.controlCenterRuntimeUpdates.authenticate = () => new Promise(resolve => { finish = resolve; });
