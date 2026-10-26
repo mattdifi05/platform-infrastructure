@@ -3,6 +3,10 @@ import datetime
 import importlib.util
 import json
 import pathlib
+import shutil
+import subprocess
+import tempfile
+import os
 import sys
 import threading
 import time
@@ -61,15 +65,17 @@ class EventsTests(unittest.TestCase):
             self.assertNotIn('restart', args); self.assertNotIn('reset-failed', args); self.assertNotIn('logs', args)
 
     def test_secrets_urls_pii_pem_tokens_and_control_characters_are_redacted(self):
+        example_access_key = 'AKIA' + 'ABCDEFGHIJKLMNOP'
+        example_key_type = 'PRIVATE KEY'
+        example_pem = f'-----BEGIN {example_key_type}-----\nprivate material\n-----END {example_key_type}-----'
         raw = ('DB_PASSWORD="short private value" client_secret=hidden Bearer shortBearer '
                'https://user:pass@example.test/path?token=urlSecret&key=urlKey '
-               'name.person@example.test 187.7.64.76 2001:db8::1 '
-               'AKIAABCDEFGHIJKLMNOP /home/privateperson/file\x00\x1b[31m '
-               '-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----')
+               'name.person@example.test 192.0.2.10 2001:db8::1 '
+               f'{example_access_key} /home/privateperson/file\x00\x1b[31m {example_pem}')
         self.journal = [self.journal_row(raw)]
         value = json.dumps(self.collector())
         for secret in ['short private value', 'hidden', 'shortBearer', 'urlSecret', 'urlKey', 'user:pass',
-                       'name.person@example.test', '187.7.64.76', '2001:db8::1', 'AKIAABCDEFGHIJKLMNOP', 'privateperson', 'private material']:
+                       'name.person@example.test', '192.0.2.10', '2001:db8::1', example_access_key, 'privateperson', 'private material']:
             self.assertNotIn(secret, value)
         message = self.collector()['events'][0]['message']
         self.assertFalse(any(ord(character) < 32 for character in message)); self.assertLessEqual(len(message), 400)
@@ -120,6 +126,41 @@ class EventsTests(unittest.TestCase):
         projection = args[args.index('--format') + 1]
         self.assertNotIn('.Env', projection); self.assertNotIn('.Log', projection)
         self.assertNotIn('Health.Log', projection); self.assertIn('.State.OOMKilled', projection)
+
+    def test_container_without_healthcheck_is_valid_observation_without_false_issue(self):
+        self.containers = [self.container('no-healthcheck', health=None)]
+        value = self.collector()
+        self.assertTrue(next(source for source in value['sources'] if source['id'] == 'docker')['available'])
+        self.assertEqual(value['issues'], [])
+        self.assertNotIn('.State.Health', m.DOCKER_FORMAT)
+        self.assertIn('with index .State "Health"', m.DOCKER_FORMAT)
+
+    @unittest.skipUnless(shutil.which('go'), 'Go strict-template renderer is unavailable on this host')
+    def test_real_strict_go_projection_accepts_absent_health_and_preserves_explicit_unhealthy(self):
+        # Match Docker's strict map lookup, not a Python approximation of templates.
+        program = r'''package main
+import("encoding/json";"fmt";"os";"text/template")
+func main(){
+ var rows []map[string]interface{}
+ if err:=json.NewDecoder(os.Stdin).Decode(&rows);err!=nil{panic(err)}
+ functions:=template.FuncMap{"json":func(value interface{})(string,error){data,err:=json.Marshal(value);return string(data),err}}
+ view,err:=template.New("docker").Option("missingkey=error").Funcs(functions).Parse(os.Args[1]);if err!=nil{panic(err)}
+ for _,row:=range rows{if err:=view.Execute(os.Stdout,row);err!=nil{panic(err)};fmt.Println()}
+}
+'''
+        row = {'Id': 'fixture', 'Name': '/generic-app', 'State': {'Status': 'running', 'Running': True, 'OOMKilled': False,
+               'ExitCode': 0, 'Error': '', 'FinishedAt': '0001-01-01T00:00:00Z'},
+               'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped'}}, 'Config': {'Labels': {'com.docker.compose.service': 'generic-app'}}}
+        unhealthy = copy.deepcopy(row); unhealthy['State']['Health'] = {'Status': 'unhealthy'}
+        with tempfile.TemporaryDirectory(prefix='events-go-template-') as directory:
+            source = pathlib.Path(directory) / 'main.go'; source.write_text(program)
+            environment = {**os.environ, 'GOTOOLCHAIN': 'local', 'GO111MODULE': 'off'}
+            result = subprocess.run([shutil.which('go'), 'run', str(source), m.DOCKER_FORMAT], input=json.dumps([row, unhealthy]),
+                                    capture_output=True, text=True, timeout=90, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        values = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertIsNone(values[0]['health']); self.assertEqual(values[1]['health'], 'unhealthy')
+        self.assertTrue(values[0]['running'])
 
     def test_failed_read_is_partial_and_never_claims_no_errors_or_leaks_exception(self):
         self.fail = {'journalctl'}

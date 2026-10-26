@@ -23,7 +23,7 @@ DOCKER_FORMAT = ('{"id":{{json .Id}},"name":{{json .Name}},"state":{{json .State
                  '"running":{{json .State.Running}},"oom":{{json .State.OOMKilled}},'
                  '"exitCode":{{json .State.ExitCode}},"error":{{if .State.Error}}true{{else}}false{{end}},'
                  '"finishedAt":{{json .State.FinishedAt}},'
-                 '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'
+                 '"health":{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}},'
                  '"restart":{{json .HostConfig.RestartPolicy.Name}},'
                  '"service":{{json (index .Config.Labels "com.docker.compose.service")}}}')
 
