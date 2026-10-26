@@ -65,6 +65,13 @@ test('unavailable, missing and unsupported components cannot start an update', a
   assert.equal(h.node('[data-updates-list]').children.length, 3);
   for (const row of h.node('[data-updates-list]').children) assert.equal(row.children.find(node => node.tagName === 'button').disabled, true);
 });
+test('a current component with no candidate never renders a null version or a migration claim', async () => {
+  const h = fixture(() => ({ ...catalog, components: [{ ...component, status: 'current', canUpdate: false, candidateRelease: { version: null, imageDigest: null }, latestStable: { version: '8.5.12' }, current: { version: '8.5.12' } }] }));
+  await tick();
+  const row = h.node('[data-updates-list]').children[0];
+  assert.equal(row.children.some(node => node.textContent.includes('Aggiornamento compatibile:') || node.textContent.includes('migrazione')), false);
+  assert.equal(row.children.find(node => node.tagName === 'button').disabled, true);
+});
 test('compatible candidate is separate from a newer major and apply requires a fresh reviewed plan', async () => {
   const plan = { planId: 'p1', revision: 'revision', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '8.5.12', targetDigest: 'sha256:fixture', affectedServices: ['php-apache'], steps: ['Scarica', 'Verifica'], risks: ['Riavvio breve'], confirmationRequired: 'UPDATE' };
   const h = fixture(path => path.endsWith('/plan') ? plan : path.endsWith('/apply') ? { operationId: 'apply1', status: 'queued' } : { ...catalog, components: [{ ...component, latestStable: { version: '9.0.1' } }] });

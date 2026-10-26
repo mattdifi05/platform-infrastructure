@@ -49,12 +49,12 @@
         count++;
         var row = element('article'); row.className = 'cc-update-row';
         var name = element('div'); name.append(element('strong', text(item.label, item.id)), element('small', text(item.category, 'Componente'))); row.append(name);
-        var current = element('div'); current.append(element('small', 'In esecuzione'), element('strong', item.installed === false ? 'Non installato' : text(item.current && item.current.version, 'Non verificata'))); row.append(current);
+        var current = element('div'); current.append(element('small', 'Versione installata'), element('strong', item.installed === false ? 'Non installato' : text(item.current && item.current.version, 'Non verificata'))); row.append(current);
         var latest = element('div'); latest.append(element('small', 'Ultima stabile'), element('strong', text(item.latestStable && item.latestStable.version, 'Non disponibile'))); row.append(latest);
         var button = element('button', 'Rivedi aggiornamento'); button.type = 'button'; button.className = 'ops-button secondary compact';
         button.disabled = working || value.available !== true || value.canApply === false || !item.canUpdate || item.installed === false || item.status !== 'update-available' || !item.candidateRelease || !item.candidateRelease.imageDigest;
         button.addEventListener('click', function () { openPlan(item); }); row.append(button);
-        if (item.candidateRelease && item.latestStable && item.candidateRelease.version !== item.latestStable.version) row.append(element('p', 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · Ultima stabile: ' + item.latestStable.version + (item.compatibilityReason ? ' · ' + item.compatibilityReason : ' · La versione stabile più recente richiede una migrazione.')));
+        if (item.candidateRelease && item.candidateRelease.version && item.latestStable && item.latestStable.version && item.candidateRelease.version !== item.latestStable.version) row.append(element('p', 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · Ultima stabile: ' + item.latestStable.version + (item.compatibilityReason ? ' · ' + item.compatibilityReason : ' · La serie più recente richiede una verifica di compatibilità.')));
         row.append(element('p', (labels[item.status] || 'Stato non disponibile') + (item.blockedReason ? ' · ' + item.blockedReason : item.installed !== false && !item.candidateRelease && item.status !== 'current' ? ' · Nessun aggiornamento compatibile verificato.' : '') + ((item.services || []).length ? ' · Servizi: ' + item.services.join(', ') : '')));
         list.append(row);
       });

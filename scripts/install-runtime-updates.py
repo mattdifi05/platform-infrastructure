@@ -29,6 +29,8 @@ def discover(rows, infra):
         image = row['Config']['Image']
         name = row['Name'].lstrip('/')
         service = labels.get('com.docker.compose.service', name)
+        if not row['State']['Running'] and service.endswith(('-init', '-bootstrap')):
+            continue
         if not row['State']['Running'] and ((labels.get('com.docker.compose.project'), service) in active or name not in {service, 'enterprise-' + service, labels.get('com.docker.compose.project', '') + '-' + service + '-1'}):
             continue
         image = official.get(row['Image'], image)

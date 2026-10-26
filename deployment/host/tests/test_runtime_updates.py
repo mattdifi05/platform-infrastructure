@@ -497,6 +497,14 @@ class InstallerDiscoveryTests(unittest.TestCase):
         self.assertTrue(all(x['strategy'] == 'node-layer' for x in components))
         self.assertNotEqual(components[0]['id'], components[1]['id'])
 
+    def test_completed_initialization_helpers_are_not_runtime_update_targets(self):
+        rows = [self.runtime('web-proxy', 'nginx:1.30.5-alpine'),
+                self.runtime('storage-volume-init', 'nginx:1.30.5-alpine', running=False),
+                self.runtime('auth-bootstrap', 'platform/bootstrap:deployed', ['NODE_VERSION=26.10.0'], running=False)]
+        components = self.installer.discover(rows, pathlib.Path('/fixture/platform'))
+        self.assertEqual(len(components), 1)
+        self.assertEqual(components[0]['containers'], ['web-proxy'])
+
 
 if __name__ == '__main__':
     unittest.main()

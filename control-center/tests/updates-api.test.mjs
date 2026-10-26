@@ -45,6 +45,24 @@ test('Unix client signs exact envelopes with unique nonces and retains compatibl
   assert.deepEqual(requests[1].envelope.body, { action: 'plan', componentId: 'php', revision });
 });
 
+test('absent compatible or latest releases stay null while current inventory remains available', async t => {
+  const source = catalog(), item = source.components[0];
+  item.current.version = '8.5.12'; item.status = 'current'; item.canUpdate = false;
+  item.latestStable.version = '8.5.12';
+  const latest = { ...item.latestStable }, current = { ...item.current };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  for (const [candidate, stable] of [[null, latest], [null, null], [undefined, undefined]]) {
+    item.candidateRelease = candidate; item.latestStable = stable;
+    const actual = await client.catalog();
+    assert.equal(actual.available, true, 'Missing release metadata must not discard the verified inventory');
+    assert.equal(actual.revision, revision); assert.equal(actual.components.length, 1);
+    assert.deepEqual(actual.components[0].current, current);
+    assert.equal(actual.components[0].status, 'current'); assert.equal(actual.components[0].canUpdate, false);
+    assert.equal(actual.components[0].candidateRelease, null, 'An absent candidate must remain falsy for the UI');
+    assert.deepEqual(actual.components[0].latestStable, stable == null ? null : latest);
+  }
+});
+
 test('catalog never enables updates for absent components or unavailable native inventory', async t => {
   const source = catalog(); source.components[0].installed = false;
   const { client } = await fixture(t, (_body, res) => send(res, source));

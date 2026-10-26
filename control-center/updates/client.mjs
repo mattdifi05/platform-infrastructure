@@ -82,6 +82,7 @@ function sanitizeResult(body, value) {
       || value.components.length > 200 || value.operations.length > 100 || value.available && !token(value.revision)) throw new RuntimeUpdatesError(503, 'invalid_response');
   const seen = new Set();
   const release = value => {
+    if (value == null) return null;
     let sourceUrl = null;
     try { const url = new URL(value?.sourceUrl); if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash) sourceUrl = url.href; } catch {}
     return { version: text(value?.version, 128), imageDigest: digest(value?.imageDigest), sourceUrl };
