@@ -72,7 +72,7 @@ if grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.*(example\.com|localhost|change_me|REPLACE
 fi
 
 cd "$ROOT"
-export EMPTY_VPS_HOSTED_LOCK_SHA256=45a56612923c64022df1173ca11486445d20c5ef06aab7b02c960f85feea851b
+export EMPTY_VPS_HOSTED_LOCK_SHA256=693a4f67bf8ae1ff55fdee5d1ed24ee21827ae630d1f278c9b6443cb1d1c4235
 [[ $(sha256sum "$ROOT/config/no-hosted-workloads.lock.json" | cut -d ' ' -f 1) = "$EMPTY_VPS_HOSTED_LOCK_SHA256" ]] || {
   echo 'Empty-host workload lock differs from the reviewed candidate.' >&2
   exit 1
@@ -86,7 +86,7 @@ install -d -m 0700 "$ROOT/../src"
 }
 # Run the repository's existing secret manager inside a pinned Node image.
 # The checkout is read-only; only the ignored secrets directory is writable.
-NODE_IMAGE='node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
+NODE_IMAGE='node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797'
 if [[ ! -e "$ROOT/secrets/infra-secret-manager-master.key" ]]; then
   docker run --rm --network none --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$ROOT,dst=/workspace,readonly" \

@@ -118,7 +118,7 @@ testRunner("v2 broker Dockerfile is the exact immutable runtime import closure",
   );
   const expected = [
     "# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
-    "FROM node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
+    "FROM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797",
     "WORKDIR /opt/platform-docker-broker",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-contract.mjs /opt/platform-docker-broker/docker-action-contract.mjs",
     "COPY --chown=0:0 --chmod=0555 scripts/docker-action-activation.mjs /opt/platform-docker-broker/docker-action-activation.mjs",

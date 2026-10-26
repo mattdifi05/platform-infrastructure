@@ -47,7 +47,7 @@ const EXPECTED_BROKER_IMAGE_ENTRYPOINT = Object.freeze([
   "/opt/platform-docker-broker/docker-action-broker.mjs",
 ]);
 const EXPECTED_NODE_IMAGE_REFERENCE =
-  "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606";
+  "node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797";
 const EXPECTED_DOCKERFILE_FRONTEND_REFERENCE =
   "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e";
 const FIXED_ADAPTER_SOURCE_DIRECTORY = "scripts/docker-action-adapters";
