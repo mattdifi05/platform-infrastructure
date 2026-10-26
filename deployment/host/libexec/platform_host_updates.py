@@ -184,6 +184,21 @@ def inventory():
             'provider': 'apt', 'releaseUpgradeSupported': False, 'maintenanceRunning': active_maintenance()}
 
 
+def _canonical_package(name, installed):
+    """Map apt's shortened Multi-Arch names to one exact dpkg inventory key."""
+    if name in installed:
+        return name
+    base, separator, architecture = name.partition(':')
+    candidates = [key for key in installed if key.partition(':')[0] == base]
+    if separator:
+        # Never substitute a different explicit architecture. The sole unqualified
+        # inventory identity is acceptable only when no qualified sibling exists.
+        candidates = candidates if len(candidates) == 1 and ':' not in candidates[0] else []
+    if len(candidates) != 1:
+        raise HostUpdateError('package alias is missing or ambiguous in installed inventory')
+    return candidates[0]
+
+
 def _simulation(text, installed):
     packages, kept, collecting = [], [], False
     for line in text.splitlines():
@@ -205,6 +220,10 @@ def _simulation(text, installed):
         name, old, target = match.groups()
         if not _PACKAGE.fullmatch(name) or not _VERSION.fullmatch(target):
             raise HostUpdateError('invalid package candidate')
+        try:
+            name = _canonical_package(name, installed)
+        except HostUpdateError as error:
+            raise HostUpdateError('package plan adds packages or package alias is ambiguous') from error
         current = installed.get(name)
         if current is None or old is not None and old != current:
             raise HostUpdateError('package plan adds packages or inventory changed')
@@ -300,7 +319,8 @@ def apply(value, progress=None):
     automatic_before = _run(['apt-mark', 'showauto'], timeout=60).splitlines()
     if any(not _PACKAGE.fullmatch(name) for name in automatic_before):
         raise HostUpdateError('invalid automatic package metadata')
-    automatic = sorted({row['name'] for row in packages} & set(automatic_before))
+    automatic_names = {_canonical_package(name, installed) for name in automatic_before}
+    automatic = sorted({row['name'] for row in packages} & automatic_names)
     _persist_package_recovery(value, automatic, 'prepared')
     _emit(progress, stage='upgrade', state='running', packageCount=len(packages))
     upgrade_error = None

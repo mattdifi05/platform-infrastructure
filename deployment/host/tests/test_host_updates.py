@@ -210,6 +210,32 @@ class HostTests(unittest.TestCase):
         self.assertEqual(events[-1]['recoveryRequired'], True)
         self.assertEqual(events[-1]['state'], 'failed')
 
+    def test_real_multiarch_simulation_uses_canonical_installed_identity(self):
+        installed = {'libsystemd0:amd64': '259.5-0ubuntu3.4'}
+        simulation = 'Inst libsystemd0 [259.5-0ubuntu3.4] (259.5-0ubuntu3.5 Ubuntu [amd64])\n'
+        packages, _ = m._simulation(simulation, installed)
+        self.assertEqual(packages, [{'name': 'libsystemd0:amd64', 'currentVersion': '259.5-0ubuntu3.4', 'targetVersion': '259.5-0ubuntu3.5'}])
+        with self.assertRaisesRegex(m.HostUpdateError, 'ambiguous'):
+            m._simulation(simulation, {**installed, 'libsystemd0:i386': '259.5-0ubuntu3.4'})
+        self.assertEqual(m._canonical_package('curl:amd64', {'curl': '2.0'}), 'curl')
+        with self.assertRaises(m.HostUpdateError):
+            m._canonical_package('curl:arm64', {'curl': '2.0', 'curl:i386': '2.0'})
+        with self.assertRaises(m.HostUpdateError):
+            m._canonical_package('libsystemd0:arm64', installed)
+
+    def test_multiarch_automatic_flags_restore_using_canonical_plan_name(self):
+        installed = {'libsystemd0:amd64': '259.5-0ubuntu3.4'}
+        simulation = 'Inst libsystemd0 [259.5-0ubuntu3.4] (259.5-0ubuntu3.5 Ubuntu [amd64])\n'
+        packages, kept = m._simulation(simulation, installed)
+        value = m.plan({'bootId': BOOT, 'checkedAt': int(m.time.time()), 'packages': packages, 'keptBack': kept,
+                        'installedFingerprint': m._digest(installed), 'candidateFingerprint': m._digest(packages), 'rebootRequired': False})
+        with patch.object(m, '_installed', side_effect=[installed, {'libsystemd0:amd64': '259.5-0ubuntu3.5'}]), patch.object(m, '_run', side_effect=[simulation, simulation, 'libsystemd0\n', '', '']) as run:
+            result = m.apply(value)
+        self.assertEqual(result['state'], 'succeeded')
+        self.assertIn('libsystemd0:amd64=259.5-0ubuntu3.5', run.call_args_list[-2].args[0])
+        self.assertEqual(run.call_args_list[-1].args[0], ['apt-mark', 'auto', '--', 'libsystemd0:amd64'])
+        self.assertEqual(self.recovery.call_args.args[1], ['libsystemd0:amd64'])
+
     def test_running_maintenance_blocks_reboot(self):
         with patch.object(m, 'active_maintenance', return_value=True):
             with self.assertRaisesRegex(m.HostUpdateError, 'reboot blocked'):
