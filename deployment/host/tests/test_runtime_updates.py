@@ -112,6 +112,16 @@ class UpdatesTests(unittest.TestCase):
         self.docker = DockerFixture()
         patch.object(m, 'docker', self.docker.docker).start()
         patch.object(m, 'inspect', self.docker.inspect).start()
+        real_run = m.run
+        def fixture_run(argv, **kwargs):
+            if argv[:2] == ['docker', 'exec'] and len(argv) >= 4:
+                row = self.docker.inspect(argv[2])
+                if row is not None and argv[3:] == ['php', '-r', 'echo PHP_VERSION;']:
+                    environment = dict(value.split('=', 1) for value in row['Config'].get('Env', []) if '=' in value)
+                    return environment['PHP_VERSION'] + '\n'
+            # Keep the actual error-redaction path and other deliberate mocks.
+            return real_run(argv, **kwargs)
+        patch.object(m, 'run', side_effect=fixture_run).start()
         # Root ancestry is tested separately with synthetic lstat metadata below.
         patch.object(m, 'protected', lambda value: real_path(value)).start()
         self.release = {'version': '8.5.12', 'imageDigest': NEW_IMAGE, 'imageReference': 'docker.io/library/php:8.5.12-apache', 'sourceUrl': 'https://www.php.net/releases/'}

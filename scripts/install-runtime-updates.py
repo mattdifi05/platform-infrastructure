@@ -34,15 +34,14 @@ def discover(rows, infra):
         image = official.get(row['Image'], image)
         entry = {'strategy': 'observe', 'category': 'Piattaforma', 'compatibility': 'minor', 'tagSuffix': '', 'tagPrefix': '', 'architecture': 'amd64'}
         if 'phpmyadmin' in name:
-            entry.update(label='phpMyAdmin', category='Amministrazione', repository='library/phpmyadmin', strategy='reviewed-build', dockerfile=str(infra / 'deployment/docker/phpmyadmin-remediated.Dockerfile'), probe=['php', '-r', 'echo PMA_VERSION;'])
+            entry.update(label='phpMyAdmin', category='Amministrazione', repository='library/phpmyadmin', strategy='reviewed-build', dockerfile=str(infra / 'deployment/docker/phpmyadmin-remediated.Dockerfile'), probe=['php', '-r', 'define("VERSION_SUFFIX", ""); require "/var/www/html/libraries/classes/Version.php"; echo \\PhpMyAdmin\\Version::VERSION;'])
         elif 'phppgadmin' in name:
             entry.update(label='phpPgAdmin', category='Amministrazione', blockedReason='Il pacchetto usa un builder dedicato senza una release stabile numerata verificabile. Richiede manutenzione assistita.')
         elif 'PHP_VERSION' in env:
             entry.update(label='PHP ' + '.'.join(env['PHP_VERSION'].split('.')[:2]), category='Runtime', repository='library/php', strategy='php-build', tagSuffix='-apache', versionEnv='PHP_VERSION', dockerfile=str(infra / 'docker/php-apache.Dockerfile'), probe=['php', '-r', 'echo PHP_VERSION;'])
         elif 'NODE_VERSION' in env:
             # Same-major Node binary layered over the exact existing application image.
-            service = labels.get('com.docker.compose.service', name)
-            entry.update(label='Node.js · ' + service, category='Runtime', repository='library/node', strategy='node-layer', compatibility='major', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
+            entry.update(label='Node.js · ' + name, category='Runtime', repository='library/node', strategy='node-layer', compatibility='major', tagSuffix='-alpine', versionEnv='NODE_VERSION', probe=['node', '--version'])
         elif 'PG_VERSION' in env:
             entry.update(label='PostgreSQL ' + env.get('PG_MAJOR', ''), category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='major', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'MARIADB_VERSION' in env:

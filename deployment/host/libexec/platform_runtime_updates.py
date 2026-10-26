@@ -209,13 +209,13 @@ def observed(row):
         version = env.get(row.get('versionEnv', ''), '')
         if version and row.get('versionEnv') == 'MARIADB_VERSION':
             version = version.split(':')[-1].split('+')[0]
-        if not version and r['State']['Running'] and row.get('probe'):
+        if r['State']['Running'] and row.get('probe'):
             try:
                 output = run(['docker', 'exec', r['Id'], *row['probe']], timeout=10, include_stderr=True)
                 match = re.search(r'(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)', output)
                 version = match.group(1) if match else ''
             except Rejected:
-                pass
+                version = ''
         if not version:
             labels = docker('GET', '/images/' + r['Image'] + '/json')['Config'].get('Labels') or {}
             version = labels.get('org.opencontainers.image.version', '')
