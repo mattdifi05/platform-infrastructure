@@ -191,6 +191,52 @@ test('HTTP uses injected JSON reader and never exposes unexpected native/adapter
 
 test('route capabilities require viewer for reads, admin for checks, fresh owner for plans/apply in both namespaces', () => {
   for (const prefix of ['/control', '/control/v1']) for (const [method, suffix, capability] of [
-    ['GET', '', 'viewer'], ['POST', '/check', 'admin'], ['POST', '/php/plan', 'owner:fresh'], ['POST', '/php/apply', 'owner:fresh'], ['GET', '/operations/update-1', 'viewer'],
+    ['GET', '', 'viewer'], ['POST', '/check', 'admin'], ['POST', '/php/plan', 'owner:fresh'], ['POST', '/php/apply', 'owner:fresh'], ['POST', '/all/plan', 'owner:fresh'], ['POST', '/all/apply', 'owner:fresh'], ['GET', '/operations/update-1', 'viewer'],
+    ['GET', '/system', 'viewer'], ['POST', '/system/check', 'admin'], ['POST', '/system/plan', 'owner:fresh'], ['POST', '/system/apply', 'owner:fresh'], ['POST', '/system/reboot/plan', 'owner:fresh'], ['POST', '/system/reboot/apply', 'owner:fresh'],
   ]) assert.equal(resolveAuthorizationCapability(method, prefix + '/runtime-updates' + suffix).capability, capability);
+});
+
+test('system API exposes counts only and binds separate UPDATE and REBOOT confirmations', async t => {
+  let source = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 1, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [], packages: [{ name: 'private-package' }] };
+  const { client, requests } = await fixture(t, (_body, res) => send(res, source));
+  const inventory = await client.hostCatalog();
+  assert.equal(inventory.updateCount, 1); assert.equal(inventory.canReboot, true);
+  assert.doesNotMatch(JSON.stringify(inventory), /private-package|packages/);
+  source = { planId: 'host-plan', revision, expiresAt: plan.expiresAt, kind: 'host-upgrade', packageCount: 1, steps: ['Installa'], risks: ['Fermo temporaneo'], confirmationRequired: 'UPDATE', packages: [{ name: 'private-package' }] };
+  const approved = await client.hostPlan({ revision });
+  assert.equal(approved.packageCount, 1); assert.doesNotMatch(JSON.stringify(approved), /private-package|packages/);
+  assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision });
+  const fields = { revision, planId: 'host-plan', confirmation: 'UPDATE', idempotencyKey: 'host-1' };
+  await assert.rejects(client.hostRebootApply(fields), error => error.status === 400);
+  assert.throws(() => validateRuntimeUpdatesRequest({ action: 'host-apply', ...fields, confirmation: 'REBOOT' }), error => error.status === 400);
+  source = { operationId: 'reboot-1', status: 'queued' };
+  assert.equal((await client.hostRebootApply({ ...fields, confirmation: 'REBOOT' })).operationId, 'reboot-1');
+});
+
+test('batch plans bind every target and service without exposing native fields or accepting incomplete membership', async t => {
+  const source = { ...plan, componentId: 'all', kind: 'batch', targetVersion: 'Aggiornamenti compatibili', components: [{ id: 'php', label: 'PHP', targetVersion: '8.5.12', targetDigest: imageDigest, affectedServices: ['php-app'], rawEnv: 'SECRET' }] };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  const result = await client.plan('all', { revision });
+  assert.equal(result.kind, 'batch'); assert.equal(result.components[0].targetVersion, '8.5.12');
+  assert.doesNotMatch(JSON.stringify(result), /SECRET|rawEnv/);
+  source.components[0].affectedServices.push('unreviewed-service');
+  await assert.rejects(client.plan('all', { revision }), error => error.code === 'invalid_response');
+  source.components = [];
+  await assert.rejects(client.plan('all', { revision }), error => error.code === 'invalid_response');
+});
+
+test('per-service progress retains partial success and rollback while redacting errors and rejecting false totals', async t => {
+  const source = { id: 'batch-1', status: 'failed', stage: 'Interrotto', completedSteps: 1, totalSteps: 2,
+    error: 'protected failure detail SECRET',
+    currentComponent: 'redis', currentService: 'redis-app', completedServices: 1, totalServices: 2,
+    serviceResults: [{ componentId: 'php', service: 'php-app', status: 'succeeded', stage: 'Aggiornato' }, { componentId: 'redis', service: 'redis-app', status: 'rolled-back', stage: 'Ripristinato', error: '/etc/SECRET' }],
+    componentResults: [{ componentId: 'php', status: 'succeeded' }, { componentId: 'redis', status: 'failed' }] };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  const result = await client.operation('batch-1');
+  assert.equal(result.currentService, 'redis-app'); assert.equal(result.completedServices, 1);
+  assert.match(result.error, /Operazione non riuscita/);
+  assert.deepEqual(result.serviceResults.map(item => item.status), ['succeeded', 'rolled-back']);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  source.totalServices = 3;
+  await assert.rejects(client.operation('batch-1'), error => error.code === 'invalid_response');
 });

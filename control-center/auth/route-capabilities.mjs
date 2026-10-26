@@ -116,6 +116,12 @@ const CONTROL_ROUTES = Object.freeze([
 
   viewer("runtime-updates.catalog", "control", "runtime-updates"),
   admin("runtime-updates.check", "control", "runtime-updates", "check"),
+  viewer("runtime-updates.host.catalog", "control", "runtime-updates", "system"),
+  admin("runtime-updates.host.check", "control", "runtime-updates", "system", "check"),
+  ownerFresh("POST", "runtime-updates.host.plan", "control", "runtime-updates", "system", "plan"),
+  ownerFresh("POST", "runtime-updates.host.apply", "control", "runtime-updates", "system", "apply"),
+  ownerFresh("POST", "runtime-updates.host.reboot.plan", "control", "runtime-updates", "system", "reboot", "plan"),
+  ownerFresh("POST", "runtime-updates.host.reboot.apply", "control", "runtime-updates", "system", "reboot", "apply"),
   ownerFresh("POST", "runtime-updates.plan", "control", "runtime-updates", parameter("componentId"), "plan"),
   ownerFresh("POST", "runtime-updates.apply", "control", "runtime-updates", parameter("componentId"), "apply"),
   viewer("runtime-updates.operation", "control", "runtime-updates", "operations", parameter("operationId")),

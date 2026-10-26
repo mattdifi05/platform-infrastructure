@@ -3,10 +3,12 @@ import { openSync, closeSync, fstatSync, readFileSync, lstatSync, constants } fr
 import { createHmac, randomBytes } from 'node:crypto';
 import path from 'node:path';
 
-const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation']);
+const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation', 'host-catalog', 'host-check', 'host-plan', 'host-apply', 'host-reboot-plan', 'host-reboot-apply']);
 const fields = {
   catalog: [], check: [], plan: ['componentId', 'revision'],
   apply: ['componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'], operation: ['operationId'],
+  'host-catalog': [], 'host-check': [], 'host-plan': ['revision'], 'host-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
+  'host-reboot-plan': ['revision'], 'host-reboot-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
 };
 const token = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value);
 export const validRuntimeUpdatesId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value);
@@ -32,7 +34,7 @@ export function validateRuntimeUpdatesRequest(body) {
   const required = fields[body.action];
   if (Object.keys(body).length !== required.length + 1 || Object.keys(body).some(key => key !== 'action' && !required.includes(key))) invalid();
   for (const key of required) {
-    if (key === 'confirmation' ? body[key] !== 'UPDATE' : key === 'componentId' || key === 'operationId' || key === 'planId' ? !validRuntimeUpdatesId(body[key]) : !token(body[key])) invalid();
+    if (key === 'confirmation' ? body[key] !== (body.action === 'host-reboot-apply' ? 'REBOOT' : 'UPDATE') : key === 'componentId' || key === 'operationId' || key === 'planId' ? !validRuntimeUpdatesId(body[key]) : !token(body[key])) invalid();
   }
   return Object.freeze({ ...body });
 }
@@ -59,11 +61,54 @@ function operation(value) {
   for (const key of ['createdAt', 'startedAt', 'finishedAt']) if (timestamp(value[key])) result[key] = value[key];
   result.recoveryRequired = value.recoveryRequired === true;
   if (value.error) result.error = 'Operazione non riuscita. Controlla lo stato e verifica un nuovo piano.';
+  const serviceStates = new Set(['queued', 'preparing', 'checking', 'updating', 'verifying', 'verified', 'succeeded', 'failed', 'rolled-back', 'skipped']);
+  for (const key of ['currentComponent', 'currentService']) if (value[key] === null || text(value[key], 256)) result[key] = value[key];
+  if (value.serviceResults !== undefined) {
+    if (!Array.isArray(value.serviceResults) || value.serviceResults.length > 1000
+        || !Number.isSafeInteger(value.completedServices) || !Number.isSafeInteger(value.totalServices)
+        || value.completedServices < 0 || value.completedServices > value.totalServices || value.totalServices !== value.serviceResults.length) throw new RuntimeUpdatesError(503, 'invalid_response');
+    const seen = new Set();
+    result.serviceResults = value.serviceResults.map(item => {
+      const identity = item.componentId + ':' + item.service;
+      if (!validRuntimeUpdatesId(item.componentId) || !text(item.service, 256) || !text(item.stage, 256) || !serviceStates.has(item.status) || seen.has(identity)) throw new RuntimeUpdatesError(503, 'invalid_response');
+      seen.add(identity);
+      const safe = { componentId: item.componentId, service: item.service, status: item.status, stage: item.stage };
+      for (const key of ['startedAt', 'finishedAt']) if (timestamp(item[key])) safe[key] = item[key];
+      if (item.error) safe.error = 'Servizio non aggiornato. Consulta il registro della manutenzione.';
+      return safe;
+    });
+    result.completedServices = value.completedServices; result.totalServices = value.totalServices;
+  }
+  if (value.componentResults !== undefined) {
+    if (!Array.isArray(value.componentResults) || value.componentResults.length > 200) throw new RuntimeUpdatesError(503, 'invalid_response');
+    result.componentResults = value.componentResults.map(item => {
+      if (!validRuntimeUpdatesId(item.componentId) || !serviceStates.has(item.status)) throw new RuntimeUpdatesError(503, 'invalid_response');
+      return { componentId: item.componentId, status: item.status };
+    });
+  }
   return result;
 }
 function sanitizeResult(body, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RuntimeUpdatesError(503, 'invalid_response');
-  if (body.action === 'check' || body.action === 'apply') return accepted(value);
+  if (['check', 'apply', 'host-check', 'host-apply', 'host-reboot-apply'].includes(body.action)) return accepted(value);
+  if (body.action === 'host-catalog') {
+    const count = item => Number.isSafeInteger(item) && item >= 0 && item <= 100000;
+    if (value.schema !== 'host-updates/v1' || typeof value.available !== 'boolean' || value.available && !token(value.revision)
+        || !count(value.updateCount) || !count(value.keptBackCount) || !Array.isArray(value.operations)) throw new RuntimeUpdatesError(503, 'invalid_response');
+    return { schema: value.schema, available: value.available, revision: token(value.revision) ? value.revision : null,
+      os: { id: text(value.os?.id, 80), name: text(value.os?.name, 128), version: text(value.os?.version, 80), kernel: text(value.os?.kernel, 128) },
+      checkedAt: timestamp(value.checkedAt), updateCount: value.updateCount, keptBackCount: value.keptBackCount,
+      rebootRequired: value.rebootRequired === true, canReboot: value.available && value.rebootRequired === true && value.canReboot === true, canCheck: value.available && value.canCheck === true, canApply: value.available && value.canApply === true,
+      operations: value.operations.map(operation) };
+  }
+  if (body.action === 'host-plan' || body.action === 'host-reboot-plan') {
+    const reboot = body.action === 'host-reboot-plan';
+    if (!validRuntimeUpdatesId(value.planId) || value.revision !== body.revision || !timestamp(value.expiresAt)
+        || value.confirmationRequired !== (reboot ? 'REBOOT' : 'UPDATE') || value.kind !== (reboot ? 'host-reboot' : 'host-upgrade')
+        || !Array.isArray(value.steps) || !Array.isArray(value.risks) || !Number.isSafeInteger(value.packageCount) || value.packageCount < 0) throw new RuntimeUpdatesError(503, 'invalid_response');
+    return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, kind: value.kind, packageCount: value.packageCount,
+      steps: strings(value.steps), risks: strings(value.risks), confirmationRequired: value.confirmationRequired };
+  }
   if (body.action === 'operation') {
     const result = operation(value);
     if (result.id !== body.operationId) throw new RuntimeUpdatesError(503, 'invalid_response');
@@ -74,9 +119,24 @@ function sanitizeResult(body, value) {
         || value.componentId !== body.componentId || !timestamp(value.expiresAt) || !text(value.targetVersion, 128)
         || !digest(value.targetDigest) || !Array.isArray(value.affectedServices) || !Array.isArray(value.steps) || !Array.isArray(value.risks)
         || value.confirmationRequired !== 'UPDATE') throw new RuntimeUpdatesError(503, 'invalid_response');
-    return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, componentId: value.componentId,
+    const result = { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, componentId: value.componentId,
       targetVersion: value.targetVersion, targetDigest: value.targetDigest, affectedServices: strings(value.affectedServices),
       steps: strings(value.steps), risks: strings(value.risks), confirmationRequired: 'UPDATE' };
+    if (body.componentId === 'all') {
+      if (value.kind !== 'batch' || !Array.isArray(value.components) || !value.components.length || value.components.length > 200) throw new RuntimeUpdatesError(503, 'invalid_response');
+      const seen = new Set();
+      result.kind = 'batch';
+      result.components = value.components.map(item => {
+        const affectedServices = strings(item.affectedServices);
+        if (!validRuntimeUpdatesId(item.id) || item.id === 'all' || seen.has(item.id) || !text(item.label, 256)
+            || !text(item.targetVersion, 128) || !digest(item.targetDigest) || !affectedServices.length) throw new RuntimeUpdatesError(503, 'invalid_response');
+        seen.add(item.id);
+        return { id: item.id, label: item.label, targetVersion: item.targetVersion, targetDigest: item.targetDigest, affectedServices };
+      });
+      const services = result.components.flatMap(item => item.affectedServices).sort();
+      if (JSON.stringify(services) !== JSON.stringify([...result.affectedServices].sort())) throw new RuntimeUpdatesError(503, 'invalid_response');
+    } else if (value.kind === 'batch' || value.components !== undefined) throw new RuntimeUpdatesError(503, 'invalid_response');
+    return result;
   }
   if (value.schema !== 'runtime-updates/v1' || typeof value.available !== 'boolean' || !Array.isArray(value.components) || !Array.isArray(value.operations)
       || value.components.length > 200 || value.operations.length > 100 || value.available && !token(value.revision)) throw new RuntimeUpdatesError(503, 'invalid_response');
@@ -128,7 +188,7 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
             if (settled) return;
             try {
               const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-              if (![200, 202].includes(res.statusCode) || value.error) {
+              if (![200, 202].includes(res.statusCode)) {
                 const status = Number.isInteger(value.error?.status) && value.error.status >= 400 && value.error.status <= 599 ? value.error.status : res.statusCode >= 400 ? res.statusCode : 503;
                 finish(new RuntimeUpdatesError(status, value.error?.code));
               } else finish(null, sanitizeResult(body, value));
@@ -147,5 +207,8 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
     plan: (componentId, payload) => call({ ...payload, action: 'plan', componentId }),
     apply: (componentId, payload) => call({ ...payload, action: 'apply', componentId }),
     operation: operationId => call({ action: 'operation', operationId }),
+    hostCatalog: () => call({ action: 'host-catalog' }), hostCheck: () => call({ action: 'host-check' }),
+    hostPlan: payload => call({ ...payload, action: 'host-plan' }), hostApply: payload => call({ ...payload, action: 'host-apply' }),
+    hostRebootPlan: payload => call({ ...payload, action: 'host-reboot-plan' }), hostRebootApply: payload => call({ ...payload, action: 'host-reboot-apply' }),
   });
 }

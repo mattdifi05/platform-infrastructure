@@ -16,13 +16,14 @@ class Node {
   showModal() { this.open = true; }
   close() { this.open = false; }
 }
-function fixture(request) {
+function fixture(request, host = false) {
   const nodes = new Map(), calls = [], timers = new Map(); let timer = 0, scan;
   const root = new Node(); root.isConnected = true;
   root.querySelector = selector => { if (selector === '[data-updates-search]') throw Error('Search control was removed'); if (!nodes.has(selector)) nodes.set(selector, new Node()); return nodes.get(selector); };
   root.querySelector('[data-updates-category]').value = 'all';
   root.querySelector('[data-updates-progress]').querySelector = () => root.querySelector('progress');
-  const document = { readyState: 'complete', hidden: false, body: {}, createElement: tag => new Node(tag), querySelectorAll: () => root.isConnected ? [root] : [], addEventListener() {} };
+  root.querySelector('[data-host-updates-progress]').querySelector = () => root.querySelector('progress');
+  const document = { readyState: 'complete', hidden: false, body: {}, createElement: tag => new Node(tag), querySelectorAll: selector => root.isConnected && selector === (host ? '[data-host-updates]' : '[data-runtime-updates]') ? [root] : [], addEventListener() {} };
   const context = { document, Headers, Date, Set, WeakSet, Number, Array, String, Error, encodeURIComponent, crypto: { randomUUID: () => 'fixture-uuid' }, clearTimeout: id => timers.delete(id), setTimeout: (callback, delay) => { timers.set(++timer, { callback, delay }); return timer; } };
   context.window = { addEventListener() {}, MutationObserver: class {} , controlCenterRuntimeUpdates: { authenticate: async () => calls.push('authenticate'), request: async (path, payload) => { calls.push({ path, payload }); return request(path, payload); } } };
   context.MutationObserver = class { constructor(callback) { scan = callback; } observe() {} };
@@ -36,6 +37,7 @@ test('settings markup has accessible update controls and uses existing vendored 
   const css = readFileSync(new URL('../styles/runtime-updates.css', import.meta.url), 'utf8');
   assert.match(css, /\.cc-settings > \.ops-project-detail-panel\{border-radius:var\(--cc-radius-2xl,16px\)\}/);
   assert.match(html, /data-runtime-updates/); assert.match(html, /<dialog/); assert.match(html, /aria-live="polite"/); assert.match(html, /data-fa-version="7.3.1"/); assert.doesNotMatch(html, /Installa componente|data-updates-search|type="search"|https:\/\//);
+  assert.ok(html.indexOf('data-host-updates aria-labelledby') < html.indexOf('data-runtime-updates aria-labelledby'), 'OS is a separate panel above runtime updates');
 });
 test('check remains queued until operation readback and polls pending operations at two seconds', async () => {
   const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' } : catalog);
@@ -51,6 +53,15 @@ test('late catalog response cannot render after navigation disconnects the panel
   let resolve; const promise = new Promise(yes => { resolve = yes; }); const h = fixture(() => promise);
   h.root.isConnected = false; h.scan(); resolve(catalog); await tick();
   assert.equal(h.node('[data-updates-list]').children.length, 0); assert.equal(h.timers.size, 0);
+});
+test('metadata checks finish their real step progress instead of leaving an indeterminate bar', async () => {
+  const h = fixture(path => path.endsWith('/check') ? { operationId: 'check1', status: 'queued' }
+    : path.includes('/operations/') ? { id: 'check1', status: 'succeeded', stage: 'Verifica completata', completedSteps: 19, totalSteps: 19 } : catalog);
+  await tick(); await h.node('[data-updates-check]').listeners.click();
+  await [...h.timers.values()][0].callback(); await tick();
+  assert.equal(h.node('progress').max, 19); assert.equal(h.node('progress').value, 19);
+  assert.match(h.node('[data-updates-stage]').textContent, /Verifica completata/);
+  assert.doesNotMatch(h.node('[data-updates-stage]').textContent, /19 servizi/);
 });
 test('closing a plan before passkey returns prevents the plan request and apply', async () => {
   const h = fixture(() => catalog); await tick();
@@ -97,11 +108,111 @@ test('one runtime family displays all known mixed versions and reviews a single 
   const current = rows[0].children[1].children[1].textContent;
   assert.equal(current, 'Da uniformare: 24.22.0 / 26.10.0'); assert.doesNotMatch(current, /Non verificata/);
   assert.match(h.node('[data-updates-summary]').textContent, /^1 componente · 1 aggiornamento disponibile/);
-  const button = rows[0].children.find(node => node.tagName === 'button'); assert.equal(button.textContent, 'Uniforma runtime'); assert.equal(button.disabled, false);
+  const button = rows[0].children.find(node => node.tagName === 'button'); assert.equal(button.textContent, 'Aggiorna'); assert.equal(button.disabled, false);
   button.listeners.click(); await tick();
   const details = h.node('[data-updates-plan-details]').children.map(node => node.textContent).join('\n');
   assert.match(details, /→ 26\.12\.1/); assert.match(details, /Versione unica per tutti i servizi elencati/);
   for (const service of services) assert.ok(details.includes(service));
   assert.equal(h.calls.filter(call => call.path?.endsWith('/plan')).length, 1);
   assert.equal(h.calls.some(call => call.path?.endsWith('/apply')), false);
+});
+async function poll(h) { const timer = [...h.timers.values()][0]; assert.ok(timer); await timer.callback(); await tick(); }
+test('updatable components sort first and idle catalog refresh does not flash busy or disable actions', async () => {
+  let resolve; let count = 0;
+  const h = fixture(() => ++count === 1 ? { ...catalog, components: [{ ...component, id: 'current', status: 'current', canUpdate: false }, component] } : new Promise(yes => { resolve = yes; })); await tick();
+  assert.equal(h.node('[data-updates-list]').children[0].children[0].children[0].textContent, 'PHP');
+  const loading = [...h.timers.values()][0].callback();
+  assert.equal(h.node('[data-updates-check]').disabled, false); assert.equal(h.node('[data-updates-all]').disabled, false);
+  assert.equal(h.node('[data-updates-progress]').hidden, true); assert.equal(h.root.attributes['aria-busy'], 'false');
+  resolve(catalog); await loading;
+});
+test('pending operation polls only its status and confirms all services before displaying a full bar', async () => {
+  let operation = { id: 'op', status: 'running', stage: 'verifica', totalServices: 2, completedServices: 2, currentService: 'php-app', serviceResults: [{ service: 'php-app', status: 'verifying', stage: 'Controllo HTTP' }, { service: 'other-app', status: 'verified' }] };
+  const h = fixture(path => path.includes('/operations/') ? operation : { ...catalog, operations: [operation] }); await tick();
+  assert.equal(h.calls.length, 1); await poll(h);
+  assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates').length, 1, 'pending must not perform another expensive catalog request');
+  assert.equal(h.node('progress').value, ''); assert.equal(h.node('progress').attributes.value, undefined);
+  assert.equal(h.node('[data-updates-services]').children.length, 2); assert.match(h.node('[data-updates-stage]').textContent, /php-app/);
+  operation = { ...operation, status: 'succeeded', serviceResults: operation.serviceResults.map(service => ({ ...service, status: 'verified' })) };
+  await poll(h);
+  assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates').length, 2, 'terminal status refreshes catalog once');
+  assert.equal(h.node('progress').value, 2); assert.equal(h.node('progress').max, 2);
+});
+test('self update reconnects after a dropped poll and preserves operation without another catalog request', async () => {
+  let attempts = 0;
+  const operation = { id: 'self', status: 'running', stage: 'Riavvio Control Center', totalServices: 1, completedServices: 0, currentService: 'control-center' };
+  const h = fixture(path => { if (path.includes('/operations/')) { if (++attempts === 1) throw Error('Failed to fetch'); return { ...operation, status: 'succeeded', completedServices: 1 }; } return { ...catalog, operations: attempts > 1 ? [] : [operation] }; }); await tick();
+  await poll(h); assert.match(h.node('[data-updates-status]').textContent, /Riconnessione automatica/); assert.equal([...h.timers.values()][0].delay, 2000);
+  assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates').length, 1);
+  await poll(h); assert.match(h.node('[data-updates-status]').textContent, /completata/); assert.equal(h.node('[data-updates-check]').disabled, false);
+});
+test('batch review enumerates targets, submits one all operation and retains service failure evidence', async () => {
+  const plan = { kind: 'batch', componentId: 'all', planId: 'all-plan', revision: 'revision', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '2 componenti', targetDigest: 'sha256:aggregate', components: [{ id: 'php', label: 'PHP', targetVersion: '8.5.12', targetDigest: 'sha256:fixture', affectedServices: ['php-app'] }, { id: 'node', label: 'Node.js', targetVersion: '26.12.1', targetDigest: 'sha256:fixture', affectedServices: ['node-app'] }], affectedServices: ['php-app', 'node-app'], steps: ['Prepara tutti', 'Verifica tutti'], risks: ['Riavvio servizi'], confirmationRequired: 'UPDATE' };
+  const operation = { id: 'batch1', status: 'failed', stage: 'Rollback completato dopo errore', totalServices: 2, completedServices: 1, error: 'Verifica non riuscita', serviceResults: [{ componentId: 'php', service: 'php-app', status: 'rolled-back' }, { componentId: 'node', service: 'node-app', status: 'failed' }] };
+  const h = fixture(path => path.endsWith('/all/plan') ? plan : path.endsWith('/all/apply') ? { operationId: 'batch1', status: 'queued' } : path.includes('/operations/') ? operation : catalog); await tick();
+  h.node('[data-updates-all]').listeners.click(); await tick();
+  const details = h.node('[data-updates-plan-details]').children;
+  assert.ok(details.find(node => node.tagName === 'ul').children.some(node => node.textContent.includes('Node.js → 26.12.1')));
+  assert.equal(h.node('[data-updates-apply]').disabled, true);
+  h.node('[data-updates-confirm]').value = 'UPDATE'; h.node('[data-updates-confirm]').listeners.input(); await h.node('[data-updates-apply]').listeners.click();
+  assert.equal(h.calls.filter(call => call.path?.endsWith('/all/apply')).length, 1); assert.equal(h.calls.filter(call => call === 'authenticate').length, 2);
+  await poll(h); assert.equal(h.node('progress').value, 1); assert.equal(h.node('[data-updates-services]').children[1].attributes['data-service-status'], 'failed'); assert.equal(h.node('[data-updates-all]').disabled, false);
+});
+test('batch success stays active through preparation and verifies each service before completion', async () => {
+  let stage = 0;
+  const services = ['php-app', 'node-app'];
+  const operations = [
+    { id: 'all-op', status: 'preparing', stage: 'Preparazione immagini', totalServices: 0, completedServices: 0, serviceResults: [] },
+    { id: 'all-op', status: 'updating', stage: 'Aggiornamento servizi', currentComponent: 'node', currentService: 'node-app', totalServices: 2, completedServices: 1, serviceResults: services.map((service, index) => ({ service, status: index ? 'updating' : 'verified' })) },
+    { id: 'all-op', status: 'succeeded', stage: 'Verifica finale completata', totalServices: 2, completedServices: 2, serviceResults: services.map(service => ({ service, status: 'verified' })) },
+  ];
+  const h = fixture(path => path.includes('/operations/') ? operations[++stage] : { ...catalog, operations: stage === 0 ? [operations[0]] : [] }); await tick();
+  assert.equal(h.node('progress').attributes.value, undefined); assert.equal(h.node('[data-updates-all]').disabled, true);
+  await poll(h); assert.equal(h.node('progress').value, 1); assert.match(h.node('[data-updates-stage]').textContent, /node-app/);
+  await poll(h); assert.equal(h.node('progress').value, 2); assert.equal(h.node('[data-updates-all]').disabled, false);
+  assert.ok(h.node('[data-updates-services]').children.every(row => row.attributes['data-service-status'] === 'verified'));
+  assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates').length, 2);
+});
+const hostCatalog = { schema: 'host-updates/v1', available: true, revision: 'host-revision', os: { id: 'ubuntu', name: 'Ubuntu', version: '24.04' }, checkedAt: new Date().toISOString(), updateCount: 1, keptBackCount: 1, rebootRequired: true, canCheck: true, canApply: true, operations: [] };
+test('OS catalog loads independently once and never applies upgrades or reboots on mount', async () => {
+  const h = fixture(() => hostCatalog, true); await tick();
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].path, '/control/runtime-updates/system'); assert.equal(h.timers.size, 0);
+  assert.equal(h.node('[data-host-updates-os]').textContent, 'Ubuntu 24.04');
+  assert.match(h.node('[data-host-updates-summary]').textContent, /Riavvio richiesto/);
+  assert.equal(h.node('[data-host-updates-reboot]').hidden, false);
+  assert.doesNotMatch(renderRuntimeUpdates(), /data-host-updates-packages/);
+  assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
+});
+test('OS upgrade and reboot require distinct reviewed confirmation and recover connection after server maintenance', async () => {
+  for (const rebooting of [false, true]) {
+    let polls = 0;
+    const kind = rebooting ? 'host-reboot' : 'host-upgrade', expected = rebooting ? 'REBOOT' : 'UPDATE';
+    const plan = { kind, planId: 'host-plan', revision: 'host-revision', expiresAt: new Date(Date.now() + 60000).toISOString(), packageCount: hostCatalog.updateCount, steps: ['Prepara', 'Verifica'], risks: ['Indisponibilità temporanea'], confirmationRequired: expected };
+    const h = fixture(path => path.endsWith('/plan') ? plan : path.endsWith('/apply') ? { operationId: 'host-op', status: 'queued' } : path.includes('/operations/') ? (++polls === 1 ? Promise.reject(Error('connection reset')) : { id: 'host-op', status: 'succeeded', stage: 'Server verificato', totalSteps: 2, completedSteps: 2 }) : hostCatalog, true);
+    await tick(); h.node(rebooting ? '[data-host-updates-reboot]' : '[data-host-updates-upgrade]').listeners.click(); await tick();
+    assert.match(h.node('[data-host-updates-confirm-prompt]').textContent, new RegExp(expected));
+    assert.ok(!h.node('[data-host-updates-plan-details]').children.some(node => node.textContent.includes('openssl')), 'package names never appear in OS review');
+    h.node('[data-host-updates-confirm]').value = rebooting ? 'UPDATE' : 'REBOOT'; h.node('[data-host-updates-confirm]').listeners.input(); assert.equal(h.node('[data-host-updates-apply]').disabled, true);
+    h.node('[data-host-updates-confirm]').value = expected; h.node('[data-host-updates-confirm]').listeners.input(); await h.node('[data-host-updates-apply]').listeners.click();
+    const call = h.calls.find(call => call.path?.endsWith('/apply'));
+    assert.equal(call.payload.confirmation, expected); assert.equal(call.payload.revision, 'host-revision');
+    assert.equal(call.path, '/control/runtime-updates/system/' + (rebooting ? 'reboot/' : '') + 'apply');
+    await poll(h); assert.match(h.node('[data-host-updates-status]').textContent, /Riconnessione automatica/); assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates/system').length, 1);
+    await poll(h); assert.equal(h.node('progress').value, 2); assert.equal(h.node('[data-host-updates-reboot]').disabled, false);
+    assert.equal(h.calls.filter(call => call === 'authenticate').length, 2); assert.equal(h.calls.filter(call => call.path === '/control/runtime-updates/system').length, 2);
+  }
+});
+test('unavailable OS catalog offers a read retry and never touches the runtime catalog', async () => {
+  let count = 0;
+  const h = fixture(() => ++count === 1 ? { ...hostCatalog, available: false, updateCount: 0 } : hostCatalog, true); await tick();
+  assert.equal(h.node('[data-host-updates-upgrade]').disabled, true); assert.equal(h.node('[data-host-updates-check]').disabled, false);
+  await h.node('[data-host-updates-check]').listeners.click(); await tick();
+  assert.ok(h.calls.every(call => call.path === '/control/runtime-updates/system' && call.payload === undefined));
+  assert.equal(h.node('[data-host-updates-upgrade]').disabled, false);
+});
+test('reboot control stays hidden when the server does not require a reboot', async () => {
+  const h = fixture(() => ({ ...hostCatalog, rebootRequired: false }), true); await tick();
+  assert.equal(h.node('[data-host-updates-reboot]').hidden, true); assert.equal(h.node('[data-host-updates-reboot]').disabled, true);
+  await h.node('[data-host-updates-reboot]').listeners.click();
+  assert.equal(h.calls.length, 1); assert.equal(h.node('[data-host-updates-dialog]').open, false);
 });

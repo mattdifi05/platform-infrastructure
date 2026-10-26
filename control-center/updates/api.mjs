@@ -24,6 +24,14 @@ export async function handleRuntimeUpdatesApi(req, res, url, { readJson = bounde
     res.setHeader('cache-control', 'no-store');
     let value, status = 200;
     if (method === 'GET' && segments.length === 0) value = await client.catalog();
+    else if (method === 'GET' && segments.length === 1 && segments[0] === 'system') value = await client.hostCatalog();
+    else if (method === 'POST' && segments[0] === 'system' && (segments.length === 2 || segments.length === 3 && segments[1] === 'reboot')) {
+      const action = segments.at(-1), reboot = segments.length === 3;
+      if (!['check', 'plan', 'apply'].includes(action) || reboot && action === 'check') throw new RuntimeUpdatesError(404, 'not_found');
+      const body = payload(await readJson(req), action === 'check' ? [] : action === 'plan' ? ['revision'] : ['revision', 'planId', 'confirmation', 'idempotencyKey']);
+      const operation = reboot ? action === 'plan' ? 'hostRebootPlan' : 'hostRebootApply' : action === 'check' ? 'hostCheck' : action === 'plan' ? 'hostPlan' : 'hostApply';
+      value = await client[operation](body); status = action === 'plan' ? 200 : 202;
+    }
     else if (method === 'POST' && segments.length === 1 && segments[0] === 'check') {
       payload(await readJson(req), []); value = await client.check(); status = 202;
     } else if (method === 'GET' && segments.length === 2 && segments[0] === 'operations') {

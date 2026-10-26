@@ -92,7 +92,7 @@ def _release(client, repository, tag, architecture):
 
 
 def resolve_release(component, current_version):
-    """Return latest and compatible upgrade, or unavailable on incomplete discovery.
+    """Return the latest stable directly, with explicit migration or assistance blocks.
 
     Network, pagination and validation failures deliberately return no releases;
     a partial listing must never be represented as the latest official release.
@@ -101,11 +101,11 @@ def resolve_release(component, current_version):
     try:
         repository = component.get('repository', '')
         prefix, suffix = component.get('tagPrefix', ''), component.get('tagSuffix', '')
-        compatibility = component.get('compatibility', 'major')
+        compatibility = component.get('compatibility', 'latest')
         architecture = component.get('architecture', 'amd64')
         if not _REPOSITORY.fullmatch(repository) or prefix not in ('', 'v') or not re.fullmatch(r'(?:-[a-zA-Z0-9][a-zA-Z0-9_.-]*)?', suffix):
             raise ValueError('invalid repository or tag format')
-        if compatibility not in ('major', 'minor', 'exact') or component.get('versionScheme', 'semver') != 'semver' or architecture not in ('amd64', 'arm64', 'arm', '386', 'ppc64le', 's390x', 'riscv64'):
+        if compatibility not in ('latest', 'major', 'minor', 'exact') or component.get('versionScheme', 'semver') != 'semver' or architecture not in ('amd64', 'arm64', 'arm', '386', 'ppc64le', 's390x', 'riscv64'):
             raise ValueError('unsupported release policy')
         current = _version(current_version)
         include_current = component.get('includeCurrent') is True
@@ -179,28 +179,40 @@ def resolve_release(component, current_version):
         else:
             if not official and not github:
                 raise ValueError('release listing exceeds pagination limit')
+        if repository == 'library/nginx':
+            # NGINX's documented stable channel uses even minor versions;
+            # odd minor versions are mainline, despite having numeric tags.
+            tags = {name: tag for name, tag in tags.items() if _version(tag['_version'])[1] % 2 == 0}
         ordered = sorted(tags.values(), key=lambda item: (_version(item['_version']), item['name']), reverse=True)
-        latest = candidate = None
+        latest = None
         for tag in ordered:
-            version = _version(tag['_version'])
-            compatible = (compatibility == 'major' and version[0] == current[0]) or (compatibility == 'minor' and version[:2] == current[:2]) or (compatibility == 'exact' and version == current)
-            candidate_allowed = version > current or include_current and version == current
-            if latest is not None and (candidate is not None or not compatible or not candidate_allowed):
-                continue
             if tag.get('_needsMetadata'):
                 metadata, _ = client.get(_HUB + path + urllib.parse.quote(tag['name'], safe='') + '/')
                 if metadata.get('name') != tag['name']:
                     raise ValueError('exact tag metadata mismatch')
                 tag = dict(metadata, _version=tag['_version'])
-            release = _release(client, repository, tag, architecture)
-            if release is None:
-                continue
-            if latest is None:
-                latest = release
-            if compatible and candidate_allowed and candidate is None:
-                candidate = release
+            latest = _release(client, repository, tag, architecture)
+            if latest is not None:
+                break
         if latest is None:
             return dict(unavailable, reason='unavailable: no stable release for architecture and tag policy')
-        return {'latestStable': latest, 'candidateRelease': candidate, 'reason': None if candidate else 'no compatible upgrade available'}
+        version = _version(latest['version'])
+        result = {'latestStable': latest, 'candidateRelease': None, 'reason': None}
+        if version < current or version == current and not include_current:
+            result['reason'] = 'already current or newer than latest stable'
+        elif component.get('strategy') == 'observe':
+            result['reason'] = 'assisted update required: dedicated runtime strategy'
+        elif version[0] != current[0] and (
+            component.get('category') == 'Database'
+            or repository in {'library/postgres', 'library/mysql', 'library/mariadb', 'library/redis', 'library/mongo', 'library/cassandra', 'library/elasticsearch'}
+        ):
+            # Database storage formats require an explicit, tested migration path.
+            # Never hide a newer major behind an older same-major patch target.
+            result['reason'] = 'migration required: database major upgrade to ' + latest['version'] + ' needs an explicit migration plan'
+        else:
+            # Legacy major/minor policies are accepted only for config compatibility.
+            # Runtime/build/config/recovery gates remain the worker's responsibility.
+            result['candidateRelease'] = latest
+        return result
     except (ValueError, TypeError, KeyError, AttributeError, OSError, TimeoutError) as error:
         return dict(unavailable, reason='unavailable: ' + str(error))
