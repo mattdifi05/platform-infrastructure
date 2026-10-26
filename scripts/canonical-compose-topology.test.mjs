@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -10,8 +11,8 @@ import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workloadLock = "secrets/hosted-workloads.lock.json";
 const workloadLockSha256 = "a".repeat(64);
-const noHostedWorkloadLockSha256 = "45a56612923c64022df1173ca11486445d20c5ef06aab7b02c960f85feea851b";
-const localPrivateNoHostedWorkloadLockSha256 = "68ef59a6399c56f84fa69128696f181e34b881cef4ce8ac1ca57457acf2cd120";
+const noHostedWorkloadLockSha256 = "693a4f67bf8ae1ff55fdee5d1ed24ee21827ae630d1f278c9b6443cb1d1c4235";
+const localPrivateNoHostedWorkloadLockSha256 = "1b8ee0d1bc8a1f5f5ba20dc3d3f2d436873ea2c8656e73365f51d69c84707aec";
 
 test("canonical plan invokes the deployment wrapper with a verified workload lock", () => {
   const plan = canonicalVpsTopologyPlan({
@@ -190,5 +191,13 @@ test("production activation requires a hosted lock while install examples are ex
     const content = readFileSync(path.join(repositoryRoot, file), "utf8");
     assert.match(content, /^HOSTED_WORKLOAD_LOCK=$/m, `${file} must not claim an unavailable Hosted lock`);
     assert.match(content, /^HOSTED_WORKLOAD_MODE=no-hosted$/m, `${file} must explicitly keep Hosted activation disabled`);
+  }
+});
+
+test("canonical topology bindings match the exact checked-in VPS and LOCAL_PRIVATE lock bytes", () => {
+  for (const composeVariant of ["VPS", "LOCAL_PRIVATE"]) {
+    const plan = canonicalVpsTopologyPlan({ infraRoot: repositoryRoot, envFile: ".env.vps.example", workloadMode: "no-hosted", composeVariant });
+    const digest = createHash("sha256").update(readFileSync(plan.workloadLock)).digest("hex");
+    assert.equal(plan.expectedWorkloadLockSha256, digest, `${composeVariant} canonical lock binding is stale`);
   }
 });
