@@ -49,8 +49,6 @@ struct SecretsView: View {
                     Text("Collegati").tag("linked")
                     Text("Solo Vault").tag("vault")
                 }.pickerStyle(.segmented)
-            } footer: {
-                Text("La passkey è richiesta per mostrare un valore. I metadati restano consultabili senza leggere i valori.")
             }
             if loading && catalog["items"].arrayValue.isEmpty {
                 LoadingState(title: "Caricamento secret…")
@@ -128,7 +126,25 @@ private struct VaultEntryView: View {
     let entryID: String
     @Binding var catalog: JSONValue
     private var entry: VaultEntry { VaultEntry(value: catalog["items"].arrayValue.first { $0["id"].text == entryID } ?? .object(["id": .string(entryID)])) }
-    private var bindings: [JSONValue] { catalog["runtime"]["bindings"].arrayValue.filter { $0["itemId"].text == entryID } }
+    private var applications: String {
+        let bindings = catalog["runtime"]["bindings"].arrayValue.filter { $0["itemId"].text == entryID }
+        let ids = [entry.value["projectId"].text] + entry.value["linkedApps"].arrayValue.map(\.text) + bindings.map { $0["project"].text }
+        var seen = Set<String>()
+        let names = ids.filter { !$0.isEmpty && seen.insert($0).inserted }.map { id in
+            if id == "platform" { return "Platform" }
+            return catalog["projects"].arrayValue.first { $0["slug"].text == id || $0["id"].text == id }?["name"].stringValue ?? id
+        }
+        return names.isEmpty ? "Nessuna" : names.formatted(.list(type: .and))
+    }
+
+    private var rotation: String {
+        guard let days = entry.value["rotationDays"].intValue else { return "Non impostata" }
+        switch days {
+        case 0: return "Disattivata"
+        case 1: return "Ogni giorno"
+        default: return "Ogni \(days) giorni"
+        }
+    }
     let manage: (String) -> Void
     @State private var revealedValue: String?
     @State private var expiresAt: Date?
@@ -144,54 +160,36 @@ private struct VaultEntryView: View {
                 if let revealedValue, let expiresAt, expiresAt > Date(), scenePhase == .active {
                     Text(revealedValue).font(.body.monospaced()).privacySensitive()
                         .accessibilityLabel("Valore secret").accessibilityValue(revealedValue)
-                    Text("Nascosto automaticamente \(expiresAt, style: .relative)").font(.caption).foregroundStyle(.secondary)
                     Button("Copia valore", systemImage: "doc.on.doc") { copy(revealedValue, until: expiresAt) }
                     Button("Nascondi", systemImage: "eye.slash") { clear() }
+                } else if entry.value["valueStored"].boolValue == false {
+                    Text("Nessun valore salvato").foregroundStyle(.secondary)
+                } else if !app.vaultFaceIDSupported {
+                    Text("Face ID non disponibile per questo server").foregroundStyle(.secondary)
                 } else {
-                    Label("Valore protetto", systemImage: "lock.fill").foregroundStyle(.secondary)
-                    Button { Task { await reveal() } } label: {
-                        if revealing { ProgressView("Conferma passkey…") }
-                        else { Label("Mostra con passkey", systemImage: "eye") }
+                    Button { Task { await showValue() } } label: {
+                        if revealing { ProgressView() }
+                        else { Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid") }
                     }.disabled(revealing)
                 }
                 if let error { ErrorNotice(message: error) }
-            } header: { Text("Valore") } footer: { Text("Il valore viene nascosto entro 30 secondi e quando l’app passa in secondo piano. Le copie restano solo su questo dispositivo e scadono insieme al valore.") }
-            Section("Metadati") {
-                ForEach([("Nome", "itemKey"), ("Applicazione", "projectId"), ("Ambiente", "environment"), ("Tipo", "kind"), ("Utente / account", "username"), ("URL / host", "url"), ("Stato rotazione", "rotationStatus"), ("Origine", "source"), ("Creato", "createdAt"), ("Aggiornato", "updatedAt")], id: \.1) { field in
-                    if !entry.value[field.1].text.isEmpty { LabeledContent(field.0, value: entry.value[field.1].text) }
-                }
-                LabeledContent("Rotazione", value: "\(entry.value["rotationDays"].intValue ?? 0) giorni")
-                LabeledContent("Versioni cifrate", value: "\(entry.value["versions"].arrayValue.count)")
-                LabeledContent("Valore salvato", value: entry.value["valueStored"].boolValue == true ? "Sì" : "No")
-                if !entry.value["linkedApps"].arrayValue.isEmpty { LabeledContent("Applicazioni associate", value: entry.value["linkedApps"].arrayValue.map(\.text).joined(separator: ", ")) }
-            }
-            if !entry.value["versions"].arrayValue.isEmpty {
-                Section("Cronologia versioni") {
-                    ForEach(Array(entry.value["versions"].arrayValue.enumerated()), id: \.offset) { index, version in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Versione \(index + 1)\(version["versionId"].text == entry.value["currentVersionId"].text ? " · attuale" : "")")
-                            Text(version["createdAt"].text).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            if !bindings.isEmpty {
-                Section("Consegna alle applicazioni") {
-                    ForEach(Array(bindings.enumerated()), id: \.offset) { _, binding in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(binding["label"].stringValue ?? binding["bindingId"].text).font(.headline)
-                            Text([binding["project"].text, binding["environment"].text].joined(separator: " · ")).foregroundStyle(.secondary)
-                            Label(binding["deliveryVerified"].boolValue == true ? "Consegna verificata" : "Consegna non verificata", systemImage: binding["deliveryVerified"].boolValue == true ? "checkmark.circle" : "questionmark.circle")
-                            Text("Applicazione: \(binding["runtimeHealthy"].boolValue == true ? "verificata" : "non verificata") · Provider: \(binding["providerVerified"].boolValue == true ? "verificato" : "non verificato")").font(.caption)
-                            if !binding["verifiedAt"].text.isEmpty { Text(binding["verifiedAt"].text).font(.caption).foregroundStyle(.secondary) }
-                        }
-                    }
+            } header: { Text("Valore") } footer: {
+                if app.vaultFaceIDSupported && !app.vaultFaceIDRegistered && entry.value["valueStored"].boolValue != false {
+                    Text("Conferma l’accesso una volta per abilitare Face ID in questa sessione.")
                 }
             }
             Section {
-                Button("Salva nuova versione", systemImage: "square.and.pencil") { clear(); manage("edit") }
+                LabeledContent("Nome", value: entry.value["itemKey"].stringValue ?? entry.title)
+                LabeledContent("Applicazioni", value: applications)
+                LabeledContent("Ambiente", value: entry.value["environment"].text.capitalized)
+                dateRow("Creato", value: entry.value["createdAt"].text)
+                dateRow("Aggiornato", value: entry.value["updatedAt"].text)
+                LabeledContent("Rotazione", value: rotation)
+            }
+            Section {
+                Button("Modifica valore", systemImage: "square.and.pencil") { clear(); manage("edit") }
                 Button("Rimuovi dal Vault", systemImage: "trash", role: .destructive) { clear(); manage("delete") }
-            } footer: { Text("Una nuova versione resta nel Vault finché non viene consegnata. Rimuovere il record conserva le credenziali dei servizi.") }
+            }.disabled(revealing)
         }
         .navigationTitle(entry.title)
         .onChange(of: scenePhase) { _, phase in if phase == .background { clear() } }
@@ -199,16 +197,32 @@ private struct VaultEntryView: View {
         .onDisappear { clear() }
     }
 
-    @MainActor private func reveal() async {
+    private func dateRow(_ title: String, value: String) -> some View {
+        LabeledContent(title) {
+            if let date = vaultDate(value) { Text(date, format: .dateTime.day().month(.abbreviated).year().hour().minute()) }
+            else { Text("Non disponibile") }
+        }
+    }
+
+    @MainActor private func showValue() async {
+        guard !revealing else { return }
         clear()
         let generation = revealGeneration
         revealing = true
+        error = nil
         defer { revealing = false }
         do {
-            try await app.stepUp()
-            guard generation == revealGeneration, scenePhase == .active else { return }
-            let result = try await app.post("/control/v1/vault/secrets/\(entry.id)/reveal", body: .object(["confirm": .string("REVEAL-VAULT-SECRET:\(entry.id)")]))
-            guard generation == revealGeneration, scenePhase == .active else { return }
+            if !app.vaultFaceIDRegistered {
+                try await app.enableVaultFaceID()
+                return
+            }
+            let path = "/api/native/v1/vault/secrets/\(entry.id)"
+            let nonce = try await app.post("\(path)/challenge")["challenge"].text
+            guard generation == revealGeneration, scenePhase != .background else { return }
+            let signature = try await app.signVaultChallenge(nonce)
+            guard generation == revealGeneration, scenePhase != .background else { return }
+            let result = try await app.post("\(path)/reveal", body: .object(["challenge": .string(nonce), "signature": .string(signature)]))
+            guard generation == revealGeneration, scenePhase != .background else { return }
             let value = result["value"].stringValue
             let serverExpiry = vaultDate(result["revealExpiresAt"].text)
             guard let value, let serverExpiry, serverExpiry > Date() else { throw VaultUIError.invalidReveal }
@@ -223,7 +237,8 @@ private struct VaultEntryView: View {
                 guard !Task.isCancelled, generation == revealGeneration else { return }
                 clear()
             }
-        } catch { if generation == revealGeneration { self.error = error.localizedDescription } }
+        } catch is CancellationError { }
+        catch { if generation == revealGeneration { self.error = error.localizedDescription } }
     }
 
     @MainActor private func copy(_ value: String, until expiry: Date) {
@@ -265,7 +280,7 @@ private struct VaultEditorSheet: View {
     @State private var lifecycle = UUID()
 
     private var title: String {
-        switch mode { case .create: "Nuovo secret"; case .edit: "Nuova versione"; case .delete: "Rimuovi secret"; case .importExisting: "Importa esistenti" }
+        switch mode { case .create: "Nuovo secret"; case .edit: "Modifica valore"; case .delete: "Rimuovi secret"; case .importExisting: "Importa esistenti" }
     }
     private var enabled: Bool {
         guard !busy else { return false }
@@ -375,6 +390,8 @@ private struct VaultEditorSheet: View {
         busy = true
         defer { busy = false }
         do {
+            try await app.confirmVaultAction("Conferma l’operazione nel Vault.")
+            guard generation == lifecycle, scenePhase != .background else { return }
             let path: String
             let body: JSONValue
             let message: String
@@ -402,7 +419,8 @@ private struct VaultEditorSheet: View {
             value = ""
             await completed(message)
             dismiss()
-        } catch { if generation == lifecycle { self.error = error.localizedDescription } }
+        } catch is CancellationError { }
+        catch { if generation == lifecycle { self.error = error.localizedDescription } }
     }
 
     @MainActor private func clear() { lifecycle = UUID(); value = ""; confirmation = "" }

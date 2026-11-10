@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,7 @@ import {
 } from "../auth/app-passkey.mjs";
 import { createFirstConfiguration, FIRST_CONFIGURATION_STATES } from "../first-configuration/index.mjs";
 import { DATABASE_ADMIN_AUTHORIZATION_PATH } from "../auth/database-admin-gate.mjs";
+import { createNativeVaultChallenges } from "../auth/native-client.mjs";
 
 const ORIGIN = "https://portal.platform-infrastructure.com";
 const HOST = "portal.platform-infrastructure.com";
@@ -324,6 +325,19 @@ test("one passkey completes direct first configuration and duplicate credentials
     changedAddress.headers["x-forwarded-for"] = "192.168.1.24";
     assert.equal(auth.assertRequest(changedAddress).clientAddress, "203.0.113.10");
     assert.equal((await auth.beginLogin(changedAddress)).rpId, HOST);
+    const nativeKey = p256Fixture().encodedPublicKey;
+    const replacedKey = p256Fixture().encodedPublicKey;
+    const assertion = { id: credential.id, type: "public-key", response: { clientDataJSON: "e30", authenticatorData: "YQ", signature: "YQ" } };
+    const first = await auth.beginLogin(request(), nativeKey);
+    await assert.rejects(
+      auth.completeLogin(request(), { challenge: first.challenge, credential: assertion, nativeVaultPublicKey: replacedKey }),
+      /authentication challenge is invalid or expired/,
+    );
+    const second = await auth.beginLogin(request(), nativeKey);
+    await assert.rejects(
+      auth.completeLogin(request(), { challenge: second.challenge, credential: assertion, nativeVaultPublicKey: nativeKey }),
+      /authentication assertion is invalid/,
+    );
     const session = await auth.createSessionResult();
     changedAddress.headers.cookie = session.cookies.map((cookie) => cookie.split(";", 1)[0]).join("; ");
     const authenticated = await auth.authenticate(changedAddress);
@@ -350,3 +364,21 @@ test("one passkey completes direct first configuration and duplicate credentials
     await auth.close();
   }
 });
+
+test("a native Vault signature expires at the challenge deadline", () => {
+  let timestamp = 0;
+  const challenges = createNativeVaultChallenges(() => timestamp);
+  const { encodedPublicKey, privateKey } = p256Fixture();
+  const session = { sessionTokenHash: "session", identity: { nativeVaultPublicKey: encodedPublicKey } };
+  const challenge = challenges.issue(session, "secret");
+  const signature = sign("sha256", Buffer.from(`platform-vault-reveal-v1\n${challenge}`), privateKey).toString("base64url");
+  timestamp = 60_000;
+  assert.equal(challenges.consume(session, "secret", { challenge, signature }), false);
+});
+
+function p256Fixture() {
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const { x, y } = publicKey.export({ format: "jwk" });
+  const encodedPublicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]).toString("base64url");
+  return { encodedPublicKey, privateKey };
+}

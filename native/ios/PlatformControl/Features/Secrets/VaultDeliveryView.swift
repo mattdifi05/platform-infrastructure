@@ -135,13 +135,17 @@ struct VaultDeliveryView: View {
         busy = true
         defer { busy = false }
         do {
-            guard current == generation, scenePhase == .active else { return }
+            try await app.confirmVaultAction("Centralizza la credenziale nel Vault.")
+            guard current == generation, scenePhase != .background else { return }
             let result = try await app.post("/control/v1/vault/runtime/adopt", body: .object(["bindingId": .string(bindingID), "confirmation": .string("ADOPT:\(bindingID)"), "expectedVaultRevision": .string(revision)]))
             guard result["bindingId"].text == bindingID, result["adopted"].boolValue == true else { throw DeliveryUIError.invalidResponse }
             notice = "Credenziale centralizzata. Consulta le verifiche del collegamento aggiornato."
             error = nil
             await refresh()
             selectedVersion = item["currentVersionId"].text
+        } catch is CancellationError { }
+        catch let error as VaultFaceIDError {
+            if current == generation { self.error = error.localizedDescription }
         } catch {
             self.error = "Centralizzazione non confermata. Aggiorna il collegamento prima di riprovare. \(error.localizedDescription)"
             await refresh()
@@ -243,14 +247,20 @@ private struct VaultDeliveryPlanSheet: View {
         busy = true
         defer { busy = false }
         do {
-            guard current == generation, scenePhase == .active else { return }
+            try await app.confirmVaultAction("Applica la modifica della credenziale.")
+            guard current == generation, scenePhase != .background else { return }
             try validateDeliveryPlan(plan)
             dispatched = true
             let result = try await app.post("/control/v1/vault/runtime/apply", body: .object(["bindingId": plan["bindingId"], "planId": plan["planId"], "confirmation": plan["confirmation"], "expectedVaultRevision": plan["expectedVaultRevision"], "expectedBindingRevision": plan["expectedBindingRevision"]]))
             guard !result["operationId"].text.isEmpty, result["phase"].text == "queued", result["bindingId"] == plan["bindingId"] else { throw DeliveryUIError.invalidResponse }
             await accepted(result)
             dismiss()
-        } catch { if current == generation { self.error = "Esito da verificare. Chiudi e controlla lo stato del collegamento prima di preparare un altro piano. \(error.localizedDescription)" } }
+        } catch is CancellationError { }
+        catch {
+            if current == generation {
+                self.error = dispatched ? "Esito da verificare. Chiudi e controlla lo stato del collegamento prima di preparare un altro piano. \(error.localizedDescription)" : error.localizedDescription
+            }
+        }
     }
 }
 

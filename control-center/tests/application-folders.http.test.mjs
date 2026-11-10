@@ -11,6 +11,15 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const stateDir = path.join(root, "state");
   mkdirSync(stateDir);
   mkdirSync(path.join(root, "projects"));
+  const invalidCatalogRoot = path.join(root, "invalid-catalog");
+  const observationFixture = path.join(root, "rejected-observation.mjs");
+  writeFileSync(observationFixture, `
+    import { registerHooks } from "node:module";
+    registerHooks({ load(url, context, nextLoad) {
+      if (!url.endsWith("/control-center/host-extension.mjs")) return nextLoad(url, context);
+      return { format: "module", shortCircuit: true, source: 'export const hostExtension = { readVpsBackupCatalog: () => null, readObservedApplications() { throw Error("Observation admission differs"); } };' };
+    } });
+  `);
   const staleFolderId = "folder-00000000-0000-0000-0000-000000000001";
   const initial = { projects: {
     alpha: { declaredProject: true, displayName: "Alpha app", host: "alpha.example.test", runtime: "node" },
@@ -25,9 +34,9 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const origin = `https://127.0.0.1:${port}`;
   const base = `http://127.0.0.1:${port}`;
   const sessions = ["viewer", "admin", "owner"].map(role => ({ token: `folder-test-${role}`, csrf: `folder-csrf-${role}`, role, ageSeconds: 0 }));
-  const child = spawn(process.execPath, ["control-center/server.mjs"], {
+  const child = spawn(process.execPath, ["--import", observationFixture, "control-center/server.mjs"], {
     cwd: path.resolve(import.meta.dirname, "../.."),
-    env: { ...process.env, NODE_ENV: "test", CONTROL_CENTER_ENV: "test", CONTROL_CENTER_BIND_HOST: "127.0.0.1", CONTROL_CENTER_PORT: String(port), CONTROL_CENTER_AUTH_MODE: "app-passkey", CONTROL_CENTER_AUTH_STORE: "memory", CONTROL_CENTER_PUBLIC_ORIGIN: origin, CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1", CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled", CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8", CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: "172.16.0.0/12", CONTROL_CENTER_TEST_SESSION_FIXTURES: JSON.stringify(sessions), CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false", CONTROL_CENTER_DATABASE_LIVE_APPLY: "false", CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: "", CONTROL_CENTER_HOST_EXTENSION_FILE: undefined, PROJECTS_ROOT: path.join(root, "projects"), CONTROL_CENTER_REPORTS_ROOT: path.join(root, "reports"), CONTROL_CENTER_BACKUP_ROOT: path.join(root, "backups"), ...isolatedStateEnv(stateDir) },
+    env: { ...process.env, NODE_ENV: "test", CONTROL_CENTER_ENV: "test", CONTROL_CENTER_BIND_HOST: "127.0.0.1", CONTROL_CENTER_PORT: String(port), CONTROL_CENTER_AUTH_MODE: "app-passkey", CONTROL_CENTER_AUTH_STORE: "memory", CONTROL_CENTER_PUBLIC_ORIGIN: origin, CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1", CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled", CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8", CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: "172.16.0.0/12", CONTROL_CENTER_TEST_SESSION_FIXTURES: JSON.stringify(sessions), CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false", CONTROL_CENTER_DATABASE_LIVE_APPLY: "false", CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: invalidCatalogRoot, CONTROL_CENTER_HOST_EXTENSION_FILE: undefined, PROJECTS_ROOT: path.join(root, "projects"), CONTROL_CENTER_REPORTS_ROOT: path.join(root, "reports"), CONTROL_CENTER_BACKUP_ROOT: path.join(root, "backups"), ...isolatedStateEnv(stateDir) },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -79,6 +88,12 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   assert.equal(catalog.folders.find(folder => folder.id === folderId).canDelete, false);
   assert.equal(catalog.folders.find(folder => folder.id === staleFolderId).canDelete, false);
   assert.equal(Object.hasOwn(catalog.memberships, "project:absent"), false);
+  const native = await request("GET", "/api/native/v1/applications", "viewer");
+  assert.equal(native.status, 200, "a rejected host catalog must not hide managed apps in the native client");
+  const nativeCatalog = await native.json();
+  assert.deepEqual(nativeCatalog.projects.map(project => project.slug).sort(), ["alpha", "beta"]);
+  assert.deepEqual(nativeCatalog.observed, []);
+  assert.deepEqual(nativeCatalog.folders, catalog);
   for (const prefix of ["/control", "/control/v1"]) for (const occupiedId of [folderId, staleFolderId]) {
     const beforeDelete = readFileSync(path.join(stateDir, "projects.json"), "utf8");
     const rejected = await request("POST", `${prefix}/project-folders/${occupiedId}/delete`, "owner", {});

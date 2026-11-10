@@ -328,14 +328,14 @@ def _apply_autoremove(value, installed, progress):
     protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
     if _digest(automatic) != value['automaticFingerprint'] or _digest(protected) != value['protectedPackageFingerprint']:
         raise HostUpdateError('autoremove protection/automatic flags changed; no cleanup performed; create a fresh plan')
-    approved_names = {row['name'] for row in value['autoremove']}
-    options = _cleanup_options(sorted(set(protected) | (set(installed) - approved_names)))
-    text = _run(['apt-get', '-s', *options, 'autoremove'], timeout=120)
-    upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed)
-    removals = _removals(text, installed, automatic, protected)
-    if upgrades or removals != value['autoremove']:
-        raise HostUpdateError('post-upgrade autoremove candidates changed; no cleanup performed; create a fresh plan')
+    removals = value['autoremove']
     if removals:
+        approved_names = {row['name'] for row in removals}
+        options = _cleanup_options(sorted(set(protected) | (set(installed) - approved_names)))
+        text = _run(['apt-get', '-s', *options, 'autoremove'], timeout=120)
+        upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed)
+        if upgrades or _removals(text, installed, automatic, protected) != removals:
+            raise HostUpdateError('post-upgrade autoremove candidates changed; no cleanup performed; create a fresh plan')
         _persist_package_recovery(value, value['automaticPackages'], 'autoremove-prepared')
         guard_path = _write_autoremove_guard(value, installed, automatic, protected)
         try:
@@ -382,14 +382,14 @@ def _seal(value):
     return value
 
 
-def plan(check_result=None, ttl=PLAN_TTL):
+def plan(check_result=None, ttl=PLAN_TTL, *, reboot_after=False):
     value = check_result if check_result is not None else check()
     if any(key not in value for key in _CLEANUP_FIELDS):
         raise HostUpdateError('package check predates autoremove verification; run a fresh check')
     now = int(time.time())
     if now - value['checkedAt'] > 300 or value['checkedAt'] > now + 5:
         raise HostUpdateError('package check expired')
-    return _seal({'schema': 'platform-host-package-plan/v1', 'planId': uuid.uuid4().hex,
+    planned = {'schema': 'platform-host-package-plan/v1', 'planId': uuid.uuid4().hex,
                   'createdAt': now, 'expiresAt': now + min(max(int(ttl), 1), PLAN_TTL),
                   'bootId': value['bootId'], 'packages': value['packages'], 'keptBack': value['keptBack'],
                   'installedFingerprint': value['installedFingerprint'], 'candidateFingerprint': value['candidateFingerprint'],
@@ -397,7 +397,12 @@ def plan(check_result=None, ttl=PLAN_TTL):
                   'autoremoveCount': len(value['autoremove']),
                   'confirmationRequired': 'UPDATE', 'steps': ['Verify exact package versions and removals', 'Upgrade planned packages', 'Restore automatic package marks', 'Autoremove approved unused dependencies', 'Verify installed versions and removed packages'],
                   'risks': ['Services may restart during package configuration.', 'Package failures require host recovery; automatic rollback is unavailable.'],
-                  'rebootRequired': value['rebootRequired']})
+                  'rebootRequired': value['rebootRequired']}
+    if reboot_after:
+        planned.update(rebootAfter=True, confirmationRequired='UPDATE_AND_REBOOT')
+        planned['steps'].append('Reboot the server and verify the services')
+        planned['risks'].append('The host and its applications will be temporarily unavailable.')
+    return _seal(planned)
 
 
 def _validate(value, schema):
@@ -517,11 +522,23 @@ def prepare_reboot(value, persist_intent, confirmation):
     return intent
 
 
+def prepare_upgrade_reboot(value):
+    # The sealed package plan was already accepted and verified by the root
+    # worker. Its expiry limits when maintenance can start, not its duration.
+    unsigned = {key: item for key, item in value.items() if key != 'revision'}
+    if (value.get('revision') != _digest(unsigned) or value.get('schema') != 'platform-host-package-plan/v1'
+            or value.get('confirmationRequired') != 'UPDATE_AND_REBOOT' or value.get('rebootAfter') is not True
+            or value.get('bootId') != _boot_id()):
+        raise HostUpdateError('invalid or stale upgrade reboot plan')
+    return {'schema': 'platform-host-reboot-intent/v1', 'planId': value['planId'],
+            'bootIdBefore': value['bootId'], 'createdAt': int(time.time()), 'state': 'queued', 'afterUpgrade': True}
+
+
 def schedule_reboot(intent):
     """Call ONLY after the HTTP accepted response has been flushed by the bridge."""
     if active_maintenance() or package_manager_busy():
         raise HostUpdateError('package maintenance still running; reboot blocked')
-    if not inventory()['rebootRequired']:
+    if intent.get('afterUpgrade') is not True and not inventory()['rebootRequired']:
         raise HostUpdateError('reboot is no longer required')
     if intent.get('schema') != 'platform-host-reboot-intent/v1' or intent.get('state') != 'queued' or intent.get('bootIdBefore') != _boot_id():
         raise HostUpdateError('invalid or stale reboot intent')

@@ -43,6 +43,8 @@ EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 GATE = threading.Lock()
 HOST_JOB_GUARD = threading.Lock()
 HOST_JOB_THREADS = set()
+HOST_REBOOT_GUARD = threading.Lock()
+HOST_RECONCILE_GUARD = threading.Lock()
 SERVER_EVENTS_GUARD = threading.Lock()
 SERVER_EVENTS_COLLECTOR = None
 DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
@@ -319,8 +321,10 @@ def catalog():
     revision = digest({'components': [{k: v for k, v in x.items() if k != 'current'} | {'version': x['current']['version'], 'versions': x['current']['versions'], 'image': x['current']['imageDigest']} for x in output], 'checkedAt': checked.get('checkedAt')})
     for item in output:
         item.pop('_fingerprint')
-    operations = [item for item in records('operation') if not item.get('kind', '').startswith('host-')]
-    return {'schema': 'runtime-updates/v1', 'available': True, 'canCheck': True, 'canApply': not recovery_required(), 'busy': any(item['status'] in ['queued', 'running'] for item in records('operation')), 'revision': revision, 'checkedAt': checked.get('checkedAt'), 'components': output, 'operations': operations[:12]}
+    recent = records('operation')
+    operations = [item for item in recent if not item.get('kind', '').startswith('host-')]
+    busy = any(item['status'] in ['queued', 'running'] for item in recent)
+    return {'schema': 'runtime-updates/v1', 'available': True, 'canCheck': not busy, 'canApply': not recovery_required(), 'busy': busy, 'revision': revision, 'checkedAt': checked.get('checkedAt'), 'components': output, 'operations': operations[:12]}
 
 
 def operation_update(job_id, **changes):
@@ -500,7 +504,7 @@ def plan(component_id, revision):
                  'componentId': 'all', 'kind': 'batch', 'components': components,
                  'targetVersion': 'Aggiornamenti compatibili', 'targetDigest': 'sha256:' + digest(components),
                  'affectedServices': [service for x in components for service in x['affectedServices']],
-                 'steps': ['Preparazione e verifica isolata di tutte le immagini', 'Aggiornamento e verifica servizio per servizio', 'Registrazione del risultato di ogni famiglia'],
+                 'steps': ['Preparazione parallela e verifica isolata delle immagini', 'Aggiornamento e verifica servizio per servizio', 'Registrazione del risultato di ogni famiglia'],
                  'risks': ['I servizi saranno brevemente indisponibili durante il proprio aggiornamento.', 'Al primo errore il gruppo si ferma. Le famiglie già completate restano aggiornate.', 'Per database e servizi con dati persistenti resta obbligatorio il recupero verificato; nessun downgrade automatico dopo un nuovo avvio.'],
                  'confirmationRequired': 'UPDATE'}
         stored = {'public': value, 'families': families}
@@ -814,6 +818,38 @@ def apply_job(job_id, stored):
                          **({'completedSteps': completed, 'totalSteps': total} if batch else {}), **changes)
     def service_result(service, **changes):
         next(x for x in services if x['componentId'] == current_component and x['service'] == service).update(changes)
+
+    def prepare_images(family, notify):
+        item = family['stored']
+        row, target = item['component'], item['target']
+        work, actual = family['directory'], family['actual']
+        notify(row, None, 'preparing', 'Download e preparazione: ' + row['label'])
+        if row['strategy'] != 'node-layer':
+            image = image_candidate(row, target, work)
+            return {old['Image']: image for old in actual}
+        images = {}
+        for source_image in sorted({old['Image'] for old in actual}):
+            candidate_directory = work / (job_id + '-' + source_image[-12:])
+            candidate_directory.mkdir(mode=0o700)
+            images[source_image] = image_candidate(row, target, candidate_directory, source_image)
+        for old in actual:
+            service = old['Name'].lstrip('/')
+            notify(row, service, 'checking', 'Verifica isolata del runtime e delle dipendenze')
+            node_preflight(old, images[old['Image']], target['version'])
+            notify(row, service, 'queued', 'Pronto per aggiornamento')
+        return images
+
+    preparation_guard = threading.Lock()
+    def preparation_progress(row, service, status, stage):
+        nonlocal current_component, current_service
+        with preparation_guard:
+            current_component, current_service = row['id'], service
+            if service:
+                service_result(service, status=status, stage=stage)
+            else:
+                next(x for x in results if x['componentId'] == row['id'])['status'] = 'preparing'
+            report(stage, **({} if batch else {'completedSteps': 1}))
+
     report('Verifica dello stato attuale', status='running', **({} if batch else {'completedSteps': 0}))
     lock_path = pathlib.Path('/var/lib/platform-vps-backup/operation.lock')
     lock_path.parent.mkdir(mode=0o700, exist_ok=True)
@@ -836,28 +872,23 @@ def apply_job(job_id, stored):
                 atomic(work / 'before.json', encode(actual))
                 prepared.append({'stored': family, 'directory': work, 'actual': actual})
             # Prepare the entire batch before the first live service mutation.
-            for family in prepared:
-                item = family['stored']; row, target = item['component'], item['target']
-                work, actual = family['directory'], family['actual']
-                current_component, current_service = row['id'], None
-                next(x for x in results if x['componentId'] == row['id'])['status'] = 'preparing'
-                report('Download e preparazione: ' + row['label'], **({} if batch else {'completedSteps': 1}))
-                images = {}
-                if row['strategy'] == 'node-layer':
-                    for source_image in sorted({old['Image'] for old in actual}):
-                        candidate_directory = work / (job_id + '-' + source_image[-12:])
-                        candidate_directory.mkdir(mode=0o700)
-                        images[source_image] = image_candidate(row, target, candidate_directory, source_image)
-                    for old in actual:
-                        current_service = old['Name'].lstrip('/')
-                        service_result(current_service, status='checking', stage='Verifica isolata del runtime e delle dipendenze')
-                        report('Verifica isolata: ' + current_service)
-                        node_preflight(old, images[old['Image']], target['version'])
-                        service_result(current_service, status='queued', stage='Pronto per aggiornamento')
-                else:
-                    image = image_candidate(row, target, work)
-                    images = {old['Image']: image for old in actual}
-                family['images'] = images
+            if len(prepared) == 1:
+                prepared[0]['images'] = prepare_images(prepared[0], preparation_progress)
+            else:
+                # Docker tags and work directories are scoped to each family.
+                # Running service changes and admission writes remain serial.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as preparation:
+                    pending = {preparation.submit(prepare_images, family, preparation_progress): family for family in prepared}
+                    for future in concurrent.futures.as_completed(pending):
+                        family = pending[future]
+                        try:
+                            family['images'] = future.result()
+                        except Exception:
+                            for waiting in pending:
+                                waiting.cancel()
+                            preparation.shutdown(wait=True, cancel_futures=True)
+                            current_component, current_service = family['stored']['component']['id'], None
+                            raise
             for family in prepared:
                 fresh, _ = observed(family['stored']['component'])
                 if fingerprint(fresh) != family['stored']['fingerprint']:
@@ -978,7 +1009,7 @@ def host_os_release():
 def host_catalog():
     operations = [item for item in records('operation') if item.get('kind', '').startswith('host-')]
     unavailable = {'schema': 'host-updates/v1', 'available': False, 'revision': None, 'os': host_os_release(), 'checkedAt': None,
-                   'updateCount': 0, 'autoremoveCount': 0, 'keptBackCount': 0, 'rebootRequired': False, 'canCheck': False, 'canApply': False, 'canReboot': False, 'operations': operations[:12]}
+                   'updateCount': 0, 'autoremoveCount': 0, 'keptBackCount': 0, 'packages': [], 'rebootRequired': False, 'canCheck': False, 'canApply': False, 'canReboot': False, 'operations': operations[:12]}
     if host_updates is None:
         return unavailable
     try:
@@ -988,6 +1019,7 @@ def host_catalog():
             cached = None
         fresh = bool(cached and 0 <= time.time() - cached['checkedAt'] <= 300)
         busy = any(item['status'] in ['queued', 'running'] for item in records('operation'))
+        needs_recovery = recovery_required()
         revision = digest({'bootId': inventory['bootId'], 'rebootRequired': inventory['rebootRequired'],
                            'checkedAt': cached.get('checkedAt') if cached else None,
                            'installedFingerprint': cached.get('installedFingerprint') if cached else None,
@@ -998,10 +1030,11 @@ def host_catalog():
         return {**unavailable, 'available': True, 'revision': revision,
                 'checkedAt': datetime.datetime.fromtimestamp(cached['checkedAt'], datetime.timezone.utc).isoformat() if cached else None,
                 'updateCount': len(cached['packages']) if cached else 0, 'autoremoveCount': len(cached.get('autoremove', [])) if cached else 0,
+                'packages': cached['packages'] if cached else [],
                 'keptBackCount': len(cached['keptBack']) if cached else 0,
-                'rebootRequired': inventory['rebootRequired'], 'canCheck': not busy,
-                'canApply': fresh and bool(cached['packages'] or cached.get('autoremove')) and not busy and not recovery_required(),
-                'canReboot': inventory['rebootRequired'] and not busy and not recovery_required(), 'busy': busy}
+                'rebootRequired': inventory['rebootRequired'], 'canCheck': not busy and not needs_recovery,
+                'canApply': fresh and bool(cached['packages'] or cached.get('autoremove')) and not busy and not needs_recovery,
+                'canReboot': inventory['rebootRequired'] and not busy and not needs_recovery, 'busy': busy}
     except Exception:
         return unavailable
 
@@ -1031,7 +1064,7 @@ def reconcile_host_reboots(force=False):
     if host_updates is None:
         return
     for record in records('operation'):
-        if record.get('kind') != 'host-reboot' or record['status'] not in ['queued', 'running', 'failed']:
+        if record.get('kind') not in ['host-reboot', 'host-upgrade'] or record['status'] not in ['queued', 'running', 'failed']:
             continue
         private = load('host-reboot', record['id'])
         if not private:
@@ -1041,20 +1074,34 @@ def reconcile_host_reboots(force=False):
         if not force and time.time() - record.get('lastReconcileAt', 0) < 5:
             continue
         try:
+            combined = private['intent'].get('afterUpgrade') is True
+            if combined and private['intent']['state'] == 'queued' and not private.get('scheduleStartedAt'):
+                EXECUTOR.submit(host_reboot_job, record['id'])
+                operation_update(record['id'], lastReconcileAt=time.time())
+                continue
             intent = host_updates.reconcile_reboot(private['intent'], health_check=lambda: reboot_services_healthy(private['services']))
-            private['intent'] = intent
-            save('host-reboot', record['id'], private)
             succeeded = intent['state'] == 'succeeded'
-            completed = 3 if succeeded else 2 if intent.get('bootIdAfter') else 1
-            operation_update(record['id'], status='succeeded' if succeeded else 'running',
-                             stage='Riavvio e servizi verificati' if succeeded else 'Verifica dei servizi dopo il riavvio' if completed == 2 else 'In attesa del riavvio del server',
-                             completedSteps=completed, totalSteps=3, lastReconcileAt=time.time(), recoveryRequired=False,
-                             **({'finishedAt': stamp()} if succeeded else {}))
+            booted = bool(intent.get('bootIdAfter'))
+            if combined and booted and not private.get('bootObservedAt'):
+                private['bootObservedAt'] = time.time()
+            # A stopped/failed reboot timer must not leave a native client
+            # polling forever. Still allow later health evidence to resolve it.
+            expired = combined and not succeeded and time.time() - private.get('bootObservedAt', private.get('scheduleStartedAt', time.time())) >= 180
+            if not combined or booted or private['intent']['state'] != 'queued':
+                private['intent'] = intent
+                save('host-reboot', record['id'], private)
+            if combined and record['status'] == 'failed' and not booted and not succeeded:
+                continue
+            completed = (100 if succeeded else 99) if combined else (3 if succeeded else 2 if booted else 1)
+            operation_update(record['id'], status='succeeded' if succeeded else 'failed' if expired else 'running',
+                             stage='Riavvio e servizi verificati' if succeeded else 'Riavvio o servizi non verificati' if expired else 'Verifica dei servizi dopo il riavvio' if booted else 'In attesa del riavvio del server',
+                             completedSteps=completed, totalSteps=100 if combined else 3, lastReconcileAt=time.time(), recoveryRequired=expired,
+                             **({'finishedAt': stamp(), 'error': 'Verifica amministrativa del riavvio richiesta.' if expired else None} if succeeded or expired else {}))
         except Exception:
             operation_update(record['id'], status='running', stage='Riavvio: verifica dello stato del server in attesa', lastReconcileAt=time.time())
 
 
-def host_plan(kind, revision):
+def host_plan(kind, revision, reboot_after=False):
     current = host_catalog()
     if not current['available']:
         raise Rejected('updates_unavailable', 'Gestione aggiornamenti OS non disponibile.', 503)
@@ -1065,13 +1112,18 @@ def host_plan(kind, revision):
     if kind == 'host-reboot' and not current['canReboot']:
         raise Rejected('unsupported', 'Il riavvio non è richiesto o la manutenzione è occupata.', 422)
     try:
-        native = host_updates.plan(load('cache', 'host-releases')) if kind == 'host-upgrade' else host_updates.reboot_plan()
+        if kind == 'host-upgrade':
+            native = host_updates.plan(load('cache', 'host-releases'), **({'reboot_after': True} if reboot_after else {}))
+        else:
+            native = host_updates.reboot_plan()
     except host_updates.HostUpdateError:
         raise Rejected('unsupported', 'Il piano OS non è applicabile; verifica nuovamente lo stato.', 422)
     public = {'kind': kind, 'planId': native['planId'], 'revision': revision,
               'expiresAt': datetime.datetime.fromtimestamp(native['expiresAt'], datetime.timezone.utc).isoformat(),
-              'packageCount': len(native.get('packages', [])), 'autoremoveCount': len(native.get('autoremove', [])), 'steps': native['steps'], 'risks': native['risks'],
-              'confirmationRequired': 'REBOOT' if kind == 'host-reboot' else 'UPDATE'}
+              'packageCount': len(native.get('packages', [])), 'packages': native.get('packages', []),
+              'autoremoveCount': len(native.get('autoremove', [])), 'steps': native['steps'], 'risks': native['risks'],
+              'confirmationRequired': 'REBOOT' if kind == 'host-reboot' else 'UPDATE_AND_REBOOT' if reboot_after else 'UPDATE',
+              'rebootAfter': reboot_after}
     save('host-plan', public['planId'], {'public': public, 'native': native})
     return public
 
@@ -1138,6 +1190,17 @@ def finish_host_upgrade(job_id, execution, result):
                          **({'error': 'Verifica amministrativa richiesta per i servizi del server.', 'finishedAt': stamp()} if expired else {'finishedAt': None}))
         return
     save('cache', 'host-releases', None)
+    if native.get('rebootAfter') is True:
+        with HOST_REBOOT_GUARD:
+            if load('host-reboot', job_id):
+                return
+            intent = host_updates.prepare_upgrade_reboot(native)
+            save('host-reboot', job_id, {'intent': intent, 'services': baseline, 'acknowledged': True})
+            operation_update(job_id, status='running', recoveryRequired=False, error=None,
+                             stage='Aggiornamento verificato; preparazione del riavvio', completedSteps=99, totalSteps=100,
+                             lastHostReconcileAt=time.time(), finishedAt=None)
+            EXECUTOR.submit(host_reboot_job, job_id)
+        return
     operation_update(job_id, status='succeeded', recoveryRequired=False, error=None,
                      stage='Aggiornamento OS e servizi verificati', completedSteps=100, totalSteps=100,
                      rebootRequired=result.get('rebootRequired') is True, lastHostReconcileAt=time.time(), finishedAt=stamp())
@@ -1159,6 +1222,8 @@ def reconcile_host_jobs(operation_id=None, force=False):
         job_id, kind = record['id'], record['kind']
         with HOST_JOB_GUARD:
             local = job_id in HOST_JOB_THREADS
+        if local and not force:
+            continue  # The local job publishes its own progress and final result.
         try:
             status = host_updates.worker_status(job_id)
             alive = host_updates.worker_alive(job_id)
@@ -1166,6 +1231,13 @@ def reconcile_host_jobs(operation_id=None, force=False):
                 status = None
             execution = stored_host_execution(record)
             native = execution.get('native')
+            if kind == 'host-upgrade' and native and native.get('rebootAfter') is True:
+                if load('host-reboot', job_id):
+                    continue
+                if not execution.get('acknowledged') and not execution.get('dispatched'):
+                    if native['expiresAt'] <= time.time():
+                        operation_update(job_id, status='failed', recoveryRequired=False, stage='Piano OS scaduto: nessun aggiornamento eseguito', finishedAt=stamp())
+                    continue
             if kind == 'host-upgrade' and isinstance(execution.get('verifiedResult'), dict):
                 finish_host_upgrade(job_id, execution, execution['verifiedResult'])
                 reconciled = True
@@ -1210,6 +1282,31 @@ def reconcile_host_jobs(operation_id=None, force=False):
                                  error='Impossibile confermare tutte le verifiche finali OS.', lastHostReconcileAt=time.time(), finishedAt=stamp())
                 reconciled = True
     return reconciled
+
+
+def reconcile_host_maintenance(operation_id=None, force=False):
+    if not HOST_RECONCILE_GUARD.acquire(blocking=force):
+        return
+    try:
+        reconcile_host_jobs(operation_id=operation_id, force=force)
+        reconcile_host_reboots(force=force)
+    finally:
+        HOST_RECONCILE_GUARD.release()
+
+
+def resume_combined_maintenance():
+    # After a bridge restart the root package worker may still be running.
+    # Finish an accepted upgrade/reboot even if the client closed the app.
+    for record in records('operation'):
+        if record.get('kind') != 'host-upgrade' or record['status'] not in ['queued', 'running']:
+            continue
+        job_id = record['id']
+        native = load('host-execution', job_id, {}).get('native')
+        if not native or native.get('rebootAfter') is not True:
+            continue
+        while load('operation', job_id, {}).get('status') in ['queued', 'running']:
+            reconcile_host_maintenance(operation_id=job_id)
+            time.sleep(5)
 
 
 def wait_operation_lock(lock, job_id, expires_at=None, timeout=60):
@@ -1284,11 +1381,20 @@ def host_reboot_job(job_id):
     with lock_path.open('a') as lock:
         try:
             private = load('host-reboot', job_id)
+            combined = private['intent'].get('afterUpgrade') is True
+            if combined:
+                with HOST_REBOOT_GUARD:
+                    private = load('host-reboot', job_id)
+                    if private.get('scheduleStartedAt') or private['intent']['state'] != 'queued':
+                        return
+                    private['scheduleStartedAt'] = time.time()
+                    save('host-reboot', job_id, private)
             stored = load('host-plan', private['intent']['planId'])
-            wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored else None)
+            wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored and not combined else None)
             private['intent'] = host_updates.schedule_reboot(private['intent'])
             save('host-reboot', job_id, private)
-            operation_update(job_id, status='running', stage='Riavvio programmato; attesa nuova connessione', completedSteps=1, totalSteps=3)
+            operation_update(job_id, status='running', stage='Riavvio programmato; attesa nuova connessione',
+                             completedSteps=99 if combined else 1, totalSteps=100 if combined else 3)
         except Exception as error:
             blocked = isinstance(error, Rejected) and error.code in ['operation_conflict', 'plan_expired']
             operation_update(job_id, status='failed', recoveryRequired=not blocked,
@@ -1307,6 +1413,17 @@ def acknowledge_host_reboot(job_id):
         private['acknowledged'] = True
         save('host-reboot', job_id, private)
         EXECUTOR.submit(host_reboot_job, job_id)
+
+
+def acknowledge_host_upgrade(job_id, stored):
+    with GATE:
+        execution = load('host-execution', job_id)
+        record = load('operation', job_id)
+        if not execution or execution.get('acknowledged') or record['status'] != 'queued':
+            return
+        execution['acknowledged'] = True
+        save('host-execution', job_id, execution)
+        EXECUTOR.submit(host_job, job_id, 'host-upgrade', stored)
 
 
 def submit_host(kind, stored=None, idempotency_key=None):
@@ -1330,15 +1447,15 @@ def submit_host(kind, stored=None, idempotency_key=None):
             raise Rejected('unsupported', 'Riavvio non applicabile: verifica manutenzione e stato del server.', 422)
     else:
         persist()
-        EXECUTOR.submit(host_job, job_id, kind, stored)
+        if not (stored and stored['native'].get('rebootAfter') is True):
+            EXECUTOR.submit(host_job, job_id, kind, stored)
     return {'operationId': job_id, 'status': 'queued'}
 
 
 def handle_host(body, after_response=None):
     action = body['action']
     if action == 'host-catalog':
-        reconcile_host_jobs()
-        reconcile_host_reboots()
+        reconcile_host_maintenance()
         return host_catalog()
     if host_updates is None:
         raise Rejected('updates_unavailable', 'Gestione aggiornamenti OS non disponibile.', 503)
@@ -1347,7 +1464,8 @@ def handle_host(body, after_response=None):
             raise Rejected('operation_conflict', 'Una manutenzione interrotta richiede verifica amministrativa.')
         if action in ['host-apply', 'host-reboot-apply']:
             expected_kind = 'host-reboot' if action == 'host-reboot-apply' else 'host-upgrade'
-            if body['confirmation'] != ('REBOOT' if expected_kind == 'host-reboot' else 'UPDATE'):
+            confirmations = ['REBOOT'] if expected_kind == 'host-reboot' else ['UPDATE', 'UPDATE_AND_REBOOT']
+            if body['confirmation'] not in confirmations:
                 raise Rejected('confirmation_required', 'Conferma esplicita richiesta.', 422)
             with db() as connection:
                 prior = connection.execute('SELECT plan,job FROM idempotency WHERE id=?', (body['idempotencyKey'],)).fetchone()
@@ -1357,8 +1475,13 @@ def handle_host(body, after_response=None):
                 record = load('operation', prior['job'])
                 if record.get('kind') != expected_kind:
                     raise Rejected('idempotency_conflict', 'Identificativo di richiesta già usato per un’altra operazione.')
+                stored = load('host-plan', body['planId'])
+                if not stored or body['confirmation'] != stored['public']['confirmationRequired']:
+                    raise Rejected('confirmation_required', 'Conferma esplicita richiesta.', 422)
                 if record.get('kind') == 'host-reboot' and after_response:
                     after_response(lambda: acknowledge_host_reboot(record['id']))
+                if stored['native'].get('rebootAfter') and after_response:
+                    after_response(lambda: acknowledge_host_upgrade(record['id'], stored))
                 return {'operationId': record['id'], 'status': record['status']}
         if any(item['status'] in ['queued', 'running'] for item in records('operation')):
             raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
@@ -1366,11 +1489,11 @@ def handle_host(body, after_response=None):
             return submit_host('host-check')
         kind = 'host-reboot' if action.startswith('host-reboot-') else 'host-upgrade'
         if action in ['host-plan', 'host-reboot-plan']:
-            return host_plan(kind, body['revision'])
+            return host_plan(kind, body['revision'], reboot_after=body.get('rebootAfter', False))
         stored = load('host-plan', body['planId'])
         if not stored or stored['public']['kind'] != kind:
             raise Rejected('not_found', 'Piano OS non disponibile.', 404)
-        if body['confirmation'] != ('REBOOT' if kind == 'host-reboot' else 'UPDATE'):
+        if body['confirmation'] != stored['public']['confirmationRequired']:
             raise Rejected('confirmation_required', 'Conferma esplicita richiesta.', 422)
         if stored['native']['expiresAt'] <= time.time():
             raise Rejected('plan_expired', 'Piano OS scaduto.', 410)
@@ -1379,6 +1502,8 @@ def handle_host(body, after_response=None):
         result = submit_host(kind, stored, body['idempotencyKey'])
         if kind == 'host-reboot' and after_response:
             after_response(lambda: acknowledge_host_reboot(result['operationId']))
+        if stored['native'].get('rebootAfter') and after_response:
+            after_response(lambda: acknowledge_host_upgrade(result['operationId'], stored))
         return result
 
 
@@ -1397,9 +1522,13 @@ def server_events():
 def handle(body, after_response=None):
     allowed = {'server-events': set(), 'catalog': set(), 'check': set(), 'plan': {'componentId', 'revision'}, 'apply': {'componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'operation': {'operationId'}}
     allowed.update({'host-catalog': set(), 'host-check': set(), 'host-plan': {'revision'}, 'host-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'host-reboot-plan': {'revision'}, 'host-reboot-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}})
-    if not isinstance(body, dict) or not isinstance(body.get('action'), str) or body.get('action') not in allowed or set(body) != allowed[body['action']] | {'action'}:
+    if not isinstance(body, dict) or not isinstance(body.get('action'), str) or body.get('action') not in allowed:
         raise Rejected('invalid_request', 'Richiesta non valida.', 400)
     action = body['action']
+    required = allowed[action] | {'action'}
+    optional = {'rebootAfter'} if action == 'host-plan' else set()
+    if not required <= set(body) <= required | optional or 'rebootAfter' in body and type(body['rebootAfter']) is not bool:
+        raise Rejected('invalid_request', 'Richiesta non valida.', 400)
     for key in ['componentId', 'planId', 'operationId']:
         if key in body and (not isinstance(body[key], str) or not IDENTIFIER.fullmatch(body[key])):
             raise Rejected('invalid_request', 'Identificativo non valido.', 400)
@@ -1413,8 +1542,7 @@ def handle(body, after_response=None):
     if action == 'catalog':
         return catalog()
     if action == 'operation':
-        reconcile_host_jobs(operation_id=body['operationId'])
-        reconcile_host_reboots()
+        reconcile_host_maintenance(operation_id=body['operationId'])
         value = load('operation', body['operationId'])
         if value is None:
             raise Rejected('not_found', 'Operazione non presente.', 404)
@@ -1522,6 +1650,7 @@ def main():
         server.key = key
         os.chown(p, 0, 1000)
         os.chmod(p, 0o660)
+        threading.Thread(target=resume_combined_maintenance, daemon=True).start()
         server.serve_forever()
 
 

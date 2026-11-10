@@ -10,6 +10,7 @@ import {
 } from "@simplewebauthn/server";
 import { resolveAuthorizationCapability } from "./route-capabilities.mjs";
 import { DATABASE_ADMIN_AUTHORIZATION_PATH } from "./database-admin-gate.mjs";
+import { isNativeVaultPublicKey } from "./native-client.mjs";
 
 const { Pool } = pg;
 
@@ -192,8 +193,9 @@ export class AppPasskeyAuth {
     }
   }
 
-  async beginPasskeyRegistration(req, bootstrapToken) {
+  async beginPasskeyRegistration(req, bootstrapToken, nativeVaultKey) {
     const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
+    const publicKey = optionalNativeVaultPublicKey(nativeVaultKey);
     const existing = await this.store.listPasskeys(this.config.adminSubject);
     if (existing.length > 0) {
       throw new AuthRequestError("A Control Center passkey is already registered. Authenticate to manage it.", 409);
@@ -221,7 +223,7 @@ export class AppPasskeyAuth {
       challengeHash: sha256(options.challenge),
       flow: "registration",
       userId: this.config.adminSubject,
-      peerHash: request.peerHash,
+      peerHash: passkeyChallengePeer(request.peerHash, publicKey),
       expiresAt: new Date(Date.now() + this.config.challengeTtlSeconds * 1000),
     });
     return options;
@@ -229,6 +231,7 @@ export class AppPasskeyAuth {
 
   async completePasskeyRegistration(req, payload) {
     const request = this.assertRequest(req, { mutation: true, firstEnrollment: true });
+    const publicKey = optionalNativeVaultPublicKey(payload?.nativeVaultPublicKey);
     if ((await this.store.listPasskeys(this.config.adminSubject)).length > 0) {
       throw new AuthRequestError("A Control Center passkey is already registered.", 409);
     }
@@ -240,7 +243,7 @@ export class AppPasskeyAuth {
       challenge,
       flow: "registration",
       userId: this.config.adminSubject,
-      peerHash: request.peerHash,
+      peerHash: passkeyChallengePeer(request.peerHash, publicKey),
     });
     if (!consumed) throw new AuthRequestError("The passkey registration challenge is invalid or expired.", 401);
 
@@ -281,11 +284,12 @@ export class AppPasskeyAuth {
       expiresAt: new Date(Date.now() + this.config.passkeyTtlSeconds * 1000),
     });
     if (!created) throw new AuthRequestError("A Control Center passkey is already registered.", 409);
-    return this.createSessionResult();
+    return this.createSessionResult(publicKey);
   }
 
-  async beginLogin(req) {
+  async beginLogin(req, nativeVaultKey) {
     const request = this.assertRequest(req, { mutation: true });
+    const publicKey = optionalNativeVaultPublicKey(nativeVaultKey);
     const throttleKeyHash = sha256(`app-passkey-login\0${request.peerHash}`);
     const permit = await this.store.registerLoginAttempt(
       throttleKeyHash,
@@ -314,7 +318,7 @@ export class AppPasskeyAuth {
       challengeHash: sha256(options.challenge),
       flow: "authentication",
       userId: this.config.adminSubject,
-      peerHash: request.peerHash,
+      peerHash: passkeyChallengePeer(request.peerHash, publicKey),
       expiresAt: new Date(Date.now() + this.config.challengeTtlSeconds * 1000),
     });
     return options;
@@ -322,6 +326,7 @@ export class AppPasskeyAuth {
 
   async completeLogin(req, payload) {
     const request = this.assertRequest(req, { mutation: true });
+    const publicKey = optionalNativeVaultPublicKey(payload?.nativeVaultPublicKey);
     const challenge = boundedChallenge(payload?.challenge);
     const credential = normalizeCredential(payload?.credential || payload, "authentication");
     const consumed = await this.store.consumeWebAuthnChallenge({
@@ -329,7 +334,7 @@ export class AppPasskeyAuth {
       challenge,
       flow: "authentication",
       userId: this.config.adminSubject,
-      peerHash: request.peerHash,
+      peerHash: passkeyChallengePeer(request.peerHash, publicKey),
     });
     if (!consumed) throw new AuthRequestError("The passkey authentication challenge is invalid or expired.", 401);
 
@@ -367,10 +372,10 @@ export class AppPasskeyAuth {
     });
     if (!updated) throw new AuthRequestError("The passkey counter is stale; authenticate again.", 401);
     await this.store.clearLoginThrottle(sha256(`app-passkey-login\0${request.peerHash}`));
-    return this.createSessionResult();
+    return this.createSessionResult(publicKey);
   }
 
-  createSessionResult() {
+  createSessionResult(nativeVaultPublicKey) {
     const rawSessionToken = opaqueToken(64);
     const rawCsrfToken = opaqueToken(32);
     const authTime = new Date();
@@ -390,6 +395,7 @@ export class AppPasskeyAuth {
       issuer: this.config.publicOrigin,
       sessionId: "",
       keyId: "",
+      nativeVaultPublicKey,
       expiresAt,
     };
     return this.store.createSession(item).then(() => ({
@@ -526,10 +532,12 @@ export class PostgresAppPasskeyStore {
               exists(select 1 from information_schema.columns
                      where table_schema='control_auth' and table_name='sessions' and column_name='csrf_hash') as csrf_ready,
               exists(select 1 from information_schema.columns
-                     where table_schema='control_auth' and table_name='sessions' and column_name='policy_version') as policy_ready`,
+                     where table_schema='control_auth' and table_name='sessions' and column_name='policy_version') as policy_ready,
+              exists(select 1 from information_schema.columns
+                     where table_schema='control_auth' and table_name='sessions' and column_name='native_vault_public_key') as native_vault_ready`,
     );
     const row = result.rows[0] || {};
-    if (!row.sessions || !row.throttle || !row.passkeys || !row.webauthn_challenges || !row.csrf_ready || !row.policy_ready) {
+    if (!row.sessions || !row.throttle || !row.passkeys || !row.webauthn_challenges || !row.csrf_ready || !row.policy_ready || !row.native_vault_ready) {
       throw new AuthConfigurationError("Control Center app-passkey migration is not applied.");
     }
   }
@@ -537,8 +545,8 @@ export class PostgresAppPasskeyStore {
   async createSession(item) {
     await this.pool.query(
       `insert into control_auth.sessions
-       (token_hash,csrf_hash,policy_version,subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,signing_key_id,expires_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+       (token_hash,csrf_hash,policy_version,subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,signing_key_id,expires_at,native_vault_public_key)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
         item.tokenHash,
         item.csrfHash,
@@ -555,6 +563,7 @@ export class PostgresAppPasskeyStore {
         item.sessionId || "",
         item.keyId || "",
         item.expiresAt,
+        item.nativeVaultPublicKey || null,
       ],
     );
   }
@@ -565,7 +574,7 @@ export class PostgresAppPasskeyStore {
        set last_seen_at=now()
        where token_hash=$1 and revoked_at is null and expires_at > now()
          and last_seen_at > now() - ($2::text || ' seconds')::interval
-       returning subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,csrf_hash,policy_version,created_at,last_seen_at,expires_at`,
+       returning subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,csrf_hash,policy_version,created_at,last_seen_at,expires_at,native_vault_public_key`,
       [tokenHash, idleSeconds],
     );
     return normalizeSessionRow(result.rows[0]);
@@ -835,6 +844,7 @@ async function seedTestSessions(store, config, env) {
       issuer: config.publicOrigin,
       sessionId: "",
       keyId: "",
+      nativeVaultPublicKey: optionalNativeVaultPublicKey(fixture?.nativeVaultPublicKey),
       expiresAt: new Date(Date.now() + config.sessionMaxAgeSeconds * 1000),
     });
   }
@@ -846,6 +856,16 @@ function requiredFixtureToken(value, label) {
     throw new AuthConfigurationError(`Test session ${label} is invalid.`);
   }
   return token;
+}
+
+function optionalNativeVaultPublicKey(value) {
+  if (value === undefined) return null;
+  if (!isNativeVaultPublicKey(value)) throw new AuthRequestError("Invalid native Vault credential.", 400);
+  return value;
+}
+
+function passkeyChallengePeer(peerHash, nativeVaultPublicKey) {
+  return nativeVaultPublicKey ? sha256(`native-vault\0${peerHash}\0${nativeVaultPublicKey}`) : peerHash;
 }
 
 function normalizeSessionRow(row) {
@@ -866,6 +886,7 @@ function normalizeSessionRow(row) {
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
+    nativeVaultPublicKey: row.native_vault_public_key,
   };
 }
 

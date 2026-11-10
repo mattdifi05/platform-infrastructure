@@ -19,42 +19,49 @@ struct HomeView: View {
     @State private var samples: [ResourceSample] = []
     @State private var error: String?
     @State private var loading = true
+    @State private var refreshing = false
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 18) {
+            LazyVStack(spacing: 16) {
                 if let error { ErrorNotice(message: error) { Task { await refresh() } } }
                 if loading { LoadingState(title: "Lettura delle risorse…") }
                 else {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 5) { Text("Stexor VPS").font(.title2.bold()); Text("Le risorse del tuo server").font(.subheadline).foregroundStyle(.secondary) }
-                        Spacer()
-                        let fresh = error == nil && snapshot["freshness"]["available"].boolValue == true
-                        StatusPill(text: fresh ? "Operativo" : "Dati non aggiornati", tone: fresh ? .green : .orange)
+                    if error == nil && snapshot["freshness"]["available"].boolValue != true {
+                        ErrorNotice(message: "Le misurazioni non sono disponibili al momento.")
                     }
-                    resourceCard("CPU", value: NativeFormatting.percent(snapshot["cpu"]["usedPercent"].doubleValue), detail: snapshot["cpu"]["cores"].intValue.map { "\($0) core" } ?? "—", symbol: "cpu", color: .indigo, series: [("CPU", \.cpu)])
-                    resourceCard("Memoria", value: NativeFormatting.percent(snapshot["memory"]["usedPercent"].doubleValue), detail: capacity(snapshot["memory"]), symbol: "memorychip", color: .teal, series: [("RAM", \.memory)])
+                    resourceCard("CPU", value: NativeFormatting.percent(snapshot["cpu"]["usedPercent"].doubleValue), detail: snapshot["cpu"]["cores"].intValue.map { "\($0) core" } ?? "—", symbol: "cpu", color: .indigo, series: [("CPU", \.cpu)], percentage: true)
+                    resourceCard("Memoria", value: NativeFormatting.percent(snapshot["memory"]["usedPercent"].doubleValue), detail: capacity(snapshot["memory"]), symbol: "memorychip", color: .teal, series: [("RAM", \.memory)], percentage: true)
                     HStack(spacing: 14) {
                         capacityCard("Disco", value: NativeFormatting.percent(snapshot["disk"]["usedPercent"].doubleValue), detail: capacity(snapshot["disk"]), symbol: "internaldrive", color: .orange)
                         capacityCard("Swap", value: NativeFormatting.bytes(snapshot["swap"]["usedBytes"].doubleValue), detail: "di " + NativeFormatting.bytes(snapshot["swap"]["totalBytes"].doubleValue), symbol: "arrow.left.arrow.right", color: .purple)
                     }
-                    resourceCard("Connessione", value: NativeFormatting.bytes(snapshot["network"]["totals"]["rxBytesPerSecond"].doubleValue) + "/s", detail: "↑ " + NativeFormatting.bytes(snapshot["network"]["totals"]["txBytesPerSecond"].doubleValue) + "/s", symbol: "network", color: .blue, series: [("Ricezione", \.received), ("Invio", \.sent)])
-                    resourceCard("Attività disco", value: NativeFormatting.bytes(snapshot["diskIo"]["totals"]["readBytesPerSecond"].doubleValue) + "/s", detail: "Scrittura " + NativeFormatting.bytes(snapshot["diskIo"]["totals"]["writeBytesPerSecond"].doubleValue) + "/s", symbol: "externaldrive", color: .pink, series: [("Lettura", \.read), ("Scrittura", \.written)])
-                    NavigationLink { ServerInformationView(snapshot: snapshot) } label: { Label("Dettagli del server", systemImage: "server.rack").frame(maxWidth: .infinity) }.buttonStyle(.bordered)
-                }
-            }.padding(20)
-        }.background(Color(.systemGroupedBackground)).navigationTitle("Home")
-            .refreshable { await refresh() }
-            .task(id: isActive) {
-                guard isActive else { return }
-                while !Task.isCancelled {
-                    await refresh()
-                    do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                    resourceCard("Connessione", value: rate(snapshot["network"]["totals"]["rxBytesPerSecond"]), detail: "↑ " + rate(snapshot["network"]["totals"]["txBytesPerSecond"]), symbol: "network", color: .blue, series: [("Ricezione", \.received), ("Invio", \.sent)])
+                    resourceCard("Attività disco", value: rate(snapshot["diskIo"]["totals"]["readBytesPerSecond"]), detail: "Scrittura " + rate(snapshot["diskIo"]["totals"]["writeBytesPerSecond"]), symbol: "externaldrive", color: .pink, series: [("Lettura", \.read), ("Scrittura", \.written)])
                 }
             }
+            .padding(20)
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("Home")
+        .navigationSubtitle("Le risorse del tuo server")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await refresh() }
+        .task(id: isActive) {
+            guard isActive else { return }
+            while !Task.isCancelled {
+                await refresh()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
     }
 
     private func capacity(_ item: JSONValue) -> String { NativeFormatting.bytes(item["usedBytes"].doubleValue) + " di " + NativeFormatting.bytes(item["totalBytes"].doubleValue) }
+
+    private func rate(_ value: JSONValue) -> String {
+        guard let bytes = value.doubleValue else { return "—" }
+        return NativeFormatting.bytes(bytes) + "/s"
+    }
 
     private func capacityCard(_ title: String, value: String, detail: String, symbol: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -64,15 +71,20 @@ struct HomeView: View {
         }.frame(maxWidth: .infinity, alignment: .leading).padding(18).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 22))
     }
 
-    private func resourceCard(_ title: String, value: String, detail: String, symbol: String, color: Color, series: [(String, KeyPath<ResourceSample, Double?>)]) -> some View {
+    private func resourceCard(_ title: String, value: String, detail: String, symbol: String, color: Color, series: [(String, KeyPath<ResourceSample, Double?>)], percentage: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(detail).font(.caption).foregroundStyle(.secondary) }
             Text(value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
-            ResourceChart(samples: samples, series: series, color: color, percentage: title == "CPU" || title == "Memoria", active: isActive)
+            ResourceChart(samples: samples, series: series, color: color, percentage: percentage, active: isActive)
+                .accessibilityLabel("Grafico \(title)")
+                .accessibilityIdentifier("home.chart.\(symbol)")
         }.padding(20).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
     }
 
     private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
         do {
             let value = try await model.get("/control/resources/host")
             guard !Task.isCancelled else { return }
@@ -80,14 +92,23 @@ struct HomeView: View {
             snapshot = value
             error = nil
             let available = value["freshness"]["available"].boolValue == true
-            samples.append(ResourceSample(date: .now, cpu: available ? value["cpu"]["usedPercent"].doubleValue : nil, memory: available ? value["memory"]["usedPercent"].doubleValue : nil, received: available ? value["network"]["totals"]["rxBytesPerSecond"].doubleValue : nil, sent: available ? value["network"]["totals"]["txBytesPerSecond"].doubleValue : nil, read: available ? value["diskIo"]["totals"]["readBytesPerSecond"].doubleValue : nil, written: available ? value["diskIo"]["totals"]["writeBytesPerSecond"].doubleValue : nil))
-            samples.removeAll { $0.date < Date.now.addingTimeInterval(-125) }
-        } catch is CancellationError { }
-        catch {
-            self.error = error.localizedDescription
+            samples.append(ResourceSample(
+                date: .now,
+                cpu: available ? value["cpu"]["usedPercent"].doubleValue : nil,
+                memory: available ? value["memory"]["usedPercent"].doubleValue : nil,
+                received: available ? value["network"]["totals"]["rxBytesPerSecond"].doubleValue : nil,
+                sent: available ? value["network"]["totals"]["txBytesPerSecond"].doubleValue : nil,
+                read: available ? value["diskIo"]["totals"]["readBytesPerSecond"].doubleValue : nil,
+                written: available ? value["diskIo"]["totals"]["writeBytesPerSecond"].doubleValue : nil
+            ))
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            self.error = "Impossibile aggiornare le risorse del server."
             samples.append(ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil))
-            samples.removeAll { $0.date < Date.now.addingTimeInterval(-125) }
         }
+        samples.removeAll { $0.date < Date.now.addingTimeInterval(-125) }
         loading = false
     }
 }
@@ -107,51 +128,88 @@ private struct ResourceChart: View {
         let segment: Int
     }
 
+    private struct Trace: Identifiable {
+        let id: Int
+        let name: String
+        let points: [Point]
+    }
+
     private func points(for key: KeyPath<ResourceSample, Double?>) -> [Point] {
         var segment = 0
+        var previous: Date?
         return samples.compactMap { sample in
             guard let value = sample[keyPath: key] else { segment += 1; return nil }
+            if let previous, sample.date.timeIntervalSince(previous) > 6 { segment += 1 }
+            previous = sample.date
             return Point(id: sample.id, date: sample.date, value: value, segment: segment)
         }
     }
+
     var body: some View {
+        let traces = series.enumerated().map { Trace(id: $0.offset, name: $0.element.0, points: points(for: $0.element.1)) }
+        let peak = traces.flatMap(\.points).map(\.value).max() ?? 0
+        let upperBound = percentage ? 100 : max(1, peak * 1.15)
+        let oldest = traces.compactMap { $0.points.first?.date }.min()
+
         TimelineView(.animation(minimumInterval: reduceMotion ? 2 : 1.0 / 30.0, paused: !active)) { context in
             let now = context.date
+            // Expand continuously as samples arrive, then keep a rolling two-minute window.
+            let window = min(120, max(8, now.timeIntervalSince(oldest ?? now) + 2))
+            let offsets = [1.0, 0.75, 0.5, 0.25, 0].map { window * $0 }
+            let grid = offsets.map { now.addingTimeInterval(-$0) }
             Chart {
-                ForEach(Array(series.enumerated()), id: \.offset) { index, line in
-                    let points = points(for: line.1)
-                    ForEach(points) { point in
-                        LineMark(x: .value("Ora", point.date), y: .value(line.0, point.value), series: .value("Serie", "\(line.0)-\(point.segment)"))
-                            .interpolationMethod(.monotone).foregroundStyle(index == 0 ? color : color.opacity(0.4)).lineStyle(StrokeStyle(lineWidth: 2.4))
+                ForEach(traces) { trace in
+                    let stroke = trace.id == 0 ? color : color.opacity(0.72)
+                    ForEach(trace.points) { point in
+                        LineMark(x: .value("Ora", point.date), y: .value(trace.name, point.value), series: .value("Serie", "\(trace.id)-\(point.segment)"))
+                            .interpolationMethod(.linear)
+                            .foregroundStyle(stroke)
+                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: trace.id == 0 ? [] : [4, 3]))
                     }
-                    if let last = points.last, last.id == samples.last?.id, now.timeIntervalSince(last.date) < 6 {
-                        // Move the time window continuously and extend only the last measured value.
-                        LineMark(x: .value("Ora", now), y: .value(line.0, last.value), series: .value("Serie", "\(line.0)-\(last.segment)")).foregroundStyle(index == 0 ? color : color.opacity(0.4)).lineStyle(StrokeStyle(lineWidth: 2.4))
+                    if let last = trace.points.last, last.id == samples.last?.id, now.timeIntervalSince(last.date) < 6 {
+                        PointMark(x: .value("Ora", last.date), y: .value(trace.name, last.value))
+                            .foregroundStyle(stroke)
+                            .symbolSize(38)
                     }
                 }
-            }.chartXScale(domain: now.addingTimeInterval(-120)...now)
-                .chartYScale(domain: 0...(percentage ? 100 : max(1, samples.flatMap { sample in series.compactMap { sample[keyPath: $0.1] } }.max() ?? 1) * 1.15))
-                .chartXAxis(.hidden).chartYAxis(.hidden).chartLegend(.hidden).frame(height: 100)
-                .accessibilityLabel("Grafico degli ultimi due minuti")
+            }
+            .chartXScale(domain: grid[0]...now, range: .plotDimension(padding: 4))
+            .chartYScale(domain: 0...upperBound, range: .plotDimension(padding: 4))
+            .chartXAxis {
+                AxisMarks(values: grid) { axis in
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                    if axis.index.isMultiple(of: 2) {
+                        AxisValueLabel {
+                            Text(timeLabel(offsets[axis.index]))
+                                .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: percentage ? .stride(by: 25) : .automatic(desiredCount: 4)) { axis in
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                    if let value = axis.as(Double.self) {
+                        AxisValueLabel {
+                            Text(percentage ? "\(Int(value))%" : NativeFormatting.bytes(value))
+                                .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
+                }
+            }
+            .chartLegend(.hidden)
+            .frame(height: 135)
         }
     }
-}
 
-private struct ServerInformationView: View {
-    let snapshot: JSONValue
-    var body: some View {
-        List {
-            Section("Server") {
-                LabeledContent("Inode usati", value: NativeFormatting.percent(snapshot["inodes"]["usedPercent"].doubleValue))
-                LabeledContent("Tempo di attività", value: snapshot["uptimeSeconds"].doubleValue.map { Duration.seconds($0).formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated)) } ?? "—")
-                LabeledContent("Carico medio", value: ["one", "five", "fifteen"].map { snapshot["load"][$0].displayText }.joined(separator: " / "))
-            }
-            Section("Approfondimenti") {
-                ForEach([("Monitoraggio", "/control/monitoring", "waveform.path.ecg"), ("Risorse", "/control/resources/summary", "cpu"), ("Sicurezza", "/control/security/summary", "shield.lefthalf.filled"), ("Log", "/control/logs/summary", "text.alignleft"), ("Operazioni", "/control/operations", "clock.arrow.circlepath"), ("Audit", "/control/audit", "checkmark.shield")], id: \.1) { item in
-                    NavigationLink { RemoteDetailView(title: item.0, path: item.1) } label: { Label(item.0, systemImage: item.2) }
-                }
-            }
-        }.navigationTitle("Server").navigationBarTitleDisplayMode(.inline)
+    private func timeLabel(_ duration: TimeInterval) -> String {
+        let seconds = Int(duration.rounded())
+        if seconds == 0 { return "Ora" }
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        if minutes == 0 { return "−\(remainder) s" }
+        if remainder == 0 { return "−\(minutes) min" }
+        return "−\(minutes) m \(remainder) s"
     }
 }
 

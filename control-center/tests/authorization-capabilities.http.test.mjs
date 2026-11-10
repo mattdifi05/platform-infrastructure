@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -82,6 +82,9 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   writeFileSync(path.join(stateDir, "secret-vault.json"), JSON.stringify({ version: 2, items: { [fixtureVaultId]: { id: fixtureVaultId, itemKey: "qa_value", label: "Ordinary QA credential", projectId: "platform", environment: "local", kind: "provider", source: "manual", valueStored: true, sealedValue: sealedOld } } }), { mode: 0o600 });
   writeFileSync(path.join(backupsDir, "postgres", "fg043-canary.dump"), "non-secret backup canary\n", { mode: 0o600 });
   writeFileSync(clockModule, `Date.now = () => ${fixedNow};\n`, { mode: 0o600 });
+  const biometricKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const { x, y } = biometricKey.publicKey.export({ format: "jwk" });
+  const nativeVaultPublicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]).toString("base64url");
   const sessionFixtures = [
     fixture("viewer", "viewer", 0),
     fixture("admin", "admin", 0),
@@ -90,6 +93,8 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     fixture("owner-300", "owner", 300),
     fixture("owner-301", "owner", 301),
     fixture("owner-future", "owner", -1),
+    { ...fixture("owner-face-id", "owner", 301), nativeVaultPublicKey },
+    { ...fixture("owner-face-id-other", "owner", 301), nativeVaultPublicKey },
   ];
 
   const port = await freePort();
@@ -154,6 +159,8 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     owner300: identity(sessionFixtures[4]),
     owner301: identity(sessionFixtures[5]),
     ownerFuture: identity(sessionFixtures[6]),
+    ownerFaceID: identity(sessionFixtures[7]),
+    ownerFaceIDOther: identity(sessionFixtures[8]),
   };
 
   const restoreStateAfterDenied = installContextTripwire(path.join(stateDir, "projects.json"));
@@ -283,6 +290,37 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   const revealed = await freshReveal.json();
   assert.equal(revealed.value, nextFixtureValue);
   assert.equal(revealed.ttlMs, 30000);
+  const biometricPath = `/api/native/v1/vault/secrets/${fixtureVaultId}`;
+  const biometricBootstrap = await request(baseUrl, "GET", "/api/native/v1/bootstrap", identities.ownerFaceID);
+  const biometricSession = await biometricBootstrap.json();
+  assert.equal(biometricSession.session.vaultFaceIDRegistered, true);
+  assert.equal(biometricSession.authentication.vaultFaceIDSupported, true);
+  assert.doesNotMatch(JSON.stringify(biometricSession), new RegExp(nativeVaultPublicKey));
+  for (const target of ["challenge", "reveal"]) {
+    assert.equal((await request(baseUrl, "POST", `${biometricPath}/${target}`)).status, 401);
+    assert.equal((await request(baseUrl, "POST", `${biometricPath}/${target}`, identities.viewer, { validCsrf: true })).status, 403);
+    assert.equal((await request(baseUrl, "POST", `${biometricPath}/${target}`, identities.ownerFaceID, { invalidCsrf: true })).status, 403);
+    assert.equal((await request(baseUrl, "POST", `${biometricPath}/${target}`, identities.owner, { validCsrf: true })).status, 428);
+  }
+  const issueBiometricChallenge = async () => {
+    const response = await request(baseUrl, "POST", `${biometricPath}/challenge`, identities.ownerFaceID, { validCsrf: true });
+    assert.equal(response.status, 200);
+    const { challenge } = await response.json();
+    return challenge;
+  };
+  const biometricChallenge = await issueBiometricChallenge();
+  const biometricSignature = sign("sha256", Buffer.from(`platform-vault-reveal-v1\n${biometricChallenge}`), biometricKey.privateKey).toString("base64url");
+  const proof = { challenge: biometricChallenge, signature: biometricSignature };
+  const verifyBiometric = (target, identity, payload = proof) => request(baseUrl, "POST", `${target}/reveal`, identity, { validCsrf: true, payload });
+  assert.equal((await verifyBiometric(biometricPath, identities.ownerFaceIDOther)).status, 403, "proof cannot be used in a second session");
+  assert.equal((await verifyBiometric("/api/native/v1/vault/secrets/another-item", identities.ownerFaceID)).status, 403, "proof cannot be used for a different item");
+  const nativeRevealed = await verifyBiometric(biometricPath, identities.ownerFaceID);
+  assert.equal(nativeRevealed.status, 200, "registered biometric proof can reveal after the passkey freshness window");
+  assert.equal(nativeRevealed.headers.get("cache-control"), "no-store");
+  assert.equal((await nativeRevealed.json()).value, nextFixtureValue);
+  assert.equal((await verifyBiometric(biometricPath, identities.ownerFaceID)).status, 403, "proof cannot be replayed");
+  const invalidChallenge = await issueBiometricChallenge();
+  assert.equal((await verifyBiometric(biometricPath, identities.ownerFaceID, { challenge: invalidChallenge, signature: biometricSignature })).status, 403, "a signature for another nonce is rejected");
   for (const action of ["reveal", "get", "read"]) {
     const legacy = await request(baseUrl, "POST", "/actions/vault-command", identities.owner301, { validCsrf: true, payload: { action, itemId: fixtureVaultId, confirm: `REVEAL-VAULT-SECRET:${fixtureVaultId}` } });
     assert.equal(legacy.status, 422, `legacy ${action} cannot bypass the reveal gate`);

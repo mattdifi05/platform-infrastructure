@@ -170,6 +170,8 @@ const CONTROL_ROUTES = Object.freeze([
 
 const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   viewer("native.bootstrap", "api", "native", "v1", "bootstrap"),
+  owner("POST", "native.vault.challenge", "api", "native", "v1", "vault", "secrets", parameter("vaultItemId"), "challenge"),
+  owner("POST", "native.vault.reveal", "api", "native", "v1", "vault", "secrets", parameter("vaultItemId"), "reveal"),
   viewer("native.applications", "api", "native", "v1", "applications"),
   ownerFresh("POST", "native.database", "api", "native", "v1", "database-command"),
   ownerFresh("POST", "native.database-delete", "api", "native", "v1", "database-delete-command"),

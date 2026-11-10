@@ -7,8 +7,8 @@ async function boundedJson(req) {
   try { return size ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; }
   catch { throw new RuntimeUpdatesError(400, 'invalid_request'); }
 }
-function payload(value, required) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== required.length || Object.keys(value).some(key => !required.includes(key))) throw new RuntimeUpdatesError(400, 'invalid_request');
+function payload(value, required, optional = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) throw new RuntimeUpdatesError(400, 'invalid_request');
   return value;
 }
 const defaultJson = (res, value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
@@ -28,7 +28,9 @@ export async function handleRuntimeUpdatesApi(req, res, url, { readJson = bounde
     else if (method === 'POST' && segments[0] === 'system' && (segments.length === 2 || segments.length === 3 && segments[1] === 'reboot')) {
       const action = segments.at(-1), reboot = segments.length === 3;
       if (!['check', 'plan', 'apply'].includes(action) || reboot && action === 'check') throw new RuntimeUpdatesError(404, 'not_found');
-      const body = payload(await readJson(req), action === 'check' ? [] : action === 'plan' ? ['revision'] : ['revision', 'planId', 'confirmation', 'idempotencyKey']);
+      const body = payload(await readJson(req), action === 'check' ? [] : action === 'plan' ? ['revision'] : ['revision', 'planId', 'confirmation', 'idempotencyKey'],
+        !reboot && action === 'plan' ? ['rebootAfter'] : []);
+      if (Object.hasOwn(body, 'rebootAfter') && typeof body.rebootAfter !== 'boolean') throw new RuntimeUpdatesError(400, 'invalid_request');
       const operation = reboot ? action === 'plan' ? 'hostRebootPlan' : 'hostRebootApply' : action === 'check' ? 'hostCheck' : action === 'plan' ? 'hostPlan' : 'hostApply';
       value = await client[operation](body); status = action === 'plan' ? 200 : 202;
     }

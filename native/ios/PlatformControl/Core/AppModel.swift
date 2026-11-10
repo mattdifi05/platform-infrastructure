@@ -13,6 +13,10 @@ final class AppModel {
     var unreadWarnings = 0
     let isTestEnvironment: Bool
     private let passkeys = PasskeyCoordinator()
+    private var vaultCredentialNeedsRenewal = false
+
+    var vaultFaceIDSupported: Bool { bootstrap["authentication"]["vaultFaceIDSupported"].boolValue == true }
+    var vaultFaceIDRegistered: Bool { bootstrap["session"]["vaultFaceIDRegistered"].boolValue == true && !vaultCredentialNeedsRenewal }
 
     init(testEnvironment: Bool = false) {
         isTestEnvironment = testEnvironment
@@ -53,6 +57,27 @@ final class AppModel {
         bootstrap = try await readSession()
     }
 
+    func enableVaultFaceID() async throws {
+        guard vaultFaceIDSupported else { throw VaultFaceIDError.unsupported }
+        _ = try VaultFaceID.preparePublicKey()
+        try await stepUp()
+        guard bootstrap["session"]["vaultFaceIDRegistered"].boolValue == true else { throw VaultFaceIDError.credentialUnavailable }
+        vaultCredentialNeedsRenewal = false
+    }
+
+    func signVaultChallenge(_ challenge: String) async throws -> String {
+        do { return try await VaultFaceID.sign(challenge: challenge) }
+        catch VaultFaceIDError.credentialUnavailable {
+            vaultCredentialNeedsRenewal = true
+            throw VaultFaceIDError.credentialUnavailable
+        }
+    }
+
+    func confirmVaultAction(_ reason: String) async throws {
+        if isTestEnvironment { return }
+        try await VaultFaceID.confirm(reason: reason)
+    }
+
     private func readSession() async throws -> JSONValue {
         let session = try await api.request("/api/native/v1/bootstrap")
         guard session["schemaVersion"].intValue == 1, !session["session"]["subject"].text.isEmpty else {
@@ -62,10 +87,18 @@ final class AppModel {
     }
 
     private func authenticate() async throws {
-        let value = try await api.request("/auth/passkey/login/options", method: "POST", body: .object([:]))
+        let vaultIdentity = nativeVaultIdentity()
+        let value = try await api.request("/auth/passkey/login/options", method: "POST", body: .object(vaultIdentity))
         let options = value["options"]
         let credential = try await passkeys.assertion(options: options)
-        _ = try await api.request("/auth/passkey/login/verify", method: "POST", body: .object(["challenge": options["challenge"], "credential": credential]))
+        let proof = vaultIdentity.merging(["challenge": options["challenge"], "credential": credential]) { _, value in value }
+        _ = try await api.request("/auth/passkey/login/verify", method: "POST", body: .object(proof))
+        if !vaultIdentity.isEmpty { vaultCredentialNeedsRenewal = false }
+    }
+
+    private func nativeVaultIdentity() -> [String: JSONValue] {
+        guard let publicKey = try? VaultFaceID.preparePublicKey() else { return [:] }
+        return ["nativeVaultPublicKey": .string(publicKey)]
     }
 
     func enroll(bootstrapToken: String) async {
@@ -74,9 +107,11 @@ final class AppModel {
         defer { isAuthenticating = false }
         do {
             let token = JSONValue.string(bootstrapToken)
-            let value = try await api.request("/auth/passkey/register/options", method: "POST", body: .object(["bootstrapToken": token]))
+            let vaultIdentity = nativeVaultIdentity().merging(["bootstrapToken": token]) { _, value in value }
+            let value = try await api.request("/auth/passkey/register/options", method: "POST", body: .object(vaultIdentity))
             let credential = try await passkeys.registration(options: value["options"])
-            _ = try await api.request("/auth/passkey/register/verify", method: "POST", body: .object(["challenge": value["options"]["challenge"], "bootstrapToken": token, "credential": credential]))
+            let proof = vaultIdentity.merging(["challenge": value["options"]["challenge"], "credential": credential]) { _, value in value }
+            _ = try await api.request("/auth/passkey/register/verify", method: "POST", body: .object(proof))
             await connect()
         } catch is CancellationError { }
         catch { connectionError = error.localizedDescription }

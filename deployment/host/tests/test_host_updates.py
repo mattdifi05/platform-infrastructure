@@ -439,6 +439,7 @@ class AutoremoveTests(unittest.TestCase):
         self.assertEqual(result['removedCount'], 0)
         self.assertTrue(result['autoremoveVerified'])
         self.assertEqual(len(self.mutations()), 1)
+        self.assertFalse(any(args[-1] == 'autoremove' for args in self.calls))
 
     def test_cleanup_only_plan_is_valid_and_does_not_run_empty_install(self):
         self.upgrade, self.combined = '', 'Remv unused-lib [2.0]\n'
