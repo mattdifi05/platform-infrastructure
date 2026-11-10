@@ -169,10 +169,28 @@ const CONTROL_ROUTES = Object.freeze([
 ]);
 
 const LEGACY_SENSITIVE_ROUTES = Object.freeze([
+  viewer("native.bootstrap", "api", "native", "v1", "bootstrap"),
+  viewer("native.applications", "api", "native", "v1", "applications"),
+  ownerFresh("POST", "native.database", "api", "native", "v1", "database-command"),
+  ownerFresh("POST", "native.database-delete", "api", "native", "v1", "database-delete-command"),
+  admin("native.redis-backup", "api", "native", "v1", "redis-backup-command"),
+  ownerFresh("POST", "native.redis-restore", "api", "native", "v1", "redis-restore-command"),
+  ownerFresh("POST", "native.redis-backup-delete", "api", "native", "v1", "redis-backup-delete-command"),
   // A valid application session keeps the shell available for its full hard
   // lifetime. Fresh passkey proof remains attached to sensitive operations.
   viewer("ui.control-center"),
   viewer("ui.control-center.index", "index.html"),
+  admin("legacy.project.toggle", "actions", "toggle-project"),
+  admin("legacy.project.command", "actions", "project-command"),
+  admin("legacy.application.command", "actions", "application-command"),
+  admin("legacy.subdomain.command", "actions", "subdomain-command"),
+  admin("legacy.webspace.command", "actions", "webspace-command"),
+  admin("legacy.storage.command", "actions", "storage-command"),
+  admin("legacy.material.command", "actions", "material-command"),
+  admin("legacy.worker-job.command", "actions", "worker-job-command"),
+  admin("legacy.status.check", "actions", "status-check"),
+  admin("legacy.security.command", "actions", "security-command"),
+  admin("legacy.alert.command", "actions", "alert-command"),
   owner("POST", "legacy.vault", "actions", "vault-command"),
   ownerFresh("POST", "legacy.database", "actions", "database-command"),
   ownerFresh("POST", "legacy.database-delete", "actions", "database-delete-command"),
@@ -217,11 +235,28 @@ export function listControlRouteDefinitions() {
   }));
 }
 
+export function listNativeRouteDefinitions() {
+  const excluded = new Set(["projects.files.read", "ui-package.read"]);
+  return [...CONTROL_ROUTES, ...LEGACY_SENSITIVE_ROUTES]
+    .filter((definition) => !excluded.has(definition.operationId) && !definition.operationId.startsWith("ui.") && !["legacy.project-file-view", "legacy.phpmyadmin-login", "legacy.phppgadmin-login", "legacy.database-admin-login"].includes(definition.operationId))
+    .map((definition) => ({
+      method: definition.method,
+      operationId: definition.operationId,
+      capability: definition.capability,
+      template: `/${definition.segments.map((segment) => isParameter(segment) ? `:${segment.parameter}` : segment).join("/")}`,
+    }));
+}
+
 export function resolveAuthorizationCapability(method, pathname, { rawPathname = pathname } = {}) {
   const verb = String(method || "GET").toUpperCase();
   const pathValue = String(pathname || "");
   const rawPathValue = String(rawPathname || "");
   const rawControlPath = controlPathDisposition(rawPathValue);
+  const nativePath = /^\/api\/native(?:\/|$)/.test(pathValue);
+  const rawNativePath = /^\/api\/native(?:\/|$)/.test(rawPathValue);
+  if ((nativePath || rawNativePath) && (rawPathValue !== pathValue || !isUnambiguousControlPath(rawPathValue))) {
+    return deniedOperation(verb, rawPathValue || pathValue, false);
+  }
   if (rawControlPath === "confusable" ||
       (rawPathValue !== pathValue && (rawControlPath === "canonical" || isControlApiPath(pathValue)))) {
     return deniedOperation(verb, rawPathValue || pathValue, true);
@@ -230,8 +265,8 @@ export function resolveAuthorizationCapability(method, pathname, { rawPathname =
   const parsed = parsePath(pathValue);
 
   if (!parsed.ok) {
-    return controlPath
-      ? deniedOperation(verb, pathValue)
+    return controlPath || nativePath
+      ? deniedOperation(verb, pathValue, controlPath)
       : defaultOperation(verb, pathValue);
   }
 
@@ -255,7 +290,7 @@ export function resolveAuthorizationCapability(method, pathname, { rawPathname =
     }
   }
 
-  return parts[0] === "control" || isProtectedUiPath(parts)
+  return parts[0] === "control" || (parts[0] === "api" && parts[1] === "native") || isProtectedUiPath(parts)
     ? deniedOperation(verb, canonicalPath(parts), parts[0] === "control")
     : defaultOperation(verb, canonicalPath(parts));
 }

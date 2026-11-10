@@ -10,6 +10,7 @@ import { gzipSync } from "node:zlib";
 import { AuthRequestError, createControlCenterAuth } from "./auth/app-passkey.mjs";
 import { createFirstConfiguration } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
+import { nativeAssociationDocument, nativeAuthenticationMetadata, nativeSessionBootstrap } from "./auth/native-client.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
 import { hostExtension } from "./host-extension.mjs";
@@ -312,6 +313,17 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Apple fetches this public association independently of an app session.
+    // Only explicitly configured application identifiers receive credentials.
+    if (url.pathname === "/.well-known/apple-app-site-association" && req.method === "GET") {
+      if (controlAuth.mode !== "app-passkey" || String(req.headers.host || "").toLowerCase() !== controlAuth.config.publicHost) {
+        json(res, { error: "association_host_rejected", message: "The exact Control Center host is required." }, 421);
+        return;
+      }
+      json(res, nativeAssociationDocument(controlAuth.config));
+      return;
+    }
+
     if (url.pathname.startsWith("/assets/control-center/")) {
       serveStaticAsset(req, res, url, controlCenterStylesRoot, "/assets/control-center/");
       return;
@@ -328,6 +340,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (controlAuth.mode === "app-passkey") {
+      if (url.pathname === "/auth/native/bootstrap" && req.method === "GET") {
+        controlAuth.assertRequest(req);
+        const setup = await firstConfiguration.status();
+        json(res, {
+          schemaVersion: 1,
+          authentication: nativeAuthenticationMetadata(controlAuth),
+          firstConfiguration: { required: firstConfiguration.enabled, complete: !firstConfiguration.enabled || setup.complete === true },
+        });
+        return;
+      }
       if (url.pathname === "/auth/passkey/register/options" && req.method === "POST") {
         if (!firstConfiguration.enabled) {
           notFound(res);
@@ -422,7 +444,7 @@ const server = createServer(async (req, res) => {
       const setup = await firstConfiguration.status();
       if (!setup.complete) {
         const method = String(req.method || "GET").toUpperCase();
-        const controlApi = url.pathname === "/control" || url.pathname.startsWith("/control/");
+        const controlApi = url.pathname === "/control" || url.pathname.startsWith("/control/") || url.pathname.startsWith("/api/native/");
         if (["GET", "HEAD"].includes(method) && !controlApi) {
           redirect(res, "/first-configuration");
         } else {
@@ -466,7 +488,8 @@ const server = createServer(async (req, res) => {
         summary: "Administrative session revoked.",
       });
       res.setHeader("set-cookie", await controlAuth.logout(req));
-      redirect(res, "/auth/login");
+      if (wantsJson(req)) json(res, { ok: true });
+      else redirect(res, "/auth/login");
       return;
     }
 
@@ -476,11 +499,11 @@ const server = createServer(async (req, res) => {
       rawPathname: rawRequestPathname(req.url),
     });
     const controlOperation = requestOperation.control === true ? requestOperation : null;
-    if (controlOperation) req.controlCenterOperation = controlOperation;
+    if (controlOperation || requestOperation.operationId.startsWith("native.")) req.controlCenterOperation = requestOperation;
 
     const session = await controlAuth.authenticate(req);
     if (!session.ok) {
-      if (url.pathname.startsWith("/control/") || req.method !== "GET") {
+      if (url.pathname.startsWith("/control/") || url.pathname.startsWith("/api/native/") || req.method !== "GET") {
         json(res, { error: "admin_auth_required", message: session.message }, session.status);
         return;
       }
@@ -527,6 +550,10 @@ const server = createServer(async (req, res) => {
       requestId: rid(),
       operation: requestOperation,
     }, async () => {
+      if (requestOperation.operationId === "native.bootstrap") {
+        json(res, nativeSessionBootstrap(controlAuth, session));
+        return;
+      }
       if (requestOperation.operationId === "server-events.read") {
         try {
           json(res, await runtimeUpdatesClient.serverEvents());
@@ -558,6 +585,35 @@ const server = createServer(async (req, res) => {
       const context = req.method === "GET" && !url.pathname.startsWith("/control/")
         ? await buildCachedContext({ projects, state })
         : await buildContext({ projects, state });
+      if (requestOperation.operationId === "native.applications") {
+        json(res, {
+          projects: context.projects,
+          applications: context.applications,
+          observed: observedApplications(true),
+          folders: applicationFolderCatalog(context, folderApplications(context)),
+          databases: context.databases.map((database) => ({ ...database, adminTool: { label: databaseAdminAction(database).label, url: new URL(databaseAdminAction(database).href, controlAuth.config.publicOrigin || url.origin).href } })),
+          engines: context.databaseEngines,
+          destructiveOperations: context.databaseDeleteOperations,
+          resources: resourceControlPayload(context),
+          redis: context.redis,
+        });
+        return;
+      }
+      if (["native.database", "native.database-delete"].includes(requestOperation.operationId)) {
+        req.headers.accept = "application/json";
+        await handleDatabaseCommand(req, res, context);
+        return;
+      }
+      const nativeRedisHandler = {
+        "native.redis-backup": handleRedisBackupCommand,
+        "native.redis-restore": handleRedisRestoreCommand,
+        "native.redis-backup-delete": handleRedisBackupDeleteCommand,
+      }[requestOperation.operationId];
+      if (nativeRedisHandler) {
+        req.headers.accept = "application/json";
+        await nativeRedisHandler(req, res, context);
+        return;
+      }
 
     if (requestOperation.control === true) {
       await handleApi(req, res, url, context, requestOperation);
@@ -856,7 +912,7 @@ async function handleApi(req, res, url, context, operation) {
       case "vault.runtime.rollback": return json(res, await vaultRuntime.call({ ...payload, action: "rollback" }));
       case "vault.runtime.status": return json(res, await vaultRuntime.call({ ...payload, action: "status" }));
       case "vault.secret.version": return json(res, await createVaultItemVersion(operation.parameters.vaultItemId, payload, context), 202);
-      case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
+      case "vault.inventory.read": return json(res, await vaultInventoryPayload(context));
       case "vault.secret.store": return json(res, await planVaultSecretCreate(payload, context), 202);
       case "vault.import-existing": return json(res, await planVaultSecretImportExisting(payload, context), 202);
       case "vault.secret.reveal": return json(res, await planVaultSecretReveal(operation.parameters.vaultItemId, payload, context), 202);
@@ -1008,7 +1064,7 @@ async function handleApi(req, res, url, context, operation) {
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "access")) {
       return json(res, planMaterialAccessAudit(parts[3], payload, context), 202);
     }
-    if (method === "GET" && route(parts, "control", "vault")) return json(res, { items: context.vaultItems, overview: context.overview.vault });
+    if (method === "GET" && route(parts, "control", "vault")) return json(res, await vaultInventoryPayload(context));
     if (method === "POST" && route(parts, "control", "vault", "secrets")) return json(res, await planVaultSecretCreate(payload, context), 202);
     if (method === "POST" && route(parts, "control", "vault", "import-existing")) return json(res, await planVaultSecretImportExisting(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "reveal")) {
@@ -1309,6 +1365,10 @@ async function handleWebspaceCommand(req, res, context) {
   redirect(res, `/?section=webspaces#webspace-${encodeURIComponent(operation.details?.webspaceId || operation.details?.id || "")}`);
 }
 
+async function vaultInventoryPayload(context) {
+  return { items: context.vaultItems, overview: context.overview.vault, revision: readVaultState().revision, projects: context.projects.map(({ id, slug, name }) => ({ id, slug, name })), runtime: await vaultRuntime.catalog() };
+}
+
 async function handleDatabaseCommand(req, res, context) {
   const payload = await readPayload(req);
   const action = String(payload.action || "");
@@ -1319,7 +1379,7 @@ async function handleDatabaseCommand(req, res, context) {
     else if (action === "update") operation = planDatabaseUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "delete") operation = planDatabaseDelete(payload.id || payload.databaseId || "", payload, context);
     else if (action === "delete-now") {
-      if (String(req.url || "").split("?", 1)[0] !== "/actions/database-delete-command") throw new RejectedOperationError("Database deletion requires the passkey-protected endpoint.");
+      if (String(req.url || "").split("?", 1)[0] !== "/actions/database-delete-command" && req.controlCenterOperation?.operationId !== "native.database-delete") throw new RejectedOperationError("Database deletion requires the passkey-protected endpoint.");
       operation = deleteDatabaseNow(payload.id || payload.databaseId || "", payload, context);
     }
     else if (action === "delete-approve") operation = approveDatabaseDelete(payload.operationId || payload.id || "", payload, context);
@@ -11548,7 +11608,7 @@ async function planVaultSecretCreate(payload, context) {
     kind,
     username: payload.username || "",
     url: payload.url || "",
-    rotationDays: payload.rotationDays || 90,
+    rotationDays: payload.rotationDays ?? 90,
     valueStored: false,
     valueFingerprint: "",
     source: "control-center-vault",

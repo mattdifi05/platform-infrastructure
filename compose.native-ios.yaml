@@ -1,0 +1,4 @@
+services:
+  control-center:
+    environment:
+      CONTROL_CENTER_APPLE_ASSOCIATED_APP_IDS: ${CONTROL_CENTER_APPLE_ASSOCIATED_APP_IDS:?Set the explicit signed iOS application identifier}

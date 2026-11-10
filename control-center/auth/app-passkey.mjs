@@ -97,6 +97,7 @@ export function readAuthConfig(env = process.env) {
     publicOrigin,
     publicHost,
     rpId,
+    associatedAppIds: readAssociatedAppIds(env.CONTROL_CENTER_APPLE_ASSOCIATED_APP_IDS),
     rpName: requiredText(env.CONTROL_CENTER_AUTH_RP_NAME || "Platform Control Center", "CONTROL_CENTER_AUTH_RP_NAME"),
     adminUsername,
     adminEmail,
@@ -119,6 +120,14 @@ export function readAuthConfig(env = process.env) {
     store,
     databaseUrl: store === "postgres" ? readDatabaseUrl(env.CONTROL_CENTER_AUTH_DATABASE_URL_FILE) : "",
   };
+}
+
+function readAssociatedAppIds(value) {
+  const ids = String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (ids.length > 32 || ids.some((id) => !/^[A-Z0-9]{10}\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(id))) {
+    throw new AuthConfigurationError("CONTROL_CENTER_APPLE_ASSOCIATED_APP_IDS must contain explicit application identifier prefixes and bundle identifiers, without wildcards.");
+  }
+  return Object.freeze([...new Set(ids)]);
 }
 
 /**

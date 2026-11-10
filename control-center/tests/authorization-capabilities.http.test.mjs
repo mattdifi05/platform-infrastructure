@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
+import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -25,6 +26,10 @@ let publicOrigin = "";
 let publicHost = "";
 
 const sensitiveTargets = Object.freeze([
+  ["POST", "/api/native/v1/database-command"],
+  ["POST", "/api/native/v1/database-delete-command"],
+  ["POST", "/api/native/v1/redis-restore-command"],
+  ["POST", "/api/native/v1/redis-backup-delete-command"],
   ["POST", "/control/backups/control"],
   ["POST", "/control/projects/example/visibility"],
   ["POST", "/control/projects/example/clone"],
@@ -102,6 +107,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       CONTROL_CENTER_AUTH_STORE: "memory",
       CONTROL_CENTER_CLOUDFLARE_DNS_CONFIG_FILE: "/nonexistent-test-only-cloudflare-config",
       CONTROL_CENTER_PUBLIC_ORIGIN: publicOrigin,
+      CONTROL_CENTER_APPLE_ASSOCIATED_APP_IDS: "ABCDE12345.com.example.control",
       CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1",
       CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled",
       CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8",
@@ -151,6 +157,24 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   };
 
   const restoreStateAfterDenied = installContextTripwire(path.join(stateDir, "projects.json"));
+  const nativeAnonymous = await fetch(`${baseUrl}/api/native/v1/bootstrap`, { headers: { host: publicHost }, redirect: "manual" });
+  assert.equal(nativeAnonymous.status, 401);
+  assert.equal((await nativeAnonymous.json()).error, "admin_auth_required");
+  const nativePublic = await request(baseUrl, "GET", "/auth/native/bootstrap");
+  assert.equal(nativePublic.status, 200);
+  assert.equal((await nativePublic.json()).authentication.rpId, "127.0.0.1");
+  const association = await request(baseUrl, "GET", "/.well-known/apple-app-site-association");
+  assert.deepEqual(await association.json(), { webcredentials: { apps: ["ABCDE12345.com.example.control"] } });
+  const wrongHostStatus = await new Promise((resolve, reject) => {
+    const req = httpRequest(`${baseUrl}/.well-known/apple-app-site-association`, { headers: { host: "attacker.example" } }, res => { res.resume(); resolve(res.statusCode); });
+    req.on("error", reject); req.end();
+  });
+  assert.equal(wrongHostStatus, 421);
+  const nativeBootstrap = await request(baseUrl, "GET", "/api/native/v1/bootstrap", identities.owner301);
+  assert.equal(nativeBootstrap.status, 200, "bootstrap must not build application context or require fresh authentication");
+  const nativeSession = await nativeBootstrap.json();
+  assert.equal(nativeSession.csrfToken, identities.owner301.csrf);
+  assert.equal(nativeSession.capabilities.find(item => item.operationId === "native.database").requiresFreshAuthentication, true);
   const beforeDenied = digestTree(root, new Set(["fixed-clock.mjs"]));
   for (const [method, pathname] of sensitiveTargets) {
     for (const alias of [pathname, versioned(pathname)]) {
@@ -214,6 +238,17 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   assert.equal(digestTree(root, new Set(["fixed-clock.mjs"])), beforeDenied, "denied requests must leave all state and sink fixtures byte-identical");
   restoreStateAfterDenied();
 
+  const nativeApplications = await request(baseUrl, "GET", "/api/native/v1/applications", identities.owner);
+  assert.equal(nativeApplications.status, 200);
+  const nativeCatalog = await nativeApplications.json();
+  for (const field of ["projects", "applications", "observed", "databases"]) assert.ok(Array.isArray(nativeCatalog[field]), field);
+  assert.ok(nativeCatalog.folders && nativeCatalog.resources && nativeCatalog.redis);
+  for (const path of ["database-command", "database-delete-command", "redis-backup-command", "redis-restore-command", "redis-backup-delete-command"]) {
+    const response = await request(baseUrl, "POST", `/api/native/v1/${path}`, identities.owner, { validCsrf: true, payload: { action: "unsupported" } });
+    assert.equal(response.status, 422, `native ${path} must dispatch to JSON validation`);
+    assert.equal((await response.json()).error, "validation_failed");
+  }
+
   for (const [method, target] of ownerVaultTargets) {
     for (const pathname of target.startsWith("/control/") ? [target, versioned(target)] : [target]) {
       const response = await request(baseUrl, method, pathname, identities.owner301, { validCsrf: method === "POST" });
@@ -225,6 +260,10 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   const initialHtml = await staleBrowserPage.text();
   assert.doesNotMatch(initialHtml, new RegExp(oldFixtureValue));
   const inventory = await (await request(baseUrl, "GET", "/control/v1/vault", identities.owner301)).text();
+  const nativeVault = JSON.parse(inventory);
+  assert.equal(typeof nativeVault.revision, "string");
+  assert.ok(Array.isArray(nativeVault.projects));
+  assert.ok(Array.isArray(nativeVault.runtime.bindings));
   assert.doesNotMatch(inventory, /old-fixture-value|sealedValue|ciphertext/);
   const initialRevision = readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).revision;
   const edited = await request(baseUrl, "POST", `/control/v1/vault/secrets/${fixtureVaultId}/versions`, identities.owner301, { validCsrf: true, payload: { newValue: nextFixtureValue, expectedVaultRevision: initialRevision } });
@@ -249,9 +288,10 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     assert.equal(legacy.status, 422, `legacy ${action} cannot bypass the reveal gate`);
     assert.doesNotMatch(await legacy.text(), /new-fixture-value|old-fixture-value/);
   }
-  const created = await request(baseUrl, "POST", "/control/vault/secrets", identities.owner301, { validCsrf: true, payload: { itemKey: "session_only", projectId: "platform", targetEnv: "local", kind: "provider", value: "session-create-fixture", confirm: "STORE-VAULT-SECRET" } });
+  const created = await request(baseUrl, "POST", "/control/vault/secrets", identities.owner301, { validCsrf: true, json: true, payload: { itemKey: "session_only", projectId: "platform", targetEnv: "local", kind: "provider", value: "session-create-fixture", rotationDays: 0, confirm: "STORE-VAULT-SECRET" } });
   assert.equal(created.status, 202);
   const createdItem = (await created.json()).item;
+  assert.equal(createdItem.rotationDays, 0);
   const deleteRevision = readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).revision;
   const deleted = await request(baseUrl, "POST", `/control/v1/vault/secrets/${createdItem.id}/delete`, identities.owner301, { validCsrf: true, payload: { confirm: `DELETE-VAULT-SECRET:${createdItem.id}`, typedConfirmation: "RIMUOVI", expectedVaultRevision: deleteRevision } });
   assert.equal(deleted.status, 202);
@@ -306,7 +346,7 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     [{ validCsrf: true, fetchSite: "cross-site" }, "csrf_fetch_site_rejected"],
     [{ invalidCsrf: true }, "csrf_token_rejected"],
   ]) {
-    for (const pathname of [boundaryPath, versioned(boundaryPath)]) {
+    for (const pathname of [boundaryPath, versioned(boundaryPath), "/api/native/v1/database-command"]) {
       const invalidCsrf = await request(baseUrl, "POST", pathname, identities.owner299, options);
       assert.equal(invalidCsrf.status, 403, `${pathname} ${error}`);
       assert.equal((await invalidCsrf.json()).error, error);
@@ -338,6 +378,12 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   );
   restoreStateAfterUnknown();
 
+  const nativeLogout = await request(baseUrl, "POST", "/logout", identities.viewer, { validCsrf: true });
+  assert.equal(nativeLogout.status, 200);
+  assert.deepEqual(await nativeLogout.json(), { ok: true });
+  assert.equal(nativeLogout.headers.getSetCookie().length, 2);
+  assert.equal((await request(baseUrl, "GET", "/api/native/v1/bootstrap", identities.viewer)).status, 401, "native logout revokes the server session");
+
   assert.equal(stderr, "");
 });
 
@@ -362,7 +408,7 @@ function request(baseUrl, method, pathname, identity = null, options = {}) {
   if (identity) headers.cookie = identity.cookie;
   let body;
   if (method === "POST") {
-    headers["content-type"] = "application/x-www-form-urlencoded";
+    headers["content-type"] = options.json ? "application/json" : "application/x-www-form-urlencoded";
     if (options.validCsrf || options.invalidCsrf) {
       headers.origin = options.origin || publicOrigin;
       if (!options.omitFetchSite) headers["sec-fetch-site"] = options.fetchSite || "same-origin";
@@ -370,7 +416,7 @@ function request(baseUrl, method, pathname, identity = null, options = {}) {
     }
     body = options.oversized
       ? `padding=${"x".repeat(70 * 1024)}`
-      : new URLSearchParams({ ...options.payload, _csrf: options.invalidCsrf ? "invalid-csrf-token" : identity?.csrf || "" });
+      : options.json ? JSON.stringify(options.payload || {}) : new URLSearchParams({ ...options.payload, _csrf: options.invalidCsrf ? "invalid-csrf-token" : identity?.csrf || "" });
   }
   return fetch(`${baseUrl}${pathname}`, { method, headers, body, redirect: "manual" });
 }
