@@ -86,6 +86,31 @@ final class PlatformControlUITests: XCTestCase {
         XCTAssertTrue(application.exists)
     }
 
+    func testApplicationDetailShowsHostingResourcesAndScopedDatabases() {
+        let app = launchFixtures()
+        app.tabBars.buttons["App"].tap()
+        let application = app.buttons["application.row.project:sample"]
+        XCTAssertTrue(application.waitForExistence(timeout: 10))
+        application.tap()
+        XCTAssertTrue(app.navigationBars["Applicazione di prova"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["application.site"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["PHP"].exists)
+        XCTAssertTrue(app.staticTexts["Pubblica"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Crea copia privata"].exists)
+
+        let resources = app.staticTexts["Spazio dei file"]
+        if !resources.isHittable { app.swipeUp() }
+        XCTAssertTrue(resources.exists)
+        let postgres = app.buttons["application.database.fixture-postgres"]
+        if !postgres.isHittable { app.swipeUp() }
+        XCTAssertTrue(postgres.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "phpMyAdmin")).firstMatch.exists)
+        postgres.tap()
+        XCTAssertTrue(app.navigationBars["Archivio di prova"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["application.database.admin"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["Elimina database"].exists)
+    }
+
     func testSecretMetadataNavigationDoesNotRevealValue() {
         let app = launchFixtures()
         app.tabBars.buttons["Secrets"].tap()

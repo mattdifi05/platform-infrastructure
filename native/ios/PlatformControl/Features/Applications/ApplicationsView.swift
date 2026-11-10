@@ -131,35 +131,27 @@ struct ApplicationsView: View {
         }
     }
 
-    @ViewBuilder private func applicationRow(_ entry: Entry) -> some View {
-        if folders.isEmpty {
-            ApplicationCatalogRow(name: entry.name, host: entry.host)
-                .accessibilityIdentifier("application.row.\(entry.id)")
-        } else {
-            Menu {
-                let current = store.memberships[entry.id].text
-                ForEach([unfiled] + folders) { folder in
-                    Button {
-                        move(entry, to: folder)
-                    } label: {
-                        Label(folder.name, systemImage: folder.id == current ? "checkmark" : "folder")
+    private func applicationRow(_ entry: Entry) -> some View {
+        NavigationLink {
+            ApplicationDetailView(projectID: entry.slug, observed: entry.observed, store: store)
+        } label: {
+            ApplicationCatalogRow(value: entry.value)
+        }
+        .accessibilityIdentifier("application.row.\(entry.id)")
+        .contextMenu {
+            if !folders.isEmpty {
+                Menu("Sposta in cartella", systemImage: "folder") {
+                    let current = store.memberships[entry.id].text
+                    ForEach([unfiled] + folders) { folder in
+                        Button {
+                            move(entry, to: folder)
+                        } label: {
+                            Label(folder.name, systemImage: folder.id == current ? "checkmark" : "folder")
+                        }
+                        .disabled(folder.id == current)
                     }
-                    .disabled(folder.id == current)
                 }
-            } label: {
-                HStack {
-                    ApplicationCatalogRow(name: entry.name, host: entry.host)
-                    Spacer()
-                    Image(systemName: "folder.badge.arrow.forward")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                }
-                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .accessibilityLabel(entry.name)
-            .accessibilityHint("Sposta in un’altra cartella")
-            .accessibilityIdentifier("application.row.\(entry.id)")
         }
     }
 
@@ -182,23 +174,17 @@ struct ApplicationsView: View {
 
 @MainActor
 struct ApplicationCatalogRow: View {
-    let name: String
-    let host: String
-
-    init(name: String, host: String) {
-        self.name = name
-        self.host = host
-    }
-
-    init(value: JSONValue) {
-        self.init(name: value["name"].stringValue ?? value.id, host: value["host"].text)
-    }
+    let value: JSONValue
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "app.fill").font(.title2).foregroundStyle(.tint).accessibilityHidden(true)
+            ApplicationIcon(entry: value)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                Text(name).font(.headline).foregroundStyle(.primary)
+                Text(value["name"].stringValue ?? value.id)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                let host = value["host"].stringValue ?? applicationSiteURL(value)?.host ?? ""
                 if !host.isEmpty { Text(host).font(.subheadline).foregroundStyle(.secondary) }
             }
         }

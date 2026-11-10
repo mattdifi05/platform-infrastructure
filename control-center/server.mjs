@@ -14,6 +14,7 @@ import { createNativeVaultChallenges, nativeAssociationDocument, nativeAuthentic
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
 import { hostExtension } from "./host-extension.mjs";
+import { createDatabaseSizeReader } from "./database/size-reader.mjs";
 const { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, externalDatabaseCapabilities, assertExternalDatabaseAction, TRUSTED_EXTERNAL_DATABASE_IDS = [], TRUSTED_EXTERNAL_PROJECT_IDS = [] } = hostExtension;
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
@@ -84,6 +85,7 @@ import { renderRuntimeUpdates } from "./updates/ui.mjs";
 import { renderServerEvents } from "./events/ui.mjs";
 const runtimeUpdatesClient = createRuntimeUpdatesClient();
 const nativeVaultChallenges = createNativeVaultChallenges();
+const databaseSizeReader = createDatabaseSizeReader();
 import {
   createStatusEventBroker,
   pumpStatusEventStream,
@@ -627,13 +629,19 @@ const server = createServer(async (req, res) => {
           applications: context.applications,
           observed,
           folders: applicationFolderCatalog(context, folderApplications(context, observed)),
-          databases: context.databases.map((database) => ({ ...database, adminTool: { label: databaseAdminAction(database).label, url: new URL(databaseAdminAction(database).href, controlAuth.config.publicOrigin || url.origin).href } })),
+          databases: context.databases.map((database) => ({ ...database, adminTool: nativeDatabaseAdminTool(database, url) })),
           engines: context.databaseEngines,
           destructiveOperations: context.databaseDeleteOperations,
           resources: resourceControlPayload(context),
           redis: context.redis,
         });
         return;
+      }
+      if (requestOperation.operationId === "native.application-databases") {
+        const projectId = requestOperation.parameters.projectId;
+        const project = projectId === sanitizeIdentifier(projectId) ? resolveContextProject(context, projectId) : null;
+        if (!project) return json(res, { error: "project_not_found", message: "Applicazione non disponibile." }, 404);
+        return json(res, await nativeApplicationDatabases(context, project, url));
       }
       if (["native.database", "native.database-delete"].includes(requestOperation.operationId)) {
         req.headers.accept = "application/json";
@@ -9092,6 +9100,77 @@ function projectDatabases(context, projectOrId) {
     seen.add(database.id);
     return true;
   });
+}
+
+function nativeDatabaseAdminTool(database, url) {
+  try {
+    const action = databaseAdminAction(database);
+    return { label: action.label, url: new URL(action.href, controlAuth.config.publicOrigin || url.origin).href };
+  } catch (error) {
+    if (!(error instanceof RejectedOperationError)) throw error;
+    return null;
+  }
+}
+
+function databaseSizeConnection(database, external) {
+  if (external) {
+    const target = externalDatabaseAdminTarget(external);
+    if (database.engine !== "postgres" || target.tlsMode !== "verify-full" || !target.caFile) return null;
+    const [credential] = externalDatabaseAdminCredentials(external, (file) => readCredentialPasswordFile(file, null));
+    if (!credential?.password) return null;
+    return {
+      engine: database.engine, host: target.host, port: target.port,
+      user: credential.user, password: credential.password, database: database.name,
+      tlsCA: readFileSync(target.caFile),
+    };
+  }
+  const postgres = database.engine === "postgres";
+  return {
+    engine: database.engine,
+    host: postgres ? postgresHost : mariadbHost,
+    port: postgres ? postgresPort : mariadbPort,
+    user: postgres ? postgresSuperuser : mariadbRootUser,
+    password: readRequiredSecretFile(postgres ? postgresSuperuserPasswordFile : mariadbRootPasswordFile, "Database size"),
+  };
+}
+
+async function nativeApplicationDatabases(context, project, url) {
+  const databases = projectDatabases(context, project);
+  const groups = new Map();
+  for (const database of databases) {
+    try {
+      const external = trustedExternalDatabaseFor(database.id);
+      const key = external ? `external:${external.id}` : database.engine;
+      if (!groups.has(key)) {
+        const connection = databaseSizeConnection(database, external);
+        if (!connection) continue;
+        groups.set(key, { connection, databases: [] });
+      }
+      groups.get(key).databases.push(database);
+    } catch {
+      // An unavailable connection or credential affects only its own measurement.
+    }
+  }
+  const measurements = new Map();
+  await Promise.all([...groups.values()].map(async (group) => {
+    const sizes = await databaseSizeReader.measure(group.connection, group.databases.map((database) => database.name));
+    const measuredAt = new Date().toISOString();
+    for (const database of group.databases) {
+      if (sizes.has(database.name)) measurements.set(database.id, { sizeBytes: sizes.get(database.name), sizeMeasuredAt: measuredAt });
+    }
+  }));
+  return {
+    measurementAvailable: measurements.size > 0,
+    databases: databases.map((database) => {
+      const measurement = measurements.get(database.id);
+      return {
+        id: database.id, projectId: database.projectId, name: database.name, displayName: database.displayName,
+        engine: database.engine, status: database.status, adminTool: nativeDatabaseAdminTool(database, url),
+        sizeAvailable: Boolean(measurement), sizeBytes: measurement?.sizeBytes ?? null,
+        sizeMeasuredAt: measurement?.sizeMeasuredAt ?? null,
+      };
+    }),
+  };
 }
 
 function portalProjectDatabases(context, projectOrId) {

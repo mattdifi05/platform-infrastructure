@@ -38,17 +38,26 @@ enum VaultFaceID {
         try await authenticate(context, reason: reason)
     }
 
-    static func sign(challenge: String) async throws -> String {
-        guard let bytes = Data(base64URL: challenge), bytes.count == 32, bytes.base64URL == challenge else {
-            throw VaultFaceIDError.invalidChallenge
-        }
+    static func sign(
+        requestingChallenge: @MainActor @Sendable () async throws -> String
+    ) async throws -> (challenge: String, signature: String) {
         let context = try faceIDContext()
         defer { context.invalidate() }
         guard let data = try loadKeyData() else { throw VaultFaceIDError.credentialUnavailable }
+
+        // The server issues a nonce while Face ID runs. The signature still
+        // requires this attempt's successful Face ID and the server's nonce.
+        async let pendingChallenge = requestingChallenge()
         try await authenticate(context, reason: "Mostra il valore del secret.")
+        let challenge = try await pendingChallenge
+        try Task.checkCancellation()
+        guard let bytes = Data(base64URL: challenge), bytes.count == 32, bytes.base64URL == challenge else {
+            throw VaultFaceIDError.invalidChallenge
+        }
         do {
             let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data, authenticationContext: context)
-            return try key.signature(for: Data("platform-vault-reveal-v1\n\(challenge)".utf8)).derRepresentation.base64URL
+            let signature = try key.signature(for: Data("platform-vault-reveal-v1\n\(challenge)".utf8))
+            return (challenge, signature.derRepresentation.base64URL)
         } catch {
             discardCredential()
             throw VaultFaceIDError.credentialUnavailable

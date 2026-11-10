@@ -148,6 +148,7 @@ private struct VaultEntryView: View {
     let manage: (String) -> Void
     @State private var revealedValue: String?
     @State private var expiresAt: Date?
+    @State private var revealRequest: Task<Void, Never>?
     @State private var revealTask: Task<Void, Never>?
     @State private var pasteboardChange: Int?
     @State private var revealGeneration = UUID()
@@ -167,7 +168,7 @@ private struct VaultEntryView: View {
                 } else if !app.vaultFaceIDSupported {
                     Text("Face ID non disponibile per questo server").foregroundStyle(.secondary)
                 } else {
-                    Button { Task { await showValue() } } label: {
+                    Button(action: beginReveal) {
                         if revealing { ProgressView() }
                         else { Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid") }
                     }.disabled(revealing)
@@ -204,25 +205,32 @@ private struct VaultEntryView: View {
         }
     }
 
-    @MainActor private func showValue() async {
+    @MainActor private func beginReveal() {
         guard !revealing else { return }
         clear()
         let generation = revealGeneration
         revealing = true
         error = nil
-        defer { revealing = false }
+        revealRequest = Task { await showValue(generation: generation) }
+    }
+
+    @MainActor private func showValue(generation: UUID) async {
+        defer {
+            if generation == revealGeneration {
+                revealing = false
+                revealRequest = nil
+            }
+        }
         do {
+            try Task.checkCancellation()
             if !app.vaultFaceIDRegistered {
                 try await app.enableVaultFaceID()
                 return
             }
-            let path = "/api/native/v1/vault/secrets/\(entry.id)"
-            let nonce = try await app.post("\(path)/challenge")["challenge"].text
-            guard generation == revealGeneration, scenePhase != .background else { return }
-            let signature = try await app.signVaultChallenge(nonce)
-            guard generation == revealGeneration, scenePhase != .background else { return }
-            let result = try await app.post("\(path)/reveal", body: .object(["challenge": .string(nonce), "signature": .string(signature)]))
-            guard generation == revealGeneration, scenePhase != .background else { return }
+            let proof = try await app.vaultRevealProof(itemID: entryID)
+            guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
+            let result = try await app.post("/api/native/v1/vault/secrets/\(entryID)/reveal", body: proof)
+            guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
             let value = result["value"].stringValue
             let serverExpiry = vaultDate(result["revealExpiresAt"].text)
             guard let value, let serverExpiry, serverExpiry > Date() else { throw VaultUIError.invalidReveal }
@@ -249,6 +257,9 @@ private struct VaultEntryView: View {
 
     @MainActor private func clear() {
         revealGeneration = UUID()
+        revealRequest?.cancel()
+        revealRequest = nil
+        revealing = false
         revealTask?.cancel(); revealTask = nil
         revealedValue = nil; expiresAt = nil
         if let pasteboardChange, UIPasteboard.general.changeCount == pasteboardChange { UIPasteboard.general.items = [] }

@@ -5,8 +5,9 @@ struct ApplicationDatabaseView: View {
     @Environment(AppModel.self) private var model
     let databaseID: String
     let store: ApplicationsStore
+    var scopedDatabase: JSONValue? = nil
     @State private var operation: ApplicationOperation?
-    private var database: JSONValue { store.databases.first { $0.id == databaseID } ?? .null }
+    private var database: JSONValue { scopedDatabase ?? store.databases.first { $0.id == databaseID } ?? .null }
     private var deleteOperations: [JSONValue] {
         let value = store.catalog["destructiveOperations"]
         let items = value.arrayValue.isEmpty ? Array(value.objectValue.values) : value.arrayValue
@@ -15,23 +16,36 @@ struct ApplicationDatabaseView: View {
     private var isExternal: Bool { database["source"].text.contains("external") || database["external"].boolValue == true }
 
     var body: some View {
+        Group {
+            if scopedDatabase == nil {
+                databaseList.refreshable { await store.load(model) }
+            } else {
+                databaseList
+            }
+        }
+        .navigationTitle(database == .null ? "Database" : applicationDatabaseName(database))
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
+    }
+
+    private var databaseList: some View {
         List {
             if database == .null {
                 EmptyState(title: "Database non presente", systemImage: "externaldrive.badge.xmark", description: "Il database non compare nel catalogo corrente. Le eventuali operazioni restano consultabili qui sotto.")
             } else {
                 identitySection
-                principalSection
-                managementSection
-                backupSection
                 adminToolSection
+                if scopedDatabase == nil {
+                    principalSection
+                    managementSection
+                    backupSection
+                }
             }
-            ForEach(deleteOperations, id: \.id) { deletion in deletionSection(deletion) }
-            if let error = store.error { Section { ErrorNotice(message: error) } }
+            if scopedDatabase == nil {
+                ForEach(deleteOperations, id: \.id) { deletion in deletionSection(deletion) }
+                if let error = store.error { Section { ErrorNotice(message: error) } }
+            }
         }
-        .navigationTitle(database["displayName"].text.isEmpty ? (database["name"].stringValue ?? "Database") : database["displayName"].text)
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await store.load(model) }
-        .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
     }
 
     private var identitySection: some View {
@@ -41,7 +55,10 @@ struct ApplicationDatabaseView: View {
             LabeledContent("Motore", value: applicationLabel(database["engine"].text))
             LabeledContent("Stato", value: applicationLabel(database["status"].text))
             LabeledContent("Connessione", value: applicationLabel(database["connectionStatus"].text))
-            LabeledContent("Dimensione", value: NativeFormatting.bytes(database["sizeBytes"].doubleValue))
+            LabeledContent("Dimensione", value: applicationDatabaseSize(database))
+            if let measuredAt = database["sizeMeasuredAt"].stringValue, !measuredAt.isEmpty {
+                LabeledContent("Dimensione rilevata", value: NativeFormatting.date(measuredAt))
+            }
         }
     }
     private var principalSection: some View {
@@ -78,9 +95,10 @@ struct ApplicationDatabaseView: View {
         }
     }
     @ViewBuilder private var adminToolSection: some View {
-        if let url = URL(string: database["adminTool"]["url"].text), url.scheme == "https" {
+        if let url = URL(string: database["adminTool"]["url"].text), url.scheme == "https", url.host != nil {
             Section {
                 Link(destination: url) { Label("Apri \(database["adminTool"]["label"].text)", systemImage: "arrow.up.right.square") }
+                    .accessibilityIdentifier("application.database.admin")
             } header: { Text("Strumento database esterno") } footer: {
                 Text("Si apre in Safari. Potrebbe essere richiesta una sessione passkey separata per accedere allo strumento di amministrazione.")
             }
@@ -136,4 +154,14 @@ struct ApplicationDatabaseView: View {
             .init(key: "password", title: "Password", kind: .secret)
         ], confirmation: "CREATE-DATABASE", fresh: true, planPath: "/api/native/v1/database-command")
     }
+}
+
+func applicationDatabaseName(_ database: JSONValue) -> String {
+    database["displayName"].text.isEmpty ? database["name"].text : database["displayName"].text
+}
+
+func applicationDatabaseSize(_ database: JSONValue) -> String {
+    guard let size = database["sizeBytes"].doubleValue, size.isFinite, size >= 0,
+          database["sizeAvailable"].boolValue ?? (size > 0) else { return "Dimensione non disponibile" }
+    return NativeFormatting.bytes(size)
 }

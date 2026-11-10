@@ -1,8 +1,8 @@
 import SwiftUI
 import Charts
+import Accessibility
 
-private struct ResourceSample: Identifiable {
-    let id = UUID()
+private struct ResourceSample {
     let date: Date
     let cpu: Double?
     let memory: Double?
@@ -17,6 +17,7 @@ struct HomeView: View {
     let isActive: Bool
     @State private var snapshot: JSONValue = .null
     @State private var samples: [ResourceSample] = []
+    @State private var historyStart: Date?
     @State private var error: String?
     @State private var loading = true
     @State private var refreshing = false
@@ -75,7 +76,7 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(detail).font(.caption).foregroundStyle(.secondary) }
             Text(value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
-            ResourceChart(samples: samples, series: series, color: color, percentage: percentage, active: isActive)
+            ResourceChart(title: title, samples: samples, historyStart: historyStart, series: series, color: color, percentage: percentage, active: isActive)
                 .accessibilityLabel("Grafico \(title)")
                 .accessibilityIdentifier("home.chart.\(symbol)")
         }.padding(20).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
@@ -108,97 +109,236 @@ struct HomeView: View {
             self.error = "Impossibile aggiornare le risorse del server."
             samples.append(ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil))
         }
-        samples.removeAll { $0.date < Date.now.addingTimeInterval(-125) }
+        if historyStart == nil { historyStart = samples.first?.date }
+        samples.removeAll { $0.date < Date.now.addingTimeInterval(-126) }
         loading = false
     }
 }
 
 private struct ResourceChart: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var scale: VerticalScale?
+    @ScaledMetric(relativeTo: .caption2) private var rateLabelWidth = 52
+    let title: String
     let samples: [ResourceSample]
+    let historyStart: Date?
     let series: [(String, KeyPath<ResourceSample, Double?>)]
     let color: Color
     let percentage: Bool
     let active: Bool
 
-    private struct Point: Identifiable {
-        let id: UUID
+    private struct Point {
         let date: Date
         let value: Double
-        let segment: Int
+        let startsSegment: Bool
     }
 
-    private struct Trace: Identifiable {
-        let id: Int
-        let name: String
+    private struct Trace {
         let points: [Point]
+        let hasCurrentPoint: Bool
     }
 
-    private func points(for key: KeyPath<ResourceSample, Double?>) -> [Point] {
-        var segment = 0
-        var previous: Date?
-        return samples.compactMap { sample in
-            guard let value = sample[keyPath: key] else { segment += 1; return nil }
-            if let previous, sample.date.timeIntervalSince(previous) > 6 { segment += 1 }
-            previous = sample.date
-            return Point(id: sample.id, date: sample.date, value: value, segment: segment)
+    private struct VerticalScale {
+        let previous: Double
+        let target: Double
+        let changedAt: Date
+
+        var labelUpdates: [Date] {
+            guard previous != target else { return [] }
+            return (1...5).map { changedAt.addingTimeInterval(Double($0) / 10) }
+        }
+
+        func upperBound(at date: Date) -> Double {
+            let progress = min(1, max(0, date.timeIntervalSince(changedAt) / 0.5))
+            let easedProgress = progress * progress * (3 - 2 * progress)
+            return previous + (target - previous) * easedProgress
         }
     }
 
-    var body: some View {
-        let traces = series.enumerated().map { Trace(id: $0.offset, name: $0.element.0, points: points(for: $0.element.1)) }
-        let peak = traces.flatMap(\.points).map(\.value).max() ?? 0
-        let upperBound = percentage ? 100 : max(1, peak * 1.15)
-        let oldest = traces.compactMap { $0.points.first?.date }.min()
+    private var isAnimating: Bool { active && scenePhase == .active && !reduceMotion }
 
-        TimelineView(.animation(minimumInterval: reduceMotion ? 2 : 1.0 / 30.0, paused: !active)) { context in
-            let now = context.date
-            // Expand continuously as samples arrive, then keep a rolling two-minute window.
-            let window = min(120, max(8, now.timeIntervalSince(oldest ?? now) + 2))
-            let offsets = [1.0, 0.75, 0.5, 0.25, 0].map { window * $0 }
-            let grid = offsets.map { now.addingTimeInterval(-$0) }
-            Chart {
-                ForEach(traces) { trace in
-                    let stroke = trace.id == 0 ? color : color.opacity(0.72)
-                    ForEach(trace.points) { point in
-                        LineMark(x: .value("Ora", point.date), y: .value(trace.name, point.value), series: .value("Serie", "\(trace.id)-\(point.segment)"))
-                            .interpolationMethod(.linear)
-                            .foregroundStyle(stroke)
-                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: trace.id == 0 ? [] : [4, 3]))
-                    }
-                    if let last = trace.points.last, last.id == samples.last?.id, now.timeIntervalSince(last.date) < 6 {
-                        PointMark(x: .value("Ora", last.date), y: .value(trace.name, last.value))
-                            .foregroundStyle(stroke)
-                            .symbolSize(38)
-                    }
-                }
+    private func trace(for key: KeyPath<ResourceSample, Double?>) -> Trace {
+        var previous: Date?
+        let points: [Point] = samples.compactMap { sample in
+            guard let value = sample[keyPath: key] else {
+                previous = nil
+                return nil
             }
-            .chartXScale(domain: grid[0]...now, range: .plotDimension(padding: 4))
-            .chartYScale(domain: 0...upperBound, range: .plotDimension(padding: 4))
-            .chartXAxis {
-                AxisMarks(values: grid) { axis in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
-                    if axis.index.isMultiple(of: 2) {
-                        AxisValueLabel {
-                            Text(timeLabel(offsets[axis.index]))
+            let startsSegment = previous.map { sample.date.timeIntervalSince($0) > 6 } ?? true
+            previous = sample.date
+            return Point(date: sample.date, value: value, startsSegment: startsSegment)
+        }
+        return Trace(points: points, hasCurrentPoint: samples.last?[keyPath: key] != nil)
+    }
+
+    var body: some View {
+        let traces = series.map { trace(for: $0.1) }
+        let peak = traces.lazy.flatMap(\.points).map(\.value).max() ?? 0
+        let target = percentage ? 100 : Self.rateUpperBound(for: peak)
+        let scale = scale ?? VerticalScale(previous: target, target: target, changedAt: .distantPast)
+        let staticDate = samples.last?.date ?? .now
+
+        // Keep the native axes out of the frame-by-frame plot updates.
+        Chart {
+            PointMark(x: .value("Ora", 0.0), y: .value("Valore", 0.0)).opacity(0)
+        }
+        .chartXScale(domain: 0.0...1.0, range: .plotDimension(padding: 4))
+        .chartYScale(domain: 0.0...1.0, range: .plotDimension(padding: 4))
+        .chartXAxis {
+            AxisMarks(values: [0.0, 0.25, 0.5, 0.75, 1.0]) { axis in
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                if let fraction = axis.as(Double.self), axis.index.isMultiple(of: 2) {
+                    AxisValueLabel {
+                        TimelineView(.animation(minimumInterval: 1, paused: !isAnimating)) { context in
+                            let date = isAnimating ? context.date : staticDate
+                            Text(timeLabel(Self.window(at: date, startingAt: historyStart) * (1 - fraction)))
                                 .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                 }
             }
-            .chartYAxis {
-                AxisMarks(position: .leading, values: percentage ? .stride(by: 25) : .automatic(desiredCount: 4)) { axis in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
-                    if let value = axis.as(Double.self) {
-                        AxisValueLabel {
-                            Text(percentage ? "\(Int(value))%" : NativeFormatting.bytes(value))
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0.0, 0.25, 0.5, 0.75, 1.0]) { axis in
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                if let fraction = axis.as(Double.self) {
+                    AxisValueLabel {
+                        if percentage {
+                            Text("\(Int(fraction * 100))%")
                                 .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        } else {
+                            TimelineView(.explicit(isAnimating ? scale.labelUpdates : [])) { context in
+                                let bound = isAnimating ? scale.upperBound(at: context.date) : target
+                                Text(NativeFormatting.bytes(fraction * bound))
+                                    .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                                    .lineLimit(1).minimumScaleFactor(0.75)
+                                    .frame(width: rateLabelWidth, alignment: .trailing)
+                            }
                         }
                     }
                 }
             }
-            .chartLegend(.hidden)
-            .frame(height: 135)
+        }
+        .chartLegend(.hidden)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let anchor = proxy.plotFrame,
+                   let left = proxy.position(forX: 0.0), let right = proxy.position(forX: 1.0),
+                   let top = proxy.position(forY: 1.0), let bottom = proxy.position(forY: 0.0) {
+                    let frame = geometry[anchor]
+                    let plot = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+                    TimelineView(.animation(paused: !isAnimating)) { timeline in
+                        let date = isAnimating ? timeline.date : staticDate
+                        let window = Self.window(at: date, startingAt: historyStart)
+                        let upperBound = isAnimating ? scale.upperBound(at: date) : target
+                        Canvas { context, _ in
+                            draw(traces, in: context, plot: plot, date: date, window: window, upperBound: upperBound, animated: isAnimating)
+                        }
+                    }
+                    .frame(width: frame.width, height: frame.height)
+                    .clipped()
+                    .position(x: frame.midX, y: frame.midY)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+            }
+        }
+        .frame(height: 135)
+        .accessibilityChartDescriptor(ChartAccessibility(title: title, traces: traces, seriesNames: series.map(\.0), date: staticDate, window: Self.window(at: staticDate, startingAt: historyStart), upperBound: target, percentage: percentage))
+        .onChange(of: target, initial: true) { _, target in
+            let now = Date.now
+            let current = self.scale?.upperBound(at: now) ?? target
+            self.scale = VerticalScale(previous: isAnimating ? current : target, target: target, changedAt: now)
+        }
+    }
+
+    private static func window(at date: Date, startingAt start: Date?) -> TimeInterval {
+        min(120, max(8, date.timeIntervalSince(start ?? date) + 2))
+    }
+
+    private static func rateUpperBound(for peak: Double) -> Double {
+        // Rounded scales prevent minor changes in the peak from moving every point.
+        let padded = max(4, peak * 1.15)
+        let magnitude = pow(10, floor(log10(padded)))
+        return ([1.0, 2, 4, 8, 10].first { $0 * magnitude >= padded } ?? 10) * magnitude
+    }
+
+    private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect, date: Date, window: TimeInterval, upperBound: Double, animated: Bool) {
+        func location(_ point: Point) -> CGPoint {
+            CGPoint(
+                x: plot.maxX + plot.width * point.date.timeIntervalSince(date) / window,
+                y: plot.maxY - plot.height * min(1, point.value / upperBound)
+            )
+        }
+
+        for (index, trace) in traces.enumerated() {
+            let stroke = index == 0 ? color : color.opacity(0.72)
+            let style = StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round, dash: index == 0 ? [] : [4, 3])
+            var path = Path()
+            var endpoint: CGPoint?
+            var previous: CGPoint?
+            for (pointIndex, point) in trace.points.enumerated() {
+                let position = location(point)
+                if point.startsSegment || previous == nil {
+                    path.move(to: position)
+                    endpoint = position
+                } else if let previous {
+                    var end = position
+                    if animated, trace.hasCurrentPoint, pointIndex == trace.points.count - 1 {
+                        let age = date.timeIntervalSince(point.date)
+                        let progress = min(1, max(0, age / 0.45))
+                        end = CGPoint(x: previous.x + (position.x - previous.x) * progress, y: previous.y + (position.y - previous.y) * progress)
+                    }
+                    path.addLine(to: end)
+                    endpoint = end
+                }
+                previous = position
+            }
+            context.stroke(path, with: .color(stroke), style: style)
+
+            if trace.hasCurrentPoint, let endpoint, let last = trace.points.last {
+                let age = date.timeIntervalSince(last.date)
+                let opacity = min(1, max(0, (6 - age) / 0.4))
+                let dot = Path(ellipseIn: CGRect(x: endpoint.x - 3.5, y: endpoint.y - 3.5, width: 7, height: 7))
+                context.fill(dot, with: .color(stroke.opacity(opacity)))
+            }
+        }
+    }
+
+    private struct ChartAccessibility: AXChartDescriptorRepresentable {
+        let title: String
+        let traces: [Trace]
+        let seriesNames: [String]
+        let date: Date
+        let window: TimeInterval
+        let upperBound: Double
+        let percentage: Bool
+
+        func makeChartDescriptor() -> AXChartDescriptor {
+            let end = date.timeIntervalSinceReferenceDate
+            let xAxis = AXNumericDataAxisDescriptor(title: "Ora", range: (end - window)...end, gridlinePositions: []) { value in
+                Date(timeIntervalSinceReferenceDate: value).formatted(date: .omitted, time: .standard)
+            }
+            let yAxis = AXNumericDataAxisDescriptor(title: percentage ? "Percentuale" : "Byte al secondo", range: 0...upperBound, gridlinePositions: []) { value in
+                percentage ? NativeFormatting.percent(value) : NativeFormatting.bytes(value) + "/s"
+            }
+            let series = zip(seriesNames, traces).flatMap { name, trace in
+                var segments: [[AXDataPoint]] = []
+                for point in trace.points where point.date.timeIntervalSinceReferenceDate >= end - window {
+                    if point.startsSegment || segments.isEmpty { segments.append([]) }
+                    segments[segments.count - 1].append(AXDataPoint(x: point.date.timeIntervalSinceReferenceDate, y: point.value))
+                }
+                return segments.map { AXDataSeriesDescriptor(name: name, isContinuous: true, dataPoints: $0) }
+            }
+            return AXChartDescriptor(title: title, xAxis: xAxis, yAxis: yAxis, series: series)
+        }
+
+        func updateChartDescriptor(_ descriptor: AXChartDescriptor) {
+            let updated = makeChartDescriptor()
+            descriptor.xAxis = updated.xAxis
+            descriptor.yAxis = updated.yAxis
+            descriptor.series = updated.series
         }
     }
 

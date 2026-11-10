@@ -104,9 +104,27 @@ class EventsTests(unittest.TestCase):
         self.assertEqual(value['events'][0]['lastSeen'], m.iso(self.at[0]))
         self.assertEqual(value['issues'], [])
         args = next(args for args, _ in self.calls if args[0] == 'journalctl')
-        for expected in ['--boot=0', '--since=-24h', '--lines=100', '--priority=0..4', '_TRANSPORT=kernel', '_SYSTEMD_UNIT=docker.service']:
+        for expected in ['--boot=0', '--since=-24h', f'--lines={m.JOURNAL_LIMIT}', '--priority=0..4', '_TRANSPORT=kernel', '_SYSTEMD_UNIT=docker.service']:
             self.assertIn(expected, args)
         self.assertNotIn('private-business.service', args)
+
+    def test_expected_external_firewall_drop_is_hidden_without_suppressing_other_diagnostics(self):
+        external = '[UFW BLOCK] IN=eth0 OUT= MAC= SRC=8.8.8.8 DST=192.0.2.8 LEN=40'
+        local = external.replace('8.8.8.8', '10.0.0.2')
+        forwarded = external.replace('OUT= ', 'OUT=eth1 ')
+        self.journal = [self.journal_row(external, _TRANSPORT='kernel', PRIORITY='4')] * 110
+        self.journal.extend([
+            self.journal_row(external, _TRANSPORT='kernel', PRIORITY='3'),
+            self.journal_row(local, _TRANSPORT='kernel', PRIORITY='4'),
+            self.journal_row(forwarded, _TRANSPORT='kernel', PRIORITY='4'),
+            self.journal_row(external, PRIORITY='4'),
+            self.journal_row('UFW rejected its configuration', _TRANSPORT='kernel', PRIORITY='4'),
+        ])
+        value = self.collector()
+        self.assertFalse(value['partial'])
+        self.assertEqual(len(value['events']), 5)
+        self.assertTrue(any(item['severity'] == 'error' for item in value['events']))
+        self.assertTrue(all(item['count'] == 1 for item in value['events']))
 
     def test_docker_projection_excludes_env_health_stdout_and_intentional_stops(self):
         self.containers = [self.container('unhealthy', health='unhealthy'), self.container('restarting', state='restarting'),
@@ -191,6 +209,20 @@ func main(){
         value = self.refresh()
         active = [item for item in value['issues'] if item['source'] == 'updates']
         self.assertEqual(len(active), 1); self.assertEqual(active[0]['service'], 'runtime:php')
+
+    def test_explicit_admin_resolution_retains_failed_upgrade_history(self):
+        failed = {'kind': 'host-upgrade', 'status': 'failed', 'recoveryRequired': False,
+                  'finishedAt': m.iso(self.at[0] - 60), 'resolvedAt': m.iso(self.at[0] - 30),
+                  'resolution': 'Targets installed; package state and services verified.'}
+        self.jobs = [failed]
+        value = self.collector()
+        self.assertEqual(value['issues'], [])
+        self.assertEqual([item['code'] for item in value['events']], ['update-failed-history'])
+        for invalid in [{'recoveryRequired': True}, {'resolution': ''}, {'resolvedAt': 'invalid'},
+                        {'resolvedAt': m.iso(self.at[0] - 90)}, {'resolvedAt': m.iso(self.at[0] + 3600)}]:
+            with self.subTest(invalid=invalid):
+                self.jobs = [{**failed, **invalid}]
+                self.assertEqual(len(self.refresh()['issues']), 1)
 
     def test_current_unresolved_recovery_is_active_without_using_error_payload(self):
         self.jobs = [{'kind': 'host-upgrade', 'status': 'interrupted', 'recoveryRequired': True, 'error': 'password=TOP_SECRET'}]
