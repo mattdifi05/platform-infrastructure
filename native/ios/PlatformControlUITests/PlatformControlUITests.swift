@@ -94,17 +94,17 @@ final class PlatformControlUITests: XCTestCase {
         application.tap()
         XCTAssertTrue(app.navigationBars["Applicazione di prova"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["application.site"].firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["PHP"].exists)
-        XCTAssertTrue(app.staticTexts["Pubblica"].waitForExistence(timeout: 5))
+        XCTAssertTrue(accessibleText("PHP", in: app).exists)
+        XCTAssertTrue(accessibleText("Pubblica", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Crea copia privata"].exists)
 
-        let resources = app.staticTexts["Spazio dei file"]
+        let resources = accessibleText("Spazio dei file", in: app)
         if !resources.isHittable { app.swipeUp() }
         XCTAssertTrue(resources.exists)
         let postgres = app.buttons["application.database.fixture-postgres"]
         if !postgres.isHittable { app.swipeUp() }
         XCTAssertTrue(postgres.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "phpMyAdmin")).firstMatch.exists)
+        XCTAssertTrue(accessibleText("phpMyAdmin", in: app).exists)
         postgres.tap()
         XCTAssertTrue(app.navigationBars["Archivio di prova"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["application.database.admin"].firstMatch.exists)

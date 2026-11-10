@@ -47,6 +47,11 @@ HOST_REBOOT_GUARD = threading.Lock()
 HOST_RECONCILE_GUARD = threading.Lock()
 SERVER_EVENTS_GUARD = threading.Lock()
 SERVER_EVENTS_COLLECTOR = None
+DATABASE_SIZE_PROFILES = pathlib.Path('/etc/platform-infrastructure/database-size-profiles.json')
+DATABASE_SIZE_LOCK = threading.Lock()
+DATABASE_SIZE_CACHE = {}
+DATABASE_SIZE_PROFILE_LIMIT = 12
+DATABASE_SIZE_PROJECT = re.compile(r'[a-z0-9][a-z0-9-]{0,79}')
 DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
 IDENTIFIER = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$')
 
@@ -1519,8 +1524,98 @@ def server_events():
     return collector()
 
 
+def database_size_profiles():
+    try:
+        path = protected(DATABASE_SIZE_PROFILES)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+                return []
+            raw = file.read(16385)
+        if len(raw) > 16384:
+            return []
+        value = json.loads(raw)
+    except (OSError, ValueError, Rejected):
+        return []
+    if not isinstance(value, dict) or set(value) != {'profiles'} or not isinstance(value['profiles'], list) or len(value['profiles']) > DATABASE_SIZE_PROFILE_LIMIT:
+        return []
+    profiles, ids, targets = [], set(), set()
+    for row in value['profiles']:
+        if not isinstance(row, dict) or set(row) != {'id', 'projectId', 'containerId', 'imageId', 'name'} or any(not isinstance(item, str) for item in row.values()):
+            return []
+        identity, project, container_id, image_id, name = (row[key] for key in ('id', 'projectId', 'containerId', 'imageId', 'name'))
+        target = (container_id, name)
+        if (not IDENTIFIER.fullmatch(identity) or not DATABASE_SIZE_PROJECT.fullmatch(project)
+                or not re.fullmatch(r'[a-f0-9]{64}', container_id) or not DIGEST.fullmatch(image_id)
+                or not re.fullmatch(r'[a-z][a-z0-9_]{0,62}', name) or identity in ids or target in targets):
+            return []
+        ids.add(identity)
+        targets.add(target)
+        profiles.append((identity, project, container_id, image_id, name))
+    return profiles
+
+
+def measure_database_size(profile, deadline):
+    _, _, container_id, image_id, name = profile
+    docker_cli = ['/usr/bin/docker', '--host=unix:///var/run/docker.sock']
+
+    def bounded_output(args, max_seconds):
+        remaining = min(max_seconds, deadline - time.monotonic())
+        if remaining <= 0:
+            return b''
+        result = subprocess.run(docker_cli + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=remaining, check=False)
+        return result.stdout.strip() if result.returncode == 0 else b''
+
+    try:
+        actual = bounded_output(['inspect', '--type=container', '--format={{.Id}} {{.Image}} {{.State.Running}}', container_id], 1)
+        if actual != f'{container_id} {image_id} true'.encode():
+            return None
+        output = bounded_output([
+            'exec', '--user=postgres', '--env=PGCONNECT_TIMEOUT=2',
+            '--env=PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=2000', container_id,
+            'env', '-u', 'PGHOSTADDR', '-u', 'PGSERVICE', 'psql', '-XAtw', '--host=/var/run/postgresql', '--port=5432', '--username=postgres', f'--dbname={name}',
+            '--command=SELECT pg_catalog.pg_database_size(pg_catalog.current_database())',
+        ], 2.5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not re.fullmatch(rb'[0-9]{1,16}', output):
+        return None
+    size = int(output)
+    return size if size <= 2**53 - 1 else None
+
+
+def database_sizes(project_id):
+    if not isinstance(project_id, str) or not DATABASE_SIZE_PROJECT.fullmatch(project_id):
+        raise Rejected('invalid_request', 'Identificativo non valido.', 400)
+    profiles = database_size_profiles()
+    scoped = [row for row in profiles if row[1] == project_id]
+    if scoped and DATABASE_SIZE_LOCK.acquire(blocking=False):
+        try:
+            for profile in set(DATABASE_SIZE_CACHE) - set(profiles):
+                DATABASE_SIZE_CACHE.pop(profile, None)
+            deadline = time.monotonic() + 3.5
+            for profile in scoped:
+                expires_at, _, _ = DATABASE_SIZE_CACHE.get(profile, (0, None, None))
+                if time.monotonic() < expires_at or time.monotonic() >= deadline:
+                    continue
+                size = measure_database_size(profile, deadline)
+                DATABASE_SIZE_CACHE[profile] = (time.monotonic() + (10 if size is not None else 4),
+                                                size, stamp() if size is not None else None)
+        finally:
+            DATABASE_SIZE_LOCK.release()
+    rows = []
+    for profile in scoped:
+        expires_at, size, measured_at = DATABASE_SIZE_CACHE.get(profile, (0, None, None))
+        if expires_at <= time.monotonic():
+            size, measured_at = None, None
+        rows.append({'id': profile[0], 'name': profile[4], 'sizeBytes': size, 'measuredAt': measured_at})
+    return {'databases': rows}
+
+
 def handle(body, after_response=None):
-    allowed = {'server-events': set(), 'catalog': set(), 'check': set(), 'plan': {'componentId', 'revision'}, 'apply': {'componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'operation': {'operationId'}}
+    allowed = {'database-sizes': {'projectId'}, 'server-events': set(), 'catalog': set(), 'check': set(), 'plan': {'componentId', 'revision'}, 'apply': {'componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'operation': {'operationId'}}
     allowed.update({'host-catalog': set(), 'host-check': set(), 'host-plan': {'revision'}, 'host-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}, 'host-reboot-plan': {'revision'}, 'host-reboot-apply': {'revision', 'planId', 'confirmation', 'idempotencyKey'}})
     if not isinstance(body, dict) or not isinstance(body.get('action'), str) or body.get('action') not in allowed:
         raise Rejected('invalid_request', 'Richiesta non valida.', 400)
@@ -1535,6 +1630,8 @@ def handle(body, after_response=None):
     for key in ['revision', 'idempotencyKey']:
         if key in body and (not isinstance(body[key], str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}', body[key])):
             raise Rejected('invalid_request', 'Richiesta non valida.', 400)
+    if action == 'database-sizes':
+        return database_sizes(body['projectId'])
     if action == 'server-events':
         return server_events()
     if action.startswith('host-'):

@@ -9112,18 +9112,7 @@ function nativeDatabaseAdminTool(database, url) {
   }
 }
 
-function databaseSizeConnection(database, external) {
-  if (external) {
-    const target = externalDatabaseAdminTarget(external);
-    if (database.engine !== "postgres" || target.tlsMode !== "verify-full" || !target.caFile) return null;
-    const [credential] = externalDatabaseAdminCredentials(external, (file) => readCredentialPasswordFile(file, null));
-    if (!credential?.password) return null;
-    return {
-      engine: database.engine, host: target.host, port: target.port,
-      user: credential.user, password: credential.password, database: database.name,
-      tlsCA: readFileSync(target.caFile),
-    };
-  }
+function databaseSizeConnection(database) {
   const postgres = database.engine === "postgres";
   return {
     engine: database.engine,
@@ -9136,17 +9125,16 @@ function databaseSizeConnection(database, external) {
 
 async function nativeApplicationDatabases(context, project, url) {
   const databases = projectDatabases(context, project);
+  const projectId = project.slug || project.id;
+  const dedicatedRead = runtimeUpdatesClient.databaseSizes(projectId).catch(() => ({ databases: [] }));
   const groups = new Map();
   for (const database of databases) {
     try {
-      const external = trustedExternalDatabaseFor(database.id);
-      const key = external ? `external:${external.id}` : database.engine;
-      if (!groups.has(key)) {
-        const connection = databaseSizeConnection(database, external);
-        if (!connection) continue;
-        groups.set(key, { connection, databases: [] });
+      if (trustedExternalDatabaseFor(database.id)) continue;
+      if (!groups.has(database.engine)) {
+        groups.set(database.engine, { connection: databaseSizeConnection(database), databases: [] });
       }
-      groups.get(key).databases.push(database);
+      groups.get(database.engine).databases.push(database);
     } catch {
       // An unavailable connection or credential affects only its own measurement.
     }
@@ -9159,9 +9147,21 @@ async function nativeApplicationDatabases(context, project, url) {
       if (sizes.has(database.name)) measurements.set(database.id, { sizeBytes: sizes.get(database.name), sizeMeasuredAt: measuredAt });
     }
   }));
+  const { databases: dedicated } = await dedicatedRead;
+  const observedOnly = [];
+  for (const row of dedicated) {
+    const registered = context.databases.find((database) => database.id === row.id);
+    if (registered && (registered.name !== row.name || registered.engine !== "postgres" || !databaseMatchesProject(context, registered, project))) continue;
+    if (row.sizeBytes !== null) measurements.set(row.id, { sizeBytes: row.sizeBytes, sizeMeasuredAt: row.measuredAt });
+    if (!registered) observedOnly.push({
+      id: row.id, projectId, name: row.name, displayName: row.name,
+      engine: "postgres", status: "observed", adminTool: null,
+      sizeAvailable: row.sizeBytes !== null, sizeBytes: row.sizeBytes, sizeMeasuredAt: row.measuredAt,
+    });
+  }
   return {
     measurementAvailable: measurements.size > 0,
-    databases: databases.map((database) => {
+    databases: [...databases.map((database) => {
       const measurement = measurements.get(database.id);
       return {
         id: database.id, projectId: database.projectId, name: database.name, displayName: database.displayName,
@@ -9169,7 +9169,7 @@ async function nativeApplicationDatabases(context, project, url) {
         sizeAvailable: Boolean(measurement), sizeBytes: measurement?.sizeBytes ?? null,
         sizeMeasuredAt: measurement?.sizeMeasuredAt ?? null,
       };
-    }),
+    }), ...observedOnly],
   };
 }
 

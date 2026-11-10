@@ -95,6 +95,20 @@ test('server events are read only, bounded metadata with active and historical e
   await assert.rejects(client.serverEvents(), error => error.code === 'invalid_response');
 });
 
+test('database-size bridge permits only project lookups and projects only size metadata', async t => {
+  const { client, requests } = await fixture(t, (_body, res) => send(res, { databases: [
+    { id: 'app-postgres', name: 'app_db', sizeBytes: 123, measuredAt: plan.expiresAt, host: 'private-host' },
+    { id: 'app-archive', name: 'archive_db', sizeBytes: null, measuredAt: null },
+  ] }));
+  assert.deepEqual(await client.databaseSizes('app-project'), { databases: [
+    { id: 'app-postgres', name: 'app_db', sizeBytes: 123, measuredAt: plan.expiresAt },
+    { id: 'app-archive', name: 'archive_db', sizeBytes: null, measuredAt: null },
+  ] });
+  assert.deepEqual(requests[0].envelope.body, { action: 'database-sizes', projectId: 'app-project' });
+  assert.throws(() => validateRuntimeUpdatesRequest({ action: 'database-sizes', projectId: '../app' }), error => error.status === 400);
+  assert.throws(() => validateRuntimeUpdatesRequest({ action: 'database-sizes', projectId: 'app', host: 'custom' }), error => error.status === 400);
+});
+
 test('catalog never enables updates for absent components or unavailable native inventory', async t => {
   const source = catalog(); source.components[0].installed = false;
   const { client } = await fixture(t, (_body, res) => send(res, source));
