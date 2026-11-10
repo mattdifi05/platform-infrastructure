@@ -11013,6 +11013,8 @@ function repoCoverageCategory(filePath) {
     ["identity", /^keycloak\//],
     ["database", /^(?:postgres|mariadb|phppgadmin)\//],
     ["control-plane", /^(?:control-center)\/|^deployment\/(?:phpmyadmin\/composer\.(?:json|lock)|vps-backup\/.+\.(?:patch|test\.mjs))$/],
+    ["native-control-client", /^native\/ios\/(?:README\.md$|PlatformControl(?:\.xcodeproj)?\/)/],
+    ["native-control-tests", /^native\/ios\/PlatformControl(?:UI)?Tests\/.+\.swift$/],
     ["php-runtime", /^(?:php-apache|phpmyadmin|php-runtime-root|projects-portal)\//],
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],
@@ -11076,6 +11078,8 @@ async function repoCoverageCheck() {
     "reverse-proxy",
     "waf",
     "security-policy",
+    "native-control-client",
+    "native-control-tests",
   ];
   const missingCategories = requiredCategories.filter((category) => !categories.has(category));
   const workflow = readGithubWorkflowText();
