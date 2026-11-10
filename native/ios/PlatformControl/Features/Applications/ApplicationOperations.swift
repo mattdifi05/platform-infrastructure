@@ -20,11 +20,17 @@ final class ApplicationsStore {
         isLoading = true
         defer { isLoading = false }
         do {
-            catalog = try await model.get("/api/native/v1/applications")
+            let response = try await model.get("/api/native/v1/applications")
+            guard !Task.isCancelled else { return }
+            guard case .array = response["projects"], case .array = response["observed"],
+                  case .array = response["folders"]["folders"], case .object = response["folders"]["memberships"] else {
+                throw APIError(status: 0, message: "Il catalogo delle applicazioni non è disponibile.")
+            }
+            catalog = response
             error = nil
             hasLoaded = true
         } catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
 
     func project(_ id: String) -> JSONValue? {

@@ -10,7 +10,7 @@ actor NativeFixtures {
 
     func response(path: String, method: String, body: JSONValue?) throws -> JSONValue {
         let canonical = path.replacingOccurrences(of: "/control/v1/", with: "/control/").components(separatedBy: "?")[0]
-        if canonical == "/api/native/v1/bootstrap" { return parse(#"{"schemaVersion":1,"session":{"subject":"test-owner","displayName":"Ambiente di prova","role":"owner"},"csrfToken":"fixture-csrf","capabilities":[]}"#) }
+        if canonical == "/api/native/v1/bootstrap" { return parse(#"{"schemaVersion":1,"authentication":{"vaultFaceIDSupported":true},"session":{"subject":"test-owner","displayName":"Ambiente di prova","role":"owner","vaultFaceIDRegistered":true},"csrfToken":"fixture-csrf","capabilities":[]}"#) }
         if canonical == "/control/resources/host" {
             return parse(#"{"scope":"host","freshness":{"available":true},"cpu":{"available":true,"usedPercent":17.4,"cores":4},"memory":{"available":true,"usedPercent":32.8,"usedBytes":2817508540,"totalBytes":8589934592},"disk":{"available":true,"usedPercent":26.4,"usedBytes":56693568307,"totalBytes":214748364800},"swap":{"usedBytes":0,"totalBytes":2147483648},"network":{"totals":{"rxBytesPerSecond":38400,"txBytesPerSecond":12800}},"diskIo":{"totals":{"readBytesPerSecond":24000,"writeBytesPerSecond":128000}},"inodes":{"usedPercent":3.1},"load":{"one":0.4,"five":0.3,"fifteen":0.2},"uptimeSeconds":102400}"#)
         }
@@ -26,21 +26,33 @@ actor NativeFixtures {
         if canonical.hasSuffix("/delete"), canonical.contains("project-folders") { return .object(["ok": .bool(true)]) }
         if canonical.hasSuffix("/hosting-status") { return parse(#"{"available":true,"mode":"private","visibility":"private","revision":"fixture-hosting","clone":{"available":true},"modes":["public","private","offline"]}"#) }
         if canonical == "/control/vault" {
-            return .object(["revision": .string(revision), "items": .array([parse(#"{"id":"fixture-secret","itemKey":"Esempio","label":"Credenziale di prova","projectId":"sample","environment":"production","kind":"api-key","rotationDays":90,"versions":[{"versionId":"v1","createdAt":"2026-11-10T10:00:00Z"}],"currentVersionId":"v1"}"#)]), "projects": .array([.object(["id": .string("sample"), "name": .string("Applicazione di prova")])]), "runtime": .object(["bindings": .array([]), "available": .bool(true)])])
+            return .object(["revision": .string(revision), "items": .array([parse(#"{"id":"fixture-secret","itemKey":"Esempio","label":"Credenziale di prova","projectId":"sample","environment":"production","kind":"api-key","createdAt":"2026-11-10T10:00:00Z","updatedAt":"2026-11-10T11:30:00Z","rotationDays":90,"versions":[{"versionId":"v1","createdAt":"2026-11-10T10:00:00Z"}],"currentVersionId":"v1"}"#)]), "projects": .array([.object(["slug": .string("sample"), "name": .string("Applicazione di prova")])]), "runtime": .object(["bindings": .array([]), "available": .bool(true)])])
         }
         if canonical.hasSuffix("/reveal") { return .object(["value": .string("fixture-secret-value"), "expiresAt": .string(ISO8601DateFormatter().string(from: Date.now.addingTimeInterval(30)))]) }
         if canonical.hasPrefix("/control/vault/"), method == "POST" { return .object(["ok": .bool(true), "dryRun": .bool(false)]) }
         if canonical == "/control/runtime-updates/system" {
-            return parse(#"{"schema":"host-updates/v1","available":true,"revision":"fixture-host","os":{"name":"Ubuntu","version":"26.04","kernel":"7.0"},"updateCount":2,"autoremoveCount":1,"keptBackCount":0,"canCheck":true,"canApply":true,"canReboot":true,"rebootRequired":true,"operations":[]}"#)
+            return parse(#"{"schema":"host-updates/v1","available":true,"revision":"fixture-host","checkedAt":"2026-11-10T10:00:00Z","updateCount":1,"autoremoveCount":1,"canCheck":true,"canApply":true,"canReboot":true,"rebootRequired":true,"packages":[{"name":"openssl","currentVersion":"3.0.1","targetVersion":"3.0.2"}],"operations":[]}"#)
         }
         if canonical == "/control/runtime-updates" {
             return parse(#"{"schema":"runtime-updates/v1","available":true,"canCheck":true,"canApply":true,"revision":"fixture-runtime","components":[{"id":"php","label":"PHP","category":"Runtime","current":{"version":"8.5.12","versions":["8.5.12"]},"latestStable":{"version":"8.5.13"},"candidateRelease":{"version":"8.5.13"},"status":"update-available","canUpdate":true,"services":["application-test"],"installed":true}],"operations":[]}"#)
         }
         if canonical.hasPrefix("/control/runtime-updates/"), canonical.hasSuffix("/plan") {
-            return .object(["planId": .string("fixture-plan"), "revision": body?["revision"] ?? .string(revision), "targetVersion": .string("8.5.13"), "expiresAt": .string(ISO8601DateFormatter().string(from: .now.addingTimeInterval(240))), "confirmationRequired": .string(canonical.contains("reboot") ? "REBOOT" : "UPDATE"), "packageCount": .number(2), "autoremoveCount": .number(1), "affectedServices": .array([.string("application-test")]), "steps": .array([.string("Verifica"), .string("Aggiornamento"), .string("Verifica finale")]), "risks": .array([.string("Possibile breve interruzione dei servizi.")])])
+            let target = String(canonical.split(separator: "/").dropLast().last ?? "")
+            let host = target == "system" || target == "reboot"
+            let rebootAfter = body?["rebootAfter"].boolValue == true
+            let confirmation = target == "reboot" ? "REBOOT" : rebootAfter ? "UPDATE_AND_REBOOT" : "UPDATE"
+            let kind = target == "reboot" ? "host-reboot" : host ? "host-upgrade" : target == "all" ? "batch" : "runtime"
+            return .object([
+                "planId": .string("fixture-plan"), "revision": body?["revision"] ?? .string(revision),
+                "expiresAt": .string(ISO8601DateFormatter().string(from: .now.addingTimeInterval(240))),
+                "kind": .string(kind), "rebootAfter": .bool(rebootAfter), "confirmationRequired": .string(confirmation),
+                "packages": .array([parse(#"{"name":"openssl","currentVersion":"3.0.1","targetVersion":"3.0.2"}"#)]),
+                "autoremoveCount": .number(1), "componentId": .string(target), "targetVersion": .string("8.5.13"),
+                "targetDigest": .string("sha256:fixture"), "components": .array([parse(#"{"id":"php","label":"PHP","targetVersion":"8.5.13"}"#)])
+            ])
         }
         if canonical.hasPrefix("/control/runtime-updates/"), canonical.hasSuffix("/apply") || canonical.hasSuffix("/check") {
-            let id = "fixture-operation"
+            let id = UUID().uuidString
             jobs[id] = .object(["id": .string(id), "status": .string("succeeded"), "stage": .string("Verifica completata"), "completedSteps": .number(3), "totalSteps": .number(3), "recoveryRequired": .bool(false), "serviceResults": .array([])])
             return .object(["operationId": .string(id), "status": .string("queued")])
         }

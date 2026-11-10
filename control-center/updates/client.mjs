@@ -33,9 +33,12 @@ const invalid = () => { throw new RuntimeUpdatesError(400, 'invalid_request'); }
 export function validateRuntimeUpdatesRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || !actions.has(body.action)) invalid();
   const required = fields[body.action];
-  if (Object.keys(body).length !== required.length + 1 || Object.keys(body).some(key => key !== 'action' && !required.includes(key))) invalid();
+  const optional = body.action === 'host-plan' ? ['rebootAfter'] : [];
+  if (required.some(key => !Object.hasOwn(body, key)) || Object.keys(body).some(key => key !== 'action' && !required.includes(key) && !optional.includes(key))) invalid();
+  if (Object.hasOwn(body, 'rebootAfter') && typeof body.rebootAfter !== 'boolean') invalid();
+  const confirmations = body.action === 'host-reboot-apply' ? ['REBOOT'] : body.action === 'host-apply' ? ['UPDATE', 'UPDATE_AND_REBOOT'] : ['UPDATE'];
   for (const key of required) {
-    if (key === 'confirmation' ? body[key] !== (body.action === 'host-reboot-apply' ? 'REBOOT' : 'UPDATE') : key === 'componentId' || key === 'operationId' || key === 'planId' ? !validRuntimeUpdatesId(body[key]) : !token(body[key])) invalid();
+    if (key === 'confirmation' ? !confirmations.includes(body[key]) : key === 'componentId' || key === 'operationId' || key === 'planId' ? !validRuntimeUpdatesId(body[key]) : !token(body[key])) invalid();
   }
   return Object.freeze({ ...body });
 }
@@ -49,6 +52,19 @@ const text = (value, max = 256) => typeof value === 'string' && value.length <= 
 const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
 const digest = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value) ? value : null;
 const strings = value => Array.isArray(value) && value.length <= 100 && value.every(item => text(item, 512) !== null) ? [...value] : [];
+function packageVersions(rows, count) {
+  if (rows === undefined) return [];
+  if (!Array.isArray(rows) || rows.length !== count || rows.length > 4000) throw new RuntimeUpdatesError(503, 'invalid_response');
+  const seen = new Set();
+  return rows.map(row => {
+    const { name, currentVersion, targetVersion } = row ?? {};
+    const version = value => typeof value === 'string' && value.length <= 256 && /^[A-Za-z0-9.+:~_-]+$/.test(value);
+    if (typeof name !== 'string' || name.length > 256 || !/^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?$/.test(name)
+        || seen.has(name) || !version(currentVersion) || !version(targetVersion)) throw new RuntimeUpdatesError(503, 'invalid_response');
+    seen.add(name);
+    return { name, currentVersion, targetVersion };
+  });
+}
 function accepted(value) {
   if (!validRuntimeUpdatesId(value?.operationId) || !['queued', 'running', 'completed', 'failed', 'rolled_back', 'rolled-back', 'rollback_failed', 'interrupted', 'succeeded'].includes(value.status)) throw new RuntimeUpdatesError(503, 'invalid_response');
   return { operationId: value.operationId, status: value.status };
@@ -58,6 +74,7 @@ function operation(value) {
       || !Number.isSafeInteger(value.completedSteps) || !Number.isSafeInteger(value.totalSteps)
       || value.completedSteps < 0 || value.totalSteps < value.completedSteps) throw new RuntimeUpdatesError(503, 'invalid_response');
   const result = { id: value.id, status: value.status, stage: value.stage, completedSteps: value.completedSteps, totalSteps: value.totalSteps };
+  if (['check', 'apply', 'host-check', 'host-upgrade', 'host-reboot'].includes(value.kind)) result.kind = value.kind;
   for (const key of ['componentId', 'targetVersion']) if (text(value[key], 128)) result[key] = value[key];
   for (const key of ['createdAt', 'startedAt', 'finishedAt']) if (timestamp(value[key])) result[key] = value[key];
   result.recoveryRequired = value.recoveryRequired === true;
@@ -121,16 +138,21 @@ function sanitizeResult(body, value) {
     return { schema: value.schema, available: value.available, revision: token(value.revision) ? value.revision : null,
       os: { id: text(value.os?.id, 80), name: text(value.os?.name, 128), version: text(value.os?.version, 80), kernel: text(value.os?.kernel, 128) },
       checkedAt: timestamp(value.checkedAt), updateCount: value.updateCount, autoremoveCount: value.autoremoveCount ?? 0, keptBackCount: value.keptBackCount,
+      packages: packageVersions(value.packages, value.updateCount),
+      busy: value.busy === true,
       rebootRequired: value.rebootRequired === true, canReboot: value.available && value.rebootRequired === true && value.canReboot === true, canCheck: value.available && value.canCheck === true, canApply: value.available && value.canApply === true,
       operations: value.operations.map(operation) };
   }
   if (body.action === 'host-plan' || body.action === 'host-reboot-plan') {
     const reboot = body.action === 'host-reboot-plan';
+    const rebootAfter = !reboot && body.rebootAfter === true;
     if (!validRuntimeUpdatesId(value.planId) || value.revision !== body.revision || !timestamp(value.expiresAt)
-        || value.confirmationRequired !== (reboot ? 'REBOOT' : 'UPDATE') || value.kind !== (reboot ? 'host-reboot' : 'host-upgrade')
+        || value.confirmationRequired !== (reboot ? 'REBOOT' : rebootAfter ? 'UPDATE_AND_REBOOT' : 'UPDATE') || value.kind !== (reboot ? 'host-reboot' : 'host-upgrade')
+        || (value.rebootAfter === true) !== rebootAfter
         || !Array.isArray(value.steps) || !Array.isArray(value.risks) || !Number.isSafeInteger(value.packageCount) || value.packageCount < 0
         || value.autoremoveCount !== undefined && (!Number.isSafeInteger(value.autoremoveCount) || value.autoremoveCount < 0 || value.autoremoveCount > 100000)) throw new RuntimeUpdatesError(503, 'invalid_response');
     return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, kind: value.kind, packageCount: value.packageCount, autoremoveCount: value.autoremoveCount ?? 0,
+      packages: packageVersions(value.packages, value.packageCount), rebootAfter,
       steps: strings(value.steps), risks: strings(value.risks), confirmationRequired: value.confirmationRequired };
   }
   if (body.action === 'operation') {
@@ -182,14 +204,16 @@ function sanitizeResult(body, value) {
       blockedReason: text(item.blockedReason, 512) || (value.canApply === false ? 'Una manutenzione interrotta richiede verifica amministrativa.' : null), services: strings(item.services), installed: item.installed === true };
   });
   return { schema: value.schema, revision: token(value.revision) ? value.revision : null, checkedAt: timestamp(value.checkedAt),
-    available: value.available, canCheck: value.available && value.canCheck === true, canApply: value.available && value.canApply !== false, components, operations: value.operations.map(operation) };
+    available: value.available, canCheck: value.available && value.canCheck === true && value.busy !== true,
+    canApply: value.available && value.canApply !== false && value.busy !== true, components, operations: value.operations.map(operation) };
 }
 
-export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_000, maxResponseBytes = 128 * 1024 } = {}) {
+export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_000, maxResponseBytes } = {}) {
   const socketPath = env.CONTROL_CENTER_UPDATES_SOCKET || '/run/platform-updates/updates.sock';
   const keyFile = env.CONTROL_CENTER_UPDATES_KEY_FILE || '/run/secrets/control_center_updates_bridge_token';
   async function call(input) {
     const body = validateRuntimeUpdatesRequest(input);
+    const responseLimit = maxResponseBytes ?? (['host-catalog', 'host-plan'].includes(body.action) ? 4 * 1024 * 1024 : 128 * 1024);
     try {
       if (!path.isAbsolute(socketPath) || !path.isAbsolute(keyFile) || !lstatSync(socketPath).isSocket()) throw new RuntimeUpdatesError();
       let key; const fd = openSync(keyFile, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -205,7 +229,7 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
         const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
         const req = http.request({ socketPath, path: '/v1/updates', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': raw.length, 'x-platform-signature': signature } }, res => {
           const chunks = []; let size = 0;
-          res.on('data', chunk => { size += chunk.length; if (size > maxResponseBytes) { finish(new RuntimeUpdatesError(503, 'response_too_large')); req.destroy(); } else chunks.push(chunk); });
+          res.on('data', chunk => { size += chunk.length; if (size > responseLimit) { finish(new RuntimeUpdatesError(503, 'response_too_large')); req.destroy(); } else chunks.push(chunk); });
           res.on('error', () => finish(new RuntimeUpdatesError()));
           res.on('aborted', () => finish(new RuntimeUpdatesError()));
           res.on('end', () => {

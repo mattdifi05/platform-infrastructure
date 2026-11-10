@@ -213,21 +213,34 @@ test('route capabilities require viewer for reads, admin for checks, fresh owner
   ]) assert.equal(resolveAuthorizationCapability(method, prefix + '/runtime-updates' + suffix).capability, capability);
 });
 
-test('system API exposes counts only and binds separate UPDATE and REBOOT confirmations', async t => {
-  let source = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 1, autoremoveCount: 2, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [], packages: [{ name: 'private-package' }], autoremove: [{ name: 'private-removal' }] };
+test('system API projects upgrade versions and binds the three maintenance confirmations', async t => {
+  const packages = [{ name: 'libfixture:amd64', currentVersion: '1:1.0+ubuntu1', targetVersion: '1:1.1~stable1' }];
+  const nativePackages = packages.map(item => ({ ...item, privateMetadata: 'SECRET' }));
+  let source = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 1, autoremoveCount: 2, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [], packages: nativePackages, autoremove: [{ name: 'private-removal' }] };
   const { client, requests } = await fixture(t, (_body, res) => send(res, source));
   const inventory = await client.hostCatalog();
   assert.equal(inventory.updateCount, 1); assert.equal(inventory.canReboot, true); assert.equal(inventory.autoremoveCount, 2);
-  assert.doesNotMatch(JSON.stringify(inventory), /private-package|private-removal|packages/);
+  assert.deepEqual(inventory.packages, packages);
+  assert.doesNotMatch(JSON.stringify(inventory), /SECRET|private-removal/);
+  source.packages = [{ ...nativePackages[0], targetVersion: 'https://user:password@invalid' }];
+  await assert.rejects(client.hostCatalog(), error => error.code === 'invalid_response');
+  source.packages = nativePackages;
   source.autoremoveCount = -1; await assert.rejects(client.hostCatalog(), error => error.code === 'invalid_response');
-  source = { planId: 'host-plan', revision, expiresAt: plan.expiresAt, kind: 'host-upgrade', packageCount: 1, autoremoveCount: 2, steps: ['Installa'], risks: ['Fermo temporaneo'], confirmationRequired: 'UPDATE', packages: [{ name: 'private-package' }], autoremove: [{ name: 'private-removal' }] };
+  source = { planId: 'host-plan', revision, expiresAt: plan.expiresAt, kind: 'host-upgrade', packageCount: 1, autoremoveCount: 2, steps: ['Installa'], risks: ['Fermo temporaneo'], confirmationRequired: 'UPDATE', packages: nativePackages, autoremove: [{ name: 'private-removal' }] };
   const approved = await client.hostPlan({ revision });
-  assert.equal(approved.packageCount, 1); assert.equal(approved.autoremoveCount, 2); assert.doesNotMatch(JSON.stringify(approved), /private-package|private-removal|packages/);
+  assert.equal(approved.packageCount, 1); assert.equal(approved.autoremoveCount, 2); assert.deepEqual(approved.packages, packages);
+  assert.doesNotMatch(JSON.stringify(approved), /SECRET|private-removal/);
   assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision });
   const fields = { revision, planId: 'host-plan', confirmation: 'UPDATE', idempotencyKey: 'host-1' };
   await assert.rejects(client.hostRebootApply(fields), error => error.status === 400);
   assert.throws(() => validateRuntimeUpdatesRequest({ action: 'host-apply', ...fields, confirmation: 'REBOOT' }), error => error.status === 400);
+  await assert.rejects(client.hostPlan({ revision, rebootAfter: true }), error => error.code === 'invalid_response');
+  source = { ...source, rebootAfter: true, confirmationRequired: 'UPDATE_AND_REBOOT' };
+  const combined = await client.hostPlan({ revision, rebootAfter: true });
+  assert.equal(combined.rebootAfter, true); assert.equal(combined.confirmationRequired, 'UPDATE_AND_REBOOT');
+  assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision, rebootAfter: true });
   source = { operationId: 'reboot-1', status: 'queued' };
+  assert.equal((await client.hostApply({ ...fields, confirmation: 'UPDATE_AND_REBOOT' })).operationId, 'reboot-1');
   assert.equal((await client.hostRebootApply({ ...fields, confirmation: 'REBOOT' })).operationId, 'reboot-1');
 });
 

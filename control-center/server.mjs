@@ -10,7 +10,7 @@ import { gzipSync } from "node:zlib";
 import { AuthRequestError, createControlCenterAuth } from "./auth/app-passkey.mjs";
 import { createFirstConfiguration } from "./first-configuration/index.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
-import { nativeAssociationDocument, nativeAuthenticationMetadata, nativeSessionBootstrap } from "./auth/native-client.mjs";
+import { createNativeVaultChallenges, nativeAssociationDocument, nativeAuthenticationMetadata, nativeSessionBootstrap } from "./auth/native-client.mjs";
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
 import { hostExtension } from "./host-extension.mjs";
@@ -83,6 +83,7 @@ import { handleRuntimeUpdatesApi } from "./updates/api.mjs";
 import { renderRuntimeUpdates } from "./updates/ui.mjs";
 import { renderServerEvents } from "./events/ui.mjs";
 const runtimeUpdatesClient = createRuntimeUpdatesClient();
+const nativeVaultChallenges = createNativeVaultChallenges();
 import {
   createStatusEventBroker,
   pumpStatusEventStream,
@@ -360,7 +361,7 @@ const server = createServer(async (req, res) => {
           throw new AuthRequestError("A Control Center passkey is already registered.", 409);
         }
         const payload = await readPayload(req);
-        const options = await controlAuth.beginPasskeyRegistration(req, payload.bootstrapToken);
+        const options = await controlAuth.beginPasskeyRegistration(req, payload.bootstrapToken, payload.nativeVaultPublicKey);
         json(res, { options });
         return;
       }
@@ -390,11 +391,13 @@ const server = createServer(async (req, res) => {
         return;
       }
       if (url.pathname === "/auth/passkey/login/options" && req.method === "POST") {
+        controlAuth.assertRequest(req, { mutation: true });
         const setup = await firstConfiguration.status();
         if (firstConfiguration.enabled && !setup.complete) {
           throw new AuthRequestError("Register the Control Center passkey before logging in.", 409);
         }
-        const options = await controlAuth.beginLogin(req);
+        const payload = await readPayload(req);
+        const options = await controlAuth.beginLogin(req, payload.nativeVaultPublicKey);
         json(res, { options });
         return;
       }
@@ -554,6 +557,36 @@ const server = createServer(async (req, res) => {
         json(res, nativeSessionBootstrap(controlAuth, session));
         return;
       }
+      if (["native.vault.challenge", "native.vault.reveal"].includes(requestOperation.operationId)) {
+        const itemId = requestOperation.parameters.vaultItemId;
+        if (itemId !== sanitizeIdentifier(itemId) || !itemId) {
+          json(res, { error: "invalid_vault_item", message: "Secret non valido." }, 422);
+          return;
+        }
+        if (controlAuth.mode !== "app-passkey" || !session.identity.nativeVaultPublicKey) {
+          json(res, { error: "native_vault_enrollment_required", message: "Accedi di nuovo per abilitare Face ID in questa sessione." }, 428);
+          return;
+        }
+        if (requestOperation.operationId === "native.vault.challenge") {
+          const challenge = nativeVaultChallenges.issue(session, itemId);
+          if (challenge) json(res, { challenge });
+          else json(res, { error: "native_vault_challenge_busy", message: "Verifica temporaneamente occupata. Riprova." }, 429);
+          return;
+        }
+        const proof = await readPayload(req);
+        if (!nativeVaultChallenges.consume(session, itemId, proof)) {
+          json(res, { error: "native_vault_proof_rejected", message: "Verifica Face ID scaduta o non valida. Riprova." }, 403);
+          return;
+        }
+        try {
+          json(res, await planVaultSecretReveal(itemId, { confirm: `REVEAL-VAULT-SECRET:${itemId}` }));
+        } catch (error) {
+          if (error instanceof ValidationError || error instanceof VaultStoreError) {
+            json(res, { error: "native_vault_reveal_rejected", message: "Valore non disponibile per questo secret." }, 422);
+          } else { throw error; }
+        }
+        return;
+      }
       if (requestOperation.operationId === "server-events.read") {
         try {
           json(res, await runtimeUpdatesClient.serverEvents());
@@ -586,11 +619,14 @@ const server = createServer(async (req, res) => {
         ? await buildCachedContext({ projects, state })
         : await buildContext({ projects, state });
       if (requestOperation.operationId === "native.applications") {
+        // Host observations are optional. A rejected observation must not hide
+        // managed projects or become eligible for folder membership.
+        const observed = observedApplications();
         json(res, {
           projects: context.projects,
           applications: context.applications,
-          observed: observedApplications(true),
-          folders: applicationFolderCatalog(context, folderApplications(context)),
+          observed,
+          folders: applicationFolderCatalog(context, folderApplications(context, observed)),
           databases: context.databases.map((database) => ({ ...database, adminTool: { label: databaseAdminAction(database).label, url: new URL(databaseAdminAction(database).href, controlAuth.config.publicOrigin || url.origin).href } })),
           engines: context.databaseEngines,
           destructiveOperations: context.databaseDeleteOperations,
@@ -915,7 +951,7 @@ async function handleApi(req, res, url, context, operation) {
       case "vault.inventory.read": return json(res, await vaultInventoryPayload(context));
       case "vault.secret.store": return json(res, await planVaultSecretCreate(payload, context), 202);
       case "vault.import-existing": return json(res, await planVaultSecretImportExisting(payload, context), 202);
-      case "vault.secret.reveal": return json(res, await planVaultSecretReveal(operation.parameters.vaultItemId, payload, context), 202);
+      case "vault.secret.reveal": return json(res, await planVaultSecretReveal(operation.parameters.vaultItemId, payload), 202);
       case "vault.secret.delete": return json(res, await planVaultSecretDelete(operation.parameters.vaultItemId, payload, context), 202);
       case "database.create": return json(res, planDatabaseCreate(payload, context), 202);
       case "database.backup": return json(res, planDatabaseBackup(operation.parameters.databaseId, payload, context), 202);
@@ -1068,7 +1104,7 @@ async function handleApi(req, res, url, context, operation) {
     if (method === "POST" && route(parts, "control", "vault", "secrets")) return json(res, await planVaultSecretCreate(payload, context), 202);
     if (method === "POST" && route(parts, "control", "vault", "import-existing")) return json(res, await planVaultSecretImportExisting(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "reveal")) {
-      return json(res, await planVaultSecretReveal(parts[3], payload, context), 202);
+      return json(res, await planVaultSecretReveal(parts[3], payload), 202);
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "delete")) {
       return json(res, await planVaultSecretDelete(parts[3], payload, context), 202);
@@ -6560,14 +6596,13 @@ function selectedStatusGroup(groups, params = new URLSearchParams()) {
     || { meta: statusCategoryMeta("operational-evidence"), rows: [] };
 }
 
-function observedApplications(strict = false) {
+function observedApplications() {
   const root = process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT;
   if (!root) return [];
   try {
     const catalog = readVpsBackupCatalog(root);
     return readObservedApplications(root, catalog?.restoreProfileDigest);
-  } catch (error) {
-    if (strict) throw error;
+  } catch {
     return []; // Metadata refresh must not break managed application pages.
   }
 }
@@ -11668,7 +11703,7 @@ async function planVaultSecretImportExisting(payload, context) {
   return operationPlan("vault.import-existing", "local", true, ["scan approved secret directories", "show importable count", "require apply confirmation", "do not read values during plan"], { itemCount: candidates.length, importableCount: importable.length, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "IMPORT-EXISTING-SECRETS" });
 }
 
-async function planVaultSecretReveal(id, payload, context) {
+async function planVaultSecretReveal(id, payload) {
   const itemId = sanitizeIdentifier(id || "");
   if (!itemId) throw new ValidationError("Vault item id is required.");
   const state = readVaultState();
@@ -11684,8 +11719,8 @@ async function planVaultSecretReveal(id, payload, context) {
   const value = await decryptVersion(vaultStoreConfig, { itemId: item.id, versionId: existing.currentVersionId });
   const now = new Date();
   const revealExpiresAt = new Date(now.getTime() + vaultRevealTtlMs).toISOString();
-  appendAudit({ action: "vault.item.reveal.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item value revealed to the local browser after explicit confirmation; value was not logged." });
-  const operation = operationPlan("vault.item.reveal.local", item.environment, false, ["validate vault item", "decrypt in memory", "return value only for explicit browser action", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRead: true, valueExposed: true, revealExpiresAt, productionEvidence: false });
+  appendAudit({ action: "vault.item.reveal.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item value revealed after explicit authorized confirmation; value was not logged." });
+  const operation = operationPlan("vault.item.reveal.local", item.environment, false, ["validate vault item", "decrypt in memory", "return value only for explicit authorized action", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRead: true, valueExposed: true, revealExpiresAt, productionEvidence: false });
   return { ...operation, item, value, revealExpiresAt, ttlMs: vaultRevealTtlMs };
 }
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { PostgresAppPasskeyStore } from "../auth/app-passkey.mjs";
@@ -47,8 +48,16 @@ if (!databaseUrl) {
     assert.equal(loaded.policyVersion, session.policyVersion);
     assert.equal(loaded.issuer, session.issuer);
     assert.equal(loaded.sessionId, "");
+    assert.equal(loaded.nativeVaultPublicKey, null);
     await store.revokeSession(session.tokenHash);
     assert.equal(await store.getSession(session.tokenHash, 3600), null);
+
+    const { publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const { x, y } = publicKey.export({ format: "jwk" });
+    const nativeVaultPublicKey = Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]).toString("base64url");
+    const biometricSession = { ...sessionRecord("6"), nativeVaultPublicKey };
+    await store.createSession(biometricSession);
+    assert.equal((await store.getSession(biometricSession.tokenHash, 3600)).nativeVaultPublicKey, nativeVaultPublicKey);
 
     const throttleKey = hex(2);
     assert.equal((await store.registerLoginAttempt(throttleKey, 2, 60, 60)).allowed, true);

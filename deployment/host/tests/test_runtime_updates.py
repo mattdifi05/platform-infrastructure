@@ -576,15 +576,21 @@ class UpdatesTests(unittest.TestCase):
     def test_batch_prepares_every_family_before_first_stop_and_reports_each_service(self):
         stored = self.batch_fixture(); self.prepare_job()
         builds, checks, updates = [], [], []
+        parallel = threading.Barrier(2, timeout=2)
+        preparing = set()
         recreate = m.recreate
         def build(*args):
             self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
-            builds.append(args[0]['id'])
+            component_id = args[0]['id']
+            builds.append(component_id)
+            if component_id not in preparing:
+                preparing.add(component_id)
+                parallel.wait()
             return self.batch_build(*args)
         def preflight(old, *args):
             checks.append(old['Id'])
         def update(*args, **kwargs):
-            self.assertEqual(builds, ['node', 'node', 'php']); self.assertEqual(len(checks), 3)
+            self.assertCountEqual(builds, ['node', 'node', 'php']); self.assertEqual(len(checks), 3)
             record = m.load('operation', 'job-1')
             self.assertEqual(record['currentService'], args[0]['Name'].lstrip('/'))
             updates.append(record['currentService'])
@@ -709,10 +715,13 @@ class UpdatesTests(unittest.TestCase):
         self.host.worker_alive.return_value = False
         self.host.HostUpdateError = type('FixtureHostError', (RuntimeError,), {})
         self.host.inventory.side_effect = lambda: copy.deepcopy(self.host_inventory)
-        def native_plan(value=None):
-            return {'planId': uuid.uuid4().hex, 'expiresAt': int(time.time()) + 300,
+        def native_plan(value=None, reboot_after=False):
+            plan = {'planId': uuid.uuid4().hex, 'expiresAt': int(time.time()) + 300,
                     'bootId': self.host_inventory['bootId'], 'packages': value['packages'] if value else [],
                     'steps': ['Prepare', 'Verify'], 'risks': ['Services restart'], 'confirmationRequired': 'UPDATE' if value else 'REBOOT'}
+            if reboot_after:
+                plan.update(rebootAfter=True, confirmationRequired='UPDATE_AND_REBOOT')
+            return plan
         self.host.plan.side_effect = native_plan
         self.host.reboot_plan.side_effect = native_plan
         def prepare(value, persist, confirmation):
@@ -720,6 +729,10 @@ class UpdatesTests(unittest.TestCase):
             intent = {'schema': 'platform-host-reboot-intent/v1', 'state': 'queued', 'bootIdBefore': value['bootId'], 'planId': value['planId']}
             persist(intent); return intent
         self.host.prepare_reboot.side_effect = prepare
+        self.host.prepare_upgrade_reboot.side_effect = lambda value: {
+            'schema': 'platform-host-reboot-intent/v1', 'state': 'queued', 'bootIdBefore': value['bootId'],
+            'planId': value['planId'], 'afterUpgrade': True
+        }
         self.host.schedule_reboot.side_effect = lambda intent: {**intent, 'state': 'waiting-reboot'}
         def reconcile(intent, health_check=None):
             if self.host_inventory['bootId'] == intent['bootIdBefore']:
@@ -738,16 +751,55 @@ class UpdatesTests(unittest.TestCase):
         return {'action': 'host-reboot-apply' if reboot else 'host-apply', 'revision': public['revision'], 'planId': public['planId'],
                 'confirmation': 'REBOOT' if reboot else 'UPDATE', 'idempotencyKey': 'fixture-host-request'}
 
-    def test_host_public_catalog_and_plan_expose_counts_without_package_arrays_or_apt_writes(self):
+    def test_host_public_catalog_and_plan_expose_exact_package_versions_without_apt_writes(self):
         host = self.host_fixture(); catalog = m.handle({'action': 'host-catalog'})
         self.assertEqual(catalog['schema'], 'host-updates/v1'); self.assertEqual(catalog['updateCount'], 1)
         self.assertEqual(catalog['keptBackCount'], 1); self.assertTrue(catalog['canApply'])
         public = self.host_public_plan()
         self.assertEqual(public['kind'], 'host-upgrade'); self.assertEqual(public['packageCount'], 1)
-        self.assertNotIn('fixture-package', json.dumps(catalog) + json.dumps(public))
-        self.assertNotIn('packages', public)
+        self.assertEqual(catalog['packages'], self.host_check_result['packages'])
+        self.assertEqual(public['packages'], catalog['packages'])
         self.assertEqual(m.load('host-plan', public['planId'])['native']['packages'], self.host_check_result['packages'])
         host.plan.assert_called_once_with(self.host_check_result); host.run_transient.assert_not_called()
+
+    def test_host_upgrade_with_reboot_requires_separate_approval_and_verifies_new_boot(self):
+        host = self.host_fixture(reboot=False)
+        callbacks = []
+        public = m.handle({'action': 'host-plan', 'revision': m.host_catalog()['revision'], 'rebootAfter': True})
+        self.assertTrue(public['rebootAfter'])
+        body = self.host_apply_body(public)
+        with self.assertRaises(m.Rejected) as wrong:
+            m.handle(body, after_response=callbacks.append)
+        self.assertEqual(wrong.exception.code, 'confirmation_required')
+        body['confirmation'] = public['confirmationRequired']
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            accepted = m.handle(body, after_response=callbacks.append)
+            identity = accepted['operationId']
+            executor.assert_not_called()
+            self.assertIsNone(m.load('host-reboot', identity))
+            m.reconcile_host_jobs(force=True)
+            self.assertEqual(m.load('operation', identity)['status'], 'queued')
+            callbacks[0](); callbacks[0]()
+            stored = m.load('host-plan', public['planId'])
+            executor.assert_called_once_with(m.host_job, identity, 'host-upgrade', stored)
+            executor.reset_mock()
+            host.run_transient.return_value = {
+                'state': 'succeeded', 'planId': public['planId'], 'packages': [{**row, 'state': 'succeeded'} for row in public['packages']],
+                'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True, 'rebootRequired': False
+            }
+            m.host_job(identity, 'host-upgrade', stored)
+            executor.assert_called_once_with(m.host_reboot_job, identity)
+            self.assertEqual(m.load('operation', identity)['status'], 'running')
+            host.schedule_reboot.assert_not_called()
+        m.host_reboot_job(identity); m.host_reboot_job(identity)
+        host.schedule_reboot.assert_called_once()
+        self.assertEqual(m.load('operation', identity)['completedSteps'], 99)
+        m.reconcile_host_reboots(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'running')
+        self.host_inventory['bootId'] = 'fixture-boot-after'
+        m.reconcile_host_reboots(force=True)
+        self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+        self.assertEqual(m.load('operation', identity)['completedSteps'], 100)
 
     def test_host_catalog_and_runtime_catalog_keep_operation_streams_separate(self):
         self.host_fixture()

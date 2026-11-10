@@ -31,6 +31,10 @@ alter table control_auth.sessions
 alter table control_auth.sessions
   add column if not exists policy_version text not null default '1';
 
+alter table control_auth.sessions
+  add column if not exists native_vault_public_key text
+  check (native_vault_public_key ~ '^[A-Za-z0-9_-]{87}$');
+
 create index if not exists sessions_subject_active_idx
   on control_auth.sessions (subject, expires_at)
   where revoked_at is null;

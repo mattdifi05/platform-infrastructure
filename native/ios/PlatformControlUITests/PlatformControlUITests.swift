@@ -33,6 +33,14 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertTrue(alerts.waitForExistence(timeout: 5))
             XCTAssertLessThan(settings.frame.midX, alerts.frame.midX)
             XCTAssertLessThan(abs(settings.frame.midY - alerts.frame.midY), 30)
+            if label == "Home" {
+                XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.staticTexts["Le risorse del tuo server"].exists)
+                XCTAssertTrue(app.descendants(matching: .any)["home.chart.cpu"].firstMatch.waitForExistence(timeout: 5))
+                XCTAssertFalse(app.staticTexts["Stexor VPS"].exists)
+                XCTAssertFalse(app.staticTexts["Operativo"].exists)
+                attachScreenshot(app, name: "Home with resource charts")
+            }
         }
         attachScreenshot(app, name: "Four native tabs")
     }
@@ -55,8 +63,10 @@ final class PlatformControlUITests: XCTestCase {
     func testApplicationFolderReviewCanBeCancelledBeforeMutation() {
         let app = launchFixtures()
         app.tabBars.buttons["App"].tap()
-        XCTAssertTrue(app.staticTexts["Applicazione di prova"].waitForExistence(timeout: 10))
-        app.buttons["Aggiungi"].tap()
+        let application = app.buttons["application.row.project:sample"]
+        XCTAssertTrue(application.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["Nuova applicazione"].exists)
+        XCTAssertTrue(app.staticTexts["Da organizzare"].exists)
         app.buttons["Nuova cartella"].tap()
         XCTAssertTrue(app.navigationBars["Nuova cartella"].waitForExistence(timeout: 5))
         let name = app.textFields["Nome cartella"]
@@ -73,7 +83,7 @@ final class PlatformControlUITests: XCTestCase {
         app.buttons["Annulla"].firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Applicazioni"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["Cartella da annullare"].exists)
-        XCTAssertTrue(app.staticTexts["Applicazione di prova"].exists)
+        XCTAssertTrue(application.exists)
     }
 
     func testSecretMetadataNavigationDoesNotRevealValue() {
@@ -84,11 +94,38 @@ final class PlatformControlUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["fixture-secret-value"].exists)
         entry.tap()
         XCTAssertTrue(app.navigationBars["Credenziale di prova"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Mostra con passkey"].exists)
+        XCTAssertTrue(app.buttons["Mostra con Face ID"].exists)
+        XCTAssertTrue(app.staticTexts["Applicazione di prova"].exists)
+        XCTAssertTrue(app.staticTexts["Aggiornato"].exists)
+        XCTAssertFalse(app.staticTexts["Cronologia versioni"].exists)
         XCTAssertFalse(app.staticTexts["fixture-secret-value"].exists)
         XCTAssertEqual(app.secureTextFields.count, 0)
         attachScreenshot(app, name: "Secret metadata with concealed value")
         // Reveal, copy, edit and delete actions are intentionally not invoked.
+    }
+
+    func testUpdatesShowVersionsAndReviewRestartAndBatch() {
+        let app = launchFixtures()
+        app.tabBars.buttons["Aggiornamenti"].tap()
+        XCTAssertTrue(app.buttons["updates.system.check"].waitForExistence(timeout: 10))
+        let package = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "openssl")).firstMatch
+        XCTAssertTrue(package.exists)
+        app.buttons["Aggiorna e riavvia"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["updates.confirm"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna e riavvia")
+        XCTAssertTrue(app.staticTexts["Il server sarà temporaneamente irraggiungibile durante il riavvio."].exists)
+        XCTAssertEqual(app.textFields.count, 0)
+        app.buttons["Annulla"].tap()
+
+        let updateAll = app.buttons["Aggiorna tutti"]
+        if !updateAll.isHittable { app.swipeUp() }
+        XCTAssertTrue(updateAll.isHittable)
+        updateAll.tap()
+        XCTAssertTrue(app.buttons["updates.confirm"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna tutti")
+        XCTAssertTrue(app.staticTexts["8.5.13"].exists)
+        XCTAssertTrue(app.staticTexts["I servizi aggiornati si riavvieranno automaticamente."].exists)
+        app.buttons["Annulla"].tap()
     }
 
     private func attachScreenshot(_ app: XCUIApplication, name: String) {
