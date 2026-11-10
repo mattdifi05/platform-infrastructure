@@ -92,12 +92,17 @@ private struct LoginView: View {
                     if let error = model.connectionError { ErrorNotice(message: error) { Task { await model.connect() } } }
                     if model.enrollmentRequired {
                         SecureField("Codice di configurazione iniziale", text: $bootstrapToken).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder)
-                        Button("Configura passkey", systemImage: "person.badge.key") { Task { await model.enroll(bootstrapToken: bootstrapToken); bootstrapToken = "" } }
-                            .buttonStyle(.glassProminent).disabled(model.isAuthenticating || bootstrapToken.isEmpty)
+                        Button {
+                            Task { await model.enroll(bootstrapToken: bootstrapToken); bootstrapToken = "" }
+                        } label: {
+                            passkeyLabel("Configura passkey")
+                        }
+                        .buttonStyle(.glassProminent).disabled(model.isAuthenticating || bootstrapToken.isEmpty)
                     } else {
-                    Button { Task { await model.login() } } label: {
-                        HStack { if model.isAuthenticating { ProgressView().tint(.white) }; Label("Accedi con passkey", systemImage: "person.badge.key") }.frame(maxWidth: .infinity).padding(.vertical, 8)
-                    }.buttonStyle(.glassProminent).disabled(model.isAuthenticating).accessibilityIdentifier("login.passkey")
+                        Button { Task { await model.login() } } label: {
+                            passkeyLabel("Accedi con passkey")
+                        }
+                        .buttonStyle(.glassProminent).disabled(model.isAuthenticating).accessibilityIdentifier("login.passkey")
                     }
                     Label("portal.stexor.com", systemImage: "lock.shield").font(.footnote).foregroundStyle(.secondary)
                 }.padding(28).padding(.top, 70)
@@ -105,4 +110,18 @@ private struct LoginView: View {
                 .onDisappear { bootstrapToken = "" }
         }
     }
+
+    private func passkeyLabel(_ title: String) -> some View {
+        ZStack {
+            Label(title, systemImage: "person.badge.key")
+                .opacity(model.isAuthenticating ? 0 : 1)
+                .accessibilityHidden(model.isAuthenticating)
+            if model.isAuthenticating {
+                LoadingState(title: "Autenticazione in corso…", style: .inline)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
 }

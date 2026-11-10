@@ -68,7 +68,9 @@ final class AppModel {
     func vaultRevealProof(itemID: String) async throws -> JSONValue {
         do {
             let proof = try await VaultFaceID.sign {
-                try await self.post("/api/native/v1/vault/secrets/\(itemID)/challenge")["challenge"].text
+                let interval = VaultFaceID.timing.beginInterval("Vault challenge request")
+                defer { VaultFaceID.timing.endInterval("Vault challenge request", interval) }
+                return try await self.post("/api/native/v1/vault/secrets/\(itemID)/challenge")["challenge"].text
             }
             return .object(["challenge": .string(proof.challenge), "signature": .string(proof.signature)])
         }

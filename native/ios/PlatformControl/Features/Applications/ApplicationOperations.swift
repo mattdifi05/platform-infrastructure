@@ -103,7 +103,7 @@ struct ApplicationOperationSheet: View {
                     }
                 }
                 if let error { Section { ErrorNotice(message: error) } }
-                if isWorking { Section { ProgressView("Operazione in corso…") } }
+                if isWorking { Section { LoadingState(title: "Operazione in corso…", style: .row) } }
                 if result == nil {
                     Section {
                         if reviewing {

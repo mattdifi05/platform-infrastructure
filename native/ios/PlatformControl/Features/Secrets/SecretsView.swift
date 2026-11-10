@@ -99,7 +99,7 @@ struct SecretsView: View {
         .navigationTitle("Secrets")
         .searchable(text: $search, prompt: "Nome, applicazione o ambiente")
         .toolbar { ToolbarItem(placement: .primaryAction) { Button("Nuovo secret", systemImage: "plus") { sheet = .create } } }
-        .refreshable { await load() }
+        .skeletonRefreshable { await load() }
         .task { await load() }
         .sheet(item: $sheet) { mode in
             VaultEditorSheet(mode: mode, revision: catalog["revision"].text, projects: catalog["projects"].arrayValue) { message in
@@ -161,6 +161,7 @@ private struct VaultEntryView: View {
                 if let revealedValue, let expiresAt, expiresAt > Date(), scenePhase == .active {
                     Text(revealedValue).font(.body.monospaced()).privacySensitive()
                         .accessibilityLabel("Valore secret").accessibilityValue(revealedValue)
+                        .onAppear { VaultFaceID.timing.emitEvent("Vault value visible") }
                     Button("Copia valore", systemImage: "doc.on.doc") { copy(revealedValue, until: expiresAt) }
                     Button("Nascondi", systemImage: "eye.slash") { clear() }
                 } else if entry.value["valueStored"].boolValue == false {
@@ -169,7 +170,7 @@ private struct VaultEntryView: View {
                     Text("Face ID non disponibile per questo server").foregroundStyle(.secondary)
                 } else {
                     Button(action: beginReveal) {
-                        if revealing { ProgressView() }
+                        if revealing { LoadingState(title: "Verifica Face ID…", style: .inline) }
                         else { Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid") }
                     }.disabled(revealing)
                 }
@@ -211,6 +212,7 @@ private struct VaultEntryView: View {
         let generation = revealGeneration
         revealing = true
         error = nil
+        if app.vaultFaceIDRegistered { VaultFaceID.timing.emitEvent("Vault reveal requested") }
         revealRequest = Task { await showValue(generation: generation) }
     }
 
@@ -229,7 +231,12 @@ private struct VaultEntryView: View {
             }
             let proof = try await app.vaultRevealProof(itemID: entryID)
             guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
-            let result = try await app.post("/api/native/v1/vault/secrets/\(entryID)/reveal", body: proof)
+            let result: JSONValue
+            do {
+                let interval = VaultFaceID.timing.beginInterval("Vault reveal request")
+                defer { VaultFaceID.timing.endInterval("Vault reveal request", interval) }
+                result = try await app.post("/api/native/v1/vault/secrets/\(entryID)/reveal", body: proof)
+            }
             guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
             let value = result["value"].stringValue
             let serverExpiry = vaultDate(result["revealExpiresAt"].text)
@@ -320,7 +327,7 @@ private struct VaultEditorSheet: View {
                 case .importExisting:
                     Section {
                         Text("Importa i valori dalle sole posizioni già approvate sul server. I file originali vengono conservati; i record presenti vengono saltati.")
-                        if busy { ProgressView("Preparazione…") }
+                        if busy { LoadingState(title: "Preparazione…", style: .row) }
                         if importPlan["dryRun"].boolValue == true {
                             let details = importPlan["details"]
                             LabeledContent("Importabili", value: "\(details["importableCount"].intValue ?? 0)")
@@ -333,7 +340,7 @@ private struct VaultEditorSheet: View {
                 }
                 Section {
                     Button { Task { await save() } } label: {
-                        if busy { ProgressView("Operazione in corso…") } else { Text(title) }
+                        if busy { LoadingState(title: "Operazione in corso…", style: .inline) } else { Text(title) }
                     }.disabled(!enabled).foregroundStyle(isDelete ? .red : .accentColor)
                 }
             }

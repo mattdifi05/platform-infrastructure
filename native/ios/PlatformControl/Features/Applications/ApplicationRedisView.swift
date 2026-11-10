@@ -62,7 +62,7 @@ struct ApplicationRedisView: View {
         }
         .navigationTitle("Redis")
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await store.load(model) }
+        .skeletonRefreshable { await store.load(model) }
         .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
     }
 }

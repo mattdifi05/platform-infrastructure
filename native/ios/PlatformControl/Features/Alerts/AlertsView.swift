@@ -50,7 +50,7 @@ struct AlertsView: View {
                     }
                 }
             }
-        }.navigationTitle("Avvisi").navigationBarTitleDisplayMode(.inline).refreshable { await load() }
+        }.navigationTitle("Avvisi").navigationBarTitleDisplayMode(.inline).skeletonRefreshable { await load() }
             .task {
                 while !Task.isCancelled { await load(); do { try await Task.sleep(for: .seconds(15)) } catch { break } }
             }

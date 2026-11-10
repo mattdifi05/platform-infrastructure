@@ -21,8 +21,95 @@ struct ErrorNotice: View {
 }
 
 struct LoadingState: View {
+    enum Style { case screen, row, inline }
+
     let title: String
-    var body: some View { VStack(spacing: 16) { ProgressView(); Text(title).font(.subheadline).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, minHeight: 180) }
+    var style: Style = .screen
+    @ScaledMetric(relativeTo: .body) private var lineHeight = 12.0
+
+    var body: some View {
+        Group {
+            switch style {
+            case .screen:
+                VStack(alignment: .leading, spacing: 20) {
+                    bar(width: 152)
+                    ForEach(0..<3) { _ in
+                        HStack(spacing: 12) {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(.primary.opacity(0.10))
+                                .frame(width: 32, height: 32)
+                            lines
+                        }
+                    }
+                }
+                .frame(maxWidth: 360, alignment: .leading)
+                .padding(.vertical, 20)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity)
+            case .row:
+                lines.padding(.vertical, 4)
+            case .inline:
+                bar(width: 84)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+    }
+
+    private var lines: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            bar(width: 168)
+            bar(width: 96, height: lineHeight * 0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func bar(width: CGFloat, height: CGFloat? = nil) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(.primary.opacity(0.10))
+            .frame(maxWidth: width)
+            .frame(height: height ?? lineHeight)
+    }
+}
+
+extension View {
+    func skeletonRefreshable(_ action: @escaping @MainActor () async -> Void) -> some View {
+        modifier(SkeletonRefresh(action: action))
+    }
+}
+
+private struct SkeletonRefresh: ViewModifier {
+    let action: @MainActor () async -> Void
+    @State private var refreshing = false
+
+    func body(content: Content) -> some View {
+        content
+            .scrollBounceBehavior(.always, axes: .vertical)
+            .onScrollPhaseChange { oldPhase, newPhase, context in
+                let geometry = context.geometry
+                let pullDistance = -(geometry.contentOffset.y + geometry.contentInsets.top)
+                if oldPhase == .interacting, !newPhase.isScrolling || newPhase == .decelerating,
+                   pullDistance >= 72 {
+                    refreshing = true
+                }
+            }
+            .accessibilityAction(named: Text("Aggiorna")) { refreshing = true }
+            .overlay(alignment: .top) {
+                if refreshing {
+                    LoadingState(title: "Aggiornamento in corso…", style: .row)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 16)
+                        .allowsHitTesting(false)
+                }
+            }
+            .task(id: refreshing) {
+                guard refreshing else { return }
+                await action()
+                refreshing = false
+            }
+    }
 }
 
 struct EmptyState: View {

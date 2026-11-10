@@ -90,7 +90,7 @@ struct UpdatesView: View {
             }
         }
         .navigationTitle("Aggiornamenti")
-        .refreshable { await refreshCatalogs() }
+        .skeletonRefreshable { await refreshCatalogs() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await refreshCatalogs()
@@ -376,7 +376,7 @@ private struct UpdatePlanSheet: View {
                                 .accessibilityIdentifier("updates.confirm")
                             }
                         }
-                        if applying { ProgressView("Invio richiesta…") }
+                        if applying { LoadingState(title: "Invio richiesta…", style: .row) }
                     } footer: {
                         if review.action != .update {
                             Text("Il server sarà temporaneamente irraggiungibile durante il riavvio.")
@@ -499,10 +499,10 @@ private struct UpdateOperationSummary: View {
             if !operation["currentService"].text.isEmpty { Text(operation["currentService"].text).font(.caption).foregroundStyle(.secondary) }
             else if !operation["currentComponent"].text.isEmpty { Text(operation["currentComponent"].text).font(.caption).foregroundStyle(.secondary) }
             if let completed = operation["completedServices"].intValue, let total = operation["totalServices"].intValue, total > 0 {
-                ProgressView(value: Double(completed), total: Double(total)) { Text("\(completed) di \(total) servizi") }
+                Text("\(completed) di \(total) servizi").font(.footnote).foregroundStyle(.secondary)
             } else if let completed = operation["completedSteps"].intValue, let total = operation["totalSteps"].intValue, total > 0 {
-                ProgressView(value: Double(completed), total: Double(total)) { Text("\(completed) di \(total) passaggi") }
-            } else if updatePending(operation) { ProgressView("In attesa") }
+                Text("\(completed) di \(total) passaggi").font(.footnote).foregroundStyle(.secondary)
+            }
             if operation["recoveryRequired"].boolValue == true { Label("Verifica amministrativa richiesta", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
             if !operation["error"].text.isEmpty {
                 Text(operation["error"].text).foregroundStyle(.red)

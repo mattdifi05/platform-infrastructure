@@ -18,7 +18,7 @@ struct ApplicationDatabaseView: View {
     var body: some View {
         Group {
             if scopedDatabase == nil {
-                databaseList.refreshable { await store.load(model) }
+                databaseList.skeletonRefreshable { await store.load(model) }
             } else {
                 databaseList
             }

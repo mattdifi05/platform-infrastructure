@@ -37,7 +37,7 @@ struct ApplicationDetailView: View {
         }
         .navigationTitle(entry?["name"].stringValue ?? projectID)
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await refresh() }
+        .skeletonRefreshable { await refresh() }
         .task { await loadHosting() }
         .task { await loadDatabases() }
         .task(id: copyInProgress) {
@@ -108,7 +108,7 @@ struct ApplicationDetailView: View {
                     privateCopyRows(copy, sourceIsPublic: verified && mode == "public")
                 }
             } else if isLoadingHosting || hostingError == nil {
-                ProgressView("Verifica hosting…")
+                LoadingState(title: "Verifica hosting…", style: .row)
             }
             if let hostingError {
                 ErrorNotice(message: hostingError) { Task { await loadHosting() } }
@@ -194,7 +194,7 @@ struct ApplicationDetailView: View {
             }
             if databases.isEmpty {
                 if scopedDatabases == nil, !databaseLookupFailed {
-                    ProgressView("Verifica database…")
+                    LoadingState(title: "Verifica database…", style: .row)
                 } else {
                     Text("Nessun database collegato nel catalogo").foregroundStyle(.secondary)
                 }

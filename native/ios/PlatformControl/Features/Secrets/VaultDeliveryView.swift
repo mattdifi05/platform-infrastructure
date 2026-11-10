@@ -75,7 +75,7 @@ struct VaultDeliveryView: View {
                 Section {
                     StatusPill(text: deliveryPhase(operation["phase"].text), tone: deliveryColor(operation["phase"].text))
                     if !operationID.isEmpty { LabeledContent("Identificativo", value: operationID) }
-                    if deliveryPending(operation) { ProgressView("In attesa della verifica server") }
+                    if deliveryPending(operation) { Text("In attesa della verifica server").font(.footnote).foregroundStyle(.secondary) }
                     deliveryEvidence("Consegna operazione", verified: operation["deliveryVerified"].boolValue == true)
                     deliveryEvidence("Salute applicazione", verified: operation["runtimeHealthy"].boolValue == true)
                     deliveryEvidence("Provider", verified: operation["providerVerified"].boolValue == true)
@@ -93,7 +93,7 @@ struct VaultDeliveryView: View {
         }
         .navigationTitle(binding["label"].stringValue ?? "Consegna")
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await refresh(); await poll() }
+        .skeletonRefreshable { await refresh(); await poll() }
         .task {
             selectedVersion = item["currentVersionId"].stringValue ?? binding["appliedVersionId"].text
             let last = binding["lastOperation"]
@@ -228,7 +228,7 @@ private struct VaultDeliveryPlanSheet: View {
                         let valid = deliveryDate(plan["expiresAt"].text).map { $0 > context.date } ?? false
                         if !valid { Text("Piano scaduto. Chiudi e verifica un nuovo piano.").foregroundStyle(.orange) }
                         Button { Task { await apply() } } label: {
-                            if busy { ProgressView("Invio richiesta…") } else { Text("Applica") }
+                            if busy { LoadingState(title: "Invio richiesta…", style: .inline) } else { Text("Applica") }
                         }.disabled(busy || dispatched || confirmation != "APPLICA" || !valid)
                     }
                 } footer: { Text("Il piano è legato al secret, alla versione e alle revisioni verificate. La richiesta in coda non conferma l’esito.") }

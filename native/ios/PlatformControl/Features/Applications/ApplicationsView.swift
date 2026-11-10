@@ -39,7 +39,7 @@ struct ApplicationsView: View {
         }
         .navigationTitle("Applicazioni")
         .searchable(text: $search, prompt: "Nome o indirizzo")
-        .refreshable { await store.load(model) }
+        .skeletonRefreshable { await store.load(model) }
         .task { if !store.hasLoaded { await store.load(model) } }
         .onChange(of: store.folders.map(\.id)) { _, folderIDs in
             if selectedFolder != "all" && !selectedFolder.isEmpty && !folderIDs.contains(selectedFolder) {
