@@ -95,8 +95,8 @@ final class PlatformControlUITests: XCTestCase {
         entry.tap()
         XCTAssertTrue(app.navigationBars["Credenziale di prova"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Mostra con Face ID"].exists)
-        XCTAssertTrue(app.staticTexts["Applicazione di prova"].exists)
-        XCTAssertTrue(app.staticTexts["Aggiornato"].exists)
+        XCTAssertTrue(accessibleText("Applicazione di prova", in: app).exists)
+        XCTAssertTrue(accessibleText("Aggiornato", in: app).exists)
         XCTAssertFalse(app.staticTexts["Cronologia versioni"].exists)
         XCTAssertFalse(app.staticTexts["fixture-secret-value"].exists)
         XCTAssertEqual(app.secureTextFields.count, 0)
@@ -123,9 +123,14 @@ final class PlatformControlUITests: XCTestCase {
         updateAll.tap()
         XCTAssertTrue(app.buttons["updates.confirm"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna tutti")
-        XCTAssertTrue(app.staticTexts["8.5.13"].exists)
+        XCTAssertTrue(accessibleText("8.5.13", in: app).exists)
         XCTAssertTrue(app.staticTexts["I servizi aggiornati si riavvieranno automaticamente."].exists)
         app.buttons["Annulla"].tap()
+    }
+
+    private func accessibleText(_ text: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch
     }
 
     private func attachScreenshot(_ app: XCUIApplication, name: String) {

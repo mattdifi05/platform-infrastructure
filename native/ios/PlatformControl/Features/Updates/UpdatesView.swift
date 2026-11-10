@@ -59,6 +59,7 @@ struct UpdatesView: View {
     private var components: [JSONValue] { services["components"].arrayValue.filter { $0["installed"].boolValue != false } }
     private var availableComponents: [JSONValue] { components.filter { $0["canUpdate"].boolValue == true } }
     private var pending: Bool { operations.values.contains(where: updatePending) }
+    private var maintenanceInProgress: Bool { pending || !checking.isEmpty }
     private var packages: [JSONValue] { system["packages"].arrayValue }
     private var orderedOperations: [JSONValue] {
         operations.values.sorted { left, right in
@@ -133,7 +134,7 @@ struct UpdatesView: View {
             Button(checking.contains(.system) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
                 Task { await check(.system) }
             }
-            .disabled(checking.contains(.system) || system["canCheck"].boolValue != true)
+            .disabled(maintenanceInProgress || system["canCheck"].boolValue != true)
             .accessibilityIdentifier("updates.system.check")
             if system["available"].boolValue == false {
                 Text("Verifica del sistema momentaneamente indisponibile.").foregroundStyle(.secondary)
@@ -164,17 +165,17 @@ struct UpdatesView: View {
             }
             if system["rebootRequired"].boolValue == true {
                 Button("Riavvia", systemImage: "restart", role: .destructive) { reviewSystem(.restart) }
-                    .disabled(system["canReboot"].boolValue != true || system["revision"].text.isEmpty)
+                    .disabled(maintenanceInProgress || system["canReboot"].boolValue != true || system["revision"].text.isEmpty)
             }
         }
     }
 
     private var canUpdateSystem: Bool {
-        failures[.system] == nil && system["canApply"].boolValue == true && !system["revision"].text.isEmpty
+        !maintenanceInProgress && failures[.system] == nil && system["canApply"].boolValue == true && !system["revision"].text.isEmpty
     }
 
     private var canUpdateServices: Bool {
-        failures[.services] == nil && services["canApply"].boolValue == true && !services["revision"].text.isEmpty
+        !maintenanceInProgress && failures[.services] == nil && services["canApply"].boolValue == true && !services["revision"].text.isEmpty
     }
 
     private func reviewSystem(_ action: UpdateReview.Action) {
@@ -187,7 +188,7 @@ struct UpdatesView: View {
             Button(checking.contains(.services) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
                 Task { await check(.services) }
             }
-            .disabled(checking.contains(.services) || services["canCheck"].boolValue != true)
+            .disabled(maintenanceInProgress || services["canCheck"].boolValue != true)
             .accessibilityIdentifier("updates.services.check")
             if !availableComponents.isEmpty {
                 Button("Aggiorna tutti", systemImage: "arrow.up.circle") {
@@ -290,7 +291,8 @@ struct UpdatesView: View {
     }
 
     private func check(_ scope: UpdateScope) async {
-        guard checking.insert(scope).inserted else { return }
+        guard !maintenanceInProgress else { return }
+        checking.insert(scope)
         defer { checking.remove(scope) }
         do {
             let result = try await app.post(scope.path + "/check")
