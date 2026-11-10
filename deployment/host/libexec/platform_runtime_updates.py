@@ -1591,11 +1591,11 @@ def database_sizes(project_id):
         raise Rejected('invalid_request', 'Identificativo non valido.', 400)
     profiles = database_size_profiles()
     scoped = [row for row in profiles if row[1] == project_id]
-    if scoped and DATABASE_SIZE_LOCK.acquire(blocking=False):
+    deadline = time.monotonic() + 3.5
+    if scoped and DATABASE_SIZE_LOCK.acquire(timeout=3.5):
         try:
             for profile in set(DATABASE_SIZE_CACHE) - set(profiles):
                 DATABASE_SIZE_CACHE.pop(profile, None)
-            deadline = time.monotonic() + 3.5
             for profile in scoped:
                 expires_at, _, _ = DATABASE_SIZE_CACHE.get(profile, (0, None, None))
                 if time.monotonic() < expires_at or time.monotonic() >= deadline:

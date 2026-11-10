@@ -1,9 +1,11 @@
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -65,6 +67,29 @@ class DatabaseSizeTests(unittest.TestCase):
             self.assertEqual(worker.handle({'action': 'database-sizes', 'projectId': 'project'}), {
                 'databases': [{'id': 'project-db', 'name': 'app', 'sizeBytes': None, 'measuredAt': None}],
             })
+
+    def test_concurrent_projects_wait_for_their_own_measurement(self):
+        started, release = threading.Event(), threading.Event()
+
+        def measure(profile, _deadline):
+            if profile == ROW:
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+                return 12
+            return 24
+
+        with patch.object(worker, 'database_size_profiles', return_value=[ROW, OTHER_ROW]), patch.object(worker, 'DATABASE_SIZE_CACHE', {}), patch.object(worker, 'measure_database_size', side_effect=measure):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(worker.database_sizes, 'project')
+                self.assertTrue(started.wait(timeout=2))
+                second = pool.submit(worker.database_sizes, 'other')
+                try:
+                    with self.assertRaises(TimeoutError):
+                        second.result(timeout=0.1)
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=2)['databases'][0]['sizeBytes'], 12)
+                self.assertEqual(second.result(timeout=2)['databases'][0]['sizeBytes'], 24)
 
     def test_exec_pins_running_container_and_image_and_uses_fixed_local_query(self):
         inspected = f'{CONTAINER} {IMAGE} true\n'.encode()
