@@ -1,14 +1,14 @@
 import SwiftUI
 
-private enum UpdateScope: String, CaseIterable {
+private enum UpdateScope: String, CaseIterable, Sendable {
     case system, services
 
     var title: String { self == .system ? "Sistema" : "Servizi" }
     var path: String { "/control/v1/runtime-updates" + (self == .system ? "/system" : "") }
 }
 
-private struct UpdateReview: Identifiable {
-    enum Action { case update, updateAndRestart, restart }
+private struct UpdateReview: Identifiable, Sendable {
+    enum Action: Sendable { case update, updateAndRestart, restart }
 
     let scope: UpdateScope
     let target: String
@@ -42,6 +42,12 @@ private struct UpdateReview: Identifiable {
     }
 }
 
+private struct CombinedUpdateReview: Identifiable {
+    let id = UUID()
+    let requests: [UpdateReview]
+    var aggregate = false
+}
+
 struct UpdatesView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.scenePhase) private var scenePhase
@@ -51,9 +57,8 @@ struct UpdatesView: View {
     @State private var operations: [String: JSONValue] = [:]
     @State private var operationScopes: [String: UpdateScope] = [:]
     @State private var trackedOperations: Set<String> = []
-    @State private var review: UpdateReview?
+    @State private var review: CombinedUpdateReview?
     @State private var checking: Set<UpdateScope> = []
-    @State private var loading = true
     @State private var pollingError = false
 
     private var system: JSONValue { catalogs[.system] ?? .null }
@@ -65,7 +70,22 @@ struct UpdatesView: View {
     private var packages: [JSONValue] { system["packages"].arrayValue }
     var body: some View {
         List {
-            if loading && catalogs.isEmpty && failures.isEmpty { LoadingState(title: "Caricamento aggiornamenti…") }
+            Section {
+                Button("Verifica aggiornamenti", systemImage: "arrow.clockwise") {
+                    Task { await checkAll() }
+                }
+                .disabled(maintenanceInProgress || system["canCheck"].boolValue != true || services["canCheck"].boolValue != true)
+                .accessibilityIdentifier("updates.check")
+                .contentSkeleton(!checking.isEmpty, title: "Verifica aggiornamenti in corso…")
+                if hasUpdates {
+                    Button("Aggiorna tutto", systemImage: "arrow.up.circle") {
+                        review = CombinedUpdateReview(requests: combinedRequests, aggregate: true)
+                    }
+                    .disabled(!canUpdateAll)
+                    .accessibilityIdentifier("updates.all")
+                }
+            }
+            .contentSkeleton(catalogs.count < UpdateScope.allCases.count && failures.isEmpty, title: "Caricamento aggiornamenti…")
             systemSection
             servicesSection
             if !availableComponents.isEmpty {
@@ -74,7 +94,7 @@ struct UpdatesView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             componentRow(component)
                             Button("Aggiorna", systemImage: "arrow.up.circle") {
-                                review = UpdateReview(scope: .services, target: component.id, title: component["label"].text, revision: services["revision"].text)
+                                review = CombinedUpdateReview(requests: [UpdateReview(scope: .services, target: component.id, title: component["label"].text, revision: services["revision"].text)])
                             }
                             .disabled(!canUpdateServices)
                             .accessibilityIdentifier("updates.service.\(component.id)")
@@ -93,15 +113,18 @@ struct UpdatesView: View {
         .skeletonRefreshable { await refreshCatalogs() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            for scope in UpdateScope.allCases where catalogs[scope] == nil {
+                if let cached = app.cachedPage(scope.path) { catalogs[scope] = cached }
+            }
             await refreshCatalogs()
         }
         .task(id: scenePhase == .active && pending) {
             guard scenePhase == .active, pending else { return }
             await monitorOperations()
         }
-        .sheet(item: $review) { request in
-            UpdatePlanSheet(review: request) { accepted in
-                accept(accepted, scope: request.scope, title: request.title)
+        .sheet(item: $review) { batch in
+            UpdatePlanSheet(reviews: batch.requests, aggregate: batch.aggregate) { accepted, item in
+                accept(accepted, scope: item.scope, title: item.title)
             }
         }
     }
@@ -143,11 +166,6 @@ struct UpdatesView: View {
         Section(UpdateScope.system.title) {
             if let error = failures[.system] { ErrorNotice(message: error) { Task { await refreshCatalog(.system) } } }
             operationStatus(for: .system)
-            Button(checking.contains(.system) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
-                Task { await check(.system) }
-            }
-            .disabled(maintenanceInProgress || system["canCheck"].boolValue != true)
-            .accessibilityIdentifier("updates.system.check")
             if system["available"].boolValue == false {
                 Text("Verifica del sistema momentaneamente indisponibile.").foregroundStyle(.secondary)
             } else if !system["checkedAt"].text.isEmpty && packages.isEmpty && system["updateCount"].intValue == 0 {
@@ -182,6 +200,28 @@ struct UpdatesView: View {
         }
     }
 
+    private var systemNeedsUpdate: Bool {
+        (system["updateCount"].intValue ?? 0) + (system["autoremoveCount"].intValue ?? 0) > 0
+    }
+
+    private var hasUpdates: Bool { systemNeedsUpdate || !availableComponents.isEmpty }
+
+    private var canUpdateAll: Bool {
+        hasUpdates && !maintenanceInProgress && catalogs.count == UpdateScope.allCases.count && failures.isEmpty
+            && (!systemNeedsUpdate || canUpdateSystem) && (availableComponents.isEmpty || canUpdateServices)
+    }
+
+    private var combinedRequests: [UpdateReview] {
+        var requests: [UpdateReview] = []
+        if systemNeedsUpdate {
+            requests.append(UpdateReview(scope: .system, target: "system", title: "Sistema", revision: system["revision"].text))
+        }
+        if !availableComponents.isEmpty {
+            requests.append(UpdateReview(scope: .services, target: "all", title: "Servizi", revision: services["revision"].text))
+        }
+        return requests
+    }
+
     private var canUpdateSystem: Bool {
         !maintenanceInProgress && failures[.system] == nil && system["canApply"].boolValue == true && !system["revision"].text.isEmpty
     }
@@ -191,24 +231,14 @@ struct UpdatesView: View {
     }
 
     private func reviewSystem(_ action: UpdateReview.Action) {
-        review = UpdateReview(scope: .system, target: "system", title: "Sistema", revision: system["revision"].text, action: action)
+        review = CombinedUpdateReview(requests: [UpdateReview(scope: .system, target: "system", title: "Sistema", revision: system["revision"].text, action: action)])
     }
 
     private var servicesSection: some View {
         Section {
             if let error = failures[.services] { ErrorNotice(message: error) { Task { await refreshCatalog(.services) } } }
             operationStatus(for: .services)
-            Button(checking.contains(.services) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
-                Task { await check(.services) }
-            }
-            .disabled(maintenanceInProgress || services["canCheck"].boolValue != true)
-            .accessibilityIdentifier("updates.services.check")
-            if !availableComponents.isEmpty {
-                Button("Aggiorna tutti", systemImage: "arrow.up.circle") {
-                    review = UpdateReview(scope: .services, target: "all", title: "Aggiorna tutti i servizi", revision: services["revision"].text)
-                }
-                .disabled(!canUpdateServices)
-            } else if services["available"].boolValue == true && !services["checkedAt"].text.isEmpty {
+            if availableComponents.isEmpty && services["available"].boolValue == true && !services["checkedAt"].text.isEmpty {
                 Text("Nessun aggiornamento pronto per l’installazione.").foregroundStyle(.secondary)
             } else if services["available"].boolValue == false {
                 Text("Verifica dei servizi momentaneamente indisponibile.").foregroundStyle(.secondary)
@@ -240,14 +270,13 @@ struct UpdatesView: View {
         async let host: Void = refreshCatalog(.system)
         async let services: Void = refreshCatalog(.services)
         _ = await (host, services)
-        if !Task.isCancelled { loading = false }
     }
 
     private func refreshCatalog(_ scope: UpdateScope) async {
         let request = UUID()
         catalogRequests[scope] = request
         do {
-            let catalog = try await app.get(scope.path)
+            let catalog = try await app.readPage(scope.path)
             guard !Task.isCancelled, catalogRequests[scope] == request else { return }
             catalogs[scope] = catalog
             failures[scope] = nil
@@ -308,10 +337,16 @@ struct UpdatesView: View {
         ])
     }
 
-    private func check(_ scope: UpdateScope) async {
+    private func checkAll() async {
         guard !maintenanceInProgress else { return }
-        checking.insert(scope)
-        defer { checking.remove(scope) }
+        checking = Set(UpdateScope.allCases)
+        defer { checking.removeAll() }
+        async let host: Void = submitCheck(.system)
+        async let services: Void = submitCheck(.services)
+        _ = await (host, services)
+    }
+
+    private func submitCheck(_ scope: UpdateScope) async {
         do {
             let result = try await app.post(scope.path + "/check")
             guard !result["operationId"].text.isEmpty else { throw UpdateUIError.invalidOperation }
@@ -344,51 +379,97 @@ private struct VersionChangeRow: View {
     }
 }
 
+private struct UpdatePlanSubmission: Sendable {
+    let review: UpdateReview
+    let body: JSONValue
+    let path: String
+}
+
+private struct UpdatePlanResult: Sendable {
+    let review: UpdateReview
+    var value: JSONValue?
+    var error: String?
+    var needsAuthentication = false
+}
+
 private struct UpdatePlanSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    let review: UpdateReview
-    let accepted: (JSONValue) -> Void
-    @State private var plan: JSONValue = .null
+    let reviews: [UpdateReview]
+    var aggregate = false
+    let accepted: (JSONValue, UpdateReview) -> Void
+    @State private var plans: [String: JSONValue] = [:]
     @State private var preparing = true
     @State private var applying = false
-    @State private var error: String?
-    @State private var idempotencyKey = UUID().uuidString
+    @State private var errors: [String: String] = [:]
+    @State private var idempotencyKeys: [String: String] = [:]
+    @State private var submitted: Set<String> = []
+    @State private var attempted: Set<String> = []
+
+    private var combined: Bool { aggregate }
+    private var title: String { combined ? "Aggiorna tutto" : reviews.first?.title ?? "Aggiornamenti" }
+    private var buttonTitle: String { combined ? "Aggiorna tutto" : reviews.first?.buttonTitle ?? "Aggiorna" }
+    private var ready: Bool { !reviews.isEmpty && reviews.allSatisfy { plans[$0.scope.rawValue] != nil } }
 
     var body: some View {
         NavigationStack {
             Form {
-                if preparing { LoadingState(title: "Preparazione aggiornamento…") }
-                if let error { ErrorNotice(message: error, retry: plan == .null ? { Task { await prepare() } } : nil) }
-                if plan != .null {
-                    reviewedChanges
-                    Section {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            let valid = updateDate(plan["expiresAt"].text).map { $0 > context.date } ?? false
-                            if !valid {
-                                Button("Prepara di nuovo") { Task { await prepare() } }
-                            } else {
-                                Button(review.buttonTitle, role: review.action == .restart ? .destructive : nil) {
-                                    Task { await apply() }
-                                }
-                                .disabled(applying)
-                                .accessibilityIdentifier("updates.confirm")
-                            }
+                ForEach(reviews) { review in
+                    Section(combined ? review.scope.title : "Riepilogo") {
+                        if let message = errors[review.scope.rawValue] { ErrorNotice(message: message) }
+                        if submitted.contains(review.scope.rawValue) {
+                            Label("Richiesta accettata", systemImage: "checkmark.circle")
                         }
-                        if applying { LoadingState(title: "Invio richiesta…", style: .row) }
-                    } footer: {
-                        if review.action != .update {
-                            Text("Il server sarà temporaneamente irraggiungibile durante il riavvio.")
-                        } else if review.scope == .services {
-                            Text("I servizi aggiornati si riavvieranno automaticamente.")
+                        if let plan = plans[review.scope.rawValue] {
+                            reviewedChanges(plan, review: review)
+                        } else if preparing {
+                            VersionChangeRow(name: review.title, installed: "Versione attuale", target: "Versione disponibile")
+                                .contentSkeleton("Preparazione aggiornamento…")
                         }
                     }
                 }
+                Section {
+                    if preparing {
+                        Button(buttonTitle) {}.contentSkeleton()
+                    } else if ready {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let valid = reviews.filter { !submitted.contains($0.scope.rawValue) }.allSatisfy {
+                                attempted.contains($0.scope.rawValue)
+                                    || (updateDate(plans[$0.scope.rawValue]?["expiresAt"].text ?? "").map { $0 > context.date } ?? false)
+                            }
+                            if !valid && submitted.isEmpty {
+                                Button("Prepara di nuovo") { Task { await prepare() } }
+                            } else {
+                                Button(attempted.isEmpty ? buttonTitle : "Riprova richieste rimanenti", role: reviews.first?.action == .restart ? .destructive : nil) {
+                                    Task { await apply() }
+                                }
+                                .disabled(applying || !valid)
+                                .accessibilityIdentifier("updates.confirm")
+                                .contentSkeleton(applying, title: "Invio richieste…")
+                            }
+                        }
+                    } else {
+                        Button("Prepara di nuovo") { Task { await prepare() } }
+                    }
+                } footer: {
+                    if reviews.contains(where: { $0.action != .update }) {
+                        Text("Il server sarà temporaneamente irraggiungibile durante il riavvio.")
+                    } else if reviews.contains(where: { $0.scope == .services }) {
+                        Text("I servizi aggiornati si riavvieranno automaticamente.")
+                    }
+                    if !submitted.isEmpty {
+                        Text("Le richieste accettate sono visibili negli aggiornamenti. Chiudi per seguirne l’esito.")
+                    }
+                }
             }
-            .navigationTitle(review.title)
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Annulla") { dismiss() }.disabled(applying) } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(submitted.isEmpty ? "Annulla" : "Chiudi") { dismiss() }.disabled(applying)
+                }
+            }
             .interactiveDismissDisabled(applying)
             .task { await prepare() }
             .onChange(of: scenePhase) { _, phase in
@@ -397,79 +478,132 @@ private struct UpdatePlanSheet: View {
         }
     }
 
-    private var reviewedChanges: some View {
-        Section("Riepilogo") {
-            if review.scope == .system {
-                if review.action == .restart {
-                    Label("Riavvio del server", systemImage: "restart")
-                } else {
-                    ForEach(plan["packages"].arrayValue, id: \.self) { package in
-                        VersionChangeRow(name: package["name"].text, installed: package["currentVersion"].stringValue ?? "Non installata", target: package["targetVersion"].stringValue)
-                    }
-                    if let cleanup = plan["autoremoveCount"].intValue, cleanup > 0 {
-                        LabeledContent("Dipendenze inutilizzate da rimuovere", value: "\(cleanup)")
-                    }
-                }
-            } else if review.target == "all" {
-                ForEach(plan["components"].arrayValue, id: \.self) { component in
-                    LabeledContent(component["label"].text, value: component["targetVersion"].text)
-                }
+    @ViewBuilder
+    private func reviewedChanges(_ plan: JSONValue, review: UpdateReview) -> some View {
+        if review.scope == .system {
+            if review.action == .restart {
+                Label("Riavvio del server", systemImage: "restart")
             } else {
-                LabeledContent("Nuova versione", value: plan["targetVersion"].text)
+                ForEach(plan["packages"].arrayValue, id: \.self) { package in
+                    VersionChangeRow(name: package["name"].text, installed: package["currentVersion"].stringValue ?? "Non installata", target: package["targetVersion"].stringValue)
+                }
+                if let cleanup = plan["autoremoveCount"].intValue, cleanup > 0 {
+                    LabeledContent("Dipendenze inutilizzate da rimuovere", value: "\(cleanup)")
+                }
+            }
+        } else if review.target == "all" {
+            ForEach(plan["components"].arrayValue, id: \.self) { component in
+                LabeledContent(component["label"].text, value: component["targetVersion"].text)
+            }
+        } else {
+            LabeledContent("Nuova versione", value: plan["targetVersion"].text)
+        }
+    }
+
+    private func send(_ request: UpdatePlanSubmission) async -> UpdatePlanResult {
+        do {
+            let value = try await app.post(request.path, body: request.body)
+            return UpdatePlanResult(review: request.review, value: value)
+        } catch {
+            return UpdatePlanResult(review: request.review, error: error.localizedDescription,
+                                    needsAuthentication: (error as? APIError)?.status == 428)
+        }
+    }
+
+    private func sendIfPresent(_ request: UpdatePlanSubmission?) async -> UpdatePlanResult? {
+        guard let request else { return nil }
+        return await send(request)
+    }
+
+    private func sendTogether(_ requests: [UpdatePlanSubmission]) async -> [UpdatePlanResult] {
+        async let first = sendIfPresent(requests.first)
+        async let second = sendIfPresent(requests.dropFirst().first)
+        return await [first, second].compactMap { $0 }
+    }
+
+    private func postAuthorized(_ requests: [UpdatePlanSubmission]) async -> [UpdatePlanResult] {
+        let results = await sendTogether(requests)
+        let retryScopes = Set(results.filter(\.needsAuthentication).map { $0.review.scope.rawValue })
+        guard !retryScopes.isEmpty else { return results }
+        do {
+            try await app.stepUp()
+            try Task.checkCancellation()
+            guard scenePhase != .background else { throw CancellationError() }
+            let retried = await sendTogether(requests.filter { retryScopes.contains($0.review.scope.rawValue) })
+            return results.filter { !retryScopes.contains($0.review.scope.rawValue) } + retried
+        } catch {
+            return results.map { result in
+                guard result.needsAuthentication else { return result }
+                var failure = result
+                failure.error = error.localizedDescription
+                failure.needsAuthentication = false
+                return failure
             }
         }
     }
 
-    private func postAuthorized(_ path: String, body: JSONValue) async throws -> JSONValue {
-        do { return try await app.post(path, body: body) }
-        catch let error as APIError where error.status == 428 {
-            try await app.stepUp()
-            try Task.checkCancellation()
-            guard scenePhase != .background else { throw CancellationError() }
-            return try await app.post(path, body: body)
-        }
-    }
-
     private func prepare() async {
+        guard submitted.isEmpty, attempted.isEmpty else { return }
         preparing = true
-        plan = .null
-        error = nil
+        plans.removeAll()
+        errors.removeAll()
         defer { preparing = false }
-        do {
-            let result = try await postAuthorized(review.path + "/plan", body: review.planRequest)
-            let candidate = result["plan"] == .null ? result : result["plan"]
-            try validate(candidate)
-            guard !Task.isCancelled, scenePhase != .background else { return }
-            idempotencyKey = UUID().uuidString
-            plan = candidate
-        } catch is CancellationError {
-        } catch { self.error = error.localizedDescription }
+        let requests = reviews.map { UpdatePlanSubmission(review: $0, body: $0.planRequest, path: $0.path + "/plan") }
+        let results = await postAuthorized(requests)
+        guard !Task.isCancelled, scenePhase != .background else { return }
+        for result in results {
+            let key = result.review.scope.rawValue
+            do {
+                guard let value = result.value else {
+                    errors[key] = result.error
+                    continue
+                }
+                let candidate = value["plan"] == .null ? value : value["plan"]
+                try validate(candidate, review: result.review)
+                idempotencyKeys[key] = UUID().uuidString
+                plans[key] = candidate
+            } catch { errors[key] = error.localizedDescription }
+        }
     }
 
     private func apply() async {
-        guard !applying else { return }
+        guard !applying, ready, scenePhase == .active else { return }
         applying = true
-        error = nil
+        errors.removeAll()
         defer { applying = false }
+        var requests: [UpdatePlanSubmission] = []
         do {
-            try validate(plan)
-            let body = JSONValue.object([
-                "revision": plan["revision"], "planId": plan["planId"],
-                "confirmation": .string(review.confirmation), "idempotencyKey": .string(idempotencyKey)
-            ])
-            let result = try await postAuthorized(review.path + "/apply", body: body)
-            guard !result["operationId"].text.isEmpty else { throw UpdateUIError.invalidOperation }
-            accepted(result)
-            dismiss()
-        } catch is CancellationError {
-        } catch let failure as APIError {
-            error = failure.localizedDescription
+            for review in reviews where !submitted.contains(review.scope.rawValue) {
+                let key = review.scope.rawValue
+                guard let plan = plans[key], let idempotencyKey = idempotencyKeys[key] else { throw UpdateUIError.invalidPlan }
+                if !attempted.contains(key) { try validate(plan, review: review) }
+                let body = JSONValue.object([
+                    "revision": plan["revision"], "planId": plan["planId"],
+                    "confirmation": .string(review.confirmation), "idempotencyKey": .string(idempotencyKey)
+                ])
+                requests.append(UpdatePlanSubmission(review: review, body: body, path: review.path + "/apply"))
+            }
         } catch {
-            self.error = "Esito da verificare. Puoi riprovare senza inviare due aggiornamenti. \(error.localizedDescription)"
+            for review in reviews where !submitted.contains(review.scope.rawValue) {
+                errors[review.scope.rawValue] = error.localizedDescription
+            }
+            return
         }
+        attempted.formUnion(requests.map { $0.review.scope.rawValue })
+        let results = await postAuthorized(requests)
+        for result in results {
+            let key = result.review.scope.rawValue
+            if let value = result.value, !value["operationId"].text.isEmpty {
+                submitted.insert(key)
+                accepted(value, result.review)
+            } else {
+                errors[key] = result.error ?? "Esito da verificare. Riprova con la stessa richiesta per verificarne l’accettazione."
+            }
+        }
+        if submitted.count == reviews.count { dismiss() }
     }
 
-    private func validate(_ value: JSONValue) throws {
+    private func validate(_ value: JSONValue, review: UpdateReview) throws {
         guard !value["planId"].text.isEmpty, value["revision"].text == review.revision,
               value["confirmationRequired"].text == review.confirmation,
               let expiry = updateDate(value["expiresAt"].text), expiry > Date() else { throw UpdateUIError.invalidPlan }

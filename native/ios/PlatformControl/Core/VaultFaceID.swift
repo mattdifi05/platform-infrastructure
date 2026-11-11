@@ -61,8 +61,8 @@ enum VaultFaceID {
             throw VaultFaceIDError.invalidChallenge
         }
 
-        // The fresh context is used by the key's biometryCurrentSet ACL. The
-        // protected signature itself is the only interactive authorization.
+        // The fresh context authorizes this protected signature through the
+        // key's biometryCurrentSet ACL and is discarded after this attempt.
         let message = Data("platform-vault-reveal-v1\n\(challenge)".utf8)
         let interval = timing.beginInterval("Secure Enclave signature")
         defer { timing.endInterval("Secure Enclave signature", interval) }
@@ -81,9 +81,11 @@ enum VaultFaceID {
                 cancellation.invalidate()
             }
             try Task.checkCancellation()
+            timing.emitEvent("Vault biometric signature ready")
             return (challenge, signature)
         } catch {
             try Task.checkCancellation()
+            if let error = error as? VaultFaceIDError { throw error }
             throw signingError(error)
         }
     }

@@ -7,6 +7,7 @@ final class ApplicationsStore {
     var isLoading = false
     var error: String?
     var hasLoaded = false
+    @ObservationIgnored private var loadRequest = UUID()
 
     var projects: [JSONValue] { catalog["projects"].arrayValue }
     var applications: [JSONValue] { catalog["applications"].arrayValue }
@@ -15,13 +16,14 @@ final class ApplicationsStore {
     var memberships: JSONValue { catalog["folders"]["memberships"] }
     var databases: [JSONValue] { catalog["databases"].arrayValue }
 
-    func load(_ model: AppModel) async {
-        guard !isLoading else { return }
+    func load(_ model: AppModel, maxAge: Duration = .zero) async {
+        let request = UUID()
+        loadRequest = request
         isLoading = true
-        defer { isLoading = false }
+        defer { if loadRequest == request { isLoading = false } }
         do {
-            let response = try await model.get("/api/native/v1/applications")
-            guard !Task.isCancelled else { return }
+            let response = try await model.readPage("/api/native/v1/applications", maxAge: maxAge)
+            guard !Task.isCancelled, loadRequest == request else { return }
             guard case .array = response["projects"], case .array = response["observed"],
                   case .array = response["folders"]["folders"], case .object = response["folders"]["memberships"] else {
                 throw APIError(status: 0, message: "Il catalogo delle applicazioni non è disponibile.")
@@ -30,11 +32,19 @@ final class ApplicationsStore {
             error = nil
             hasLoaded = true
         } catch is CancellationError { }
-        catch { if !Task.isCancelled { self.error = error.localizedDescription } }
+        catch { if !Task.isCancelled, loadRequest == request { self.error = error.localizedDescription } }
     }
 
     func project(_ id: String) -> JSONValue? {
         projects.first { $0["slug"].text == id || $0.id == id }
+    }
+
+    func reset() {
+        loadRequest = UUID()
+        isLoading = false
+        catalog = .object([:])
+        hasLoaded = false
+        error = nil
     }
 }
 
@@ -103,7 +113,6 @@ struct ApplicationOperationSheet: View {
                     }
                 }
                 if let error { Section { ErrorNotice(message: error) } }
-                if isWorking { Section { LoadingState(title: "Operazione in corso…", style: .row) } }
                 if result == nil {
                     Section {
                         if reviewing {
@@ -111,6 +120,7 @@ struct ApplicationOperationSheet: View {
                                 if operation.planOnly { dismiss() } else { Task { await apply() } }
                             }
                             .disabled(isWorking || !typedConfirmationMatches)
+                            .contentSkeleton(isWorking, title: "Operazione in corso…")
                             if !operation.planOnly {
                                 Button("Modifica") { reviewing = false; plan = nil; error = nil }
                                     .disabled(isWorking)
@@ -118,6 +128,7 @@ struct ApplicationOperationSheet: View {
                         } else {
                             Button(operation.planOnly ? "Genera piano" : "Rivedi operazione") { Task { await prepare() } }
                                 .disabled(isWorking || !validFields)
+                                .contentSkeleton(isWorking, title: "Operazione in corso…")
                         }
                     }
                 }

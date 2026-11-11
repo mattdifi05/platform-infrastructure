@@ -174,7 +174,7 @@ const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOU
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
-const readHostMetrics = createHostMetricsReader({ readSnapshot: readPrometheusResourceSnapshot, query: prometheusQuery, ttlMs: resourceMetricsTtlMs });
+const readHostMetrics = createHostMetricsReader({ readSnapshot: readPrometheusResourceSnapshot, query: prometheusQuery, ttlMs: Math.max(1000, resourceMetricsTtlMs - 500) });
 const readHostMetricsHistory = createHostMetricsHistoryReader({ queryRange: prometheusQuery });
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsagePartialTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000);
@@ -615,8 +615,16 @@ const server = createServer(async (req, res) => {
         res.end();
         return;
       }
+      if (req.method === "GET" && requestOperation.operationId === "backup.control.read") {
+        json(res, readGlobalBackupControl(url.searchParams.get("requestId") || ""));
+        return;
+      }
       const state = readState();
       const projects = discoverProjects(state);
+      if (req.method === "GET" && requestOperation.operationId === "vault.inventory.read") {
+        json(res, await vaultInventoryPayload({ projects }));
+        return;
+      }
       if (req.method !== "GET") await invalidateControlContextCache();
       const context = req.method === "GET" && !url.pathname.startsWith("/control/")
         ? await buildCachedContext({ projects, state })
@@ -1412,7 +1420,30 @@ async function handleWebspaceCommand(req, res, context) {
 }
 
 async function vaultInventoryPayload(context) {
-  return { items: context.vaultItems, overview: context.overview.vault, revision: readVaultState().revision, projects: context.projects.map(({ id, slug, name }) => ({ id, slug, name })), runtime: await vaultRuntime.catalog() };
+  // Inventory reads need a consistent Vault snapshot, not host resource probes.
+  const vault = readVaultState();
+  const items = vaultInventoryItems(vault);
+  const existingImport = summarizeExistingSecretImport(readExistingSecretCandidates(context.projects), items);
+  return {
+    items,
+    overview: {
+      total: items.length,
+      rotationDue: items.filter((item) => item.rotationStatus === "due").length,
+      encryptedAtRest: true,
+      importableExisting: existingImport.importableCount,
+    },
+    revision: vault.revision,
+    projects: context.projects.map(({ id, slug, name }) => ({ id, slug, name })),
+    runtime: await vaultRuntime.catalog(),
+  };
+}
+
+function vaultInventoryItems(vault) {
+  return Object.values(vault.items || {})
+    .filter(item => !protectedVaultItem(item))
+    .filter((item) => item && !item.deletedAt)
+    .map((item) => vaultItemRecord(item))
+    .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`));
 }
 
 async function handleDatabaseCommand(req, res, context) {
@@ -2053,11 +2084,7 @@ async function buildContext({ projects, state }) {
     .filter((material) => material && !material.deletedAt)
     .map((material) => sensitiveMaterialRecord(material))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.materialName}`.localeCompare(`${b.projectId}:${b.environment}:${b.materialName}`));
-  const vaultItems = Object.values(readVaultState().items || {})
-    .filter(item => !protectedVaultItem(item))
-    .filter((item) => item && !item.deletedAt)
-    .map((item) => vaultItemRecord(item))
-    .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`));
+  const vaultItems = vaultInventoryItems(readVaultState());
   const existingVaultCandidates = readExistingSecretCandidates(projects);
   const existingVaultImport = summarizeExistingSecretImport(existingVaultCandidates, vaultItems);
   const secretInventory = buildSecretInventory({
@@ -9481,12 +9508,15 @@ function matchDockerStatsContainers(app, project, containers) {
 
 async function collectLiveResourceUsage({ projects, applications, webspaces }) {
   const capturedAt = new Date().toISOString();
-  const prometheus = await readPrometheusResourceSnapshot();
+  const [prometheus, diskEntries] = await Promise.all([
+    readPrometheusResourceSnapshot(),
+    Promise.all(projects.map(async (project) => [
+      project.slug,
+      await readProjectDiskUsage(project),
+    ])),
+  ]);
   const dockerStats = readDockerStatsSnapshot();
-  const projectDisks = new Map(await Promise.all(projects.map(async (project) => [
-    project.slug,
-    await readProjectDiskUsage(project),
-  ])));
+  const projectDisks = new Map(diskEntries);
   const containersByProject = applications.flatMap((app) => {
     const project = projects.find((item) => item.slug === app.projectId) || projects.find((item) => item.slug === app.id);
     const exactContainers = project ? matchApplicationContainers(app, project, prometheus.containers) : [];

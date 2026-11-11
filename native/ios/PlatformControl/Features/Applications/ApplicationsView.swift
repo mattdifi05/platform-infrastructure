@@ -3,7 +3,8 @@ import SwiftUI
 @MainActor
 struct ApplicationsView: View {
     @Environment(AppModel.self) private var model
-    @State private var store = ApplicationsStore()
+    @Environment(NativePageToolbar.self) private var pageToolbar
+    private var store: ApplicationsStore { model.applicationStore }
     @State private var search = ""
     @State private var selectedFolder = "all"
     @State private var operation: ApplicationOperation?
@@ -16,7 +17,22 @@ struct ApplicationsView: View {
                 Section { ErrorNotice(message: error) { Task { await store.load(model) } } }
             }
             if !store.hasLoaded {
-                if store.error == nil { LoadingState(title: "Caricamento applicazioni…") }
+                if store.error == nil {
+                    folderFilter
+                    Section {
+                        ForEach(0..<3) { index in
+                            NavigationLink(destination: EmptyView()) {
+                                ApplicationCatalogRow(value: .object([
+                                    "name": .string("Applicazione"),
+                                    "host": .string("app.example.invalid")
+                                ]), isPlaceholder: true)
+                            }
+                            .contentSkeleton(index == 0 ? "Caricamento applicazioni…" : nil)
+                        }
+                    } header: {
+                        folderHeader(unfiled).contentSkeleton()
+                    }
+                }
             } else {
                 folderFilter
                 ForEach(visibleGroups) { folder in
@@ -46,14 +62,17 @@ struct ApplicationsView: View {
                 selectedFolder = "all"
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Nuova cartella", systemImage: "folder.badge.plus", action: createFolder)
-                    .labelStyle(.iconOnly)
-                    .disabled(!store.hasLoaded)
-            }
+        .onAppear { registerToolbarAction() }
+        .onChange(of: store.hasLoaded) { _, _ in registerToolbarAction() }
+        .onDisappear { pageToolbar.folderAction = nil }
+        .sheet(item: $operation) { request in
+            ApplicationOperationSheet(operation: request, store: store)
+                .nativeToolbarPresentation(request.path == "/control/project-folders" ? .createApplicationFolder : nil)
         }
-        .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
+    }
+
+    private func registerToolbarAction() {
+        pageToolbar.folderAction = store.hasLoaded ? createFolder : nil
     }
 
     private struct Folder: Identifiable {
@@ -111,6 +130,8 @@ struct ApplicationsView: View {
                 Text(unfiled.name).tag(unfiled.id)
                 ForEach(folders) { folder in Text(folder.name).tag(folder.id) }
             }
+            .disabled(!store.hasLoaded)
+            .contentSkeleton(!store.hasLoaded, title: "Caricamento cartelle…")
         }
     }
 
@@ -175,11 +196,18 @@ struct ApplicationsView: View {
 @MainActor
 struct ApplicationCatalogRow: View {
     let value: JSONValue
+    var isPlaceholder = false
 
     var body: some View {
         HStack(spacing: 12) {
-            ApplicationIcon(entry: value)
-                .accessibilityHidden(true)
+            if isPlaceholder {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.primary.opacity(0.10))
+                    .frame(width: 32, height: 32)
+            } else {
+                ApplicationIcon(entry: value)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text(value["name"].stringValue ?? value.id)
                     .font(.headline)

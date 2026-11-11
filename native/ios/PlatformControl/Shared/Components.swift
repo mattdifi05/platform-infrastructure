@@ -73,6 +73,23 @@ struct LoadingState: View {
 }
 
 extension View {
+    func contentSkeleton(_ title: String? = nil) -> some View {
+        redacted(reason: .placeholder)
+            .disabled(true)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title ?? "")
+            .accessibilityHidden(title == nil)
+    }
+
+    func contentSkeleton(_ active: Bool, title: String) -> some View {
+        redacted(reason: active ? .placeholder : [])
+            .disabled(active)
+            .allowsHitTesting(!active)
+            .accessibilityElement(children: active ? .ignore : .contain)
+            .accessibilityLabel(Text(title), isEnabled: active)
+    }
+
     func skeletonRefreshable(_ action: @escaping @MainActor () async -> Void) -> some View {
         modifier(SkeletonRefresh(action: action))
     }
@@ -84,6 +101,7 @@ private struct SkeletonRefresh: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .contentSkeleton(refreshing, title: "Aggiornamento in corso…")
             .scrollBounceBehavior(.always, axes: .vertical)
             .onScrollPhaseChange { oldPhase, newPhase, context in
                 let geometry = context.geometry
@@ -94,16 +112,6 @@ private struct SkeletonRefresh: ViewModifier {
                 }
             }
             .accessibilityAction(named: Text("Aggiorna")) { refreshing = true }
-            .overlay(alignment: .top) {
-                if refreshing {
-                    LoadingState(title: "Aggiornamento in corso…", style: .row)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                        .padding(.horizontal, 16)
-                        .allowsHitTesting(false)
-                }
-            }
             .task(id: refreshing) {
                 guard refreshing else { return }
                 await action()

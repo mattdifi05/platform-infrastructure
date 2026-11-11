@@ -245,6 +245,32 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
   assert.equal(digestTree(root, new Set(["fixed-clock.mjs"])), beforeDenied, "denied requests must leave all state and sink fixtures byte-identical");
   restoreStateAfterDenied();
 
+  const freshInventoryResponse = await request(baseUrl, "GET", "/control/v1/vault", identities.owner301);
+  assert.equal(freshInventoryResponse.status, 200);
+  const freshInventory = await freshInventoryResponse.json();
+  assert.deepEqual(Object.keys(freshInventory).sort(), ["items", "overview", "projects", "revision", "runtime"]);
+  assert.equal(freshInventory.revision, readStoreSync({ storePath: path.join(stateDir, "secret-vault.json") }).revision);
+  const backupControlResponse = await request(baseUrl, "GET", "/control/backups/control?requestId=inventory-regression", identities.viewer);
+  assert.equal(backupControlResponse.status, 200);
+  const backupControl = await backupControlResponse.json();
+  const restoreUnrelatedContext = installContextTripwire(path.join(stateDir, "databases.json"));
+  try {
+    const brokenStatus = await request(baseUrl, "GET", "/control/overview", identities.owner);
+    assert.notEqual(brokenStatus.status, 200, "tripwire must prevent unrelated full status context construction");
+    for (const pathname of ["/control/vault", "/control/v1/vault"]) {
+      const response = await request(baseUrl, "GET", pathname, identities.owner301);
+      assert.equal(response.status, 200, "Vault metadata remains available when unrelated status state is unreadable");
+      assert.deepEqual(await response.json(), freshInventory, "fresh inventory fields and revision remain identical");
+    }
+    for (const pathname of ["/control/backups/control", "/control/v1/backups/control"]) {
+      const response = await request(baseUrl, "GET", `${pathname}?requestId=inventory-regression`, identities.viewer);
+      assert.equal(response.status, 200, "backup control polling remains available when unrelated status state is unreadable");
+      assert.deepEqual(await response.json(), backupControl, "backup control response preserves the requestId query");
+    }
+  } finally {
+    restoreUnrelatedContext();
+  }
+
   const nativeApplications = await request(baseUrl, "GET", "/api/native/v1/applications", identities.owner);
   assert.equal(nativeApplications.status, 200);
   const nativeCatalog = await nativeApplications.json();

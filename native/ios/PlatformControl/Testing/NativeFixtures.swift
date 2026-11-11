@@ -14,8 +14,8 @@ actor NativeFixtures {
         if canonical == "/control/resources/host/history" {
             let now = Date.now
             let timestamp = ISO8601DateFormatter()
-            let samples = (0...21).map { index -> JSONValue in
-                let capturedAt = now.addingTimeInterval(Double(index - 21) * 2)
+            let samples = (0...24).map { index -> JSONValue in
+                let capturedAt = now.addingTimeInterval(Double(index - 24) * 2)
                 let cpu = Double(12 + index % 7)
                 let receive = Double(38_400 + index % 5 * 850)
                 let send = Double(12_800 + index % 4 * 600)

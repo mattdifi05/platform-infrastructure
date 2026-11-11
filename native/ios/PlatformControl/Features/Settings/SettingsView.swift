@@ -24,7 +24,7 @@ struct SettingsView: View {
                 Toggle(isOn: Binding(get: { backup["control"]["enabled"].boolValue == true }, set: { _ in confirmBackup = true })) {
                     Label("Backup del server", systemImage: "externaldrive.badge.timemachine")
                 }.disabled(busy || backup["control"]["available"].boolValue != true || backup["controlQueueActive"].boolValue != true)
-                if busy { LoadingState(title: "In attesa della conferma del server…", style: .row) }
+                    .contentSkeleton(busy || (backup == .null && error == nil), title: "Verifica backup…")
                 NavigationLink { BackupManagementView() } label: { Label("Copie e ripristino", systemImage: "clock.arrow.circlepath") }
             } header: { Text("Backup") } footer: { Text("Controlla le copie locali e FTP. I backup inclusi nel servizio Hostinger hanno una gestione separata.") }
             Section("Aspetto") {
@@ -40,7 +40,10 @@ struct SettingsView: View {
             }
             Section { LabeledContent("Platform", value: appVersion) }.foregroundStyle(.secondary)
         }.navigationTitle("Impostazioni").navigationBarTitleDisplayMode(.inline)
-            .task { await load() }.skeletonRefreshable { await load() }
+            .task {
+                if backup == .null, let cached = model.cachedPage("/control/backups/control") { backup = cached }
+                await load()
+            }.skeletonRefreshable { await load() }
             .confirmationDialog(backup["control"]["enabled"].boolValue == true ? "Disattivare i backup?" : "Attivare i backup?", isPresented: $confirmBackup, titleVisibility: .visible) {
                 Button(backup["control"]["enabled"].boolValue == true ? "Disattiva backup" : "Attiva backup") { Task { await changeBackup() } }
                 Button("Annulla", role: .cancel) { }
@@ -57,7 +60,7 @@ struct SettingsView: View {
         return "\(version) (\(build)) · iOS nativo"
     }
 
-    private func load() async { do { backup = try await model.get("/control/backups/control"); error = nil } catch { self.error = error.localizedDescription } }
+    private func load() async { do { backup = try await model.readPage("/control/backups/control"); error = nil } catch { self.error = error.localizedDescription } }
     private func changeBackup() async {
         busy = true; error = nil; feedback = nil
         defer { busy = false }
@@ -103,7 +106,7 @@ private struct BackupManagementView: View {
                     if records.isEmpty { Text("Nessuna copia disponibile.").foregroundStyle(.secondary) }
                     ForEach(Array(records.enumerated()), id: \.offset) { _, record in
                         NavigationLink { BackupRestoreView(record: record) } label: {
-                            VStack(alignment: .leading, spacing: 5) { Text(record["id"].text).font(.headline); Text(NativeFormatting.date(record["createdAt"].text)).font(.caption).foregroundStyle(.secondary) }
+                            backupRow(record)
                         }
                         .disabled(record["restoreCompatible"].boolValue == false)
                     }
@@ -111,9 +114,27 @@ private struct BackupManagementView: View {
                 Section {
                     Button { confirmCapture = true } label: { Label("Crea backup completo", systemImage: "plus.circle") }
                         .disabled(busy || catalog["enabled"].boolValue != true || catalog["queueActive"].boolValue != true)
-                    if busy { LoadingState(title: "Richiesta del backup…", style: .row) }
+                        .contentSkeleton(busy, title: "Richiesta del backup…")
                 }
-            } else if busy { LoadingState(title: "Caricamento copie…") }
+            } else if busy {
+                Section {
+                    StatusPill(text: "Backup attivi", tone: .secondary)
+                        .contentSkeleton("Caricamento copie…")
+                }
+                Section("Copie complete") {
+                    NavigationLink(destination: EmptyView()) {
+                        backupRow(.object([
+                            "id": .string("Copia del server"),
+                            "createdAt": .string("2026-01-01T12:00:00Z")
+                        ]))
+                    }
+                    .contentSkeleton()
+                }
+                Section {
+                    Label("Crea backup completo", systemImage: "plus.circle")
+                        .contentSkeleton()
+                }
+            }
             else { Button("Carica copie con passkey") { Task { await load() } } }
         }.navigationTitle("Copie e ripristino").navigationBarTitleDisplayMode(.inline)
             .confirmationDialog("Creare un backup completo del server?", isPresented: $confirmCapture, titleVisibility: .visible) {
@@ -121,6 +142,14 @@ private struct BackupManagementView: View {
                 Button("Annulla", role: .cancel) { }
             } message: { Text("La richiesta include tutte le risorse ammesse dal catalogo VPS. Il completamento viene verificato separatamente dalla creazione della richiesta.") }
     }
+    private func backupRow(_ record: JSONValue) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(record["id"].text).font(.headline)
+            Text(NativeFormatting.date(record["createdAt"].text))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     private func load() async {
         busy = true; defer { busy = false }
         do { try await model.stepUp(); catalog = try await model.get("/control/backups/vps")["catalog"]; error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription }
@@ -160,9 +189,9 @@ private struct BackupRestoreView: View {
                     NavigationLink("Piano e verifiche") { JSONDetailView(title: "Piano di ripristino", value: plan) }
                     TextField("Scrivi " + plan["details"]["confirmationRequired"].text, text: $confirmation).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button("Ripristina questa copia", role: .destructive) { Task { await restore() } }.disabled(busy || plan["details"]["enabled"].boolValue != true || confirmation.isEmpty || confirmation != plan["details"]["confirmationRequired"].text)
+                        .contentSkeleton(busy, title: "Verifica del server…")
                 }
-            } else { Button("Verifica il piano di ripristino") { Task { await review() } }.disabled(busy) }
-            if busy { LoadingState(title: "Verifica del server…", style: .row) }
+            } else { Button("Verifica il piano di ripristino") { Task { await review() } }.disabled(busy).contentSkeleton(busy, title: "Verifica del server…") }
         }.navigationTitle("Ripristino").navigationBarTitleDisplayMode(.inline)
     }
     private func review() async { busy = true; defer { busy = false }; do { try await model.stepUp(); plan = try await model.post("/control/backups/production-restore", body: .object(["manifestId": record["id"]])); error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription } }

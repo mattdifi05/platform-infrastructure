@@ -17,7 +17,29 @@ struct AlertsView: View {
     var body: some View {
         List {
             if let error { Section { ErrorNotice(message: error) { Task { await load() } } } }
-            if loading { LoadingState(title: "Lettura degli avvisi…") }
+            if loading && events == .null {
+                Section {
+                    Picker("Avvisi", selection: $selection) { Text("Attivi").tag(0); Text("Recenti").tag(1) }
+                        .pickerStyle(.segmented).listRowBackground(Color.clear).listRowInsets(EdgeInsets())
+                        .disabled(true)
+                }
+                Section {
+                    ForEach(0..<3) { index in
+                        NavigationLink(destination: EmptyView()) {
+                            EventRow(item: .object([
+                                "service": .string("Servizio"),
+                                "message": .string("Messaggio del servizio"),
+                                "lastSeen": .string("2026-01-01T12:00:00Z")
+                            ]))
+                        }
+                        .contentSkeleton(index == 0 ? "Lettura degli avvisi…" : nil)
+                    }
+                }
+                Section("Fonti") {
+                    LabeledContent("Fonte") { Image(systemName: "checkmark.circle.fill") }
+                        .contentSkeleton()
+                }
+            }
             else {
                 Section {
                     Picker("Avvisi", selection: $selection) { Text("Attivi").tag(0); Text("Recenti").tag(1) }.pickerStyle(.segmented).listRowBackground(Color.clear).listRowInsets(EdgeInsets())
@@ -32,14 +54,7 @@ struct AlertsView: View {
                     Section {
                         ForEach(Array(entries.enumerated()), id: \.offset) { _, item in
                             NavigationLink { EventDetailView(item: item) } label: {
-                                HStack(alignment: .top, spacing: 12) {
-                                    Image(systemName: item["severity"].text == "error" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill").foregroundStyle(item["severity"].text == "error" ? .red : .orange).padding(.top, 3)
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(item["service"].text).font(.headline)
-                                        Text(item["message"].text).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
-                                        Text(NativeFormatting.date(item["lastSeen"].text)).font(.caption).foregroundStyle(.tertiary)
-                                    }
-                                }.padding(.vertical, 5)
+                                EventRow(item: item)
                             }
                         }
                     }
@@ -52,14 +67,33 @@ struct AlertsView: View {
             }
         }.navigationTitle("Avvisi").navigationBarTitleDisplayMode(.inline).skeletonRefreshable { await load() }
             .task {
+                if events == .null, let cached = model.cachedPage("/control/server-events") {
+                    events = cached
+                    loading = false
+                }
                 while !Task.isCancelled { await load(); do { try await Task.sleep(for: .seconds(15)) } catch { break } }
             }
     }
     private func load() async {
-        do { events = try await model.get("/control/server-events"); error = nil; model.unreadWarnings = events["issues"].arrayValue.count }
+        do { events = try await model.readPage("/control/server-events"); error = nil; model.unreadWarnings = events["issues"].arrayValue.count }
         catch is CancellationError { }
         catch { self.error = error.localizedDescription }
         loading = false
+    }
+}
+
+private struct EventRow: View {
+    let item: JSONValue
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: item["severity"].text == "error" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill").foregroundStyle(item["severity"].text == "error" ? .red : .orange).padding(.top, 3)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item["service"].text).font(.headline)
+                Text(item["message"].text).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
+                Text(NativeFormatting.date(item["lastSeen"].text)).font(.caption).foregroundStyle(.tertiary)
+            }
+        }.padding(.vertical, 5)
     }
 }
 
