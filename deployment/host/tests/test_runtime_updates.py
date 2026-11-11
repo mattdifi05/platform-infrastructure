@@ -751,6 +751,127 @@ class UpdatesTests(unittest.TestCase):
         return {'action': 'host-reboot-apply' if reboot else 'host-apply', 'revision': public['revision'], 'planId': public['planId'],
                 'confirmation': 'REBOOT' if reboot else 'UPDATE', 'idempotencyKey': 'fixture-host-request'}
 
+    def test_catalog_observations_overlap_with_four_workers_and_preserve_all_versions_and_order(self):
+        self.config['components'] = []
+        self.docker.rows = {}
+        for index in range(6):
+            name = 'node-observation-' + str(index)
+            actual = container()
+            actual.update(Id=name, Name='/' + name)
+            actual['Config']['Env'] = ['NODE_VERSION=26.12.' + str(index)]
+            self.docker.rows[name] = actual
+            self.config['components'].append({'id': name, 'label': name, 'category': 'Runtime',
+                'containers': [name], 'strategy': 'observe', 'versionEnv': 'NODE_VERSION', 'probe': ['node', '--version']})
+        self.config_path.write_text(json.dumps(self.config))
+        with patch.object(m, 'stamp', return_value='2026-11-11T12:00:00+00:00'):
+            with patch.object(m.concurrent.futures, 'ThreadPoolExecutor') as serial:
+                serial.return_value.__enter__.return_value.map.side_effect = lambda function, rows: map(function, rows)
+                expected = m.catalog()
+            guard = threading.Lock()
+            rendezvous = threading.Barrier(4)
+            active, maximum, probes = 0, 0, []
+            original = m.run
+            def probe(argv, **kwargs):
+                nonlocal active, maximum
+                with guard:
+                    active += 1
+                    maximum = max(maximum, active)
+                    probes.append(argv[2])
+                    first_wave = len(probes) <= 4
+                try:
+                    if first_wave:
+                        rendezvous.wait(timeout=3)
+                    return original(argv, **kwargs)
+                finally:
+                    with guard:
+                        active -= 1
+            with patch.object(m, 'run', side_effect=probe):
+                actual = m.catalog()
+                self.assertEqual(actual, expected)
+                self.assertEqual(maximum, 4)
+                self.assertCountEqual(probes, list(self.docker.rows))
+                m.catalog()
+                self.assertEqual(len(probes), 12, 'a later request must verify every live version again')
+
+    def test_admitted_check_workers_actually_overlap_in_both_orders(self):
+        self.host_fixture()
+        for order in [('host-check', 'check'), ('check', 'host-check')]:
+            with self.subTest(order=order):
+                with m.db() as connection:
+                    connection.execute("DELETE FROM records WHERE kind IN ('operation', 'host-execution')")
+                rendezvous = threading.Barrier(2)
+                finished = threading.Event()
+                guard = threading.Lock()
+                intervals, failures = [], []
+                def worker(job_id, *args):
+                    start = time.monotonic()
+                    try:
+                        m.operation_update(job_id, status='running')
+                        rendezvous.wait(timeout=3)
+                    except Exception as error:
+                        failures.append(error)
+                    finally:
+                        end = time.monotonic()
+                        m.operation_update(job_id, status='succeeded')
+                        with guard:
+                            intervals.append((start, end))
+                            if len(intervals) == 2:
+                                finished.set()
+                with patch.object(m, 'check_job', side_effect=worker), patch.object(m, 'host_job', side_effect=worker):
+                    m.handle({'action': order[0]})
+                    m.handle({'action': order[1]})
+                    self.assertTrue(finished.wait(7), 'both production executor jobs must complete')
+                self.assertFalse(failures)
+                self.assertEqual(len(intervals), 2)
+                self.assertLess(max(start for start, _ in intervals), min(end for _, end in intervals))
+
+    def test_parallel_apply_workers_keep_the_shared_exclusive_mutation_lock(self):
+        host = self.host_fixture(reboot=False)
+        host_public = self.host_public_plan()
+        service_public = self.plan()
+        with patch.object(m.EXECUTOR, 'submit'):
+            host_job = m.handle(self.host_apply_body(host_public))
+            service_job = m.handle(self.apply_body(service_public))
+        host.run_transient.return_value = {
+            'state': 'succeeded', 'planId': host_public['planId'],
+            'packages': [{**row, 'state': 'succeeded'} for row in host_public['packages']],
+            'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True, 'rebootRequired': False,
+        }
+        guard = threading.Lock()
+        both_started = threading.Event()
+        started, owners, maximum = set(), set(), 0
+        actual_wait, actual_flock = m.wait_operation_lock, m.fcntl.flock
+        def wait(lock, job_id, *args):
+            with guard:
+                started.add(job_id)
+                if len(started) == 2:
+                    both_started.set()
+            return actual_wait(lock, job_id, *args)
+        def flock(lock, mode):
+            nonlocal maximum
+            identity = threading.get_ident()
+            if mode == m.fcntl.LOCK_UN:
+                with guard:
+                    owners.discard(identity)
+                return actual_flock(lock, mode)
+            result = actual_flock(lock, mode)
+            with guard:
+                owners.add(identity)
+                maximum = max(maximum, len(owners))
+            if not both_started.wait(3):
+                raise RuntimeError('Both fixture mutation workers must start')
+            return result
+        with patch.object(m, 'wait_operation_lock', side_effect=wait), patch.object(m.fcntl, 'flock', side_effect=flock), \
+             patch.object(m, 'image_candidate', return_value=NEW_IMAGE), patch.object(m, 'refresh_admission'):
+            host_future = m.EXECUTOR.submit(m.host_job, host_job['operationId'], 'host-upgrade', m.load('host-plan', host_public['planId']))
+            service_future = m.EXECUTOR.submit(m.apply_job, service_job['operationId'], m.load('plan', service_public['planId']))
+            host_future.result(timeout=10)
+            service_future.result(timeout=10)
+        self.assertEqual(maximum, 1)
+        self.assertEqual(len(started), 2)
+        self.assertEqual(m.load('operation', host_job['operationId'])['status'], 'succeeded')
+        self.assertEqual(m.load('operation', service_job['operationId'])['status'], 'succeeded')
+
     def test_cross_scope_checks_admit_in_both_orders_and_preserve_catalog_availability(self):
         self.host_fixture()
         for first, second in [('host-check', 'check'), ('check', 'host-check')]:

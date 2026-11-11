@@ -41,7 +41,13 @@ actor NativeFixtures {
               "containersByProject":[{"projectId":"sample","applicationId":"sample","container":"fixture-app","cpuCores":0.25,"memoryBytes":33554432,"runtimeStatus":"running","attribution":"container-dedicato"}]
             }
             """#)
-            return .object(["projects": .array([parse(#"{"id":"sample","slug":"sample","name":"Applicazione di prova","host":"local.example.test","href":"https://local.example.test","runtime":"php","type":"PHP","enabled":true,"status":"active"}"#)]), "applications": .array([]), "observed": .array([]), "folders": .object(["folders": .array(folders), "memberships": .object(["project:sample": .string("stexor")])]), "databases": .array([]), "engines": .array([]), "resources": resources, "redis": .object([:])])
+            let response: JSONValue = .object(["projects": .array([parse(#"{"id":"sample","slug":"sample","name":"Applicazione di prova","host":"local.example.test","href":"https://local.example.test","runtime":"php","type":"PHP","enabled":true,"status":"active"}"#)]), "applications": .array([]), "observed": .array([]), "folders": .object(["folders": .array(folders), "memberships": .object(["project:sample": .string("stexor")])]), "databases": .array([]), "engines": .array([]), "resources": resources, "redis": .object([:])])
+            if path.contains("view=catalog") {
+                var catalog = response.objectValue.filter { ["projects", "applications", "observed", "folders"].contains($0.key) }
+                catalog["detailState"] = .string("pending")
+                return .object(catalog)
+            }
+            return response
         }
         if canonical == "/api/native/v1/applications/sample/databases" {
             return parse(#"""

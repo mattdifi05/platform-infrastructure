@@ -625,6 +625,18 @@ const server = createServer(async (req, res) => {
         json(res, await vaultInventoryPayload({ projects }));
         return;
       }
+      if (req.method === "GET" && requestOperation.operationId === "native.applications" && url.searchParams.get("view") === "catalog") {
+        const observed = observedApplications();
+        const catalog = { projects, applicationFolders: state.applicationFolders };
+        json(res, {
+          projects,
+          applications: projectApplications(projects),
+          observed,
+          folders: applicationFolderCatalog(catalog, folderApplications(catalog, observed)),
+          detailState: "pending",
+        });
+        return;
+      }
       if (req.method !== "GET") await invalidateControlContextCache();
       const context = req.method === "GET" && !url.pathname.startsWith("/control/")
         ? await buildCachedContext({ projects, state })
@@ -1976,9 +1988,8 @@ function readRustFsRecoveryEvidence() {
   }
 }
 
-async function buildContext({ projects, state }) {
+function projectApplications(projects) {
   const storedApplications = readApplicationsState();
-  const storedDomains = readDomainsState();
   const discoveredApplications = projects.map((project) => applicationRecord({
     id: project.slug,
     projectId: project.slug,
@@ -1999,6 +2010,12 @@ async function buildContext({ projects, state }) {
       .filter((app) => app && !app.deletedAt && !discoveredApplicationIds.has(app.id))
       .map((app) => applicationRecord(app)),
   ];
+  return applications;
+}
+
+async function buildContext({ projects, state }) {
+  const applications = projectApplications(projects);
+  const storedDomains = readDomainsState();
   const subdomains = [
     ...projects.map((project) => ({
       id: slugify(project.host),

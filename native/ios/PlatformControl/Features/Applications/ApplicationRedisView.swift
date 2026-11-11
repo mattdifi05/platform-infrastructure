@@ -58,11 +58,13 @@ struct ApplicationRedisView: View {
                 }
                 if redis["backups"].arrayValue.isEmpty { Text("Nessun backup Redis").foregroundStyle(.secondary) }
             } header: { Text("Backup Redis") } footer: { Text("I contenuti delle chiavi non vengono visualizzati nell'app.") }
-            if let error = store.error { Section { ErrorNotice(message: error) } }
+            if let error = store.detailError ?? store.error { Section { ErrorNotice(message: error) } }
         }
+        .contentSkeleton(!store.hasLoadedDetails && store.detailError == nil, title: "Caricamento Redis…")
+        .task(id: store.detailsRevision) { await store.loadDetails(model) }
         .navigationTitle("Redis")
         .navigationBarTitleDisplayMode(.inline)
-        .skeletonRefreshable { await store.load(model) }
+        .skeletonRefreshable { await store.loadDetails(model, force: true) }
         .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
     }
 }

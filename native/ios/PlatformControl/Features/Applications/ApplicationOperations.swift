@@ -7,6 +7,12 @@ final class ApplicationsStore {
     var isLoading = false
     var error: String?
     var hasLoaded = false
+    var hasLoadedDetails = false
+    var isLoadingDetails = false
+    var detailError: String?
+    private(set) var detailsRevision = UUID()
+    @ObservationIgnored private var detailsFresh = false
+    @ObservationIgnored private var detailsRequest = UUID()
     @ObservationIgnored private var loadRequest = UUID()
 
     var projects: [JSONValue] { catalog["projects"].arrayValue }
@@ -19,20 +25,64 @@ final class ApplicationsStore {
     func load(_ model: AppModel, maxAge: Duration = .zero) async {
         let request = UUID()
         loadRequest = request
+        invalidateDetails()
         isLoading = true
         defer { if loadRequest == request { isLoading = false } }
         do {
-            let response = try await model.readPage("/api/native/v1/applications", maxAge: maxAge)
+            let response = try await model.readPage("/api/native/v1/applications?view=catalog", maxAge: maxAge)
             guard !Task.isCancelled, loadRequest == request else { return }
             guard case .array = response["projects"], case .array = response["observed"],
                   case .array = response["folders"]["folders"], case .object = response["folders"]["memberships"] else {
                 throw APIError(status: 0, message: "Il catalogo delle applicazioni non è disponibile.")
             }
-            catalog = response
+            // Keep already measured rows visible while their replacement is fetched.
+            var updated = response.objectValue
+            for key in Self.detailKeys where updated[key] == nil { updated[key] = catalog.objectValue[key] }
+            catalog = .object(updated)
             error = nil
             hasLoaded = true
+            if response["detailState"].text != "pending", case .object = response["resources"], case .object = response["redis"] {
+                hasLoadedDetails = true
+                detailsFresh = true
+            }
         } catch is CancellationError { }
         catch { if !Task.isCancelled, loadRequest == request { self.error = error.localizedDescription } }
+    }
+
+    private static let detailKeys = ["databases", "engines", "destructiveOperations", "resources", "redis"]
+
+    func invalidateDetails() {
+        detailsRevision = UUID()
+        detailsFresh = false
+        detailsRequest = UUID()
+        isLoadingDetails = false
+    }
+
+    func loadDetails(_ model: AppModel, force: Bool = false) async {
+        guard force || !detailsFresh else { return }
+        let request = UUID()
+        let catalogRequest = loadRequest
+        detailsRequest = request
+        isLoadingDetails = true
+        detailError = nil
+        defer { if detailsRequest == request { isLoadingDetails = false } }
+        do {
+            let response = try await model.readPage("/api/native/v1/applications")
+            guard !Task.isCancelled, detailsRequest == request, loadRequest == catalogRequest else { return }
+            guard case .object = response["resources"], case .object = response["redis"],
+                  case .array = response["databases"] else {
+                throw APIError(status: 0, message: "I dettagli delle applicazioni non sono disponibili.")
+            }
+            // A full response carries older folder metadata. Merge detail fields only.
+            var updated = catalog.objectValue
+            for key in Self.detailKeys { updated[key] = response[key] }
+            updated["detailState"] = .string("ready")
+            catalog = .object(updated)
+            hasLoadedDetails = true
+            detailsFresh = true
+            detailError = nil
+        } catch is CancellationError { }
+        catch { if !Task.isCancelled, detailsRequest == request { detailError = error.localizedDescription } }
     }
 
     func project(_ id: String) -> JSONValue? {
@@ -44,6 +94,9 @@ final class ApplicationsStore {
         isLoading = false
         catalog = .object([:])
         hasLoaded = false
+        hasLoadedDetails = false
+        invalidateDetails()
+        detailError = nil
         error = nil
     }
 }
@@ -262,6 +315,7 @@ struct ApplicationOperationSheet: View {
             result = try await model.post(operation.path, body: .object(body))
             clearSecrets()
             await store.load(model)
+            if store.hasLoadedDetails { await store.loadDetails(model, force: true) }
         } catch { self.error = error.localizedDescription; verifiedAt = nil }
     }
 

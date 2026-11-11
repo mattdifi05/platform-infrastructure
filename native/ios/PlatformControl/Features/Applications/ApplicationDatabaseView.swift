@@ -18,19 +18,23 @@ struct ApplicationDatabaseView: View {
     var body: some View {
         Group {
             if scopedDatabase == nil {
-                databaseList.skeletonRefreshable { await store.load(model) }
+                databaseList.skeletonRefreshable { await store.loadDetails(model, force: true) }
             } else {
                 databaseList
             }
         }
         .navigationTitle(database == .null ? "Database" : applicationDatabaseName(database))
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: store.detailsRevision) { await store.loadDetails(model) }
         .sheet(item: $operation) { ApplicationOperationSheet(operation: $0, store: store) }
     }
 
     private var databaseList: some View {
         List {
-            if database == .null {
+            if database == .null && !store.hasLoadedDetails && store.detailError == nil {
+                Section { LabeledContent("Database", value: "Database applicazione") }
+                    .contentSkeleton(true, title: "Caricamento database…")
+            } else if database == .null {
                 EmptyState(title: "Database non presente", systemImage: "externaldrive.badge.xmark", description: "Il database non compare nel catalogo corrente. Le eventuali operazioni restano consultabili qui sotto.")
             } else {
                 identitySection
@@ -43,7 +47,7 @@ struct ApplicationDatabaseView: View {
             }
             if scopedDatabase == nil {
                 ForEach(deleteOperations, id: \.id) { deletion in deletionSection(deletion) }
-                if let error = store.error { Section { ErrorNotice(message: error) } }
+                if let error = store.detailError ?? store.error { Section { ErrorNotice(message: error) } }
             }
         }
     }
