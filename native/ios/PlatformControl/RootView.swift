@@ -1,9 +1,21 @@
 import SwiftUI
+import Observation
 
-private enum ControlTab: String, CaseIterable { case home, applications, secrets, updates }
+private enum ControlTab: String, CaseIterable {
+    case home, applications, secrets, updates
+
+    var title: String {
+        switch self {
+        case .home: "Home"
+        case .applications: "Applicazioni"
+        case .secrets: "Secrets"
+        case .updates: "Aggiornamenti"
+        }
+    }
+}
 private enum GlobalSheet: Hashable, Identifiable {
-    case settings(ControlTab)
-    case alerts(ControlTab)
+    case settings
+    case alerts
 
     var id: Self { self }
 }
@@ -15,6 +27,7 @@ struct RootView: View {
     @Namespace private var toolbarTransition
     @State private var tab: ControlTab = .home
     @State private var sheet: GlobalSheet?
+    @State private var pageToolbar = NativePageToolbar()
 
     var body: some View {
         Group {
@@ -26,7 +39,7 @@ struct RootView: View {
             if scenePhase == .background { Rectangle().fill(.regularMaterial).ignoresSafeArea().overlay { Image(systemName: "lock.shield").font(.largeTitle).foregroundStyle(.secondary) } }
         }
         .task { await model.connect() }
-        .onChange(of: model.authenticated) { _, authenticated in if !authenticated { sheet = nil; tab = .home } }
+        .onChange(of: model.authenticated) { _, authenticated in if !authenticated { sheet = nil; tab = .home; pageToolbar.reset() } }
         .sheet(item: $sheet) { destination in
             if reduceMotion {
                 globalSheet(destination)
@@ -55,69 +68,151 @@ struct RootView: View {
     }
 
     private var authenticatedContent: some View {
-        TabView(selection: $tab) {
-            Tab("Home", systemImage: "square.grid.2x2", value: .home) {
-                tabStack(.home) { HomeView(isActive: tab == .home && scenePhase == .active) }
+        NavigationStack {
+            TabView(selection: $tab) {
+                Tab("Home", systemImage: "square.grid.2x2", value: .home) {
+                    HomeView(isActive: tab == .home && scenePhase == .active)
+                }
+                Tab("App", systemImage: "square.stack.3d.up", value: .applications) {
+                    ApplicationsView()
+                }
+                Tab("Secrets", systemImage: "key.horizontal", value: .secrets) {
+                    SecretsView()
+                }
+                Tab("Aggiornamenti", systemImage: "arrow.triangle.2.circlepath", value: .updates) {
+                    UpdatesView()
+                }
             }
-            Tab("App", systemImage: "square.stack.3d.up", value: .applications) {
-                tabStack(.applications) { ApplicationsView() }
-            }
-            Tab("Secrets", systemImage: "key.horizontal", value: .secrets) {
-                tabStack(.secrets) { SecretsView() }
-            }
-            Tab("Aggiornamenti", systemImage: "arrow.triangle.2.circlepath", value: .updates) {
-                tabStack(.updates) { UpdatesView() }
-            }
+            .navigationTitle(tab.title)
+            .navigationSubtitle(tab == .home ? "Le risorse del tuo server" : "")
+            .navigationBarTitleDisplayMode(.inline)
+            .animation(reduceMotion ? nil : .default, value: tab)
+            .modifier(GlobalToolbar(sheet: $sheet, tab: tab, transition: toolbarTransition, warnings: model.unreadWarnings))
         }
+        .environment(pageToolbar)
+        .environment(\.toolbarPresentationNamespace, toolbarTransition)
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            await model.preparePages()
             while !Task.isCancelled {
-                if let value = try? await model.get("/control/server-events") { model.unreadWarnings = value["issues"].arrayValue.count }
+                if let value = try? await model.readPage("/control/server-events", maxAge: .seconds(8)) { model.unreadWarnings = value["issues"].arrayValue.count }
                 try? await Task.sleep(for: .seconds(30))
                 if Task.isCancelled { break }
             }
         }
     }
 
-    private func tabStack<Content: View>(_ tab: ControlTab, @ViewBuilder content: () -> Content) -> some View {
-        NavigationStack {
-            content()
-                .navigationBarTitleDisplayMode(.inline)
-                .modifier(GlobalToolbar(sheet: $sheet, tab: tab, transition: toolbarTransition, warnings: model.unreadWarnings))
-        }
-    }
-
     private struct GlobalToolbar: ViewModifier {
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @Environment(NativePageToolbar.self) private var pageToolbar
         @Binding var sheet: GlobalSheet?
         let tab: ControlTab
         let transition: Namespace.ID
         let warnings: Int
 
         private var hasWarnings: Bool { warnings > 0 }
+        private var hasCreationAction: Bool { tab == .applications || tab == .secrets }
+        private var createTitle: String { tab == .applications ? "Nuova cartella" : "Nuovo secret" }
+        private var createSymbol: String { tab == .applications ? "folder.badge.plus" : "plus" }
+        private var createID: NativeToolbarAction { tab == .applications ? .createApplicationFolder : .createSecret }
+        private var createAction: (@MainActor () -> Void)? {
+            tab == .applications ? pageToolbar.folderAction : pageToolbar.secretAction
+        }
 
         func body(content: Content) -> some View {
             content.toolbar {
                 ToolbarItem(id: "global.settings", placement: .topBarLeading) {
-                    Button("Impostazioni", systemImage: "gearshape") { sheet = .settings(tab) }
+                    Button("Impostazioni", systemImage: "gearshape") { sheet = .settings }
                         .labelStyle(.iconOnly)
                         .accessibilityIdentifier("global.settings")
                 }
-                .matchedTransitionSource(id: GlobalSheet.settings(tab), in: transition)
+                .matchedTransitionSource(id: GlobalSheet.settings, in: transition)
 
-                ToolbarItem(id: "global.alerts", placement: .topBarTrailing) {
-                    Button { sheet = .alerts(tab) } label: {
-                        Image(systemName: hasWarnings ? "bell.badge" : "bell")
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(hasWarnings ? Color.orange : Color.primary, Color.primary)
-                            .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
-                            .animation(reduceMotion ? nil : .default, value: hasWarnings)
+                ToolbarItem(id: "global.actions", placement: .primaryAction) {
+                    GlassEffectContainer(spacing: 12) {
+                        HStack(spacing: 16) {
+                            Button { sheet = .alerts } label: {
+                                Image(systemName: hasWarnings ? "bell.badge" : "bell")
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(hasWarnings ? Color.orange : Color.primary, Color.primary)
+                                    .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                                    .animation(reduceMotion ? nil : .default, value: hasWarnings)
+                                    .frame(width: 44, height: 44)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(hasWarnings ? "Avvisi, \(warnings) attivi" : "Avvisi")
+                            .accessibilityIdentifier("global.alerts")
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            .glassEffectID("global.alerts", in: transition)
+                            .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
+                            .matchedTransitionSource(id: GlobalSheet.alerts, in: transition)
+
+                            if hasCreationAction {
+                                Button { createAction?() } label: {
+                                    Image(systemName: createSymbol)
+                                        .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                                        .animation(reduceMotion ? nil : .default, value: tab)
+                                        .frame(width: 44, height: 44)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(createTitle)
+                                .accessibilityIdentifier("page.create")
+                                .disabled(createAction == nil)
+                                .glassEffect(.regular.interactive(), in: .circle)
+                                .glassEffectID("page.create", in: transition)
+                                .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
+                                .matchedTransitionSource(id: createID, in: transition)
+                            }
+                        }
+                        .font(.body.weight(.semibold))
                     }
-                    .accessibilityLabel(hasWarnings ? "Avvisi, \(warnings) attivi" : "Avvisi")
-                    .accessibilityIdentifier("global.alerts")
+                    .fixedSize()
+                    .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: hasCreationAction)
+                    .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: createAction != nil)
                 }
-                .matchedTransitionSource(id: GlobalSheet.alerts(tab), in: transition)
+                .sharedBackgroundVisibility(.hidden)
             }
+        }
+    }
+}
+
+@MainActor @Observable
+final class NativePageToolbar {
+    var folderAction: (@MainActor () -> Void)?
+    var secretAction: (@MainActor () -> Void)?
+
+    func reset() {
+        folderAction = nil
+        secretAction = nil
+    }
+}
+
+enum NativeToolbarAction: Hashable {
+    case createApplicationFolder
+    case createSecret
+}
+
+extension EnvironmentValues {
+    @Entry var toolbarPresentationNamespace: Namespace.ID? = nil
+}
+
+extension View {
+    func nativeToolbarPresentation(_ action: NativeToolbarAction?) -> some View {
+        modifier(NativeToolbarPresentation(action: action))
+    }
+}
+
+private struct NativeToolbarPresentation: ViewModifier {
+    @Environment(\.toolbarPresentationNamespace) private var namespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let action: NativeToolbarAction?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let namespace, let action, !reduceMotion {
+            content.navigationTransition(.zoom(sourceID: action, in: namespace))
+        } else {
+            content
         }
     }
 }
@@ -157,14 +252,8 @@ private struct LoginView: View {
     }
 
     private func passkeyLabel(_ title: String) -> some View {
-        ZStack {
-            Label(title, systemImage: "person.badge.key")
-                .opacity(model.isAuthenticating ? 0 : 1)
-                .accessibilityHidden(model.isAuthenticating)
-            if model.isAuthenticating {
-                LoadingState(title: "Autenticazione in corso…", style: .inline)
-            }
-        }
+        Label(title, systemImage: "person.badge.key")
+        .contentSkeleton(model.isAuthenticating, title: "Autenticazione in corso…")
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
     }

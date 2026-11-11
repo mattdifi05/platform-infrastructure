@@ -35,6 +35,12 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertTrue(alerts.waitForExistence(timeout: 5))
             XCTAssertLessThan(settings.frame.midX, alerts.frame.midX)
             XCTAssertLessThan(abs(settings.frame.midY - alerts.frame.midY), 30)
+            if label == "App" || label == "Secrets" {
+                let create = app.buttons[label == "App" ? "Nuova cartella" : "Nuovo secret"]
+                XCTAssertTrue(create.waitForExistence(timeout: 5))
+                let gap = max(create.frame.minX - alerts.frame.maxX, alerts.frame.minX - create.frame.maxX)
+                XCTAssertGreaterThan(gap, 4, "Trailing actions must have distinct spacing")
+            }
             if label == "Home" {
                 XCTAssertTrue(app.staticTexts["Le risorse del tuo server"].exists)
                 XCTAssertTrue(app.descendants(matching: .any)["home.chart.cpu"].firstMatch.waitForExistence(timeout: 5))
@@ -133,7 +139,7 @@ final class PlatformControlUITests: XCTestCase {
     func testUpdatesShowVersionsAndReviewRestartAndBatch() {
         let app = launchFixtures()
         app.tabBars.buttons["Aggiornamenti"].tap()
-        XCTAssertTrue(app.buttons["updates.system.check"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["updates.check"].waitForExistence(timeout: 10))
         let package = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "openssl")).firstMatch
         XCTAssertTrue(package.exists)
         app.buttons["Aggiorna e riavvia"].firstMatch.tap()
@@ -143,15 +149,36 @@ final class PlatformControlUITests: XCTestCase {
         XCTAssertEqual(app.textFields.count, 0)
         app.buttons["Annulla"].tap()
 
-        let updateAll = app.buttons["Aggiorna tutti"]
-        if !updateAll.isHittable { app.swipeUp() }
+        let updateAll = app.buttons["updates.all"]
+        if !updateAll.isHittable { app.swipeDown() }
         XCTAssertTrue(updateAll.isHittable)
         updateAll.tap()
         XCTAssertTrue(app.buttons["updates.confirm"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna tutti")
+        XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna tutto")
         XCTAssertTrue(accessibleText("8.5.13", in: app).exists)
+        XCTAssertTrue(accessibleText("openssl", in: app).exists)
         XCTAssertTrue(app.staticTexts["I servizi aggiornati si riavvieranno automaticamente."].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "updates.confirm").count, 1)
         app.buttons["Annulla"].tap()
+    }
+
+    func testUnifiedUpdateChecksAndOneConfirmationAcceptBothFixtureJobs() {
+        let app = launchFixtures()
+        app.tabBars.buttons["Aggiornamenti"].tap()
+        let check = app.buttons["updates.check"]
+        XCTAssertTrue(check.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "updates.check").count, 1)
+        check.tap()
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: check)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+        app.buttons["updates.all"].tap()
+        let confirm = app.buttons["updates.confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertTrue(accessibleText("openssl", in: app).exists)
+        XCTAssertTrue(accessibleText("8.5.13", in: app).exists)
+        confirm.tap()
+        XCTAssertTrue(app.navigationBars["Aggiornamenti"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.navigationBars["Aggiorna tutto"].exists)
     }
 
     private func accessibleText(_ text: String, in app: XCUIApplication) -> XCUIElement {

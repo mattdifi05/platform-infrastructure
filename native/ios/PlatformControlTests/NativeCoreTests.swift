@@ -71,4 +71,37 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertFalse(model.authenticated)
         XCTAssertEqual(model.bootstrap, .null)
     }
+
+    @MainActor func testPageMetadataReuseAndMutationInvalidation() async throws {
+        let model = AppModel(testEnvironment: true)
+        await model.connect()
+        let path = "/api/native/v1/applications"
+        let original = try await model.readPage(path)
+        // Change the fixture through the transport to exercise a genuinely retained read.
+        _ = try await model.api.request("/control/project-folders", method: "POST", body: .object(["name": .string("Esterno")]))
+        let reused = try await model.readPage(path, maxAge: .seconds(8))
+        XCTAssertEqual(reused, original)
+        let fresh = try await model.readPage(path)
+        XCTAssertEqual(fresh["folders"]["folders"].arrayValue.count, original["folders"]["folders"].arrayValue.count + 1)
+        _ = try await model.post("/control/project-folders", body: .object(["name": .string("Nuova")]))
+        XCTAssertNil(model.cachedPage(path))
+        let afterMutation = try await model.readPage(path, maxAge: .seconds(8))
+        XCTAssertEqual(afterMutation["folders"]["folders"].arrayValue.count, original["folders"]["folders"].arrayValue.count + 2)
+    }
+
+    @MainActor func testPageCacheExcludesRevealedValuesAndClearsOnLogout() async throws {
+        let model = AppModel(testEnvironment: true)
+        await model.connect()
+        _ = try await model.readPage("/control/v1/vault")
+        XCTAssertNotNil(model.cachedPage("/control/v1/vault"))
+        let reveal = "/api/native/v1/vault/secrets/fixture-secret/reveal"
+        _ = try await model.post(reveal)
+        XCTAssertNil(model.cachedPage(reveal))
+        await model.applicationStore.load(model)
+        XCTAssertFalse(model.applicationStore.projects.isEmpty)
+        try await model.logout()
+        XCTAssertNil(model.cachedPage("/control/v1/vault"))
+        XCTAssertFalse(model.applicationStore.hasLoaded)
+        XCTAssertTrue(model.applicationStore.projects.isEmpty)
+    }
 }

@@ -108,7 +108,10 @@ struct ApplicationDetailView: View {
                     privateCopyRows(copy, sourceIsPublic: verified && mode == "public")
                 }
             } else if isLoadingHosting || hostingError == nil {
-                LoadingState(title: "Verifica hosting…", style: .row)
+                LabeledContent("Stato attuale") {
+                    StatusPill(text: "Visibilità", tone: .secondary)
+                }
+                .contentSkeleton("Verifica hosting…")
             }
             if let hostingError {
                 ErrorNotice(message: hostingError) { Task { await loadHosting() } }
@@ -194,7 +197,13 @@ struct ApplicationDetailView: View {
             }
             if databases.isEmpty {
                 if scopedDatabases == nil, !databaseLookupFailed {
-                    LoadingState(title: "Verifica database…", style: .row)
+                    NavigationLink(destination: EmptyView()) {
+                        databaseRow(.object([
+                            "name": .string("Database applicazione"),
+                            "engine": .string("postgresql")
+                        ]))
+                    }
+                    .contentSkeleton("Verifica database…")
                 } else {
                     Text("Nessun database collegato nel catalogo").foregroundStyle(.secondary)
                 }
@@ -203,15 +212,19 @@ struct ApplicationDetailView: View {
                 NavigationLink {
                     ApplicationDatabaseView(databaseID: database.id, store: store, scopedDatabase: database)
                 } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(applicationDatabaseName(database)).font(.headline)
-                        Text([applicationLabel(database["engine"].text), database["adminTool"]["label"].text, applicationDatabaseSize(database)]
-                            .filter { !$0.isEmpty }.joined(separator: " · "))
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
+                    databaseRow(database)
                 }
                 .accessibilityIdentifier("application.database.\(database.id)")
             }
+        }
+    }
+
+    private func databaseRow(_ database: JSONValue) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(applicationDatabaseName(database)).font(.headline)
+            Text([applicationLabel(database["engine"].text), database["adminTool"]["label"].text, applicationDatabaseSize(database)]
+                .filter { !$0.isEmpty }.joined(separator: " · "))
+                .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 

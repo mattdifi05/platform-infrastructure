@@ -147,7 +147,7 @@ export function createHostMetricsReader({ readSnapshot, query, ttlMs = 2000, now
 }
 
 const historyStepSeconds = 2;
-const historyWindowSeconds = 40;
+const historyWindowSeconds = 46;
 const historyQueries = Object.freeze({
   ...HOST_BASE_METRIC_QUERIES,
   ...Object.fromEntries(["up", "sampleTime", "network", "rxBytesPerSecond", "txBytesPerSecond",

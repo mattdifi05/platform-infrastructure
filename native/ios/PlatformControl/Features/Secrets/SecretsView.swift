@@ -22,6 +22,7 @@ private enum VaultSheet: Identifiable {
 
 struct SecretsView: View {
     @Environment(AppModel.self) private var app
+    @Environment(NativePageToolbar.self) private var pageToolbar
     @State private var catalog: JSONValue = .null
     @State private var loading = true
     @State private var error: String?
@@ -51,7 +52,14 @@ struct SecretsView: View {
                 }.pickerStyle(.segmented)
             }
             if loading && catalog["items"].arrayValue.isEmpty {
-                LoadingState(title: "Caricamento secret…")
+                Section("3 secret") {
+                    ForEach(0..<3) { _ in
+                        NavigationLink {} label: {
+                            VaultCatalogRow(title: "Nome del secret", metadata: "Platform · Production · application", linked: true)
+                        }
+                    }
+                }
+                .contentSkeleton("Caricamento secret…")
             } else if entries.isEmpty {
                 EmptyState(title: search.isEmpty ? "Nessun secret" : "Nessun risultato", systemImage: "key", description: search.isEmpty ? "Aggiungi un secret o importa quelli esistenti." : "Modifica la ricerca o il filtro.")
             } else {
@@ -62,14 +70,11 @@ struct SecretsView: View {
                                 sheet = mode == "edit" ? .edit(entry) : .delete(entry)
                             }
                         } label: {
-                            Label {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(entry.title).font(.headline)
-                                    Text([entry.value["projectId"].text, entry.value["environment"].text, entry.value["kind"].text].filter { !$0.isEmpty }.joined(separator: " · "))
-                                        .font(.subheadline).foregroundStyle(.secondary)
-                                    if !bindings(for: entry.id).isEmpty { Label("Collegamento gestito", systemImage: "link").font(.caption).foregroundStyle(.secondary) }
-                                }
-                            } icon: { Image(systemName: "key.fill").foregroundStyle(.tint) }
+                            VaultCatalogRow(
+                                title: entry.title,
+                                metadata: [entry.value["projectId"].text, entry.value["environment"].text, entry.value["kind"].text].filter { !$0.isEmpty }.joined(separator: " · "),
+                                linked: !bindings(for: entry.id).isEmpty
+                            )
                         }
                     }
                 }
@@ -96,26 +101,62 @@ struct SecretsView: View {
                 }
             }
         }
+        .contentSkeleton(loading, title: "Caricamento secret…")
         .navigationTitle("Secrets")
         .searchable(text: $search, prompt: "Nome, applicazione o ambiente")
-        .toolbar { ToolbarItem(placement: .primaryAction) { Button("Nuovo secret", systemImage: "plus") { sheet = .create } } }
+        .onAppear { registerToolbarAction() }
+        .onChange(of: loading) { _, _ in registerToolbarAction() }
+        .onDisappear { pageToolbar.secretAction = nil }
         .skeletonRefreshable { await load() }
-        .task { await load() }
+        .task {
+            if let cached = app.cachedPage("/control/v1/vault") { catalog = cached }
+            await load(maxAge: .seconds(8))
+        }
         .sheet(item: $sheet) { mode in
             VaultEditorSheet(mode: mode, revision: catalog["revision"].text, projects: catalog["projects"].arrayValue) { message in
                 feedback = message
                 await load()
             }
+            .nativeToolbarPresentation(mode.id == "create" ? .createSecret : nil)
+        }
+    }
+
+    private func registerToolbarAction() {
+        if loading {
+            pageToolbar.secretAction = nil
+        } else {
+            pageToolbar.secretAction = { sheet = .create }
         }
     }
 
     private func bindings(for id: String) -> [JSONValue] { catalog["runtime"]["bindings"].arrayValue.filter { $0["itemId"].text == id } }
 
-    @MainActor private func load() async {
+    @MainActor private func load(maxAge: Duration = .zero) async {
         loading = true
         defer { loading = false }
-        do { catalog = try await app.get("/control/v1/vault"); error = nil }
+        do { catalog = try await app.readPage("/control/v1/vault", maxAge: maxAge); error = nil }
+        catch is CancellationError { }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct VaultCatalogRow: View {
+    let title: String
+    let metadata: String
+    let linked: Bool
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title).font(.headline)
+                Text(metadata).font(.subheadline).foregroundStyle(.secondary)
+                if linked {
+                    Label("Collegamento gestito", systemImage: "link").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } icon: {
+            Image(systemName: "key.fill").foregroundStyle(.tint)
+        }
     }
 }
 
@@ -161,12 +202,19 @@ private struct VaultEntryView: View {
     @State private var pasteboardChange: Int?
     @State private var revealGeneration = UUID()
     @State private var revealing = false
+    @State private var biometricHandoff = false
     @State private var error: String?
+
+    private var revealCanBeDisplayed: Bool {
+        scenePhase == .active || (scenePhase == .inactive && biometricHandoff)
+    }
+
+    private var awaitingReveal: Bool { revealing || (revealedValue != nil && scenePhase != .active) }
 
     var body: some View {
         List {
             Section {
-                if let revealedValue, let expiresAt, expiresAt > Date(), scenePhase == .active {
+                if let revealedValue, let expiresAt, expiresAt > Date(), revealCanBeDisplayed {
                     Text(revealedValue).font(.body.monospaced()).privacySensitive()
                         .accessibilityLabel("Valore secret").accessibilityValue(revealedValue)
                         .onAppear { VaultFaceID.timing.emitEvent("Vault value visible") }
@@ -178,9 +226,10 @@ private struct VaultEntryView: View {
                     Text("Face ID non disponibile per questo server").foregroundStyle(.secondary)
                 } else {
                     Button(action: beginReveal) {
-                        if revealing { LoadingState(title: "Verifica Face ID…", style: .inline) }
-                        else { Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid") }
-                    }.disabled(revealing)
+                        Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid")
+                            .redacted(reason: awaitingReveal ? .placeholder : [])
+                            .accessibilityLabel(awaitingReveal ? "Verifica Face ID in corso…" : app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID")
+                    }.disabled(awaitingReveal)
                 }
                 if let error { ErrorNotice(message: error) }
             } header: { Text("Valore") } footer: {
@@ -209,7 +258,11 @@ private struct VaultEntryView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { clear() }
-            if phase == .active { prefetchChallenge() }
+            if phase == .active {
+                biometricHandoff = false
+                if revealing || revealedValue != nil { VaultFaceID.timing.emitEvent("Vault scene active") }
+                prefetchChallenge()
+            }
         }
         .onChange(of: app.bootstrap["csrfToken"].stringValue) { _, _ in
             clear()
@@ -237,6 +290,7 @@ private struct VaultEntryView: View {
         clearRevealedValue()
         let generation = UUID()
         revealGeneration = generation
+        biometricHandoff = true
         revealing = true
         error = nil
         if app.vaultFaceIDRegistered { VaultFaceID.timing.emitEvent("Vault reveal requested") }
@@ -248,6 +302,7 @@ private struct VaultEntryView: View {
             if generation == revealGeneration {
                 revealing = false
                 revealRequest = nil
+                if revealedValue == nil { biometricHandoff = false }
             }
         }
         do {
@@ -273,9 +328,14 @@ private struct VaultEntryView: View {
             let ttl = min(30, max(0, (result["ttlMs"].doubleValue ?? 30_000) / 1_000))
             let expiry = min(serverExpiry, Date().addingTimeInterval(ttl))
             guard expiry > Date() else { throw VaultUIError.invalidReveal }
-            revealedValue = value
-            expiresAt = expiry
-            error = nil
+            VaultFaceID.timing.emitEvent("Vault response authorized")
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                revealedValue = value
+                expiresAt = expiry
+                error = nil
+            }
             revealTask = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(max(0, expiry.timeIntervalSinceNow)))
                 guard !Task.isCancelled, generation == revealGeneration else { return }
@@ -351,6 +411,7 @@ private struct VaultEntryView: View {
         revealRequest?.cancel()
         revealRequest = nil
         revealing = false
+        biometricHandoff = false
         discardChallenge()
         clearRevealedValue()
     }
@@ -429,7 +490,7 @@ private struct VaultEditorSheet: View {
                 }
                 Section {
                     Button { Task { await save() } } label: {
-                        if busy { LoadingState(title: "Operazione in corso…", style: .inline) } else { Text(title) }
+                        Text(title).contentSkeleton(busy, title: "Operazione in corso…")
                     }.disabled(!enabled).foregroundStyle(isDelete ? .red : .accentColor)
                 }
             }

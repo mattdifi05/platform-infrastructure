@@ -751,6 +751,116 @@ class UpdatesTests(unittest.TestCase):
         return {'action': 'host-reboot-apply' if reboot else 'host-apply', 'revision': public['revision'], 'planId': public['planId'],
                 'confirmation': 'REBOOT' if reboot else 'UPDATE', 'idempotencyKey': 'fixture-host-request'}
 
+    def test_cross_scope_checks_admit_in_both_orders_and_preserve_catalog_availability(self):
+        self.host_fixture()
+        for first, second in [('host-check', 'check'), ('check', 'host-check')]:
+            with self.subTest(first=first), patch.object(m.EXECUTOR, 'submit') as execute:
+                with m.db() as connection:
+                    connection.execute("DELETE FROM records WHERE kind IN ('operation', 'host-execution')")
+                one = m.handle({'action': first})
+                self.assertTrue(m.catalog()['canCheck'] if second == 'check' else m.host_catalog()['canCheck'])
+                self.assertFalse(m.catalog()['canCheck'] if first == 'check' else m.host_catalog()['canCheck'])
+                two = m.handle({'action': second})
+                self.assertEqual(m.load('operation', one['operationId'])['pairedWith'], two['operationId'])
+                self.assertEqual(m.load('operation', two['operationId'])['pairedWith'], one['operationId'])
+                self.assertFalse(m.catalog()['canCheck'])
+                self.assertFalse(m.host_catalog()['canCheck'])
+                for action in ['host-check', 'check']:
+                    with self.assertRaises(m.Rejected) as blocked:
+                        m.handle({'action': action})
+                    self.assertEqual(blocked.exception.code, 'operation_conflict')
+                self.assertEqual(execute.call_count, 2)
+
+    def test_cross_scope_apply_admits_durable_pair_in_both_orders_with_idempotency(self):
+        self.host_fixture()
+        for host_first in [True, False]:
+            with self.subTest(host_first=host_first), patch.object(m.EXECUTOR, 'submit') as execute:
+                with m.db() as connection:
+                    connection.execute("DELETE FROM records WHERE kind IN ('operation', 'host-execution')")
+                    connection.execute('DELETE FROM idempotency')
+                host_body = self.host_apply_body(self.host_public_plan())
+                service_body = self.apply_body(self.plan())
+                first_body, second_body = (host_body, service_body) if host_first else (service_body, host_body)
+                one = m.handle(first_body)
+                two = m.handle(second_body)
+                self.assertEqual(m.load('operation', one['operationId'])['pairedWith'], two['operationId'])
+                self.assertEqual(m.load('operation', two['operationId'])['pairedWith'], one['operationId'])
+                self.assertTrue(m.paired_update(one['operationId']))
+                self.assertTrue(m.paired_update(two['operationId']))
+                self.assertEqual(m.handle(first_body), one)
+                self.assertEqual(m.handle(second_body), two)
+                m.operation_update(one['operationId'], stage='Fixture worker progress')
+                self.assertEqual(m.load('operation', one['operationId'])['pairedWith'], two['operationId'])
+                for body in [{'action': 'check'}, {'action': 'host-check'},
+                             {**host_body, 'idempotencyKey': 'third-host'}, {**service_body, 'idempotencyKey': 'third-service'}]:
+                    with self.assertRaises(m.Rejected) as blocked:
+                        m.handle(body)
+                    self.assertEqual(blocked.exception.code, 'operation_conflict')
+                self.assertEqual(execute.call_count, 2)
+                self.host.run_transient.assert_not_called()
+
+    def test_pair_admission_rejects_reboot_missing_metadata_mixed_work_and_recovery(self):
+        self.host_fixture()
+        host_body = self.host_apply_body(self.host_public_plan())
+        service_body = self.apply_body(self.plan())
+        reboot_plan = m.handle({'action': 'host-plan', 'revision': m.host_catalog()['revision'], 'rebootAfter': True})
+        reboot_body = {**self.host_apply_body(reboot_plan), 'confirmation': 'UPDATE_AND_REBOOT'}
+        cases = [
+            ({'kind': 'host-upgrade'}, service_body),
+            ({'kind': 'host-reboot'}, service_body),
+            ({'kind': 'host-check'}, service_body),
+            ({'kind': 'check'}, host_body),
+            ({'kind': 'apply'}, reboot_body),
+            ({'kind': 'apply'}, {**host_body, 'action': 'host-reboot-apply', 'confirmation': 'REBOOT'}),
+            ({'kind': 'host-upgrade', 'recoveryRequired': True}, {'action': 'check'}),
+            ({'kind': 'apply', 'recoveryRequired': True}, {'action': 'host-check'}),
+        ]
+        with patch.object(m.EXECUTOR, 'submit') as execute:
+            for pending, body in cases:
+                with self.subTest(pending=pending, action=body['action']):
+                    with m.db() as connection:
+                        connection.execute("DELETE FROM records WHERE kind IN ('operation', 'host-execution')")
+                    m.save('operation', 'other-job', {'id': 'other-job', 'status': 'queued', **pending})
+                    with self.assertRaises(m.Rejected) as blocked:
+                        m.handle(body)
+                    self.assertEqual(blocked.exception.code, 'operation_conflict')
+            execute.assert_not_called()
+        with m.db() as connection:
+            connection.execute("DELETE FROM records WHERE kind='operation'")
+        with patch.object(m.EXECUTOR, 'submit'):
+            accepted = m.handle(reboot_body)
+            self.assertFalse(m.nonreboot_host_upgrade(accepted['operationId']))
+            with self.assertRaises(m.Rejected) as blocked:
+                m.handle(service_body)
+            self.assertEqual(blocked.exception.code, 'operation_conflict')
+
+    def test_paired_lock_wait_exceeds_legacy_timeout_but_respects_absolute_plan_expiry(self):
+        self.host_fixture()
+        host_body = self.host_apply_body(self.host_public_plan())
+        service_body = self.apply_body(self.plan())
+        with patch.object(m.EXECUTOR, 'submit'):
+            host = m.handle(host_body)
+            service = m.handle(service_body)
+        with patch.object(m.fcntl, 'flock', side_effect=[BlockingIOError(), None]), \
+             patch.object(m.time, 'monotonic', side_effect=[0, 61]), patch.object(m.time, 'sleep'):
+            m.wait_operation_lock(object(), service['operationId'], time.time() + 100)
+        with patch.object(m.fcntl, 'flock', side_effect=BlockingIOError), \
+             patch.object(m.time, 'monotonic', side_effect=[0, 61]), \
+             patch.object(m.time, 'time', side_effect=[100, 105]), patch.object(m.time, 'sleep'), \
+             self.assertRaises(m.Rejected) as expired:
+            m.wait_operation_lock(object(), service['operationId'], 104)
+        self.assertEqual(expired.exception.code, 'plan_expired')
+        m.operation_update(host['operationId'], pairedWith='unrelated')
+        with patch.object(m.fcntl, 'flock', side_effect=BlockingIOError), \
+             patch.object(m.time, 'monotonic', side_effect=[0, 61]), patch.object(m.time, 'sleep'), \
+             self.assertRaises(m.Rejected) as blocked:
+            m.wait_operation_lock(object(), service['operationId'], time.time() + 100)
+        self.assertEqual(blocked.exception.code, 'operation_conflict')
+        m.operation_update(host['operationId'], pairedWith=service['operationId'], recoveryRequired=True)
+        with patch.object(m.fcntl, 'flock'), self.assertRaises(m.Rejected) as recovery:
+            m.wait_operation_lock(object(), service['operationId'], time.time() + 100)
+        self.assertEqual(recovery.exception.code, 'operation_conflict')
+
     def test_host_public_catalog_and_plan_expose_exact_package_versions_without_apt_writes(self):
         host = self.host_fixture(); catalog = m.handle({'action': 'host-catalog'})
         self.assertEqual(catalog['schema'], 'host-updates/v1'); self.assertEqual(catalog['updateCount'], 1)

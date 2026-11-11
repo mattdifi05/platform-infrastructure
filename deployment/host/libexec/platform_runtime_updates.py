@@ -329,13 +329,74 @@ def catalog():
     recent = records('operation')
     operations = [item for item in recent if not item.get('kind', '').startswith('host-')]
     busy = any(item['status'] in ['queued', 'running'] for item in recent)
-    return {'schema': 'runtime-updates/v1', 'available': True, 'canCheck': not busy, 'canApply': not recovery_required(), 'busy': busy, 'revision': revision, 'checkedAt': checked.get('checkedAt'), 'components': output, 'operations': operations[:12]}
+    return {'schema': 'runtime-updates/v1', 'available': True, 'canCheck': can_admit_check('check'), 'canApply': not recovery_required(), 'busy': busy, 'revision': revision, 'checkedAt': checked.get('checkedAt'), 'components': output, 'operations': operations[:12]}
 
 
 def operation_update(job_id, **changes):
-    item = load('operation', job_id)
-    item.update(changes)
-    save('operation', job_id, item)
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        row = connection.execute('SELECT value FROM records WHERE kind=? AND id=?', ('operation', job_id)).fetchone()
+        item = json.loads(row['value'])
+        item.update(changes)
+        connection.execute('UPDATE records SET value=? WHERE kind=? AND id=?', (json.dumps(item), 'operation', job_id))
+
+
+def nonreboot_host_upgrade(job_id):
+    execution = load('host-execution', job_id)
+    if not isinstance(execution, dict) or execution.get('kind') != 'host-upgrade':
+        return False
+    native = execution.get('native')
+    if not isinstance(native, dict) or native.get('rebootAfter') is True or native.get('confirmationRequired') != 'UPDATE':
+        return False
+    plan_id = native.get('planId')
+    expiry = native.get('expiresAt')
+    if not isinstance(plan_id, str) or not IDENTIFIER.fullmatch(plan_id) or type(expiry) not in [int, float] or not 0 < expiry < float('inf'):
+        return False
+    stored = load('host-plan', plan_id)
+    public = stored.get('public') if isinstance(stored, dict) else None
+    return bool(isinstance(public, dict) and stored.get('native') == native
+                and public.get('kind') == 'host-upgrade' and public.get('confirmationRequired') == 'UPDATE')
+
+
+def maintenance_partner(kind):
+    pending = [item for item in records('operation') if item['status'] in ['queued', 'running']]
+    if not pending:
+        return None
+    if len(pending) == 1 and not pending[0].get('pairedWith'):
+        other = pending[0]
+        kinds = {kind, other.get('kind')}
+        if kinds == {'host-check', 'check'}:
+            return other['id']
+        if kinds == {'host-upgrade', 'apply'} and (other['kind'] != 'host-upgrade' or nonreboot_host_upgrade(other['id'])):
+            return other['id']
+    raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
+
+
+def can_admit_check(kind):
+    try:
+        maintenance_partner(kind)
+        return not recovery_required()
+    except Rejected:
+        return False
+
+
+def pair_maintenance(connection, job, partner):
+    if not partner:
+        return
+    row = connection.execute('SELECT value FROM records WHERE kind=? AND id=?', ('operation', partner)).fetchone()
+    other = json.loads(row['value'])
+    job['pairedWith'] = partner
+    other['pairedWith'] = job['id']
+    connection.execute('UPDATE records SET value=? WHERE kind=? AND id=?', (json.dumps(other), 'operation', partner))
+
+
+def paired_update(job_id):
+    item = load('operation', job_id) or {}
+    partner = load('operation', item.get('pairedWith', '')) or {}
+    if partner.get('pairedWith') != job_id or {item.get('kind'), partner.get('kind')} != {'host-upgrade', 'apply'}:
+        return False
+    host_id = job_id if item['kind'] == 'host-upgrade' else partner['id']
+    return nonreboot_host_upgrade(host_id)
 
 
 def check_job(job_id):
@@ -985,7 +1046,7 @@ def apply_job(job_id, stored):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def submit(kind, stored=None, idempotency_key=None):
+def submit(kind, stored=None, idempotency_key=None, paired_with=None):
     job_id = uuid.uuid4().hex
     job = {'id': job_id, 'kind': kind, 'status': 'queued', 'stage': 'In preparazione', 'completedSteps': 0, 'totalSteps': (len(stored['public']['affectedServices']) if 'families' in stored else 5) if kind == 'apply' else 1, 'startedAt': stamp()}
     if kind == 'apply':
@@ -993,6 +1054,8 @@ def submit(kind, stored=None, idempotency_key=None):
         services = [{'componentId': family['component']['id'], 'service': service, 'status': 'queued', 'stage': 'In attesa'} for family in families for service in family['public']['affectedServices']]
         job.update(currentComponent=None, currentService=None, completedServices=0, totalServices=len(services), serviceResults=services, componentResults=[{'componentId': family['component']['id'], 'status': 'queued'} for family in families])
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        pair_maintenance(c, job, paired_with)
         c.execute('INSERT INTO records VALUES(?,?,?)', ('operation', job_id, json.dumps(job)))
         if idempotency_key:
             c.execute('INSERT INTO idempotency VALUES(?,?,?)', (idempotency_key, stored['public']['planId'], job_id))
@@ -1037,7 +1100,7 @@ def host_catalog():
                 'updateCount': len(cached['packages']) if cached else 0, 'autoremoveCount': len(cached.get('autoremove', [])) if cached else 0,
                 'packages': cached['packages'] if cached else [],
                 'keptBackCount': len(cached['keptBack']) if cached else 0,
-                'rebootRequired': inventory['rebootRequired'], 'canCheck': not busy and not needs_recovery,
+                'rebootRequired': inventory['rebootRequired'], 'canCheck': can_admit_check('host-check'),
                 'canApply': fresh and bool(cached['packages'] or cached.get('autoremove')) and not busy and not needs_recovery,
                 'canReboot': inventory['rebootRequired'] and not busy and not needs_recovery, 'busy': busy}
     except Exception:
@@ -1323,10 +1386,12 @@ def wait_operation_lock(lock, job_id, expires_at=None, timeout=60):
                 raise Rejected('plan_expired', 'Piano scaduto durante l’attesa della manutenzione.', 410)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if paired_update(job_id) and recovery_required():
+                raise Rejected('operation_conflict', 'Una manutenzione interrotta richiede verifica amministrativa.')
             operation_update(job_id, waitingForMaintenance=False)
             return
         except BlockingIOError:
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline and not (expires_at is not None and paired_update(job_id)):
                 raise Rejected('operation_conflict', 'Host occupato da altra manutenzione. Riprova più tardi.', 409)
             operation_update(job_id, status='queued', stage='In attesa della manutenzione host in corso', waitingForMaintenance=True)
             time.sleep(1)
@@ -1431,13 +1496,15 @@ def acknowledge_host_upgrade(job_id, stored):
         EXECUTOR.submit(host_job, job_id, 'host-upgrade', stored)
 
 
-def submit_host(kind, stored=None, idempotency_key=None):
+def submit_host(kind, stored=None, idempotency_key=None, paired_with=None):
     job_id = uuid.uuid4().hex
     job = {'id': job_id, 'kind': kind, 'status': 'queued', 'stage': 'In preparazione', 'completedSteps': 0,
            'totalSteps': 3 if kind == 'host-reboot' else 100 if kind == 'host-upgrade' else 1, 'startedAt': stamp()}
     services = snapshot_running_services() if kind == 'host-reboot' else None
     def persist(intent=None):
         with db() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            pair_maintenance(connection, job, paired_with)
             connection.execute('INSERT INTO records VALUES(?,?,?)', ('operation', job_id, json.dumps(job)))
             if kind in ['host-upgrade', 'host-check']:
                 connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-execution', job_id, json.dumps({'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False})))
@@ -1488,10 +1555,10 @@ def handle_host(body, after_response=None):
                 if stored['native'].get('rebootAfter') and after_response:
                     after_response(lambda: acknowledge_host_upgrade(record['id'], stored))
                 return {'operationId': record['id'], 'status': record['status']}
-        if any(item['status'] in ['queued', 'running'] for item in records('operation')):
-            raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
+        admitted_kind = 'host-check' if action == 'host-check' else 'host-upgrade' if action == 'host-apply' and body['confirmation'] == 'UPDATE' else action
+        partner = maintenance_partner(admitted_kind)
         if action == 'host-check':
-            return submit_host('host-check')
+            return submit_host('host-check', paired_with=partner)
         kind = 'host-reboot' if action.startswith('host-reboot-') else 'host-upgrade'
         if action in ['host-plan', 'host-reboot-plan']:
             return host_plan(kind, body['revision'], reboot_after=body.get('rebootAfter', False))
@@ -1500,11 +1567,13 @@ def handle_host(body, after_response=None):
             raise Rejected('not_found', 'Piano OS non disponibile.', 404)
         if body['confirmation'] != stored['public']['confirmationRequired']:
             raise Rejected('confirmation_required', 'Conferma esplicita richiesta.', 422)
+        if partner and (stored['native'].get('rebootAfter') is True or stored['native'].get('confirmationRequired') != 'UPDATE'):
+            raise Rejected('operation_conflict', 'Il riavvio richiede una manutenzione separata.')
         if stored['native']['expiresAt'] <= time.time():
             raise Rejected('plan_expired', 'Piano OS scaduto.', 410)
         if body['revision'] != stored['public']['revision'] or host_catalog()['revision'] != body['revision']:
             raise Rejected('stale_revision', 'Stato del server cambiato. Verifica un nuovo piano.')
-        result = submit_host(kind, stored, body['idempotencyKey'])
+        result = submit_host(kind, stored, body['idempotencyKey'], paired_with=partner)
         if kind == 'host-reboot' and after_response:
             after_response(lambda: acknowledge_host_reboot(result['operationId']))
         if stored['native'].get('rebootAfter') and after_response:
@@ -1645,7 +1714,7 @@ def handle(body, after_response=None):
             raise Rejected('not_found', 'Operazione non presente.', 404)
         return value
     with GATE:
-        if action in ['plan', 'apply'] and recovery_required():
+        if action in ['check', 'plan', 'apply'] and recovery_required():
             raise Rejected('operation_conflict', 'Una manutenzione interrotta richiede verifica amministrativa.')
         if action == 'apply':
             with db() as c:
@@ -1657,10 +1726,9 @@ def handle(body, after_response=None):
                 if job.get('kind') != 'apply':
                     raise Rejected('idempotency_conflict', 'Identificativo di richiesta già usato per un’altra operazione.')
                 return {'operationId': job['id'], 'status': job['status']}
-        if any(x['status'] in ['queued', 'running'] for x in records('operation')):
-            raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
+        partner = maintenance_partner(action)
         if action == 'check':
-            return submit('check')
+            return submit('check', paired_with=partner)
         if body['componentId'] != 'all':
             component(body['componentId'])
         if action == 'plan':
@@ -1674,7 +1742,7 @@ def handle(body, after_response=None):
             raise Rejected('plan_expired', 'Piano scaduto.', 410)
         if body['revision'] != stored['public']['revision'] or catalog()['revision'] != body['revision']:
             raise Rejected('stale_revision', 'Stato cambiato dopo il piano.')
-        return submit('apply', stored, idempotency_key=body['idempotencyKey'])
+        return submit('apply', stored, idempotency_key=body['idempotencyKey'], paired_with=partner)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

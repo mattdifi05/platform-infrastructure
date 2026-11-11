@@ -129,6 +129,28 @@ test("reader coalesces concurrent requests and refreshes after its two second ca
   assert.equal(f.counts().queries, Object.keys(HOST_METRIC_QUERIES).length * 2);
 });
 
+test("native two-second polling obtains a new observation despite query completion latency", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  const match = source.match(/const readHostMetrics = createHostMetricsReader\(\{[^\n]*ttlMs: ([^\n]+) \}\);/);
+  assert.ok(match, "Host reader cache configuration must be inspectable");
+  const ttlMs = new Function("resourceMetricsTtlMs", `return ${match[1]}`)(2000);
+  let time = clock;
+  const f = fixture();
+  const reader = createHostMetricsReader({ ...f, ttlMs, now: () => time, readSnapshot: async () => {
+    time += 120;
+    return f.readSnapshot();
+  } });
+  let previous = await reader();
+  for (let poll = 1; poll <= 8; poll++) {
+    time = clock + poll * 2000;
+    const current = await reader();
+    assert.notStrictEqual(current, previous);
+    assert.equal(Date.parse(current.observedAt) - Date.parse(previous.observedAt), 2000);
+    previous = current;
+  }
+});
+
 test("query and snapshot errors return unavailable blocks without breaking the response", async () => {
   const result = await createHostMetricsReader({ readSnapshot: async () => { throw Error("unavailable"); }, query: async () => { throw Error("timeout"); }, now: () => clock })();
   assert.equal(result.freshness.exporterUp, null);
@@ -152,7 +174,7 @@ test("host metrics overlay limits collectors to finite read-only proc files and 
   assert.doesNotMatch(source, /network_mode: host|pid: host|source: \/(?:proc|sys)?\s*$/m);
 });
 
-test("history reads a fixed 40 seconds plus one predecessor, reuses host definitions and caches concurrent requests", async () => {
+test("history reads a fixed 46 seconds plus one predecessor, reuses host definitions and caches concurrent requests", async () => {
   const requests = [];
   let time = clock + 721;
   const queryRange = async (expression, bounds) => {
@@ -179,14 +201,14 @@ test("history reads a fixed 40 seconds plus one predecessor, reuses host definit
   const read = createHostMetricsHistoryReader({ queryRange, now: () => time });
   const [history, concurrent] = await Promise.all([read(), read()]);
   assert.strictEqual(concurrent, history);
-  assert.equal(history.samples.length, 21);
-  assert.equal(history.samples[0].capturedAt, new Date(clock - 42000).toISOString());
+  assert.equal(history.samples.length, 24);
+  assert.equal(history.samples[0].capturedAt, new Date(clock - 48000).toISOString());
   assert.equal(history.samples.at(-1).capturedAt, new Date(clock).toISOString());
   assert.equal(history.samples.some(sample => sample.capturedAt === new Date(clock - 6000).toISOString()), false);
   assert.deepEqual(history.samples.at(-1), {
     capturedAt: new Date(clock).toISOString(), cpu: 0, memory: 40, disk: 25, receive: 100, send: null, diskRead: 200, diskWrite: null,
   });
-  const expectedBounds = { start: clock / 1000 - 42, end: clock / 1000, step: 2 };
+  const expectedBounds = { start: clock / 1000 - 48, end: clock / 1000, step: 2 };
   assert.ok(requests.every(({ bounds }) => JSON.stringify(bounds) === JSON.stringify(expectedBounds)));
   const requestCount = requests.length;
   assert.equal(new Set(requests.map(({ expression }) => expression)).size, requestCount);

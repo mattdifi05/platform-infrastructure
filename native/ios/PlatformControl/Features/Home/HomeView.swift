@@ -20,13 +20,37 @@ private struct ResourcePlotClock {
 
 private struct ResourceSample {
     let date: Date
-    var arrival: ContinuousClock.Instant? = nil
     let cpu: Double?
     let memory: Double?
     let received: Double?
     let sent: Double?
     let read: Double?
     let written: Double?
+}
+
+// Present measured segments behind the collector so each frame advances at wall-clock speed.
+// Never extrapolate beyond the latest real sample when the source has a gap.
+enum ResourceChartTimeline {
+    static let delay: TimeInterval = 3
+    static let window: TimeInterval = 40
+    static let nowPosition = 0.95
+
+    static func presentationDate(now: Date) -> Date {
+        now.addingTimeInterval(-delay)
+    }
+
+    static func segmentFraction(from start: Date, to end: Date, through cursor: Date) -> Double {
+        guard end > start else { return 0 }
+        return max(0, min(1, cursor.timeIntervalSince(start) / end.timeIntervalSince(start)))
+    }
+
+    static func startsSegment(previous: Date?, current: Date) -> Bool {
+        previous.map { current.timeIntervalSince($0) > 6 } ?? true
+    }
+
+    static func horizontalFraction(sample: Date, cursor: Date) -> Double {
+        nowPosition * (1 + sample.timeIntervalSince(cursor) / window)
+    }
 }
 
 struct HomeView: View {
@@ -46,9 +70,8 @@ struct HomeView: View {
         ScrollView {
             LazyVStack(spacing: 16) {
                 if let error { ErrorNotice(message: error) { Task { await refresh() } } }
-                if loading { LoadingState(title: "Lettura delle risorse…") }
-                else {
-                    if error == nil && snapshot["freshness"]["available"].boolValue != true {
+                Group {
+                    if !loading && error == nil && snapshot["freshness"]["available"].boolValue != true {
                         ErrorNotice(message: "Le misurazioni non sono disponibili al momento.")
                     }
                     resourceCard("CPU", value: NativeFormatting.percent(snapshot["cpu"]["usedPercent"].doubleValue), detail: snapshot["cpu"]["cores"].intValue.map { "\($0) core" } ?? "—", symbol: "cpu", color: .indigo, series: [("CPU", \.cpu)], percentage: true)
@@ -60,6 +83,13 @@ struct HomeView: View {
                     resourceCard("Connessione", value: rate(snapshot["network"]["totals"]["rxBytesPerSecond"]), detail: "↑ " + rate(snapshot["network"]["totals"]["txBytesPerSecond"]), symbol: "network", color: .blue, series: [("Ricezione", \.received), ("Invio", \.sent)])
                     resourceCard("Attività disco", value: rate(snapshot["diskIo"]["totals"]["readBytesPerSecond"]), detail: "Scrittura " + rate(snapshot["diskIo"]["totals"]["writeBytesPerSecond"]), symbol: "externaldrive", color: .pink, series: [("Lettura", \.read), ("Scrittura", \.written)])
                 }
+                .redacted(reason: loading ? .placeholder : [])
+                .accessibilityHidden(loading)
+            }
+            .overlay {
+                if loading {
+                    Color.clear.accessibilityLabel("Lettura delle risorse…")
+                }
             }
             .padding(20)
         }
@@ -70,13 +100,19 @@ struct HomeView: View {
         .skeletonRefreshable { await refresh() }
         .task(id: monitoring) {
             guard monitoring else { return }
-            await loadHistory()
-        }
-        .task(id: monitoring) {
-            guard monitoring else { return }
+            async let history: Void = loadHistory()
+            async let current: Void = refresh()
+            _ = await (history, current)
+            guard !Task.isCancelled else { return }
+            loading = false
+            var deadline = ContinuousClock.now + .seconds(2)
+            do { try await ContinuousClock().sleep(until: deadline) } catch { return }
             while !Task.isCancelled {
                 await refresh()
-                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                deadline += .seconds(2)
+                // Keep request latency out of the sampling cadence. Skip missed slots.
+                while deadline < .now { deadline += .seconds(2) }
+                do { try await ContinuousClock().sleep(until: deadline) } catch { break }
             }
         }
     }
@@ -91,16 +127,16 @@ struct HomeView: View {
     private func capacityCard(_ title: String, value: String, detail: String, symbol: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color)
-            Text(value).font(.title2.bold()).contentTransition(.numericText())
-            Text(detail).font(.caption).foregroundStyle(.secondary)
+            Text(loading ? "00,0%" : value).font(.title2.bold()).contentTransition(.numericText())
+            Text(loading ? "0 GB di 0 GB" : detail).font(.caption).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, alignment: .leading).padding(18).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 22))
     }
 
     private func resourceCard(_ title: String, value: String, detail: String, symbol: String, color: Color, series: [(String, KeyPath<ResourceSample, Double?>)], percentage: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(detail).font(.caption).foregroundStyle(.secondary) }
-            Text(value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
-            ResourceChart(title: title, samples: samples, clock: plotClock, series: series, color: color, percentage: percentage, active: isActive)
+            HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(loading ? (percentage ? (title == "CPU" ? "0 core" : "0 GB di 0 GB") : "↑ 000 KB/s") : detail).font(.caption).foregroundStyle(.secondary) }
+            Text(loading ? (percentage ? "00,0%" : "000 KB/s") : value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
+            ResourceChart(title: title, samples: samples, clock: plotClock, series: series, color: color, percentage: percentage, active: isActive && !loading)
                 .accessibilityLabel("Grafico \(title)")
                 .accessibilityIdentifier("home.chart.\(symbol)")
         }.padding(20).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
@@ -130,11 +166,6 @@ struct HomeView: View {
         let ordered = keepingExisting ? incoming + samples : samples + incoming
         var byDate: [Date: ResourceSample] = [:]
         for sample in ordered where sample.date >= cutoff {
-            var sample = sample
-            // A cached snapshot may be returned again. Preserve the original arrival so its head cannot restart.
-            if let prior = byDate[sample.date], let arrival = prior.arrival {
-                sample.arrival = min(arrival, sample.arrival ?? arrival)
-            }
             byDate[sample.date] = sample
         }
         samples = byDate.values.sorted { $0.date < $1.date }
@@ -156,7 +187,6 @@ struct HomeView: View {
             let observedAt = Self.sampleDate(value["observedAt"].stringValue) ?? receivedAt
             mergeSamples([ResourceSample(
                 date: min(observedAt, receivedAt),
-                arrival: arrival,
                 cpu: available ? value["cpu"]["usedPercent"].doubleValue : nil,
                 memory: available ? value["memory"]["usedPercent"].doubleValue : nil,
                 received: available ? value["network"]["totals"]["rxBytesPerSecond"].doubleValue : nil,
@@ -171,7 +201,6 @@ struct HomeView: View {
             self.error = "Impossibile aggiornare le risorse del server."
             mergeSamples([ResourceSample(date: plotClock.date(at: .now), cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil)])
         }
-        loading = false
     }
 }
 
@@ -192,25 +221,21 @@ private struct ResourceChart: View {
         let date: Date
         let value: Double
         let startsSegment: Bool
-        let arrival: ContinuousClock.Instant?
 
         func interpolated(to point: Point, by fraction: Double) -> Point {
             Point(date: date.addingTimeInterval(point.date.timeIntervalSince(date) * fraction),
-                  value: value + (point.value - value) * fraction, startsSegment: false, arrival: nil)
+                  value: value + (point.value - value) * fraction, startsSegment: false)
         }
     }
 
     private struct Trace {
         let points: [Point]
 
-        func presented(at instant: ContinuousClock.Instant, through date: Date) -> Trace {
-            for (index, point) in points.enumerated() {
-                let progress = point.arrival.map { min(1, max(0, $0.duration(to: instant).chartSeconds / ResourceChart.headDuration)) } ?? 1
-                guard progress < 1 || point.date > date else { continue }
+        func presented(through date: Date) -> Trace {
+            for (index, point) in points.enumerated() where point.date > date {
                 var prefix = Array(points.prefix(index))
                 if !point.startsSegment, let previous = prefix.last {
-                    let timeFraction = date.timeIntervalSince(previous.date) / point.date.timeIntervalSince(previous.date)
-                    let fraction = max(0, min(progress, timeFraction))
+                    let fraction = ResourceChartTimeline.segmentFraction(from: previous.date, to: point.date, through: date)
                     if fraction > 0 { prefix.append(previous.interpolated(to: point, by: fraction)) }
                 }
                 return Trace(points: prefix)
@@ -237,8 +262,8 @@ private struct ResourceChart: View {
     }
 
     nonisolated private static let headDuration: TimeInterval = 0.5
-    private static let window: TimeInterval = 40
-    private static let nowPosition = 0.95
+    private static let window = ResourceChartTimeline.window
+    private static let nowPosition = ResourceChartTimeline.nowPosition
 
     private var isAnimating: Bool { active && scenePhase == .active && !reduceMotion }
 
@@ -249,9 +274,9 @@ private struct ResourceChart: View {
                 previous = nil
                 return nil
             }
-            let startsSegment = previous.map { sample.date.timeIntervalSince($0) > 6 } ?? true
+            let startsSegment = ResourceChartTimeline.startsSegment(previous: previous, current: sample.date)
             previous = sample.date
-            return Point(date: sample.date, value: value, startsSegment: startsSegment, arrival: sample.arrival)
+            return Point(date: sample.date, value: value, startsSegment: startsSegment)
         }
         return Trace(points: points)
     }
@@ -259,13 +284,13 @@ private struct ResourceChart: View {
     var body: some View {
         let traces = series.map { trace(for: $0.1) }
         let instant = ContinuousClock.now
-        let now = clock.date(at: instant)
+        let now = ResourceChartTimeline.presentationDate(now: clock.date(at: instant))
         let staticDate = samples.last?.date ?? now
         let reference = isAnimating ? now : staticDate
         let left = reference.addingTimeInterval(-Self.window)
         let peak = Self.visiblePeak(traces, since: left)
         let target = percentage ? Self.percentUpperBound(for: peak) : Self.rateUpperBound(for: peak)
-        let presentedPeak = isAnimating ? Self.visiblePeak(traces.map { $0.presented(at: instant, through: now) }, since: left) : peak
+        let presentedPeak = isAnimating ? Self.visiblePeak(traces.map { $0.presented(through: now) }, since: left) : peak
         let current = scale?.upperBound(at: instant, containing: presentedPeak) ?? target
         let nextScale = VerticalScale(previous: isAnimating ? current : target, target: target, startedAt: instant, labelStart: .now)
         let displayScale = scale?.target == target ? scale ?? nextScale : nextScale
@@ -294,8 +319,8 @@ private struct ResourceChart: View {
                     AxisValueLabel {
                         TimelineView(.explicit(isAnimating ? displayScale.labelUpdates : [])) { _ in
                             let instant = ContinuousClock.now
-                            let date = clock.date(at: instant)
-                            let presented = traces.map { $0.presented(at: instant, through: date) }
+                            let date = ResourceChartTimeline.presentationDate(now: clock.date(at: instant))
+                            let presented = traces.map { $0.presented(through: date) }
                             let peak = Self.visiblePeak(presented, since: date.addingTimeInterval(-Self.window))
                             let bound = isAnimating ? displayScale.upperBound(at: instant, containing: peak) : target
                             Text(axisLabel(fraction * bound))
@@ -317,8 +342,8 @@ private struct ResourceChart: View {
                     let plot = CGRect(x: left, y: top, width: right - left, height: bottom - top)
                     TimelineView(.animation(paused: !isAnimating)) { _ in
                         let instant = ContinuousClock.now
-                        let date = isAnimating ? clock.date(at: instant) : staticDate
-                        let presented = isAnimating ? traces.map { $0.presented(at: instant, through: date) } : traces
+                        let date = isAnimating ? ResourceChartTimeline.presentationDate(now: clock.date(at: instant)) : staticDate
+                        let presented = isAnimating ? traces.map { $0.presented(through: date) } : traces
                         let peak = Self.visiblePeak(presented, since: date.addingTimeInterval(-Self.window))
                         let upperBound = isAnimating ? displayScale.upperBound(at: instant, containing: peak) : target
                         Canvas { context, size in
@@ -384,7 +409,7 @@ private struct ResourceChart: View {
     private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect, date: Date, upperBound: Double) {
         func location(_ point: Point) -> CGPoint {
             CGPoint(
-                x: plot.minX + plot.width * Self.nowPosition * (1 + point.date.timeIntervalSince(date) / Self.window),
+                x: plot.minX + plot.width * ResourceChartTimeline.horizontalFraction(sample: point.date, cursor: date),
                 y: plot.maxY - plot.height * point.value / upperBound
             )
         }
