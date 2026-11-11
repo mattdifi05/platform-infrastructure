@@ -14,16 +14,18 @@ actor NativeFixtures {
         if canonical == "/control/resources/host/history" {
             let now = Date.now
             let timestamp = ISO8601DateFormatter()
-            let samples = (0...21).map { index in
-                JSONValue.object([
-                    "capturedAt": .string(timestamp.string(from: now.addingTimeInterval(Double((index - 21) * 2)))),
-                    "cpu": .number(12 + Double(index % 7)),
-                    "memory": .number(32.3 + Double(index % 6) / 10),
-                    "disk": .number(26.4),
-                    "receive": .number(38_400 + Double(index % 5) * 850),
-                    "send": .number(12_800 + Double(index % 4) * 600),
-                    "diskRead": .number(24_000 + Double(index % 6) * 1200),
-                    "diskWrite": .number(128_000 + Double(index % 7) * 5200)
+            let samples = (0...21).map { index -> JSONValue in
+                let capturedAt = now.addingTimeInterval(Double(index - 21) * 2)
+                let cpu = Double(12 + index % 7)
+                let receive = Double(38_400 + index % 5 * 850)
+                let send = Double(12_800 + index % 4 * 600)
+                let read = Double(24_000 + index % 6 * 1200)
+                let write = Double(128_000 + index % 7 * 5200)
+                return .object([
+                    "capturedAt": .string(timestamp.string(from: capturedAt)),
+                    "cpu": .number(cpu), "memory": .number(32.5), "disk": .number(26.4),
+                    "receive": .number(receive), "send": .number(send),
+                    "diskRead": .number(read), "diskWrite": .number(write)
                 ])
             }
             return .object(["samples": .array(samples)])
