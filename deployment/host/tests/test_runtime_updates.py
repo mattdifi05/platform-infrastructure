@@ -920,6 +920,79 @@ class UpdatesTests(unittest.TestCase):
                 self.assertEqual(execute.call_count, 2)
                 self.host.run_transient.assert_not_called()
 
+    def test_recovered_dispatched_host_without_local_worker_rejects_new_service_partner(self):
+        self.host_fixture()
+        host_body = self.host_apply_body(self.host_public_plan())
+        service_body = self.apply_body(self.plan())
+        with patch.object(m.EXECUTOR, 'submit') as execute:
+            host = m.handle(host_body)
+            identity = host['operationId']
+            execution = m.load('host-execution', identity)
+            execution['dispatched'] = True
+            m.save('host-execution', identity, execution)
+            self.host.worker_alive.return_value = True
+            m.reconcile_host_jobs(identity, force=True)
+            recovered = m.load('operation', identity)
+            self.assertEqual(recovered['status'], 'running')
+            self.assertFalse(recovered['recoveryRequired'])
+            self.assertTrue(m.nonreboot_host_upgrade(identity))
+            execute.reset_mock()
+            with self.assertRaises(m.Rejected) as blocked:
+                m.handle(service_body)
+            self.assertEqual(blocked.exception.code, 'operation_conflict')
+            execute.assert_not_called()
+            self.assertNotIn('pairedWith', m.load('operation', identity))
+            self.assertEqual(len(m.records('operation')), 1)
+
+    def test_unknown_host_dispatch_state_without_local_worker_rejects_service_without_writes(self):
+        self.host_fixture()
+        host_body = self.host_apply_body(self.host_public_plan())
+        service_body = self.apply_body(self.plan())
+        with patch.object(m.EXECUTOR, 'submit') as execute:
+            host = m.handle(host_body)
+            identity = host['operationId']
+            execution = m.load('host-execution', identity)
+            for dispatch in ['missing', None, 0, 'false']:
+                with self.subTest(dispatch=dispatch):
+                    candidate = copy.deepcopy(execution)
+                    if dispatch == 'missing':
+                        candidate.pop('dispatched')
+                    else:
+                        candidate['dispatched'] = dispatch
+                    m.save('host-execution', identity, candidate)
+                    before = m.records('operation')
+                    execute.reset_mock()
+                    with self.assertRaises(m.Rejected) as blocked:
+                        m.handle(service_body)
+                    self.assertEqual(blocked.exception.code, 'operation_conflict')
+                    execute.assert_not_called()
+                    self.assertEqual(m.records('operation'), before)
+                    with m.db() as connection:
+                        self.assertEqual(connection.execute('SELECT COUNT(*) FROM idempotency').fetchone()[0], 1)
+
+    def test_dispatched_host_with_current_local_worker_accepts_service_partner(self):
+        self.host_fixture()
+        host_body = self.host_apply_body(self.host_public_plan())
+        service_body = self.apply_body(self.plan())
+        with patch.object(m.EXECUTOR, 'submit') as execute:
+            host = m.handle(host_body)
+            identity = host['operationId']
+            execution = m.load('host-execution', identity)
+            execution['dispatched'] = True
+            m.save('host-execution', identity, execution)
+            with m.HOST_JOB_GUARD:
+                m.HOST_JOB_THREADS.add(identity)
+            try:
+                service = m.handle(service_body)
+            finally:
+                with m.HOST_JOB_GUARD:
+                    m.HOST_JOB_THREADS.discard(identity)
+            self.assertEqual(m.load('operation', identity)['pairedWith'], service['operationId'])
+            self.assertEqual(execute.call_count, 2)
+            self.assertTrue(m.nonreboot_host_upgrade(identity))
+            self.assertTrue(m.paired_update(service['operationId']), 'persisted pair metadata remains valid after the local worker exits')
+            self.assertEqual(m.handle(service_body), service, 'already accepted paired requests remain idempotent')
+
     def test_pair_admission_rejects_reboot_missing_metadata_mixed_work_and_recovery(self):
         self.host_fixture()
         host_body = self.host_apply_body(self.host_public_plan())
