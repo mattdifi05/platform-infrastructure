@@ -16,6 +16,14 @@ export function hostMetricsPayload(snapshot) {
   };
 }
 
+export const HOST_BASE_METRIC_QUERIES = Object.freeze({
+  cpuPercent: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[2m])))',
+  memoryTotal: "node_memory_MemTotal_bytes",
+  memoryAvailable: "node_memory_MemAvailable_bytes",
+  diskSize: 'node_filesystem_size_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
+  diskAvailable: 'node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
+});
+
 const physicalInterfaces = /^(?:eth[0-9]+|en[a-zA-Z0-9]+|bond[0-9]+)$/;
 const physicalDisks = /^(?:sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$/;
 const networkFields = { rxBytes: "receive_bytes", txBytes: "transmit_bytes", rxErrors: "receive_errs", txErrors: "transmit_errs", rxDrops: "receive_drop", txDrops: "transmit_drop" };
@@ -57,6 +65,19 @@ function groupDevices(results, fields, predicate) {
   return [...devices.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function devicePayload(results) {
+  const networkResults = { rxBytesPerSecond: results.rxBytesPerSecond, txBytesPerSecond: results.txBytesPerSecond };
+  for (const [field, metric] of Object.entries(networkFields)) networkResults[field] = (results.network || []).filter(row => row?.metric?.__name__ === `node_network_${metric}_total`);
+  const netKeys = ["rxBytesPerSecond", "txBytesPerSecond", ...Object.keys(networkFields)];
+  const interfaces = groupDevices(networkResults, netKeys, physicalInterfaces);
+  const network = { available: interfaces.some(row => netKeys.some(key => row[key] !== null)), window: "2m", interfaces, totals: Object.fromEntries(netKeys.map(key => [key, sumMeasured(interfaces, key)])) };
+  const diskKeys = Object.keys(diskFields);
+  const devices = groupDevices(results, diskKeys, physicalDisks);
+  for (const device of devices) if (device.busyPercent !== null) device.busyPercent *= 100;
+  const diskIo = { available: devices.some(row => diskKeys.some(key => row[key] !== null)), window: "2m", devices, totals: Object.fromEntries(diskKeys.filter(key => key !== "busyPercent").map(key => [key, sumMeasured(devices, key)])) };
+  return { network, diskIo };
+}
+
 function extendedPayload(snapshot, results, now) {
   const up = onlyValue(results.up);
   const sampleTime = onlyValue(results.sampleTime);
@@ -67,18 +88,11 @@ function extendedPayload(snapshot, results, now) {
   const freshness = { available: fresh, exporterUp: up === null ? null : up === 1, sampledAt: sampleTime === null ? null : new Date(sampleTime * 1000).toISOString(), ageSeconds, stale: !fresh };
   const base = hostMetricsPayload(fresh ? snapshot : null);
   base.capturedAt = fresh ? freshness.sampledAt : null;
+  base.observedAt = new Date(now).toISOString();
   const rows = fresh ? results.gauges || [] : [];
   const gauge = name => onlyValue(rows.filter(row => row?.metric?.__name__ === name));
   const validResults = fresh ? results : {};
-  const networkResults = { rxBytesPerSecond: validResults.rxBytesPerSecond, txBytesPerSecond: validResults.txBytesPerSecond };
-  for (const [field, metric] of Object.entries(networkFields)) networkResults[field] = (validResults.network || []).filter(row => row?.metric?.__name__ === `node_network_${metric}_total`);
-  const netKeys = ["rxBytesPerSecond", "txBytesPerSecond", ...Object.keys(networkFields)];
-  const interfaces = groupDevices(networkResults, netKeys, physicalInterfaces);
-  const network = { available: interfaces.some(row => netKeys.some(key => row[key] !== null)), window: "2m", interfaces, totals: Object.fromEntries(netKeys.map(key => [key, sumMeasured(interfaces, key)])) };
-  const diskKeys = Object.keys(diskFields);
-  const devices = groupDevices(validResults, diskKeys, physicalDisks);
-  for (const device of devices) if (device.busyPercent !== null) device.busyPercent *= 100;
-  const diskIo = { available: devices.some(row => diskKeys.some(key => row[key] !== null)), window: "2m", devices, totals: Object.fromEntries(diskKeys.filter(key => key !== "busyPercent").map(key => [key, sumMeasured(devices, key)])) };
+  const { network, diskIo } = devicePayload(validResults);
   const loadValues = { one: gauge("node_load1"), five: gauge("node_load5"), fifteen: gauge("node_load15") };
   const load = { available: Object.values(loadValues).some(value => value !== null), ...loadValues };
   const totalSwap = gauge("node_memory_SwapTotal_bytes"), freeSwap = gauge("node_memory_SwapFree_bytes");
@@ -126,6 +140,96 @@ export function createHostMetricsReader({ readSnapshot, query, ttlMs = 2000, now
       ]);
       cached = extendedPayload(snapshot, Object.fromEntries(entries), now());
       expiresAt = now() + ttl;
+      return cached;
+    })().finally(() => { pending = null; });
+    return pending;
+  };
+}
+
+const historyStepSeconds = 2;
+const historyWindowSeconds = 40;
+const historyQueries = Object.freeze({
+  ...HOST_BASE_METRIC_QUERIES,
+  ...Object.fromEntries(["up", "sampleTime", "network", "rxBytesPerSecond", "txBytesPerSecond",
+    ...Object.keys(diskFields)].map(key => [key, HOST_METRIC_QUERIES[key]])),
+});
+
+function rangeValues(series, { start, end, step }) {
+  const points = new Map();
+  for (const row of series) {
+    if (!Array.isArray(row?.values)) continue;
+    for (const value of row.values) {
+      const seconds = value?.[0];
+      if (typeof seconds !== "number" || seconds < start || seconds > end || (seconds - start) % step !== 0) continue;
+      if (!points.has(seconds)) points.set(seconds, []);
+      points.get(seconds).push({ metric: row.metric, value });
+    }
+  }
+  return points;
+}
+
+function diskUsedPercent(sizeRows, availableRows) {
+  const mounts = new Map(availableRows.map(row => [row?.metric?.mountpoint, rowValue(row)]));
+  const devices = new Map();
+  for (const row of sizeRows) {
+    const mountpoint = row?.metric?.mountpoint;
+    const device = row?.metric?.device || mountpoint;
+    const total = rowValue(row);
+    const available = mounts.get(mountpoint);
+    if (mountpoint && !devices.has(device) && total !== null && available != null) {
+      devices.set(device, { total, available });
+    }
+  }
+  const total = [...devices.values()].reduce((sum, row) => sum + row.total, 0);
+  const available = [...devices.values()].reduce((sum, row) => sum + row.available, 0);
+  return ratio(Math.max(0, total - available), total);
+}
+
+function historySample(results, seconds) {
+  const at = key => results[key]?.get(seconds) || [];
+  const sampled = onlyValue(at("sampleTime"));
+  if (onlyValue(at("up")) !== 1 || sampled === null || seconds - sampled < -5 || seconds - sampled > 60) return null;
+
+  const cpu = onlyValue(at("cpuPercent"));
+  const memoryTotal = onlyValue(at("memoryTotal"));
+  const memoryAvailable = onlyValue(at("memoryAvailable"));
+  const memory = memoryAvailable === null || memoryTotal === null || memoryAvailable > memoryTotal
+    ? null : ratio(memoryTotal - memoryAvailable, memoryTotal);
+  const disk = diskUsedPercent(at("diskSize"), at("diskAvailable"));
+  const resultsAtTime = Object.fromEntries(["network", "rxBytesPerSecond", "txBytesPerSecond", ...Object.keys(diskFields)]
+    .map(key => [key, at(key)]));
+  const { network, diskIo } = devicePayload(resultsAtTime);
+  return {
+    capturedAt: new Date(seconds * 1000).toISOString(), cpu, memory, disk,
+    receive: network.totals.rxBytesPerSecond, send: network.totals.txBytesPerSecond,
+    diskRead: diskIo.totals.readBytesPerSecond, diskWrite: diskIo.totals.writeBytesPerSecond,
+  };
+}
+
+export function createHostMetricsHistoryReader({ queryRange, now = Date.now }) {
+  if (typeof queryRange !== "function") throw Error("Host metrics history requires a Prometheus range query.");
+  let cached = null, expiresAt = 0, pending = null;
+  return async function readHostMetricsHistory() {
+    if (cached && expiresAt > now()) return cached;
+    if (pending) return pending;
+    const step = historyStepSeconds;
+    const end = Math.floor(now() / (1000 * step)) * step;
+    const start = end - historyWindowSeconds - step;
+    const range = { start, end, step };
+    pending = (async () => {
+      const results = Object.fromEntries(await Promise.all(Object.entries(historyQueries).map(async ([key, expression]) => {
+        try {
+          const rows = await queryRange(expression, range);
+          return [key, rangeValues(Array.isArray(rows) ? rows : [], range)];
+        } catch { return [key, new Map()]; }
+      })));
+      const samples = [];
+      for (let seconds = start; seconds <= end; seconds += step) {
+        const sample = historySample(results, seconds);
+        if (sample) samples.push(sample);
+      }
+      cached = { samples };
+      expiresAt = now() + 3000;
       return cached;
     })().finally(() => { pending = null; });
     return pending;

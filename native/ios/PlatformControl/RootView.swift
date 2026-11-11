@@ -1,11 +1,18 @@
 import SwiftUI
 
 private enum ControlTab: String, CaseIterable { case home, applications, secrets, updates }
-private enum GlobalSheet: String, Identifiable { case settings, alerts; var id: String { rawValue } }
+private enum GlobalSheet: Hashable, Identifiable {
+    case settings(ControlTab)
+    case alerts(ControlTab)
+
+    var id: Self { self }
+}
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var toolbarTransition
     @State private var tab: ControlTab = .home
     @State private var sheet: GlobalSheet?
 
@@ -21,14 +28,28 @@ struct RootView: View {
         .task { await model.connect() }
         .onChange(of: model.authenticated) { _, authenticated in if !authenticated { sheet = nil; tab = .home } }
         .sheet(item: $sheet) { destination in
-            NavigationStack {
-                Group {
-                    switch destination {
-                    case .settings: SettingsView()
-                    case .alerts: AlertsView()
-                    }
+            if reduceMotion {
+                globalSheet(destination)
+            } else {
+                globalSheet(destination)
+                    .navigationTransition(.zoom(sourceID: destination, in: toolbarTransition))
+            }
+        }
+    }
+
+    private func globalSheet(_ destination: GlobalSheet) -> some View {
+        NavigationStack {
+            Group {
+                switch destination {
+                case .settings: SettingsView()
+                case .alerts: AlertsView()
                 }
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fine", systemImage: "checkmark") { sheet = nil }.labelStyle(.iconOnly) } }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fine", systemImage: "checkmark") { sheet = nil }
+                        .labelStyle(.iconOnly)
+                }
             }
         }
     }
@@ -36,16 +57,16 @@ struct RootView: View {
     private var authenticatedContent: some View {
         TabView(selection: $tab) {
             Tab("Home", systemImage: "square.grid.2x2", value: .home) {
-                NavigationStack { HomeView(isActive: tab == .home && scenePhase == .active).modifier(GlobalToolbar(sheet: $sheet, warnings: model.unreadWarnings)) }
+                tabStack(.home) { HomeView(isActive: tab == .home && scenePhase == .active) }
             }
             Tab("App", systemImage: "square.stack.3d.up", value: .applications) {
-                NavigationStack { ApplicationsView().modifier(GlobalToolbar(sheet: $sheet, warnings: model.unreadWarnings)) }
+                tabStack(.applications) { ApplicationsView() }
             }
             Tab("Secrets", systemImage: "key.horizontal", value: .secrets) {
-                NavigationStack { SecretsView().modifier(GlobalToolbar(sheet: $sheet, warnings: model.unreadWarnings)) }
+                tabStack(.secrets) { SecretsView() }
             }
             Tab("Aggiornamenti", systemImage: "arrow.triangle.2.circlepath", value: .updates) {
-                NavigationStack { UpdatesView().modifier(GlobalToolbar(sheet: $sheet, warnings: model.unreadWarnings)) }
+                tabStack(.updates) { UpdatesView() }
             }
         }
         .task(id: scenePhase) {
@@ -58,20 +79,44 @@ struct RootView: View {
         }
     }
 
+    private func tabStack<Content: View>(_ tab: ControlTab, @ViewBuilder content: () -> Content) -> some View {
+        NavigationStack {
+            content()
+                .navigationBarTitleDisplayMode(.inline)
+                .modifier(GlobalToolbar(sheet: $sheet, tab: tab, transition: toolbarTransition, warnings: model.unreadWarnings))
+        }
+    }
+
     private struct GlobalToolbar: ViewModifier {
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Binding var sheet: GlobalSheet?
+        let tab: ControlTab
+        let transition: Namespace.ID
         let warnings: Int
+
+        private var hasWarnings: Bool { warnings > 0 }
+
         func body(content: Content) -> some View {
             content.toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Impostazioni", systemImage: "gearshape") { sheet = .settings }.labelStyle(.iconOnly).accessibilityIdentifier("global.settings")
+                ToolbarItem(id: "global.settings", placement: .topBarLeading) {
+                    Button("Impostazioni", systemImage: "gearshape") { sheet = .settings(tab) }
+                        .labelStyle(.iconOnly)
+                        .accessibilityIdentifier("global.settings")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { sheet = .alerts } label: {
-                        Image(systemName: warnings > 0 ? "bell.badge" : "bell")
-                            .symbolRenderingMode(.palette).foregroundStyle(warnings > 0 ? Color.orange : Color.primary, Color.primary)
-                    }.accessibilityLabel(warnings > 0 ? "Avvisi, \(warnings) attivi" : "Avvisi").accessibilityIdentifier("global.alerts")
+                .matchedTransitionSource(id: GlobalSheet.settings(tab), in: transition)
+
+                ToolbarItem(id: "global.alerts", placement: .topBarTrailing) {
+                    Button { sheet = .alerts(tab) } label: {
+                        Image(systemName: hasWarnings ? "bell.badge" : "bell")
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(hasWarnings ? Color.orange : Color.primary, Color.primary)
+                            .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                            .animation(reduceMotion ? nil : .default, value: hasWarnings)
+                    }
+                    .accessibilityLabel(hasWarnings ? "Avvisi, \(warnings) attivi" : "Avvisi")
+                    .accessibilityIdentifier("global.alerts")
                 }
+                .matchedTransitionSource(id: GlobalSheet.alerts(tab), in: transition)
             }
         }
     }

@@ -145,7 +145,15 @@ private struct VaultEntryView: View {
         default: return "Ogni \(days) giorni"
         }
     }
+    private struct PendingChallenge {
+        let deadline: ContinuousClock.Instant
+        let request: Task<String, Error>
+    }
+
     let manage: (String) -> Void
+    @State private var detailVisible = false
+    @State private var pendingChallenge: PendingChallenge?
+    @State private var challengeExpiry: Task<Void, Never>?
     @State private var revealedValue: String?
     @State private var expiresAt: Date?
     @State private var revealRequest: Task<Void, Never>?
@@ -194,9 +202,27 @@ private struct VaultEntryView: View {
             }.disabled(revealing)
         }
         .navigationTitle(entry.title)
-        .onChange(of: scenePhase) { _, phase in if phase == .background { clear() } }
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            detailVisible = true
+            prefetchChallenge()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { clear() }
+            if phase == .active { prefetchChallenge() }
+        }
+        .onChange(of: app.bootstrap["csrfToken"].stringValue) { _, _ in
+            clear()
+            prefetchChallenge()
+        }
+        .onChange(of: app.authenticated) { _, authenticated in
+            if !authenticated { clear() }
+        }
         .onChange(of: catalog["items"].arrayValue.contains { $0["id"].text == entryID }) { _, exists in if !exists { clear(); dismiss() } }
-        .onDisappear { clear() }
+        .onDisappear {
+            detailVisible = false
+            clear()
+        }
     }
 
     private func dateRow(_ title: String, value: String) -> some View {
@@ -207,9 +233,10 @@ private struct VaultEntryView: View {
     }
 
     @MainActor private func beginReveal() {
-        guard !revealing else { return }
-        clear()
-        let generation = revealGeneration
+        guard detailVisible, scenePhase == .active, !revealing else { return }
+        clearRevealedValue()
+        let generation = UUID()
+        revealGeneration = generation
         revealing = true
         error = nil
         if app.vaultFaceIDRegistered { VaultFaceID.timing.emitEvent("Vault reveal requested") }
@@ -229,7 +256,9 @@ private struct VaultEntryView: View {
                 try await app.enableVaultFaceID()
                 return
             }
-            let proof = try await app.vaultRevealProof(itemID: entryID)
+            let proof = try await app.vaultRevealProof {
+                try await consumeChallenge(generation: generation)
+            }
             guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
             let result: JSONValue
             do {
@@ -256,6 +285,61 @@ private struct VaultEntryView: View {
         catch { if generation == revealGeneration { self.error = error.localizedDescription } }
     }
 
+    @MainActor private func prefetchChallenge() {
+        guard detailVisible, scenePhase == .active, app.authenticated, app.vaultFaceIDSupported,
+              app.vaultFaceIDRegistered, entry.value["valueStored"].boolValue == true,
+              !revealing, revealedValue == nil, pendingChallenge == nil else { return }
+
+        // The server lifetime starts after the request arrives. Start our
+        // shorter lifetime before sending the request, using a monotonic clock.
+        let deadline = ContinuousClock.now + .seconds(45)
+        let request = Task { [app, entryID] in
+            try await app.requestVaultRevealChallenge(itemID: entryID)
+        }
+        pendingChallenge = PendingChallenge(deadline: deadline, request: request)
+        challengeExpiry = Task {
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
+            guard pendingChallenge?.deadline == deadline else { return }
+            discardChallenge()
+        }
+    }
+
+    @MainActor private func consumeChallenge(generation: UUID) async throws -> String {
+        try Task.checkCancellation()
+        guard detailVisible, generation == revealGeneration, scenePhase != .background, app.authenticated else {
+            throw CancellationError()
+        }
+        if let pending = pendingChallenge {
+            pendingChallenge = nil
+            challengeExpiry?.cancel()
+            challengeExpiry = nil
+            if pending.deadline > .now {
+                // Remove it before awaiting so it is available for only this tap.
+                let nonce = await withTaskCancellationHandler {
+                    try? await pending.request.value
+                } onCancel: {
+                    pending.request.cancel()
+                }
+                try Task.checkCancellation()
+                if let nonce, pending.deadline > .now { return nonce }
+            } else {
+                pending.request.cancel()
+            }
+        }
+        guard detailVisible, generation == revealGeneration, scenePhase != .background, app.authenticated else {
+            throw CancellationError()
+        }
+        return try await app.requestVaultRevealChallenge(itemID: entryID)
+    }
+
+    @MainActor private func discardChallenge() {
+        pendingChallenge?.request.cancel()
+        pendingChallenge = nil
+        challengeExpiry?.cancel()
+        challengeExpiry = nil
+    }
+
     @MainActor private func copy(_ value: String, until expiry: Date) {
         guard expiry > Date(), scenePhase == .active else { clear(); return }
         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: value]], options: [.localOnly: true, .expirationDate: expiry])
@@ -267,6 +351,11 @@ private struct VaultEntryView: View {
         revealRequest?.cancel()
         revealRequest = nil
         revealing = false
+        discardChallenge()
+        clearRevealedValue()
+    }
+
+    @MainActor private func clearRevealedValue() {
         revealTask?.cancel(); revealTask = nil
         revealedValue = nil; expiresAt = nil
         if let pasteboardChange, UIPasteboard.general.changeCount == pasteboardChange { UIPasteboard.general.items = [] }

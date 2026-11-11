@@ -11,6 +11,23 @@ actor NativeFixtures {
     func response(path: String, method: String, body: JSONValue?) throws -> JSONValue {
         let canonical = path.replacingOccurrences(of: "/control/v1/", with: "/control/").components(separatedBy: "?")[0]
         if canonical == "/api/native/v1/bootstrap" { return parse(#"{"schemaVersion":1,"authentication":{"vaultFaceIDSupported":true},"session":{"subject":"test-owner","displayName":"Ambiente di prova","role":"owner","vaultFaceIDRegistered":true},"csrfToken":"fixture-csrf","capabilities":[]}"#) }
+        if canonical == "/control/resources/host/history" {
+            let now = Date.now
+            let timestamp = ISO8601DateFormatter()
+            let samples = (0...21).map { index in
+                JSONValue.object([
+                    "capturedAt": .string(timestamp.string(from: now.addingTimeInterval(Double((index - 21) * 2)))),
+                    "cpu": .number(12 + Double(index % 7)),
+                    "memory": .number(32.3 + Double(index % 6) / 10),
+                    "disk": .number(26.4),
+                    "receive": .number(38_400 + Double(index % 5) * 850),
+                    "send": .number(12_800 + Double(index % 4) * 600),
+                    "diskRead": .number(24_000 + Double(index % 6) * 1200),
+                    "diskWrite": .number(128_000 + Double(index % 7) * 5200)
+                ])
+            }
+            return .object(["samples": .array(samples)])
+        }
         if canonical == "/control/resources/host" {
             return parse(#"{"scope":"host","freshness":{"available":true},"cpu":{"available":true,"usedPercent":17.4,"cores":4},"memory":{"available":true,"usedPercent":32.8,"usedBytes":2817508540,"totalBytes":8589934592},"disk":{"available":true,"usedPercent":26.4,"usedBytes":56693568307,"totalBytes":214748364800},"swap":{"usedBytes":0,"totalBytes":2147483648},"network":{"totals":{"rxBytesPerSecond":38400,"txBytesPerSecond":12800}},"diskIo":{"totals":{"readBytesPerSecond":24000,"writeBytesPerSecond":128000}},"inodes":{"usedPercent":3.1},"load":{"one":0.4,"five":0.3,"fifteen":0.2},"uptimeSeconds":102400}"#)
         }

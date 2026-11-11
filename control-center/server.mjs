@@ -49,7 +49,7 @@ import {
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 import { normalizeBackupControl } from "./backup/global-control.mjs";
-import { createHostMetricsReader } from "./resources/host-metrics.mjs";
+import { createHostMetricsHistoryReader, createHostMetricsReader, HOST_BASE_METRIC_QUERIES } from "./resources/host-metrics.mjs";
 import { renderOverview } from "./status/overview.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
 import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
@@ -175,6 +175,7 @@ const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CE
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
 const readHostMetrics = createHostMetricsReader({ readSnapshot: readPrometheusResourceSnapshot, query: prometheusQuery, ttlMs: resourceMetricsTtlMs });
+const readHostMetricsHistory = createHostMetricsHistoryReader({ queryRange: prometheusQuery });
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsagePartialTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000);
 const projectDiskUsageReader = createProjectDiskUsageReader({
@@ -601,7 +602,7 @@ const server = createServer(async (req, res) => {
         await handleRuntimeUpdatesApi(req, res, url, { readJson: readPayload, json, client: runtimeUpdatesClient });
         return;
       }
-      if (requestOperation.operationId?.startsWith("ai.") || requestOperation.operationId === "resources.host.read") {
+      if (requestOperation.operationId?.startsWith("ai.") || ["resources.host.read", "resources.host.history"].includes(requestOperation.operationId)) {
         return handleApi(req, res, url, null, requestOperation);
       }
       if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
@@ -915,6 +916,7 @@ async function handleApi(req, res, url, context, operation) {
         } catch { return json(res, { ok: false, error: "hosting_operation_rejected", message: "Hosting operation unavailable, unsupported, or changed since review." }, 409); }
       }
       case "resources.host.read": return json(res, await readHostMetrics());
+      case "resources.host.history": return json(res, await readHostMetricsHistory());
       case "overview.read": return json(res, context.overview);
       case "backup.vps.catalog": {
         const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
@@ -9621,12 +9623,8 @@ async function readPrometheusResourceSnapshot() {
   if (!prometheusUrl) return unavailableResourceSnapshot("Prometheus non configurato.");
 
   const queries = {
-    cpuPercent: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[2m])))',
+    ...HOST_BASE_METRIC_QUERIES,
     cpuCores: 'count(count by (cpu) (node_cpu_seconds_total{mode="idle"}))',
-    memoryTotal: "node_memory_MemTotal_bytes",
-    memoryAvailable: "node_memory_MemAvailable_bytes",
-    diskSize: 'node_filesystem_size_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
-    diskAvailable: 'node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
     platformCollectorHealthy: "platform_container_metrics_collector_healthy",
     platformCollectorLastAttempt: "platform_container_metrics_collector_last_attempt_timestamp_seconds",
     platformContainerCpu: "platform_container_cpu_cores",
@@ -9704,9 +9702,15 @@ function validPrometheusResourceSnapshot(value) {
     && Array.isArray(value.containers));
 }
 
-async function prometheusQuery(query) {
-  const endpoint = new URL("/api/v1/query", prometheusUrl.endsWith("/") ? prometheusUrl : `${prometheusUrl}/`);
+async function prometheusQuery(query, range = null) {
+  if (!prometheusUrl) return [];
+  const endpoint = new URL(range ? "/api/v1/query_range" : "/api/v1/query", prometheusUrl.endsWith("/") ? prometheusUrl : `${prometheusUrl}/`);
   endpoint.searchParams.set("query", query);
+  if (range) {
+    endpoint.searchParams.set("start", String(range.start));
+    endpoint.searchParams.set("end", String(range.end));
+    endpoint.searchParams.set("step", String(range.step));
+  }
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(resourceProbeTimeoutMs) });
   if (!response.ok) throw new Error(`Prometheus returned ${response.status}`);
   const payload = await response.json();

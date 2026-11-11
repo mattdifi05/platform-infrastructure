@@ -95,6 +95,17 @@ Both include `bootstrapToken`; verify includes `{challenge,bootstrapToken,creden
 whose response contains `clientDataJSON`, `attestationObject`, and optional
 `transports:["internal"]`. Existing approved-CIDR and expiring token gates remain.
 
+## Host chart history
+
+`GET /control/v1/resources/host/history` returns `{samples}` with at most 22
+observations at two-second intervals over the last 40 seconds plus one preceding
+point. Each sample has `capturedAt` (UTC evaluation time) and nullable numeric
+fields `cpu`, `memory`, `disk`, `receive`, `send`, `diskRead`, and `diskWrite`.
+CPU, memory, and disk capacity are percentages. Transfer rates are bytes per
+second. Stale or unreachable exporter samples are omitted. The live endpoint's
+`observedAt` uses the server clock; `freshness.sampledAt` remains the actual
+exporter scrape time.
+
 ## Native catalog and command facades
 
 `GET /api/native/v1/applications` returns

@@ -27,6 +27,8 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertGreaterThan(tab.frame.midX, previousX, "Unexpected tab order")
             previousX = tab.frame.midX
             tab.tap()
+            let title = label == "App" ? "Applicazioni" : label
+            XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5))
             let settings = app.buttons["global.settings"]
             let alerts = app.buttons["global.alerts"]
             XCTAssertTrue(settings.waitForExistence(timeout: 5))
@@ -34,7 +36,6 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertLessThan(settings.frame.midX, alerts.frame.midX)
             XCTAssertLessThan(abs(settings.frame.midY - alerts.frame.midY), 30)
             if label == "Home" {
-                XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.staticTexts["Le risorse del tuo server"].exists)
                 XCTAssertTrue(app.descendants(matching: .any)["home.chart.cpu"].firstMatch.waitForExistence(timeout: 5))
                 XCTAssertFalse(app.staticTexts["Stexor VPS"].exists)

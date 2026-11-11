@@ -14,13 +14,15 @@ private struct ResourceSample {
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     let isActive: Bool
     @State private var snapshot: JSONValue = .null
     @State private var samples: [ResourceSample] = []
-    @State private var historyStart: Date?
     @State private var error: String?
     @State private var loading = true
     @State private var refreshing = false
+
+    private var monitoring: Bool { isActive && scenePhase == .active }
 
     var body: some View {
         ScrollView {
@@ -48,8 +50,12 @@ struct HomeView: View {
         .navigationSubtitle("Le risorse del tuo server")
         .navigationBarTitleDisplayMode(.inline)
         .skeletonRefreshable { await refresh() }
-        .task(id: isActive) {
-            guard isActive else { return }
+        .task(id: monitoring) {
+            guard monitoring else { return }
+            await loadHistory()
+        }
+        .task(id: monitoring) {
+            guard monitoring else { return }
             while !Task.isCancelled {
                 await refresh()
                 do { try await Task.sleep(for: .seconds(2)) } catch { break }
@@ -76,10 +82,37 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(detail).font(.caption).foregroundStyle(.secondary) }
             Text(value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
-            ResourceChart(title: title, samples: samples, historyStart: historyStart, series: series, color: color, percentage: percentage, active: isActive)
+            ResourceChart(title: title, samples: samples, series: series, color: color, percentage: percentage, active: isActive)
                 .accessibilityLabel("Grafico \(title)")
                 .accessibilityIdentifier("home.chart.\(symbol)")
         }.padding(20).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    private func loadHistory() async {
+        guard let value = try? await model.get("/control/v1/resources/host/history"), !Task.isCancelled else { return }
+        let now = Date.now
+        let history: [ResourceSample] = value["samples"].arrayValue.compactMap { row in
+            guard let date = Self.sampleDate(row["capturedAt"].stringValue), date <= now.addingTimeInterval(5) else { return nil }
+            return ResourceSample(date: date, cpu: row["cpu"].doubleValue, memory: row["memory"].doubleValue,
+                                  received: row["receive"].doubleValue, sent: row["send"].doubleValue,
+                                  read: row["diskRead"].doubleValue, written: row["diskWrite"].doubleValue)
+        }
+        mergeSamples(history, keepingExisting: true)
+    }
+
+    private static func sampleDate(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        return (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(raw))
+            ?? (try? Date.ISO8601FormatStyle().parse(raw))
+    }
+
+    private func mergeSamples(_ incoming: [ResourceSample], keepingExisting: Bool = false) {
+        let cutoff = Date.now.addingTimeInterval(-48)
+        // Keep a predecessor outside the visible window so a real segment can cross the left edge.
+        let ordered = keepingExisting ? incoming + samples : samples + incoming
+        var byDate: [Date: ResourceSample] = [:]
+        for sample in ordered where sample.date >= cutoff { byDate[sample.date] = sample }
+        samples = byDate.values.sorted { $0.date < $1.date }
     }
 
     private func refresh() async {
@@ -93,24 +126,24 @@ struct HomeView: View {
             snapshot = value
             error = nil
             let available = value["freshness"]["available"].boolValue == true
-            samples.append(ResourceSample(
-                date: .now,
+            let receivedAt = Date.now
+            let observedAt = Self.sampleDate(value["observedAt"].stringValue) ?? receivedAt
+            mergeSamples([ResourceSample(
+                date: observedAt <= receivedAt.addingTimeInterval(5) ? observedAt : receivedAt,
                 cpu: available ? value["cpu"]["usedPercent"].doubleValue : nil,
                 memory: available ? value["memory"]["usedPercent"].doubleValue : nil,
                 received: available ? value["network"]["totals"]["rxBytesPerSecond"].doubleValue : nil,
                 sent: available ? value["network"]["totals"]["txBytesPerSecond"].doubleValue : nil,
                 read: available ? value["diskIo"]["totals"]["readBytesPerSecond"].doubleValue : nil,
                 written: available ? value["diskIo"]["totals"]["writeBytesPerSecond"].doubleValue : nil
-            ))
+            )])
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
             self.error = "Impossibile aggiornare le risorse del server."
-            samples.append(ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil))
+            mergeSamples([ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil)])
         }
-        if historyStart == nil { historyStart = samples.first?.date }
-        samples.removeAll { $0.date < Date.now.addingTimeInterval(-130) }
         loading = false
     }
 }
@@ -119,10 +152,9 @@ private struct ResourceChart: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var scale: VerticalScale?
-    @ScaledMetric(relativeTo: .caption2) private var rateLabelWidth = 52
+    @ScaledMetric(relativeTo: .caption2) private var axisLabelWidth = 52
     let title: String
     let samples: [ResourceSample]
-    let historyStart: Date?
     let series: [(String, KeyPath<ResourceSample, Double?>)]
     let color: Color
     let percentage: Bool
@@ -148,18 +180,21 @@ private struct ResourceChart: View {
             return (1...5).map { changedAt.addingTimeInterval(Double($0) / 10) }
         }
 
-        func upperBound(at date: Date) -> Double {
+        func upperBound(at date: Date, containing peak: Double) -> Double {
             let progress = min(1, max(0, date.timeIntervalSince(changedAt) / 0.5))
-            return previous + (target - previous) * progress
+            return max(peak, previous + (target - previous) * progress)
         }
     }
+
+    private static let window: TimeInterval = 40
+    private static let nowPosition = 0.95
 
     private var isAnimating: Bool { active && scenePhase == .active && !reduceMotion }
 
     private func trace(for key: KeyPath<ResourceSample, Double?>) -> Trace {
         var previous: Date?
         let points: [Point] = samples.compactMap { sample in
-            guard let value = sample[keyPath: key] else {
+            guard let value = sample[keyPath: key], value.isFinite, value >= 0, !percentage || value <= 100 else {
                 previous = nil
                 return nil
             }
@@ -172,10 +207,13 @@ private struct ResourceChart: View {
 
     var body: some View {
         let traces = series.map { trace(for: $0.1) }
-        let peak = traces.lazy.flatMap(\.points).map(\.value).max() ?? 0
-        let target = percentage ? 100 : Self.rateUpperBound(for: peak)
-        let scale = scale ?? VerticalScale(previous: target, target: target, changedAt: .distantPast)
-        let staticDate = samples.last?.date ?? .now
+        let now = Date.now
+        let staticDate = samples.last?.date ?? now
+        let peak = Self.visiblePeak(traces, since: (isAnimating ? now : staticDate).addingTimeInterval(-Self.window))
+        let target = percentage ? Self.percentUpperBound(for: peak) : Self.rateUpperBound(for: peak)
+        let current = scale?.upperBound(at: now, containing: peak) ?? target
+        let nextScale = VerticalScale(previous: isAnimating ? current : target, target: target, changedAt: now)
+        let displayScale = scale?.target == target ? scale ?? nextScale : nextScale
 
         // Keep the native axes out of the frame-by-frame plot updates.
         Chart {
@@ -184,15 +222,12 @@ private struct ResourceChart: View {
         .chartXScale(domain: 0.0...1.0, range: .plotDimension(padding: 0))
         .chartYScale(domain: 0.0...1.0, range: .plotDimension(padding: 4))
         .chartXAxis {
-            AxisMarks(values: [0.0, 0.25, 0.5, 0.75, 1.0]) { axis in
+            AxisMarks(values: (0...4).map { Double($0) * Self.nowPosition / 4 }) { axis in
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
-                if let fraction = axis.as(Double.self), axis.index.isMultiple(of: 2) {
+                if axis.index.isMultiple(of: 2) {
                     AxisValueLabel {
-                        TimelineView(.animation(minimumInterval: 1, paused: !isAnimating)) { context in
-                            let date = isAnimating ? presentationDate(at: context.date) : staticDate
-                            Text(timeLabel(Self.window(at: date, startingAt: historyStart) * (1 - fraction)))
-                                .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
-                        }
+                        Text(timeLabel(Self.window * Double(4 - axis.index) / 4))
+                            .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
             }
@@ -202,17 +237,12 @@ private struct ResourceChart: View {
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
                 if let fraction = axis.as(Double.self) {
                     AxisValueLabel {
-                        if percentage {
-                            Text("\(Int(fraction * 100))%")
+                        TimelineView(.explicit(isAnimating ? displayScale.labelUpdates : [])) { context in
+                            let bound = isAnimating ? displayScale.upperBound(at: context.date, containing: peak) : target
+                            Text(axisLabel(fraction * bound))
                                 .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
-                        } else {
-                            TimelineView(.explicit(isAnimating ? scale.labelUpdates : [])) { context in
-                                let bound = isAnimating ? scale.upperBound(at: context.date) : target
-                                Text(NativeFormatting.bytes(fraction * bound))
-                                    .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
-                                    .lineLimit(1).minimumScaleFactor(0.75)
-                                    .frame(width: rateLabelWidth, alignment: .trailing)
-                            }
+                                .lineLimit(1).minimumScaleFactor(0.75)
+                                .frame(width: axisLabelWidth, alignment: .trailing)
                         }
                     }
                 }
@@ -227,13 +257,12 @@ private struct ResourceChart: View {
                     let frame = geometry[anchor]
                     let plot = CGRect(x: left, y: top, width: right - left, height: bottom - top)
                     TimelineView(.animation(paused: !isAnimating)) { timeline in
-                        let date = isAnimating ? presentationDate(at: timeline.date) : staticDate
-                        let window = Self.window(at: date, startingAt: historyStart)
-                        let upperBound = isAnimating ? scale.upperBound(at: timeline.date) : target
+                        let date = isAnimating ? timeline.date : staticDate
+                        let upperBound = isAnimating ? displayScale.upperBound(at: timeline.date, containing: peak) : target
                         Canvas { context, size in
                             var clipped = context
                             clipped.clip(to: Path(CGRect(x: plot.minX, y: 0, width: plot.width, height: size.height)))
-                            draw(traces, in: clipped, plot: plot, date: date, window: window, upperBound: upperBound)
+                            draw(traces, in: clipped, plot: plot, date: date, upperBound: upperBound)
                         }
                     }
                     .frame(width: frame.width, height: frame.height)
@@ -245,23 +274,42 @@ private struct ResourceChart: View {
             }
         }
         .frame(height: 135)
-        .accessibilityChartDescriptor(ChartAccessibility(title: title, traces: traces, seriesNames: series.map(\.0), date: staticDate, window: Self.window(at: staticDate, startingAt: historyStart), upperBound: target, percentage: percentage))
-        .onChange(of: target, initial: true) { _, target in
-            let now = Date.now
-            let current = self.scale?.upperBound(at: now) ?? target
-            self.scale = VerticalScale(previous: isAnimating ? current : target, target: target, changedAt: now)
+        .accessibilityChartDescriptor(ChartAccessibility(title: title, traces: traces, seriesNames: series.map(\.0), date: staticDate, window: Self.window, upperBound: target, percentage: percentage))
+        .onChange(of: target, initial: true) { _, _ in
+            self.scale = displayScale
         }
     }
 
-    private func presentationDate(at now: Date) -> Date {
-        let cursor = now.addingTimeInterval(-3)
-        // Buffer incoming observations so a straight segment can advance with the frame clock.
-        return historyStart.map { max($0, cursor) } ?? cursor
+    private static func visiblePeak(_ traces: [Trace], since left: Date) -> Double {
+        var peak = 0.0
+        for trace in traces {
+            var predecessor: Point?
+            for point in trace.points {
+                if point.date < left {
+                    predecessor = point
+                    continue
+                }
+                if let predecessor, !point.startsSegment {
+                    let fraction = left.timeIntervalSince(predecessor.date) / point.date.timeIntervalSince(predecessor.date)
+                    peak = max(peak, predecessor.value + (point.value - predecessor.value) * fraction)
+                }
+                predecessor = nil
+                peak = max(peak, point.value)
+            }
+        }
+        return peak
     }
 
-    private static func window(at date: Date, startingAt start: Date?) -> TimeInterval {
-        // Start the domain at the first poll, then slide a full window over measured history.
-        min(120, max(1, date.timeIntervalSince(start ?? date)))
+    private static func percentUpperBound(for peak: Double) -> Double {
+        let padded = max(1, peak * 1.15)
+        return [1.0, 2, 4, 8, 12, 16, 20, 24, 32, 40, 48, 60, 80, 100].first { $0 >= padded } ?? 100
+    }
+
+    private func axisLabel(_ value: Double) -> String {
+        if percentage {
+            return value.formatted(.number.precision(.fractionLength(0...2))) + "%"
+        }
+        return NativeFormatting.bytes(value)
     }
 
     private static func rateUpperBound(for peak: Double) -> Double {
@@ -271,11 +319,11 @@ private struct ResourceChart: View {
         return ([1.0, 2, 4, 8, 10].first { $0 * magnitude >= padded } ?? 10) * magnitude
     }
 
-    private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect, date: Date, window: TimeInterval, upperBound: Double) {
+    private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect, date: Date, upperBound: Double) {
         func location(_ point: Point) -> CGPoint {
             CGPoint(
-                x: plot.maxX + plot.width * point.date.timeIntervalSince(date) / window,
-                y: plot.maxY - plot.height * min(1, point.value / upperBound)
+                x: plot.minX + plot.width * Self.nowPosition * (1 + point.date.timeIntervalSince(date) / Self.window),
+                y: plot.maxY - plot.height * point.value / upperBound
             )
         }
 

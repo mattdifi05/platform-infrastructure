@@ -128,6 +128,7 @@ const CONTROL_ROUTES = Object.freeze([
   viewer("runtime-updates.operation", "control", "runtime-updates", "operations", parameter("operationId")),
 
   viewer("resources.host.read", "control", "resources", "host"),
+  viewer("resources.host.history", "control", "resources", "host", "history"),
   viewer("resources.summary.read", "control", "resources", "summary"),
   admin("resources.limits.plan", "control", "resources", "limits"),
   viewer("monitoring.read", "control", "monitoring"),
