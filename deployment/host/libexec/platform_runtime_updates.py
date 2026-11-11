@@ -39,7 +39,7 @@ ROOT = pathlib.Path(os.environ.get('PLATFORM_UPDATES_STATE', '/var/lib/platform-
 CONFIG = pathlib.Path(os.environ.get('PLATFORM_UPDATES_CONFIG', '/etc/platform-infrastructure/updates/config.json'))
 SOCKET = os.environ.get('PLATFORM_UPDATES_SOCKET', '/run/platform-updates/updates.sock')
 KEY = pathlib.Path(os.environ.get('PLATFORM_UPDATES_KEY', '/etc/platform-infrastructure/updates/bridge-key'))
-EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 GATE = threading.Lock()
 HOST_JOB_GUARD = threading.Lock()
 HOST_JOB_THREADS = set()
@@ -283,8 +283,10 @@ def fingerprint(rows):
 def catalog():
     output = []
     checked = load('cache', 'releases', {})
-    for row in configuration()['components']:
-        actual, versions, known = observed_versions(row)
+    components = configuration()['components']
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as observations:
+        observed_components = list(observations.map(observed_versions, components))
+    for row, (actual, versions, known) in zip(components, observed_components):
         version = versions[-1] if known else None
         alignment = known and len(versions) > 1
         cached = checked.get('components', {}).get(row['id'], {})

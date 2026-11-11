@@ -31,6 +31,9 @@ struct ApplicationDetailView: View {
             } else {
                 EmptyState(title: "Applicazione rimossa", systemImage: "app.dashed", description: "L’applicazione non è più presente nel catalogo.")
             }
+            if let error = store.detailError {
+                Section { ErrorNotice(message: error) { Task { await store.loadDetails(model, force: true) } } }
+            }
             if let error = store.error {
                 Section { ErrorNotice(message: error) { Task { await refresh() } } }
             }
@@ -38,6 +41,7 @@ struct ApplicationDetailView: View {
         .navigationTitle(entry?["name"].stringValue ?? projectID)
         .navigationBarTitleDisplayMode(.inline)
         .skeletonRefreshable { await refresh() }
+        .task(id: store.detailsRevision) { await store.loadDetails(model) }
         .task { await loadHosting() }
         .task { await loadDatabases() }
         .task(id: copyInProgress) {
@@ -157,19 +161,22 @@ struct ApplicationDetailView: View {
         let diskIsPartial = usage["diskComplete"].boolValue == false || usage["diskTruncated"].boolValue == true
         let diskIsStale = usage["diskStale"].boolValue == true
         return Section {
-            LabeledContent("CPU", value: cpu.map { $0.formatted(.number.precision(.fractionLength(0...3))) + " core" } ?? "Non disponibile")
-            LabeledContent("RAM", value: memory.map { NativeFormatting.bytes($0) } ?? "Non disponibile")
-            LabeledContent("Spazio dei file", value: disk.map { NativeFormatting.bytes($0) } ?? "Non disponibile")
-            if let files = usage["files"].intValue, disk != nil {
-                LabeledContent("File rilevati", value: files.formatted())
+            Group {
+                LabeledContent("CPU", value: cpu.map { $0.formatted(.number.precision(.fractionLength(0...3))) + " core" } ?? "Non disponibile")
+                LabeledContent("RAM", value: memory.map { NativeFormatting.bytes($0) } ?? "Non disponibile")
+                LabeledContent("Spazio dei file", value: disk.map { NativeFormatting.bytes($0) } ?? "Non disponibile")
+                if let files = usage["files"].intValue, disk != nil {
+                    LabeledContent("File rilevati", value: files.formatted())
+                }
+                if disk != nil, diskIsPartial || diskIsStale {
+                    Text(diskIsPartial ? "Scansione dei file parziale" : "Scansione dei file da aggiornare")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if !containers.isEmpty {
+                    LabeledContent("Container", value: "\(containers.filter { $0["runtimeStatus"].text == "running" }.count) di \(containers.count) in esecuzione")
+                }
             }
-            if disk != nil, diskIsPartial || diskIsStale {
-                Text(diskIsPartial ? "Scansione dei file parziale" : "Scansione dei file da aggiornare")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            if !containers.isEmpty {
-                LabeledContent("Container", value: "\(containers.filter { $0["runtimeStatus"].text == "running" }.count) di \(containers.count) in esecuzione")
-            }
+            .contentSkeleton(!store.hasLoadedDetails && store.detailError == nil, title: "Caricamento risorse…")
         } header: {
             Text("Risorse applicazione")
         } footer: {
@@ -241,10 +248,11 @@ struct ApplicationDetailView: View {
     }
 
     private func refresh() async {
-        async let catalog: Void = store.load(model)
+        await store.load(model)
+        async let details: Void = store.loadDetails(model, force: true)
         async let visibility: Void = loadHosting()
         async let databases: Void = loadDatabases()
-        _ = await (catalog, visibility, databases)
+        _ = await (details, visibility, databases)
     }
 
     private func loadDatabases() async {

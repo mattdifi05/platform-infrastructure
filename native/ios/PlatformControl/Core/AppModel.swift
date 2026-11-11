@@ -22,7 +22,7 @@ final class AppModel {
 
     // Only non-value page metadata may be kept for this authenticated session.
     private static let pagePaths: Set<String> = [
-        "/api/native/v1/applications", "/control/v1/vault",
+        "/api/native/v1/applications", "/api/native/v1/applications?view=catalog", "/control/v1/vault",
         "/control/v1/runtime-updates", "/control/v1/runtime-updates/system",
         "/control/backups/control", "/control/server-events"
     ]
@@ -180,7 +180,7 @@ final class AppModel {
     func preparePages() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.applicationStore.load(self, maxAge: .seconds(8)) }
-            for path in Self.pagePaths where path != "/api/native/v1/applications" {
+            for path in Self.pagePaths where !path.hasPrefix("/api/native/v1/applications") {
                 group.addTask { _ = try? await self.readPage(path, maxAge: .seconds(8)) }
             }
         }
@@ -213,6 +213,7 @@ final class AppModel {
     }
 
     private func invalidatePages() {
+        applicationStore.invalidateDetails()
         pageGeneration = UUID()
         pageCache.removeAll()
         pageRequests.removeAll()

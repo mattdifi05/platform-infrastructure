@@ -71,15 +71,23 @@ struct UpdatesView: View {
     var body: some View {
         List {
             Section {
-                Button("Verifica aggiornamenti", systemImage: "arrow.clockwise") {
+                Button {
                     Task { await checkAll() }
+                } label: {
+                    Label("Verifica aggiornamenti", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(.rect)
                 }
                 .disabled(maintenanceInProgress || system["canCheck"].boolValue != true || services["canCheck"].boolValue != true)
                 .accessibilityIdentifier("updates.check")
                 .contentSkeleton(!checking.isEmpty, title: "Verifica aggiornamenti in corso…")
                 if hasUpdates {
-                    Button("Aggiorna tutto", systemImage: "arrow.up.circle") {
+                    Button {
                         review = CombinedUpdateReview(requests: combinedRequests, aggregate: true)
+                    } label: {
+                        Label("Aggiorna tutto", systemImage: "arrow.up.circle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(.rect)
                     }
                     .disabled(!canUpdateAll)
                     .accessibilityIdentifier("updates.all")

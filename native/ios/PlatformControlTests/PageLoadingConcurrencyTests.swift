@@ -7,7 +7,7 @@ final class PageLoadingConcurrencyTests: XCTestCase, @unchecked Sendable {
     func testConcurrentStoreReloadAfterMutationKeepsFreshCatalog() async throws {
         let (model, transport) = makeModel()
         model.authenticated = true
-        let path = "/api/native/v1/applications"
+        let path = "/api/native/v1/applications?view=catalog"
         let firstStarted = expectation(description: "Original catalog request")
         let secondStarted = expectation(description: "Post-mutation catalog request")
         transport.expect(path, occurrence: 1, fulfillment: firstStarted)
@@ -28,6 +28,77 @@ final class PageLoadingConcurrencyTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(model.applicationStore.isLoading)
         XCTAssertNil(model.applicationStore.error)
         XCTAssertEqual(model.applicationStore.projects.first?["name"].text, "Fresh")
+    }
+
+    @MainActor
+    func testDetailCompletionPreservesNewerCatalogAndFolderMetadata() async throws {
+        let (model, transport) = makeModel()
+        model.authenticated = true
+        let list = "/api/native/v1/applications?view=catalog"
+        let full = "/api/native/v1/applications"
+        transport.respondAutomatically(list, after: 0, body: catalog(named: "Current"))
+        await model.applicationStore.load(model)
+        let started = expectation(description: "Full detail request")
+        transport.expect(full, occurrence: 1, fulfillment: started)
+        let details = Task { await model.applicationStore.loadDetails(model) }
+        await fulfillment(of: [started], timeout: 3)
+        try transport.respond(full, occurrence: 1, body: #"{"projects":[{"id":"app","name":"Old"}],"folders":{"memberships":{"project:app":"old-folder"}},"databases":[],"resources":{"projectUsage":[]},"redis":{}}"#)
+        await details.value
+        XCTAssertEqual(model.applicationStore.projects.first?["name"].text, "Current")
+        XCTAssertNil(model.applicationStore.memberships["project:app"].stringValue)
+        XCTAssertTrue(model.applicationStore.hasLoadedDetails)
+        try await model.logout()
+        XCTAssertFalse(model.applicationStore.hasLoadedDetails)
+        XCTAssertEqual(model.applicationStore.catalog["resources"], .null)
+    }
+
+    @MainActor
+    func testPendingFullResponseCannotCommitAfterCatalogRefresh() async throws {
+        let (model, transport) = makeModel()
+        model.authenticated = true
+        let list = "/api/native/v1/applications?view=catalog"
+        let full = "/api/native/v1/applications"
+        transport.respondAutomatically(list, after: 0, body: catalog(named: "Before"))
+        await model.applicationStore.load(model)
+        let started = expectation(description: "Old full detail request")
+        transport.expect(full, occurrence: 1, fulfillment: started)
+        let details = Task { await model.applicationStore.loadDetails(model) }
+        await fulfillment(of: [started], timeout: 3)
+        transport.respondAutomatically(list, after: 0, body: catalog(named: "After"))
+        await model.applicationStore.load(model)
+        try transport.respond(full, occurrence: 1, body: #"{"databases":[],"resources":{"revision":"old"},"redis":{}}"#)
+        await details.value
+        XCTAssertEqual(model.applicationStore.projects.first?["name"].text, "After")
+        XCTAssertFalse(model.applicationStore.hasLoadedDetails)
+        XCTAssertEqual(model.applicationStore.catalog["resources"], .null)
+        XCTAssertFalse(model.applicationStore.isLoadingDetails)
+    }
+
+    @MainActor
+    func testDetailRevisionRestartsReadAfterCatalogInvalidation() async throws {
+        let (model, transport) = makeModel()
+        model.authenticated = true
+        let list = "/api/native/v1/applications?view=catalog"
+        let full = "/api/native/v1/applications"
+        transport.respondAutomatically(list, after: 0, body: catalog(named: "Current"))
+        await model.applicationStore.load(model)
+        let revision = model.applicationStore.detailsRevision
+        let started = expectation(description: "Full detail request before invalidation")
+        transport.expect(full, occurrence: 1, fulfillment: started)
+        let oldDetails = Task { await model.applicationStore.loadDetails(model) }
+        await fulfillment(of: [started], timeout: 3)
+        await model.applicationStore.load(model)
+        XCTAssertNotEqual(model.applicationStore.detailsRevision, revision)
+        oldDetails.cancel()
+        transport.respondAutomatically(full, after: 1, body: #"{"databases":[],"resources":{"revision":"fresh"},"redis":{}}"#)
+        let replacement = Task { await model.applicationStore.loadDetails(model) }
+        await Task.yield()
+        try transport.respond(full, occurrence: 1, body: #"{"databases":[],"resources":{"revision":"fresh"},"redis":{}}"#)
+        await oldDetails.value
+        await replacement.value
+        XCTAssertTrue(model.applicationStore.hasLoadedDetails)
+        XCTAssertFalse(model.applicationStore.isLoadingDetails)
+        XCTAssertEqual(model.applicationStore.catalog["resources"]["revision"].text, "fresh")
     }
 
     @MainActor
@@ -136,7 +207,8 @@ private final class PageTestTransport: @unchecked Sendable {
     }
 
     func start(_ request: PageTestURLProtocol) {
-        let path = request.request.url!.path
+        let url = request.request.url!
+        let path = url.path + (url.query.map { "?" + $0 } ?? "")
         if request.request.httpMethod == "POST" {
             request.complete(status: 200, body: "{}")
             return

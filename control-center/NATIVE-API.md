@@ -110,6 +110,9 @@ exporter scrape time.
 
 `GET /api/native/v1/applications` returns
 `{projects,applications,observed,folders,databases,engines,destructiveOperations,resources,redis}`.
+Adding `?view=catalog` returns only `projects`, `applications`, `observed`,
+`folders` and `detailState:"pending"` for immediate list presentation. Resource,
+database and Redis detail screens request the full endpoint progressively.
 `folders` is the existing applicationFolderCatalog object. Each database may
 include `adminTool:{label,url}` for a separate phpMyAdmin/phpPgAdmin browser tool;
 the native app's URLSession cookies are not automatically shared with Safari.

@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 
 test("real HTTP folder operations enforce auth and CSRF and render isolated catalog groups", async t => {
   const root = mkdtempSync(path.join(os.tmpdir(), "application-folders-http-"));
@@ -38,9 +39,17 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const origin = `https://127.0.0.1:${port}`;
   const base = `http://127.0.0.1:${port}`;
   const sessions = ["viewer", "admin", "owner"].map(role => ({ token: `folder-test-${role}`, csrf: `folder-csrf-${role}`, role, ageSeconds: 0 }));
+  let resourceQueries = 0;
+  const prometheus = createHttpServer((req, res) => {
+    resourceQueries++;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "success", data: { result: [] } }));
+  });
+  await new Promise(resolve => prometheus.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => prometheus.close(resolve)));
   const child = spawn(process.execPath, ["--import", observationFixture, "control-center/server.mjs"], {
     cwd: path.resolve(import.meta.dirname, "../.."),
-    env: { ...process.env, NODE_ENV: "test", CONTROL_CENTER_ENV: "test", CONTROL_CENTER_BIND_HOST: "127.0.0.1", CONTROL_CENTER_PORT: String(port), CONTROL_CENTER_AUTH_MODE: "app-passkey", CONTROL_CENTER_AUTH_STORE: "memory", CONTROL_CENTER_PUBLIC_ORIGIN: origin, CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1", CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled", CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8", CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: "172.16.0.0/12", CONTROL_CENTER_TEST_SESSION_FIXTURES: JSON.stringify(sessions), CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false", CONTROL_CENTER_DATABASE_LIVE_APPLY: "false", CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: invalidCatalogRoot, CONTROL_CENTER_HOST_EXTENSION_FILE: undefined, PROJECTS_ROOT: path.join(root, "projects"), CONTROL_CENTER_REPORTS_ROOT: path.join(root, "reports"), CONTROL_CENTER_BACKUP_ROOT: path.join(root, "backups"), ...isolatedStateEnv(stateDir) },
+    env: { ...process.env, NODE_ENV: "test", CONTROL_CENTER_ENV: "test", CONTROL_CENTER_BIND_HOST: "127.0.0.1", CONTROL_CENTER_PORT: String(port), CONTROL_CENTER_AUTH_MODE: "app-passkey", CONTROL_CENTER_AUTH_STORE: "memory", CONTROL_CENTER_PUBLIC_ORIGIN: origin, CONTROL_CENTER_AUTH_RP_ID: "127.0.0.1", CONTROL_CENTER_FIRST_CONFIGURATION_MODE: "disabled", CONTROL_CENTER_FIRST_CONFIGURATION_ALLOWED_CIDRS: "127.0.0.0/8", CONTROL_CENTER_FIRST_CONFIGURATION_TRUSTED_PROXY_CIDRS: "172.16.0.0/12", CONTROL_CENTER_TEST_SESSION_FIXTURES: JSON.stringify(sessions), CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false", CONTROL_CENTER_DATABASE_LIVE_APPLY: "false", CONTROL_CENTER_PROMETHEUS_URL: `http://127.0.0.1:${prometheus.address().port}`, CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT: invalidCatalogRoot, CONTROL_CENTER_HOST_EXTENSION_FILE: undefined, PROJECTS_ROOT: path.join(root, "projects"), CONTROL_CENTER_REPORTS_ROOT: path.join(root, "reports"), CONTROL_CENTER_BACKUP_ROOT: path.join(root, "backups"), ...isolatedStateEnv(stateDir) },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -72,6 +81,16 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
     assert.equal(/\bdisabled(?:\s|>|=)/.test(button), disabled);
     assert.match(form[1], disabled ? /sposta prima tutte le applicazioni/ : /vuota e può essere eliminata/);
   }
+  assert.equal((await request("GET", "/api/native/v1/applications?view=catalog", null)).status, 401);
+  const initialCatalog = await request("GET", "/api/native/v1/applications?view=catalog", "viewer");
+  assert.equal(initialCatalog.status, 200);
+  const lightweight = await initialCatalog.json();
+  assert.equal(lightweight.detailState, "pending");
+  assert.equal(resourceQueries, 0, "Initial catalog must bypass live resource collection");
+  assert.deepEqual(lightweight.projects.map(project => project.slug).sort(), ["alpha", "beta"]);
+  assert.deepEqual(lightweight.applications.map(app => app.id).sort(), ["alpha", "beta"]);
+  assert.equal(Object.hasOwn(lightweight, "resources"), false);
+  assert.equal(Object.hasOwn(lightweight, "redis"), false);
   const routes = ["/control/project-folders", "/control/project-folders/membership", "/control/project-folders/missing/rename", "/control/project-folders/missing/delete"];
   const before = readFileSync(path.join(stateDir, "projects.json"), "utf8");
   for (const route of [...routes, ...routes.map(route => route.replace("/control/", "/control/v1/"))]) {
@@ -95,6 +114,10 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   const native = await request("GET", "/api/native/v1/applications", "viewer");
   assert.equal(native.status, 200, "a rejected host catalog must not hide managed apps in the native client");
   const nativeCatalog = await native.json();
+  assert.ok(resourceQueries > 0, "Default API retains full live resource collection");
+  const lightAfterMutation = await (await request("GET", "/api/native/v1/applications?view=catalog", "viewer")).json();
+  for (const key of ["projects", "applications", "observed", "folders"]) assert.deepEqual(lightAfterMutation[key], nativeCatalog[key]);
+  assert.equal(lightAfterMutation.folders.memberships["project:alpha"], folderId);
   assert.deepEqual(nativeCatalog.projects.map(project => project.slug).sort(), ["alpha", "beta"]);
   assert.deepEqual(nativeCatalog.observed, []);
   assert.deepEqual(nativeCatalog.folders, catalog);
