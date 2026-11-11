@@ -45,6 +45,7 @@ private struct UpdateReview: Identifiable, Sendable {
 private struct CombinedUpdateReview: Identifiable {
     let id = UUID()
     let requests: [UpdateReview]
+    var aggregate = false
 }
 
 struct UpdatesView: View {
@@ -56,8 +57,7 @@ struct UpdatesView: View {
     @State private var operations: [String: JSONValue] = [:]
     @State private var operationScopes: [String: UpdateScope] = [:]
     @State private var trackedOperations: Set<String> = []
-    @State private var review: UpdateReview?
-    @State private var combinedReview: CombinedUpdateReview?
+    @State private var review: CombinedUpdateReview?
     @State private var checking: Set<UpdateScope> = []
     @State private var pollingError = false
 
@@ -79,7 +79,7 @@ struct UpdatesView: View {
                 .contentSkeleton(!checking.isEmpty, title: "Verifica aggiornamenti in corso…")
                 if hasUpdates {
                     Button("Aggiorna tutto", systemImage: "arrow.up.circle") {
-                        combinedReview = CombinedUpdateReview(requests: combinedRequests)
+                        review = CombinedUpdateReview(requests: combinedRequests, aggregate: true)
                     }
                     .disabled(!canUpdateAll)
                     .accessibilityIdentifier("updates.all")
@@ -94,7 +94,7 @@ struct UpdatesView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             componentRow(component)
                             Button("Aggiorna", systemImage: "arrow.up.circle") {
-                                review = UpdateReview(scope: .services, target: component.id, title: component["label"].text, revision: services["revision"].text)
+                                review = CombinedUpdateReview(requests: [UpdateReview(scope: .services, target: component.id, title: component["label"].text, revision: services["revision"].text)])
                             }
                             .disabled(!canUpdateServices)
                             .accessibilityIdentifier("updates.service.\(component.id)")
@@ -122,13 +122,8 @@ struct UpdatesView: View {
             guard scenePhase == .active, pending else { return }
             await monitorOperations()
         }
-        .sheet(item: $review) { request in
-            UpdatePlanSheet(reviews: [request]) { accepted, item in
-                accept(accepted, scope: item.scope, title: item.title)
-            }
-        }
-        .sheet(item: $combinedReview) { batch in
-            UpdatePlanSheet(reviews: batch.requests, aggregate: true) { accepted, item in
+        .sheet(item: $review) { batch in
+            UpdatePlanSheet(reviews: batch.requests, aggregate: batch.aggregate) { accepted, item in
                 accept(accepted, scope: item.scope, title: item.title)
             }
         }
@@ -236,7 +231,7 @@ struct UpdatesView: View {
     }
 
     private func reviewSystem(_ action: UpdateReview.Action) {
-        review = UpdateReview(scope: .system, target: "system", title: "Sistema", revision: system["revision"].text, action: action)
+        review = CombinedUpdateReview(requests: [UpdateReview(scope: .system, target: "system", title: "Sistema", revision: system["revision"].text, action: action)])
     }
 
     private var servicesSection: some View {

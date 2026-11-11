@@ -138,14 +138,20 @@ struct RootView: View {
                                     .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                                     .animation(reduceMotion ? nil : .default, value: hasWarnings)
                                     .frame(width: 44, height: 44)
+                                    .contentShape(.circle)
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel(hasWarnings ? "Avvisi, \(warnings) attivi" : "Avvisi")
-                            .accessibilityIdentifier("global.alerts")
+                            .frame(width: 44, height: 44)
+                            .contentShape(.circle)
                             .glassEffect(.regular.interactive(), in: .circle)
                             .glassEffectID("global.alerts", in: transition)
                             .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
                             .matchedTransitionSource(id: GlobalSheet.alerts, in: transition)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityLabel(hasWarnings ? "Avvisi, \(warnings) attivi" : "Avvisi")
+                            .accessibilityIdentifier("global.alerts")
+                            .accessibilityAction { sheet = .alerts }
 
                             if hasCreationAction {
                                 Button { createAction?() } label: {
@@ -153,18 +159,25 @@ struct RootView: View {
                                         .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                                         .animation(reduceMotion ? nil : .default, value: tab)
                                         .frame(width: 44, height: 44)
+                                        .contentShape(.circle)
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel(createTitle)
-                                .accessibilityIdentifier("page.create")
-                                .disabled(createAction == nil)
+                                .frame(width: 44, height: 44)
+                                .contentShape(.circle)
                                 .glassEffect(.regular.interactive(), in: .circle)
                                 .glassEffectID("page.create", in: transition)
                                 .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
                                 .matchedTransitionSource(id: createID, in: transition)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityLabel(createTitle)
+                                .accessibilityIdentifier("page.create")
+                                .accessibilityAction { createAction?() }
+                                .disabled(createAction == nil)
                             }
                         }
                         .font(.body.weight(.semibold))
+                        .accessibilityElement(children: .contain)
                     }
                     .fixedSize()
                     .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: hasCreationAction)

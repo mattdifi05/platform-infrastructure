@@ -148,10 +148,12 @@ final class PlatformControlUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Il server sarà temporaneamente irraggiungibile durante il riavvio."].exists)
         XCTAssertEqual(app.textFields.count, 0)
         app.buttons["Annulla"].tap()
+        XCTAssertTrue(app.navigationBars["Aggiornamenti"].waitForExistence(timeout: 5))
 
         let updateAll = app.buttons["updates.all"]
-        if !updateAll.isHittable { app.swipeDown() }
-        XCTAssertTrue(updateAll.isHittable)
+        let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: updateAll)
+        XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 5), .completed,
+                       "Aggregate action frame \(updateAll.frame), enabled \(updateAll.isEnabled)")
         updateAll.tap()
         XCTAssertTrue(app.buttons["updates.confirm"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons["updates.confirm"].label, "Aggiorna tutto")
