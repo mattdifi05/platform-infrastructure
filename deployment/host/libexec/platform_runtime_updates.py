@@ -370,6 +370,11 @@ def maintenance_partner(kind):
         if kinds == {'host-check', 'check'}:
             return other['id']
         if kinds == {'host-upgrade', 'apply'} and (other['kind'] != 'host-upgrade' or nonreboot_host_upgrade(other['id'])):
+            if other['kind'] == 'host-upgrade':
+                execution = load('host-execution', other['id'])
+                with HOST_JOB_GUARD:
+                    if execution.get('dispatched') is not False and other['id'] not in HOST_JOB_THREADS:
+                        raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
             return other['id']
     raise Rejected('operation_conflict', 'È già in corso una manutenzione.')
 
