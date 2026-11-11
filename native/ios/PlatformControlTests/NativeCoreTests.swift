@@ -31,6 +31,24 @@ final class NativeCoreTests: XCTestCase {
         }
     }
 
+    func testFaviconCandidatesUseTheSiteOrigin() throws {
+        let page = try XCTUnwrap(URL(string: "https://site.example.test/app/home"))
+        let html = """
+            <link rel="icon" href="https://other.example.test/icon.png">
+            <LINK HREF="../icon.png?v=1&amp;color=blue" REL='shortcut icon'>
+            <link rel=apple-touch-icon href=/touch.png>
+            <link rel="icon" href="http://site.example.test/unsafe.png">
+            <link rel="icon" href="https://site.example.test:8443/another-origin.png">
+            <link rel="canonical" href="/not-an-icon.png">
+            """
+        XCTAssertEqual(FaviconLinks.candidates(in: html, relativeTo: page).map(\.absoluteString), [
+            "https://site.example.test/icon.png?v=1&color=blue",
+            "https://site.example.test/touch.png"
+        ])
+        XCTAssertFalse(FaviconLinks.sameOrigin(try XCTUnwrap(URL(string: "https://user@site.example.test/icon.png")), as: page))
+        XCTAssertEqual(applicationSiteURL(.object(["href": .string("/relative"), "host": .string("site.example.test")])), URL(string: "https://site.example.test"))
+    }
+
     func testFixtureIsolationAndHonestUnknownMutations() async throws {
         let api = APIClient(fixture: true)
         let bootstrap = try await api.request("/api/native/v1/bootstrap")

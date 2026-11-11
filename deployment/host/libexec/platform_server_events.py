@@ -2,6 +2,7 @@
 import copy
 import datetime
 import hashlib
+import ipaddress
 import json
 import math
 import stat
@@ -12,6 +13,8 @@ import subprocess
 import threading
 import time
 
+JOURNAL_LIMIT = 512
+UFW_INGRESS_DROP = re.compile(r'^\[UFW BLOCK\] IN=\S+ OUT= MAC=\S* SRC=(\S+) DST=\S+ ')
 SYSTEM_UNITS = (
     'docker.service', 'containerd.service', 'ssh.service', 'sshd.service',
     'systemd-journald.service', 'systemd-networkd.service', 'systemd-resolved.service',
@@ -151,6 +154,29 @@ def operation_scopes(row):
     return {'runtime:' + str(value) for value in components} if components else {'runtime:' + str(row.get('componentId') or kind)}
 
 
+def expected_firewall_warning(message):
+    match = UFW_INGRESS_DROP.match(message)
+    if not match:
+        return False
+    try:
+        source = ipaddress.ip_address(match[1])
+    except ValueError:
+        return False
+    return source.is_global and not source.is_multicast
+
+
+def verified_operation_resolution(row, observed):
+    resolution = row.get('resolution')
+    if row.get('recoveryRequired') is not False or not isinstance(resolution, str) or not resolution.strip():
+        return False
+    try:
+        finished = datetime.datetime.fromisoformat(row['finishedAt'].replace('Z', '+00:00'))
+        resolved = datetime.datetime.fromisoformat(row['resolvedAt'].replace('Z', '+00:00'))
+        return finished.tzinfo is not None and resolved.tzinfo is not None and finished <= resolved and resolved.timestamp() <= observed + 300
+    except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+        return False
+
+
 class ServerEventsCollector:
     def __init__(self, run=read_command, read_operations=lambda: [], metrics=host_metrics, now=time.time, ttl=12, history_since=read_history_cutoff):
         self.run, self.read_operations, self.metrics, self.now, self.ttl = run, read_operations, metrics, now, ttl
@@ -254,9 +280,11 @@ class ServerEventsCollector:
         matches = ['_TRANSPORT=kernel']
         for unit in SYSTEM_UNITS:
             matches.extend(['+', '_SYSTEMD_UNIT=' + unit])
-        text = self.run(['journalctl', '--boot=0', '--since=-24h', '--priority=0..4', '--lines=100', '--output=json', '--no-pager', *matches], timeout=3)
+        text = self.run(['journalctl', '--boot=0', '--since=-24h', '--priority=0..4', f'--lines={JOURNAL_LIMIT}', '--output=json',
+                         '--output-fields=_TRANSPORT,_SYSTEMD_UNIT,PRIORITY,MESSAGE', '--no-pager', *matches],
+                        timeout=3, max_bytes=1024 * 1024)
         rows = text.splitlines()
-        if len(rows) > 100:
+        if len(rows) > JOURNAL_LIMIT:
             raise SourceUnavailable()
         events = []
         for line in rows:
@@ -271,10 +299,11 @@ class ServerEventsCollector:
             timestamp = int(row.get('__REALTIME_TIMESTAMP', int(observed * 1000000))) / 1000000
             if not observed - 86400 <= timestamp <= observed + 300:
                 continue
-            if not isinstance(row.get('MESSAGE'), str):
+            message = row.get('MESSAGE')
+            if not isinstance(message, str) or kernel and priority == 4 and expected_firewall_warning(message):
                 continue
             events.append(event('error' if priority <= 3 else 'warning', 'host' if kernel else 'systemd',
-                                'kernel' if kernel else unit, row['MESSAGE'], 'journal-error' if priority <= 3 else 'journal-warning', timestamp, False))
+                                'kernel' if kernel else unit, message, 'journal-error' if priority <= 3 else 'journal-warning', timestamp, False))
         return [], events
 
     def updates(self, observed):
@@ -285,14 +314,15 @@ class ServerEventsCollector:
         for row in rows:  # Existing operation store returns newest first.
             scopes = operation_scopes(row)
             service = ', '.join(sorted(scopes))
-            if row.get('status') in ['failed', 'interrupted', 'rolled-back', 'rolled_back']:
+            failed = row.get('status') in ['failed', 'interrupted', 'rolled-back', 'rolled_back']
+            if failed:
                 try:
                     seen = datetime.datetime.fromisoformat(row['finishedAt'].replace('Z', '+00:00')).timestamp()
                     if observed - 86400 <= seen <= observed + 300:
                         recent.append(event('warning', 'updates', service, 'Manutenzione precedente non riuscita (storico).', 'update-failed-history', seen, False))
                 except (KeyError, TypeError, ValueError):
                     pass
-            if row.get('status') == 'succeeded' or row.get('operatorReconciled'):
+            if row.get('status') == 'succeeded' or row.get('operatorReconciled') or failed and verified_operation_resolution(row, observed):
                 resolved.update(scopes)
                 continue
             if scopes <= resolved:
@@ -303,7 +333,7 @@ class ServerEventsCollector:
             if row.get('recoveryRequired'):
                 active.append(event('error', 'updates', service, 'Una manutenzione richiede una verifica amministrativa prima di procedere.', 'update-recovery-required', observed))
                 resolved.update(scopes)
-            elif row.get('status') in ['failed', 'interrupted', 'rolled-back', 'rolled_back']:
+            elif failed:
                 active.append(event('warning', 'updates', service, 'L’ultima manutenzione non è riuscita; consultare lo stato degli aggiornamenti.', 'update-failed', observed))
                 resolved.update(scopes)
         return active, recent

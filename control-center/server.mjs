@@ -14,6 +14,7 @@ import { createNativeVaultChallenges, nativeAssociationDocument, nativeAuthentic
 import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { isHiddenProjectPath, readManualApplicationFile, ManualApplicationFileError } from "./manual-application-files.mjs";
 import { hostExtension } from "./host-extension.mjs";
+import { createDatabaseSizeReader } from "./database/size-reader.mjs";
 const { readTrustedExternalDatabase, externalDatabaseRecord, externalDatabaseAdminTarget, externalDatabaseAdminCredentials, externalDatabaseCapabilities, assertExternalDatabaseAction, TRUSTED_EXTERNAL_DATABASE_IDS = [], TRUSTED_EXTERNAL_PROJECT_IDS = [] } = hostExtension;
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
@@ -48,7 +49,7 @@ import {
 import { safeBackupPreview } from "./backup/preview.mjs";
 import { readVpsBackupCatalog } from "./backup/vps-catalog.mjs";
 import { normalizeBackupControl } from "./backup/global-control.mjs";
-import { createHostMetricsReader } from "./resources/host-metrics.mjs";
+import { createHostMetricsHistoryReader, createHostMetricsReader, HOST_BASE_METRIC_QUERIES } from "./resources/host-metrics.mjs";
 import { renderOverview } from "./status/overview.mjs";
 const { readObservedApplications = () => [], renderObservedApplicationRow = () => "", renderObservedApplicationDetail = () => "" } = hostExtension;
 import { createCloudflareVisibilityProviderFromEnv } from "./providers/cloudflare-access.mjs";
@@ -84,6 +85,7 @@ import { renderRuntimeUpdates } from "./updates/ui.mjs";
 import { renderServerEvents } from "./events/ui.mjs";
 const runtimeUpdatesClient = createRuntimeUpdatesClient();
 const nativeVaultChallenges = createNativeVaultChallenges();
+const databaseSizeReader = createDatabaseSizeReader();
 import {
   createStatusEventBroker,
   pumpStatusEventStream,
@@ -173,6 +175,7 @@ const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CE
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
 const readHostMetrics = createHostMetricsReader({ readSnapshot: readPrometheusResourceSnapshot, query: prometheusQuery, ttlMs: resourceMetricsTtlMs });
+const readHostMetricsHistory = createHostMetricsHistoryReader({ queryRange: prometheusQuery });
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsagePartialTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000);
 const projectDiskUsageReader = createProjectDiskUsageReader({
@@ -599,7 +602,7 @@ const server = createServer(async (req, res) => {
         await handleRuntimeUpdatesApi(req, res, url, { readJson: readPayload, json, client: runtimeUpdatesClient });
         return;
       }
-      if (requestOperation.operationId?.startsWith("ai.") || requestOperation.operationId === "resources.host.read") {
+      if (requestOperation.operationId?.startsWith("ai.") || ["resources.host.read", "resources.host.history"].includes(requestOperation.operationId)) {
         return handleApi(req, res, url, null, requestOperation);
       }
       if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
@@ -627,13 +630,19 @@ const server = createServer(async (req, res) => {
           applications: context.applications,
           observed,
           folders: applicationFolderCatalog(context, folderApplications(context, observed)),
-          databases: context.databases.map((database) => ({ ...database, adminTool: { label: databaseAdminAction(database).label, url: new URL(databaseAdminAction(database).href, controlAuth.config.publicOrigin || url.origin).href } })),
+          databases: context.databases.map((database) => ({ ...database, adminTool: nativeDatabaseAdminTool(database, url) })),
           engines: context.databaseEngines,
           destructiveOperations: context.databaseDeleteOperations,
           resources: resourceControlPayload(context),
           redis: context.redis,
         });
         return;
+      }
+      if (requestOperation.operationId === "native.application-databases") {
+        const projectId = requestOperation.parameters.projectId;
+        const project = projectId === sanitizeIdentifier(projectId) ? resolveContextProject(context, projectId) : null;
+        if (!project) return json(res, { error: "project_not_found", message: "Applicazione non disponibile." }, 404);
+        return json(res, await nativeApplicationDatabases(context, project, url));
       }
       if (["native.database", "native.database-delete"].includes(requestOperation.operationId)) {
         req.headers.accept = "application/json";
@@ -907,6 +916,7 @@ async function handleApi(req, res, url, context, operation) {
         } catch { return json(res, { ok: false, error: "hosting_operation_rejected", message: "Hosting operation unavailable, unsupported, or changed since review." }, 409); }
       }
       case "resources.host.read": return json(res, await readHostMetrics());
+      case "resources.host.history": return json(res, await readHostMetricsHistory());
       case "overview.read": return json(res, context.overview);
       case "backup.vps.catalog": {
         const catalog = readVpsBackupCatalog(process.env.CONTROL_CENTER_VPS_BACKUP_CATALOG_ROOT);
@@ -9094,6 +9104,77 @@ function projectDatabases(context, projectOrId) {
   });
 }
 
+function nativeDatabaseAdminTool(database, url) {
+  try {
+    const action = databaseAdminAction(database);
+    return { label: action.label, url: new URL(action.href, controlAuth.config.publicOrigin || url.origin).href };
+  } catch (error) {
+    if (!(error instanceof RejectedOperationError)) throw error;
+    return null;
+  }
+}
+
+function databaseSizeConnection(database) {
+  const postgres = database.engine === "postgres";
+  return {
+    engine: database.engine,
+    host: postgres ? postgresHost : mariadbHost,
+    port: postgres ? postgresPort : mariadbPort,
+    user: postgres ? postgresSuperuser : mariadbRootUser,
+    password: readRequiredSecretFile(postgres ? postgresSuperuserPasswordFile : mariadbRootPasswordFile, "Database size"),
+  };
+}
+
+async function nativeApplicationDatabases(context, project, url) {
+  const databases = projectDatabases(context, project);
+  const projectId = project.slug || project.id;
+  const dedicatedRead = runtimeUpdatesClient.databaseSizes(projectId).catch(() => ({ databases: [] }));
+  const groups = new Map();
+  for (const database of databases) {
+    try {
+      if (trustedExternalDatabaseFor(database.id)) continue;
+      if (!groups.has(database.engine)) {
+        groups.set(database.engine, { connection: databaseSizeConnection(database), databases: [] });
+      }
+      groups.get(database.engine).databases.push(database);
+    } catch {
+      // An unavailable connection or credential affects only its own measurement.
+    }
+  }
+  const measurements = new Map();
+  await Promise.all([...groups.values()].map(async (group) => {
+    const sizes = await databaseSizeReader.measure(group.connection, group.databases.map((database) => database.name));
+    const measuredAt = new Date().toISOString();
+    for (const database of group.databases) {
+      if (sizes.has(database.name)) measurements.set(database.id, { sizeBytes: sizes.get(database.name), sizeMeasuredAt: measuredAt });
+    }
+  }));
+  const { databases: dedicated } = await dedicatedRead;
+  const observedOnly = [];
+  for (const row of dedicated) {
+    const registered = context.databases.find((database) => database.id === row.id);
+    if (registered && (registered.name !== row.name || registered.engine !== "postgres" || !databaseMatchesProject(context, registered, project))) continue;
+    if (row.sizeBytes !== null) measurements.set(row.id, { sizeBytes: row.sizeBytes, sizeMeasuredAt: row.measuredAt });
+    if (!registered) observedOnly.push({
+      id: row.id, projectId, name: row.name, displayName: row.name,
+      engine: "postgres", status: "observed", adminTool: null,
+      sizeAvailable: row.sizeBytes !== null, sizeBytes: row.sizeBytes, sizeMeasuredAt: row.measuredAt,
+    });
+  }
+  return {
+    measurementAvailable: measurements.size > 0,
+    databases: [...databases.map((database) => {
+      const measurement = measurements.get(database.id);
+      return {
+        id: database.id, projectId: database.projectId, name: database.name, displayName: database.displayName,
+        engine: database.engine, status: database.status, adminTool: nativeDatabaseAdminTool(database, url),
+        sizeAvailable: Boolean(measurement), sizeBytes: measurement?.sizeBytes ?? null,
+        sizeMeasuredAt: measurement?.sizeMeasuredAt ?? null,
+      };
+    }), ...observedOnly],
+  };
+}
+
 function portalProjectDatabases(context, projectOrId) {
   const databases = projectDatabases(context, projectOrId);
   const groups = new Map();
@@ -9542,12 +9623,8 @@ async function readPrometheusResourceSnapshot() {
   if (!prometheusUrl) return unavailableResourceSnapshot("Prometheus non configurato.");
 
   const queries = {
-    cpuPercent: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[2m])))',
+    ...HOST_BASE_METRIC_QUERIES,
     cpuCores: 'count(count by (cpu) (node_cpu_seconds_total{mode="idle"}))',
-    memoryTotal: "node_memory_MemTotal_bytes",
-    memoryAvailable: "node_memory_MemAvailable_bytes",
-    diskSize: 'node_filesystem_size_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
-    diskAvailable: 'node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
     platformCollectorHealthy: "platform_container_metrics_collector_healthy",
     platformCollectorLastAttempt: "platform_container_metrics_collector_last_attempt_timestamp_seconds",
     platformContainerCpu: "platform_container_cpu_cores",
@@ -9625,9 +9702,15 @@ function validPrometheusResourceSnapshot(value) {
     && Array.isArray(value.containers));
 }
 
-async function prometheusQuery(query) {
-  const endpoint = new URL("/api/v1/query", prometheusUrl.endsWith("/") ? prometheusUrl : `${prometheusUrl}/`);
+async function prometheusQuery(query, range = null) {
+  if (!prometheusUrl) return [];
+  const endpoint = new URL(range ? "/api/v1/query_range" : "/api/v1/query", prometheusUrl.endsWith("/") ? prometheusUrl : `${prometheusUrl}/`);
   endpoint.searchParams.set("query", query);
+  if (range) {
+    endpoint.searchParams.set("start", String(range.start));
+    endpoint.searchParams.set("end", String(range.end));
+    endpoint.searchParams.set("step", String(range.step));
+  }
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(resourceProbeTimeoutMs) });
   if (!response.ok) throw new Error(`Prometheus returned ${response.status}`);
   const payload = await response.json();

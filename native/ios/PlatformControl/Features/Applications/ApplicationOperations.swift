@@ -103,7 +103,7 @@ struct ApplicationOperationSheet: View {
                     }
                 }
                 if let error { Section { ErrorNotice(message: error) } }
-                if isWorking { Section { ProgressView("Operazione in corso…") } }
+                if isWorking { Section { LoadingState(title: "Operazione in corso…", style: .row) } }
                 if result == nil {
                     Section {
                         if reviewing {
@@ -288,9 +288,11 @@ func applicationLabel(_ value: String) -> String {
     ["public": "Pubblica", "private": "Privata", "offline": "Offline", "unknown": "Non verificata",
      "online": "Online", "running": "In esecuzione", "stopped": "Arrestata", "absent": "Assente",
      "available": "Disponibile", "authorized": "Autorizzata", "cancelled": "Annullata", "failed": "Fallita",
+     "queued": "In coda", "staged": "Preparata", "activating": "In attivazione", "copying": "In copia",
+     "interrupted": "Interrotta", "activation_failed": "Attivazione fallita",
      "active": "Attivo", "declared": "Dichiarato", "maintenance": "Manutenzione", "disabled": "Disabilitato",
      "configured": "Configurato", "healthy": "Verificato", "needs-check": "Da verificare", "metadata-only": "Solo metadati",
-     "mariadb": "MariaDB", "postgres": "PostgreSQL", "static": "Statico", "node": "Node.js", "php": "PHP",
+     "mariadb": "MariaDB", "mysql": "MySQL", "postgres": "PostgreSQL", "postgresql": "PostgreSQL", "static": "Statico", "node": "Node.js", "php": "PHP",
      "reserved": "Riservato", "legacy-unbound": "Principal non associato", "migration-required": "Migrazione richiesta",
      "protected": "Protetta", "secret-file-set": "Password configurata", "completed": "Completata",
      "rollback-required": "Ripristino richiesto", "evidence-verified": "Evidence verificata", "approved": "Approvata"] [value] ?? value

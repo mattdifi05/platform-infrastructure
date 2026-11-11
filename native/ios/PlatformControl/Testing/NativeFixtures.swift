@@ -11,11 +11,48 @@ actor NativeFixtures {
     func response(path: String, method: String, body: JSONValue?) throws -> JSONValue {
         let canonical = path.replacingOccurrences(of: "/control/v1/", with: "/control/").components(separatedBy: "?")[0]
         if canonical == "/api/native/v1/bootstrap" { return parse(#"{"schemaVersion":1,"authentication":{"vaultFaceIDSupported":true},"session":{"subject":"test-owner","displayName":"Ambiente di prova","role":"owner","vaultFaceIDRegistered":true},"csrfToken":"fixture-csrf","capabilities":[]}"#) }
+        if canonical == "/control/resources/host/history" {
+            let now = Date.now
+            let timestamp = ISO8601DateFormatter()
+            let samples = (0...21).map { index -> JSONValue in
+                let capturedAt = now.addingTimeInterval(Double(index - 21) * 2)
+                let cpu = Double(12 + index % 7)
+                let receive = Double(38_400 + index % 5 * 850)
+                let send = Double(12_800 + index % 4 * 600)
+                let read = Double(24_000 + index % 6 * 1200)
+                let write = Double(128_000 + index % 7 * 5200)
+                return .object([
+                    "capturedAt": .string(timestamp.string(from: capturedAt)),
+                    "cpu": .number(cpu), "memory": .number(32.5), "disk": .number(26.4),
+                    "receive": .number(receive), "send": .number(send),
+                    "diskRead": .number(read), "diskWrite": .number(write)
+                ])
+            }
+            return .object(["samples": .array(samples)])
+        }
         if canonical == "/control/resources/host" {
             return parse(#"{"scope":"host","freshness":{"available":true},"cpu":{"available":true,"usedPercent":17.4,"cores":4},"memory":{"available":true,"usedPercent":32.8,"usedBytes":2817508540,"totalBytes":8589934592},"disk":{"available":true,"usedPercent":26.4,"usedBytes":56693568307,"totalBytes":214748364800},"swap":{"usedBytes":0,"totalBytes":2147483648},"network":{"totals":{"rxBytesPerSecond":38400,"txBytesPerSecond":12800}},"diskIo":{"totals":{"readBytesPerSecond":24000,"writeBytesPerSecond":128000}},"inodes":{"usedPercent":3.1},"load":{"one":0.4,"five":0.3,"fifteen":0.2},"uptimeSeconds":102400}"#)
         }
         if canonical == "/api/native/v1/applications" {
-            return .object(["projects": .array([parse(#"{"id":"sample","slug":"sample","name":"Applicazione di prova","host":"local.example.test","href":"https://local.example.test","runtime":"php","type":"PHP","enabled":true,"status":"active"}"#)]), "applications": .array([]), "observed": .array([]), "folders": .object(["folders": .array(folders), "memberships": .object(["project:sample": .string("stexor")])]), "databases": .array([]), "engines": .array([]), "resources": .object([:]), "redis": .object([:])])
+            let resources = parse(#"""
+            {
+              "capturedAt":"2026-11-10T10:00:00Z",
+              "projectUsage":[{"projectId":"sample","diskAvailable":true,"diskBytes":3145728,"diskComplete":true,"files":19}],
+              "containersByProject":[{"projectId":"sample","applicationId":"sample","container":"fixture-app","cpuCores":0.25,"memoryBytes":33554432,"runtimeStatus":"running","attribution":"container-dedicato"}]
+            }
+            """#)
+            return .object(["projects": .array([parse(#"{"id":"sample","slug":"sample","name":"Applicazione di prova","host":"local.example.test","href":"https://local.example.test","runtime":"php","type":"PHP","enabled":true,"status":"active"}"#)]), "applications": .array([]), "observed": .array([]), "folders": .object(["folders": .array(folders), "memberships": .object(["project:sample": .string("stexor")])]), "databases": .array([]), "engines": .array([]), "resources": resources, "redis": .object([:])])
+        }
+        if canonical == "/api/native/v1/applications/sample/databases" {
+            return parse(#"""
+            {
+              "measurementAvailable":true,
+              "databases":[
+                {"id":"fixture-postgres","name":"sample_pg","displayName":"Archivio di prova","engine":"postgres","sizeBytes":1048576,"sizeAvailable":true,"sizeMeasuredAt":"2026-11-10T10:00:00Z","adminTool":{"label":"phpPgAdmin","url":"https://local.example.test/postgres"}},
+                {"id":"fixture-mariadb","name":"sample_maria","displayName":"Dati di prova","engine":"mariadb","sizeBytes":null,"sizeAvailable":false,"adminTool":{"label":"phpMyAdmin","url":"https://local.example.test/mysql"}}
+              ]
+            }
+            """#)
         }
         if canonical == "/control/project-folders", method == "POST" {
             let folder = JSONValue.object(["id": .string(UUID().uuidString), "name": body?["name"] ?? .string("Nuova cartella"), "canDelete": .bool(true)])
@@ -24,7 +61,7 @@ actor NativeFixtures {
         }
         if canonical.hasSuffix("/rename"), canonical.contains("project-folders") { return .object(["ok": .bool(true)]) }
         if canonical.hasSuffix("/delete"), canonical.contains("project-folders") { return .object(["ok": .bool(true)]) }
-        if canonical.hasSuffix("/hosting-status") { return parse(#"{"available":true,"mode":"private","visibility":"private","revision":"fixture-hosting","clone":{"available":true},"modes":["public","private","offline"]}"#) }
+        if canonical.hasSuffix("/hosting-status") { return parse(#"{"ok":true,"project":{"slug":"sample","productionHostname":"local.example.test","visibility":{"desired":"public","effective":"public","verified":true}},"privateCopy":{"status":"absent","hostname":"local-copy.example.test","eligible":true,"cancellable":false}}"#) }
         if canonical == "/control/vault" {
             return .object(["revision": .string(revision), "items": .array([parse(#"{"id":"fixture-secret","itemKey":"Esempio","label":"Credenziale di prova","projectId":"sample","environment":"production","kind":"api-key","createdAt":"2026-11-10T10:00:00Z","updatedAt":"2026-11-10T11:30:00Z","rotationDays":90,"versions":[{"versionId":"v1","createdAt":"2026-11-10T10:00:00Z"}],"currentVersionId":"v1"}"#)]), "projects": .array([.object(["slug": .string("sample"), "name": .string("Applicazione di prova")])]), "runtime": .object(["bindings": .array([]), "available": .bool(true)])])
         }

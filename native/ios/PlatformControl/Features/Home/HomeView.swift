@@ -1,8 +1,8 @@
 import SwiftUI
 import Charts
+import Accessibility
 
-private struct ResourceSample: Identifiable {
-    let id = UUID()
+private struct ResourceSample {
     let date: Date
     let cpu: Double?
     let memory: Double?
@@ -14,12 +14,15 @@ private struct ResourceSample: Identifiable {
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     let isActive: Bool
     @State private var snapshot: JSONValue = .null
     @State private var samples: [ResourceSample] = []
     @State private var error: String?
     @State private var loading = true
     @State private var refreshing = false
+
+    private var monitoring: Bool { isActive && scenePhase == .active }
 
     var body: some View {
         ScrollView {
@@ -46,9 +49,13 @@ struct HomeView: View {
         .navigationTitle("Home")
         .navigationSubtitle("Le risorse del tuo server")
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await refresh() }
-        .task(id: isActive) {
-            guard isActive else { return }
+        .skeletonRefreshable { await refresh() }
+        .task(id: monitoring) {
+            guard monitoring else { return }
+            await loadHistory()
+        }
+        .task(id: monitoring) {
+            guard monitoring else { return }
             while !Task.isCancelled {
                 await refresh()
                 do { try await Task.sleep(for: .seconds(2)) } catch { break }
@@ -75,10 +82,37 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).foregroundStyle(color); Spacer(); Text(detail).font(.caption).foregroundStyle(.secondary) }
             Text(value).font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
-            ResourceChart(samples: samples, series: series, color: color, percentage: percentage, active: isActive)
+            ResourceChart(title: title, samples: samples, series: series, color: color, percentage: percentage, active: isActive)
                 .accessibilityLabel("Grafico \(title)")
                 .accessibilityIdentifier("home.chart.\(symbol)")
         }.padding(20).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    private func loadHistory() async {
+        guard let value = try? await model.get("/control/v1/resources/host/history"), !Task.isCancelled else { return }
+        let now = Date.now
+        let history: [ResourceSample] = value["samples"].arrayValue.compactMap { row in
+            guard let date = Self.sampleDate(row["capturedAt"].stringValue), date <= now.addingTimeInterval(5) else { return nil }
+            return ResourceSample(date: date, cpu: row["cpu"].doubleValue, memory: row["memory"].doubleValue,
+                                  received: row["receive"].doubleValue, sent: row["send"].doubleValue,
+                                  read: row["diskRead"].doubleValue, written: row["diskWrite"].doubleValue)
+        }
+        mergeSamples(history, keepingExisting: true)
+    }
+
+    private static func sampleDate(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        return (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(raw))
+            ?? (try? Date.ISO8601FormatStyle().parse(raw))
+    }
+
+    private func mergeSamples(_ incoming: [ResourceSample], keepingExisting: Bool = false) {
+        let cutoff = Date.now.addingTimeInterval(-48)
+        // Keep a predecessor outside the visible window so a real segment can cross the left edge.
+        let ordered = keepingExisting ? incoming + samples : samples + incoming
+        var byDate: [Date: ResourceSample] = [:]
+        for sample in ordered where sample.date >= cutoff { byDate[sample.date] = sample }
+        samples = byDate.values.sorted { $0.date < $1.date }
     }
 
     private func refresh() async {
@@ -92,119 +126,281 @@ struct HomeView: View {
             snapshot = value
             error = nil
             let available = value["freshness"]["available"].boolValue == true
-            samples.append(ResourceSample(
-                date: .now,
+            let receivedAt = Date.now
+            let observedAt = Self.sampleDate(value["observedAt"].stringValue) ?? receivedAt
+            mergeSamples([ResourceSample(
+                date: observedAt <= receivedAt.addingTimeInterval(5) ? observedAt : receivedAt,
                 cpu: available ? value["cpu"]["usedPercent"].doubleValue : nil,
                 memory: available ? value["memory"]["usedPercent"].doubleValue : nil,
                 received: available ? value["network"]["totals"]["rxBytesPerSecond"].doubleValue : nil,
                 sent: available ? value["network"]["totals"]["txBytesPerSecond"].doubleValue : nil,
                 read: available ? value["diskIo"]["totals"]["readBytesPerSecond"].doubleValue : nil,
                 written: available ? value["diskIo"]["totals"]["writeBytesPerSecond"].doubleValue : nil
-            ))
+            )])
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
             self.error = "Impossibile aggiornare le risorse del server."
-            samples.append(ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil))
+            mergeSamples([ResourceSample(date: .now, cpu: nil, memory: nil, received: nil, sent: nil, read: nil, written: nil)])
         }
-        samples.removeAll { $0.date < Date.now.addingTimeInterval(-125) }
         loading = false
     }
 }
 
 private struct ResourceChart: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var scale: VerticalScale?
+    @ScaledMetric(relativeTo: .caption2) private var axisLabelWidth = 52
+    let title: String
     let samples: [ResourceSample]
     let series: [(String, KeyPath<ResourceSample, Double?>)]
     let color: Color
     let percentage: Bool
     let active: Bool
 
-    private struct Point: Identifiable {
-        let id: UUID
+    private struct Point {
         let date: Date
         let value: Double
-        let segment: Int
+        let startsSegment: Bool
     }
 
-    private struct Trace: Identifiable {
-        let id: Int
-        let name: String
+    private struct Trace {
         let points: [Point]
     }
 
-    private func points(for key: KeyPath<ResourceSample, Double?>) -> [Point] {
-        var segment = 0
-        var previous: Date?
-        return samples.compactMap { sample in
-            guard let value = sample[keyPath: key] else { segment += 1; return nil }
-            if let previous, sample.date.timeIntervalSince(previous) > 6 { segment += 1 }
-            previous = sample.date
-            return Point(id: sample.id, date: sample.date, value: value, segment: segment)
+    private struct VerticalScale {
+        let previous: Double
+        let target: Double
+        let changedAt: Date
+
+        var labelUpdates: [Date] {
+            guard previous != target else { return [] }
+            return (1...5).map { changedAt.addingTimeInterval(Double($0) / 10) }
+        }
+
+        func upperBound(at date: Date, containing peak: Double) -> Double {
+            let progress = min(1, max(0, date.timeIntervalSince(changedAt) / 0.5))
+            return max(peak, previous + (target - previous) * progress)
         }
     }
 
-    var body: some View {
-        let traces = series.enumerated().map { Trace(id: $0.offset, name: $0.element.0, points: points(for: $0.element.1)) }
-        let peak = traces.flatMap(\.points).map(\.value).max() ?? 0
-        let upperBound = percentage ? 100 : max(1, peak * 1.15)
-        let oldest = traces.compactMap { $0.points.first?.date }.min()
+    private static let window: TimeInterval = 40
+    private static let nowPosition = 0.95
 
-        TimelineView(.animation(minimumInterval: reduceMotion ? 2 : 1.0 / 30.0, paused: !active)) { context in
-            let now = context.date
-            // Expand continuously as samples arrive, then keep a rolling two-minute window.
-            let window = min(120, max(8, now.timeIntervalSince(oldest ?? now) + 2))
-            let offsets = [1.0, 0.75, 0.5, 0.25, 0].map { window * $0 }
-            let grid = offsets.map { now.addingTimeInterval(-$0) }
-            Chart {
-                ForEach(traces) { trace in
-                    let stroke = trace.id == 0 ? color : color.opacity(0.72)
-                    ForEach(trace.points) { point in
-                        LineMark(x: .value("Ora", point.date), y: .value(trace.name, point.value), series: .value("Serie", "\(trace.id)-\(point.segment)"))
-                            .interpolationMethod(.linear)
-                            .foregroundStyle(stroke)
-                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: trace.id == 0 ? [] : [4, 3]))
-                    }
-                    if let last = trace.points.last, last.id == samples.last?.id, now.timeIntervalSince(last.date) < 6 {
-                        PointMark(x: .value("Ora", last.date), y: .value(trace.name, last.value))
-                            .foregroundStyle(stroke)
-                            .symbolSize(38)
+    private var isAnimating: Bool { active && scenePhase == .active && !reduceMotion }
+
+    private func trace(for key: KeyPath<ResourceSample, Double?>) -> Trace {
+        var previous: Date?
+        let points: [Point] = samples.compactMap { sample in
+            guard let value = sample[keyPath: key], value.isFinite, value >= 0, !percentage || value <= 100 else {
+                previous = nil
+                return nil
+            }
+            let startsSegment = previous.map { sample.date.timeIntervalSince($0) > 6 } ?? true
+            previous = sample.date
+            return Point(date: sample.date, value: value, startsSegment: startsSegment)
+        }
+        return Trace(points: points)
+    }
+
+    var body: some View {
+        let traces = series.map { trace(for: $0.1) }
+        let now = Date.now
+        let staticDate = samples.last?.date ?? now
+        let peak = Self.visiblePeak(traces, since: (isAnimating ? now : staticDate).addingTimeInterval(-Self.window))
+        let target = percentage ? Self.percentUpperBound(for: peak) : Self.rateUpperBound(for: peak)
+        let current = scale?.upperBound(at: now, containing: peak) ?? target
+        let nextScale = VerticalScale(previous: isAnimating ? current : target, target: target, changedAt: now)
+        let displayScale = scale?.target == target ? scale ?? nextScale : nextScale
+
+        // Keep the native axes out of the frame-by-frame plot updates.
+        Chart {
+            PointMark(x: .value("Ora", 0.0), y: .value("Valore", 0.0)).opacity(0)
+        }
+        .chartXScale(domain: 0.0...1.0, range: .plotDimension(padding: 0))
+        .chartYScale(domain: 0.0...1.0, range: .plotDimension(padding: 4))
+        .chartXAxis {
+            AxisMarks(values: (0...4).map { Double($0) * Self.nowPosition / 4 }) { axis in
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                if axis.index.isMultiple(of: 2) {
+                    AxisValueLabel {
+                        Text(timeLabel(Self.window * Double(4 - axis.index) / 4))
+                            .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
             }
-            .chartXScale(domain: grid[0]...now, range: .plotDimension(padding: 4))
-            .chartYScale(domain: 0...upperBound, range: .plotDimension(padding: 4))
-            .chartXAxis {
-                AxisMarks(values: grid) { axis in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
-                    if axis.index.isMultiple(of: 2) {
-                        AxisValueLabel {
-                            Text(timeLabel(offsets[axis.index]))
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0.0, 0.25, 0.5, 0.75, 1.0]) { axis in
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
+                if let fraction = axis.as(Double.self) {
+                    AxisValueLabel {
+                        TimelineView(.explicit(isAnimating ? displayScale.labelUpdates : [])) { context in
+                            let bound = isAnimating ? displayScale.upperBound(at: context.date, containing: peak) : target
+                            Text(axisLabel(fraction * bound))
                                 .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                                .lineLimit(1).minimumScaleFactor(0.75)
+                                .frame(width: axisLabelWidth, alignment: .trailing)
                         }
                     }
                 }
             }
-            .chartYAxis {
-                AxisMarks(position: .leading, values: percentage ? .stride(by: 25) : .automatic(desiredCount: 4)) { axis in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.22))
-                    if let value = axis.as(Double.self) {
-                        AxisValueLabel {
-                            Text(percentage ? "\(Int(value))%" : NativeFormatting.bytes(value))
-                                .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .chartLegend(.hidden)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let anchor = proxy.plotFrame,
+                   let left = proxy.position(forX: 0.0), let right = proxy.position(forX: 1.0),
+                   let top = proxy.position(forY: 1.0), let bottom = proxy.position(forY: 0.0) {
+                    let frame = geometry[anchor]
+                    let plot = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+                    TimelineView(.animation(paused: !isAnimating)) { timeline in
+                        let date = isAnimating ? timeline.date : staticDate
+                        let upperBound = isAnimating ? displayScale.upperBound(at: timeline.date, containing: peak) : target
+                        Canvas { context, size in
+                            var clipped = context
+                            clipped.clip(to: Path(CGRect(x: plot.minX, y: 0, width: plot.width, height: size.height)))
+                            draw(traces, in: clipped, plot: plot, date: date, upperBound: upperBound)
                         }
                     }
+                    .frame(width: frame.width, height: frame.height)
+                    .clipped()
+                    .position(x: frame.midX, y: frame.midY)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                 }
             }
-            .chartLegend(.hidden)
-            .frame(height: 135)
+        }
+        .frame(height: 135)
+        .accessibilityChartDescriptor(ChartAccessibility(title: title, traces: traces, seriesNames: series.map(\.0), date: staticDate, window: Self.window, upperBound: target, percentage: percentage))
+        .onChange(of: target, initial: true) { _, _ in
+            self.scale = displayScale
+        }
+    }
+
+    private static func visiblePeak(_ traces: [Trace], since left: Date) -> Double {
+        var peak = 0.0
+        for trace in traces {
+            var predecessor: Point?
+            for point in trace.points {
+                if point.date < left {
+                    predecessor = point
+                    continue
+                }
+                if let predecessor, !point.startsSegment {
+                    let fraction = left.timeIntervalSince(predecessor.date) / point.date.timeIntervalSince(predecessor.date)
+                    peak = max(peak, predecessor.value + (point.value - predecessor.value) * fraction)
+                }
+                predecessor = nil
+                peak = max(peak, point.value)
+            }
+        }
+        return peak
+    }
+
+    private static func percentUpperBound(for peak: Double) -> Double {
+        let padded = max(1, peak * 1.15)
+        return [1.0, 2, 4, 8, 12, 16, 20, 24, 32, 40, 48, 60, 80, 100].first { $0 >= padded } ?? 100
+    }
+
+    private func axisLabel(_ value: Double) -> String {
+        if percentage {
+            return value.formatted(.number.precision(.fractionLength(0...2))) + "%"
+        }
+        return NativeFormatting.bytes(value)
+    }
+
+    private static func rateUpperBound(for peak: Double) -> Double {
+        // Rounded scales prevent minor changes in the peak from moving every point.
+        let padded = max(4, peak * 1.15)
+        let magnitude = pow(10, floor(log10(padded)))
+        return ([1.0, 2, 4, 8, 10].first { $0 * magnitude >= padded } ?? 10) * magnitude
+    }
+
+    private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect, date: Date, upperBound: Double) {
+        func location(_ point: Point) -> CGPoint {
+            CGPoint(
+                x: plot.minX + plot.width * Self.nowPosition * (1 + point.date.timeIntervalSince(date) / Self.window),
+                y: plot.maxY - plot.height * point.value / upperBound
+            )
+        }
+
+        for (index, trace) in traces.enumerated() {
+            let stroke = index == 0 ? color : color.opacity(0.72)
+            let style = StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round, dash: index == 0 ? [] : [4, 3])
+            var path = Path()
+            var previous: Point?
+            var endpoint: (position: CGPoint, date: Date)?
+            for point in trace.points {
+                if point.date > date {
+                    if !point.startsSegment, let previous {
+                        let elapsed = date.timeIntervalSince(previous.date)
+                        let progress = elapsed / point.date.timeIntervalSince(previous.date)
+                        let value = previous.value + (point.value - previous.value) * progress
+                        let boundary = location(Point(date: date, value: value, startsSegment: false))
+                        path.addLine(to: boundary)
+                        endpoint = (boundary, date)
+                    }
+                    break
+                }
+                let position = location(point)
+                if point.startsSegment { path.move(to: position) }
+                else { path.addLine(to: position) }
+                endpoint = (position, point.date)
+                previous = point
+            }
+            context.stroke(path, with: .color(stroke), style: style)
+
+            if let endpoint {
+                let age = date.timeIntervalSince(endpoint.date)
+                let opacity = min(1, max(0, (6 - age) / 0.4))
+                let dot = Path(ellipseIn: CGRect(x: endpoint.position.x - 3.5, y: endpoint.position.y - 3.5, width: 7, height: 7))
+                context.fill(dot, with: .color(stroke.opacity(opacity)))
+            }
+        }
+    }
+
+    private struct ChartAccessibility: AXChartDescriptorRepresentable {
+        let title: String
+        let traces: [Trace]
+        let seriesNames: [String]
+        let date: Date
+        let window: TimeInterval
+        let upperBound: Double
+        let percentage: Bool
+
+        func makeChartDescriptor() -> AXChartDescriptor {
+            let end = date.timeIntervalSinceReferenceDate
+            let xAxis = AXNumericDataAxisDescriptor(title: "Ora", range: (end - window)...end, gridlinePositions: []) { value in
+                Date(timeIntervalSinceReferenceDate: value).formatted(date: .omitted, time: .standard)
+            }
+            let yAxis = AXNumericDataAxisDescriptor(title: percentage ? "Percentuale" : "Byte al secondo", range: 0...upperBound, gridlinePositions: []) { value in
+                percentage ? NativeFormatting.percent(value) : NativeFormatting.bytes(value) + "/s"
+            }
+            let series = zip(seriesNames, traces).flatMap { name, trace in
+                var segments: [[AXDataPoint]] = []
+                for point in trace.points where point.date.timeIntervalSinceReferenceDate >= end - window {
+                    if point.startsSegment || segments.isEmpty { segments.append([]) }
+                    segments[segments.count - 1].append(AXDataPoint(x: point.date.timeIntervalSinceReferenceDate, y: point.value))
+                }
+                return segments.map { AXDataSeriesDescriptor(name: name, isContinuous: true, dataPoints: $0) }
+            }
+            return AXChartDescriptor(title: title, xAxis: xAxis, yAxis: yAxis, series: series)
+        }
+
+        func updateChartDescriptor(_ descriptor: AXChartDescriptor) {
+            let updated = makeChartDescriptor()
+            descriptor.xAxis = updated.xAxis
+            descriptor.yAxis = updated.yAxis
+            descriptor.series = updated.series
         }
     }
 
     private func timeLabel(_ duration: TimeInterval) -> String {
-        let seconds = Int(duration.rounded())
-        if seconds == 0 { return "Ora" }
+        guard duration > 0 else { return "Ora" }
+        let seconds = max(1, Int(duration.rounded()))
         let minutes = seconds / 60
         let remainder = seconds % 60
         if minutes == 0 { return "−\(remainder) s" }
@@ -224,7 +420,7 @@ struct RemoteDetailView: View {
             if let value { JSONDetailView(title: title, value: value) }
             else if let error { ErrorNotice(message: error) { Task { await load() } }.padding() }
             else { LoadingState(title: "Caricamento…") }
-        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline).task { await load() }.refreshable { await load() }
+        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline).task { await load() }.skeletonRefreshable { await load() }
     }
     private func load() async { do { value = try await model.get(path); error = nil } catch { self.error = error.localizedDescription } }
 }

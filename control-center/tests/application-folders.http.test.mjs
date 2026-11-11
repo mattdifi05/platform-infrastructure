@@ -26,6 +26,10 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
     beta: { declaredProject: true, displayName: "Beta app", host: "beta.example.test", runtime: "php" },
   }, subdomains: { retained: true }, extra: "preserved", applicationFolders: { folders: { [staleFolderId]: { name: "Temporaneamente assente" } }, memberships: { "project:absent": staleFolderId }, extra: "retained-folder-metadata" } };
   writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify(initial));
+  writeFileSync(path.join(stateDir, "databases.json"), JSON.stringify({
+    alpha: { id: "alpha-postgres", projectId: "alpha", name: "alpha_db", engine: "postgres" },
+    beta: { id: "beta-mariadb", projectId: "beta", name: "beta_db", engine: "mariadb" },
+  }));
   writeFileSync(path.join(stateDir, "vault.key"), `test-v1=${"a".repeat(64)}\n`, { mode: 0o600 });
   const reservation = createServer();
   await new Promise(resolve => reservation.listen(0, "127.0.0.1", resolve));
@@ -94,6 +98,19 @@ test("real HTTP folder operations enforce auth and CSRF and render isolated cata
   assert.deepEqual(nativeCatalog.projects.map(project => project.slug).sort(), ["alpha", "beta"]);
   assert.deepEqual(nativeCatalog.observed, []);
   assert.deepEqual(nativeCatalog.folders, catalog);
+  const databasePath = "/api/native/v1/applications/alpha/databases";
+  assert.equal((await request("GET", databasePath, null)).status, 401);
+  assert.equal((await request("GET", "/api/native/v1/applications/unknown/databases", "viewer")).status, 404);
+  const databases = await request("GET", databasePath, "viewer");
+  assert.equal(databases.status, 200);
+  const details = await databases.json();
+  const alphaDatabase = details.databases.find((row) => row.name === "alpha_db");
+  assert.ok(alphaDatabase);
+  assert.ok(details.databases.every((row) => row.name !== "beta_db"));
+  assert.equal(alphaDatabase.adminTool.label, "phpPgAdmin");
+  assert.equal(alphaDatabase.sizeBytes, null);
+  assert.equal(alphaDatabase.sizeAvailable, false);
+  assert.equal(Object.hasOwn(alphaDatabase, "credentialFile"), false);
   for (const prefix of ["/control", "/control/v1"]) for (const occupiedId of [folderId, staleFolderId]) {
     const beforeDelete = readFileSync(path.join(stateDir, "projects.json"), "utf8");
     const rejected = await request("POST", `${prefix}/project-folders/${occupiedId}/delete`, "owner", {});

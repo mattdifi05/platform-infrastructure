@@ -3,13 +3,14 @@ import { openSync, closeSync, fstatSync, readFileSync, lstatSync, constants } fr
 import { createHmac, randomBytes } from 'node:crypto';
 import path from 'node:path';
 
-const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation', 'host-catalog', 'host-check', 'host-plan', 'host-apply', 'host-reboot-plan', 'host-reboot-apply', 'server-events']);
+const actions = new Set(['catalog', 'check', 'plan', 'apply', 'operation', 'host-catalog', 'host-check', 'host-plan', 'host-apply', 'host-reboot-plan', 'host-reboot-apply', 'server-events', 'database-sizes']);
 const fields = {
   catalog: [], check: [], plan: ['componentId', 'revision'],
   apply: ['componentId', 'revision', 'planId', 'confirmation', 'idempotencyKey'], operation: ['operationId'],
   'host-catalog': [], 'host-check': [], 'host-plan': ['revision'], 'host-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
   'host-reboot-plan': ['revision'], 'host-reboot-apply': ['revision', 'planId', 'confirmation', 'idempotencyKey'],
   'server-events': [],
+  'database-sizes': ['projectId'],
 };
 const token = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value);
 export const validRuntimeUpdatesId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value);
@@ -37,6 +38,7 @@ export function validateRuntimeUpdatesRequest(body) {
   if (required.some(key => !Object.hasOwn(body, key)) || Object.keys(body).some(key => key !== 'action' && !required.includes(key) && !optional.includes(key))) invalid();
   if (Object.hasOwn(body, 'rebootAfter') && typeof body.rebootAfter !== 'boolean') invalid();
   const confirmations = body.action === 'host-reboot-apply' ? ['REBOOT'] : body.action === 'host-apply' ? ['UPDATE', 'UPDATE_AND_REBOOT'] : ['UPDATE'];
+  if (body.action === 'database-sizes' && !validRuntimeUpdatesId(body.projectId)) invalid();
   for (const key of required) {
     if (key === 'confirmation' ? !confirmations.includes(body[key]) : key === 'componentId' || key === 'operationId' || key === 'planId' ? !validRuntimeUpdatesId(body[key]) : !token(body[key])) invalid();
   }
@@ -108,6 +110,18 @@ function operation(value) {
 }
 function sanitizeResult(body, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RuntimeUpdatesError(503, 'invalid_response');
+  if (body.action === 'database-sizes') {
+    if (!Array.isArray(value.databases) || value.databases.length > 12) throw new RuntimeUpdatesError(503, 'invalid_response');
+    const seen = new Set();
+    return { databases: value.databases.map(row => {
+      if (!validRuntimeUpdatesId(row?.id) || seen.has(row.id) || typeof row.name !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(row.name)
+          || !(row.sizeBytes === null && row.measuredAt === null || Number.isSafeInteger(row.sizeBytes) && row.sizeBytes >= 0 && timestamp(row.measuredAt))) {
+        throw new RuntimeUpdatesError(503, 'invalid_response');
+      }
+      seen.add(row.id);
+      return { id: row.id, name: row.name, sizeBytes: row.sizeBytes, measuredAt: row.measuredAt };
+    }) };
+  }
   if (body.action === 'server-events') {
     const sources = new Set(['host', 'systemd', 'docker', 'updates', 'journal']);
     if (value.schema !== 'server-events/v1' || typeof value.available !== 'boolean' || typeof value.partial !== 'boolean' || !timestamp(value.checkedAt)
@@ -256,6 +270,7 @@ export function createRuntimeUpdatesClient({ env = process.env, timeoutMs = 30_0
     apply: (componentId, payload) => call({ ...payload, action: 'apply', componentId }),
     operation: operationId => call({ action: 'operation', operationId }),
     serverEvents: () => call({ action: 'server-events' }),
+    databaseSizes: projectId => call({ action: 'database-sizes', projectId }),
     hostCatalog: () => call({ action: 'host-catalog' }), hostCheck: () => call({ action: 'host-check' }),
     hostPlan: payload => call({ ...payload, action: 'host-plan' }), hostApply: payload => call({ ...payload, action: 'host-apply' }),
     hostRebootPlan: payload => call({ ...payload, action: 'host-reboot-plan' }), hostRebootApply: payload => call({ ...payload, action: 'host-reboot-apply' }),

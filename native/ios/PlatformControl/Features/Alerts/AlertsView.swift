@@ -6,6 +6,14 @@ struct AlertsView: View {
     @State private var error: String?
     @State private var loading = true
     @State private var selection = 0
+
+    private var partialMessage: String {
+        if events["sources"].arrayValue.contains(where: { $0["available"].boolValue == false }) {
+            return "Alcune fonti non sono disponibili. Lo stato potrebbe essere incompleto."
+        }
+        return "Il riepilogo mostra un numero limitato di elementi."
+    }
+
     var body: some View {
         List {
             if let error { Section { ErrorNotice(message: error) { Task { await load() } } } }
@@ -15,7 +23,7 @@ struct AlertsView: View {
                     Picker("Avvisi", selection: $selection) { Text("Attivi").tag(0); Text("Recenti").tag(1) }.pickerStyle(.segmented).listRowBackground(Color.clear).listRowInsets(EdgeInsets())
                 }
                 if events["partial"].boolValue == true {
-                    Section { Label("Alcune fonti non sono raggiungibili. Lo stato potrebbe essere incompleto.", systemImage: "wifi.exclamationmark").font(.subheadline).foregroundStyle(.orange) }
+                    Section { Label(partialMessage, systemImage: "info.circle").font(.subheadline).foregroundStyle(.orange) }
                 }
                 let entries = events[selection == 0 ? "issues" : "events"].arrayValue
                 if entries.isEmpty {
@@ -42,7 +50,7 @@ struct AlertsView: View {
                     }
                 }
             }
-        }.navigationTitle("Avvisi").navigationBarTitleDisplayMode(.inline).refreshable { await load() }
+        }.navigationTitle("Avvisi").navigationBarTitleDisplayMode(.inline).skeletonRefreshable { await load() }
             .task {
                 while !Task.isCancelled { await load(); do { try await Task.sleep(for: .seconds(15)) } catch { break } }
             }

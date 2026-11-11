@@ -27,6 +27,8 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertGreaterThan(tab.frame.midX, previousX, "Unexpected tab order")
             previousX = tab.frame.midX
             tab.tap()
+            let title = label == "App" ? "Applicazioni" : label
+            XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5))
             let settings = app.buttons["global.settings"]
             let alerts = app.buttons["global.alerts"]
             XCTAssertTrue(settings.waitForExistence(timeout: 5))
@@ -34,7 +36,6 @@ final class PlatformControlUITests: XCTestCase {
             XCTAssertLessThan(settings.frame.midX, alerts.frame.midX)
             XCTAssertLessThan(abs(settings.frame.midY - alerts.frame.midY), 30)
             if label == "Home" {
-                XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.staticTexts["Le risorse del tuo server"].exists)
                 XCTAssertTrue(app.descendants(matching: .any)["home.chart.cpu"].firstMatch.waitForExistence(timeout: 5))
                 XCTAssertFalse(app.staticTexts["Stexor VPS"].exists)
@@ -84,6 +85,31 @@ final class PlatformControlUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Applicazioni"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["Cartella da annullare"].exists)
         XCTAssertTrue(application.exists)
+    }
+
+    func testApplicationDetailShowsHostingResourcesAndScopedDatabases() {
+        let app = launchFixtures()
+        app.tabBars.buttons["App"].tap()
+        let application = app.buttons["application.row.project:sample"]
+        XCTAssertTrue(application.waitForExistence(timeout: 10))
+        application.tap()
+        XCTAssertTrue(app.navigationBars["Applicazione di prova"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["application.site"].firstMatch.exists)
+        XCTAssertTrue(accessibleText("PHP", in: app).exists)
+        XCTAssertTrue(accessibleText("Pubblica", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Crea copia privata"].exists)
+
+        let resources = accessibleText("Spazio dei file", in: app)
+        if !resources.isHittable { app.swipeUp() }
+        XCTAssertTrue(resources.exists)
+        let postgres = app.buttons["application.database.fixture-postgres"]
+        if !postgres.isHittable { app.swipeUp() }
+        XCTAssertTrue(postgres.waitForExistence(timeout: 5))
+        XCTAssertTrue(accessibleText("phpMyAdmin", in: app).exists)
+        postgres.tap()
+        XCTAssertTrue(app.navigationBars["Archivio di prova"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["application.database.admin"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["Elimina database"].exists)
     }
 
     func testSecretMetadataNavigationDoesNotRevealValue() {

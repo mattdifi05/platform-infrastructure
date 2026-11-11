@@ -102,6 +102,7 @@ Generated from the authorization catalog. Request and session rules are in [NATI
 | POST | `/control/runtime-updates/:componentId/apply` | owner:fresh | runtime-updates.apply |
 | GET | `/control/runtime-updates/operations/:operationId` | viewer | runtime-updates.operation |
 | GET | `/control/resources/host` | viewer | resources.host.read |
+| GET | `/control/resources/host/history` | viewer | resources.host.history |
 | GET | `/control/resources/summary` | viewer | resources.summary.read |
 | POST | `/control/resources/limits` | admin | resources.limits.plan |
 | GET | `/control/monitoring` | viewer | monitoring.read |

@@ -49,6 +49,8 @@ struct UpdatesView: View {
     @State private var catalogRequests: [UpdateScope: UUID] = [:]
     @State private var failures: [UpdateScope: String] = [:]
     @State private var operations: [String: JSONValue] = [:]
+    @State private var operationScopes: [String: UpdateScope] = [:]
+    @State private var trackedOperations: Set<String> = []
     @State private var review: UpdateReview?
     @State private var checking: Set<UpdateScope> = []
     @State private var loading = true
@@ -61,17 +63,9 @@ struct UpdatesView: View {
     private var pending: Bool { operations.values.contains(where: updatePending) }
     private var maintenanceInProgress: Bool { pending || !checking.isEmpty }
     private var packages: [JSONValue] { system["packages"].arrayValue }
-    private var orderedOperations: [JSONValue] {
-        operations.values.sorted { left, right in
-            if updatePending(left) != updatePending(right) { return updatePending(left) }
-            return (left["createdAt"].stringValue ?? left.id) > (right["createdAt"].stringValue ?? right.id)
-        }
-    }
-
     var body: some View {
         List {
             if loading && catalogs.isEmpty && failures.isEmpty { LoadingState(title: "Caricamento aggiornamenti…") }
-            if !orderedOperations.isEmpty { activitySection }
             systemSection
             servicesSection
             if !availableComponents.isEmpty {
@@ -96,7 +90,7 @@ struct UpdatesView: View {
             }
         }
         .navigationTitle("Aggiornamenti")
-        .refreshable { await refreshCatalogs() }
+        .skeletonRefreshable { await refreshCatalogs() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await refreshCatalogs()
@@ -107,30 +101,48 @@ struct UpdatesView: View {
         }
         .sheet(item: $review) { request in
             UpdatePlanSheet(review: request) { accepted in
-                accept(accepted, title: request.title)
+                accept(accepted, scope: request.scope, title: request.title)
             }
         }
     }
 
-    private var activitySection: some View {
-        Section("Attività") {
-            if pollingError {
-                Label("Connessione interrotta. Verifica in corso.", systemImage: "arrow.trianglehead.clockwise")
-                    .font(.subheadline).foregroundStyle(.secondary)
-            }
-            ForEach(Array(orderedOperations.prefix(6)), id: \.id) { operation in
-                NavigationLink {
-                    UpdateOperationDetail(operationID: operation.id, operations: $operations)
-                } label: {
-                    UpdateOperationSummary(operation: operation)
-                }
-            }
+    @ViewBuilder
+    private func operationStatus(for scope: UpdateScope) -> some View {
+        let scoped = operations.values.filter { operationScopes[$0.id] == scope }
+        let active = scoped.filter(updatePending).sorted(by: mostRecentFirst)
+        if pollingError && !active.isEmpty {
+            Label("Connessione interrotta. Verifica in corso.", systemImage: "arrow.trianglehead.clockwise")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+        ForEach(active, id: \.id) { operation in
+            operationRow(operation)
+        }
+        let recovery = scoped.filter { $0["recoveryRequired"].boolValue == true }.sorted(by: mostRecentFirst).first
+        if let recovery, !updatePending(recovery) {
+            operationRow(recovery)
+        } else if active.isEmpty,
+                  let latest = scoped.filter({ trackedOperations.contains($0.id) }).sorted(by: mostRecentFirst).first,
+                  updateFailed(latest) {
+            operationRow(latest)
+        }
+    }
+
+    private func mostRecentFirst(_ left: JSONValue, _ right: JSONValue) -> Bool {
+        (left["createdAt"].stringValue ?? left.id) > (right["createdAt"].stringValue ?? right.id)
+    }
+
+    private func operationRow(_ operation: JSONValue) -> some View {
+        NavigationLink {
+            UpdateOperationDetail(operationID: operation.id, operations: $operations)
+        } label: {
+            UpdateOperationSummary(operation: operation)
         }
     }
 
     private var systemSection: some View {
         Section(UpdateScope.system.title) {
-            if let error = failures[.system] { ErrorNotice(message: error) }
+            if let error = failures[.system] { ErrorNotice(message: error) { Task { await refreshCatalog(.system) } } }
+            operationStatus(for: .system)
             Button(checking.contains(.system) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
                 Task { await check(.system) }
             }
@@ -184,7 +196,8 @@ struct UpdatesView: View {
 
     private var servicesSection: some View {
         Section {
-            if let error = failures[.services] { ErrorNotice(message: error) }
+            if let error = failures[.services] { ErrorNotice(message: error) { Task { await refreshCatalog(.services) } } }
+            operationStatus(for: .services)
             Button(checking.contains(.services) ? "Verifica in corso…" : "Verifica aggiornamenti", systemImage: "arrow.clockwise") {
                 Task { await check(.services) }
             }
@@ -240,6 +253,7 @@ struct UpdatesView: View {
             failures[scope] = nil
             for value in catalog["operations"].arrayValue where !value.id.isEmpty {
                 if let known = operations[value.id], !updatePending(known) && updatePending(value) { continue }
+                operationScopes[value.id] = scope
                 storeOperation(value)
             }
         } catch {
@@ -278,13 +292,17 @@ struct UpdatesView: View {
         var fields = operation.objectValue
         if let title = operations[operation.id]?["displayTitle"].stringValue { fields["displayTitle"] = .string(title) }
         operations[operation.id] = .object(fields)
+        if updatePending(operation) { trackedOperations.insert(operation.id) }
     }
 
-    private func accept(_ response: JSONValue, title: String) {
+    private func accept(_ response: JSONValue, scope: UpdateScope, title: String) {
         let id = response["operationId"].text
         guard !id.isEmpty else { return }
+        operationScopes[id] = scope
+        trackedOperations.insert(id)
         operations[id] = .object([
             "id": .string(id),
+            "createdAt": .string(Date.now.ISO8601Format()),
             "status": .string(response["status"].stringValue ?? "queued"),
             "displayTitle": .string(title)
         ])
@@ -298,7 +316,7 @@ struct UpdatesView: View {
             let result = try await app.post(scope.path + "/check")
             guard !result["operationId"].text.isEmpty else { throw UpdateUIError.invalidOperation }
             failures[scope] = nil
-            accept(result, title: "Verifica \(scope.title.lowercased())")
+            accept(result, scope: scope, title: "Verifica \(scope.title.lowercased())")
         } catch {
             failures[scope] = error.localizedDescription
         }
@@ -358,7 +376,7 @@ private struct UpdatePlanSheet: View {
                                 .accessibilityIdentifier("updates.confirm")
                             }
                         }
-                        if applying { ProgressView("Invio richiesta…") }
+                        if applying { LoadingState(title: "Invio richiesta…", style: .row) }
                     } footer: {
                         if review.action != .update {
                             Text("Il server sarà temporaneamente irraggiungibile durante il riavvio.")
@@ -481,12 +499,16 @@ private struct UpdateOperationSummary: View {
             if !operation["currentService"].text.isEmpty { Text(operation["currentService"].text).font(.caption).foregroundStyle(.secondary) }
             else if !operation["currentComponent"].text.isEmpty { Text(operation["currentComponent"].text).font(.caption).foregroundStyle(.secondary) }
             if let completed = operation["completedServices"].intValue, let total = operation["totalServices"].intValue, total > 0 {
-                ProgressView(value: Double(completed), total: Double(total)) { Text("\(completed) di \(total) servizi") }
+                Text("\(completed) di \(total) servizi").font(.footnote).foregroundStyle(.secondary)
             } else if let completed = operation["completedSteps"].intValue, let total = operation["totalSteps"].intValue, total > 0 {
-                ProgressView(value: Double(completed), total: Double(total)) { Text("\(completed) di \(total) passaggi") }
-            } else if updatePending(operation) { ProgressView("In attesa") }
+                Text("\(completed) di \(total) passaggi").font(.footnote).foregroundStyle(.secondary)
+            }
             if operation["recoveryRequired"].boolValue == true { Label("Verifica amministrativa richiesta", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
-            if !operation["error"].text.isEmpty { Text(operation["error"].text).foregroundStyle(.red) }
+            if !operation["error"].text.isEmpty {
+                Text(operation["error"].text).foregroundStyle(.red)
+            } else if updateFailed(operation), operation["recoveryRequired"].boolValue != true {
+                Text("Verifica nuovamente gli aggiornamenti prima di riprovare.").font(.footnote).foregroundStyle(.secondary)
+            }
         }.accessibilityElement(children: .combine)
     }
 
@@ -541,7 +563,11 @@ private struct UpdateOperationDetail: View {
 }
 
 private func updatePending(_ operation: JSONValue) -> Bool {
-    !["succeeded", "completed", "failed", "rolled_back", "rolled-back", "rollback_failed", "interrupted"].contains(operation["status"].text)
+    !["succeeded", "completed"].contains(operation["status"].text) && !updateFailed(operation)
+}
+
+private func updateFailed(_ operation: JSONValue) -> Bool {
+    ["failed", "rolled_back", "rolled-back", "rollback_failed", "interrupted"].contains(operation["status"].text)
 }
 
 private func updateLabel(_ status: String) -> String {

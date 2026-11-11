@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hostMetricsPayload, createHostMetricsReader, HOST_METRIC_QUERIES } from "../resources/host-metrics.mjs";
+import { hostMetricsPayload, createHostMetricsReader, createHostMetricsHistoryReader, HOST_BASE_METRIC_QUERIES, HOST_METRIC_QUERIES } from "../resources/host-metrics.mjs";
 
 test("host settings reject the container filesystem fallback when Prometheus is unavailable", () => {
   const result = hostMetricsPayload({ available: false, cpu: { available: false, usedPercent: null }, memory: { available: false, totalBytes: 0, usedBytes: 0 }, disk: { available: true, totalBytes: 9999, usedBytes: 1234, usedPercent: 12.34 } });
@@ -80,6 +80,7 @@ test("optional collector absence stays null while actual swap absence remains me
   assert.equal(result.fileDescriptors.allocated, null);
   assert.equal(result.freshness.ageSeconds, 8);
   assert.equal(result.capturedAt, new Date(clock - 8000).toISOString());
+  assert.equal(result.observedAt, new Date(clock).toISOString());
 });
 
 test("host gauges compute swap, inode, uptime and descriptor ratios without counting bind mounts twice", async () => {
@@ -149,4 +150,58 @@ test("host metrics overlay limits collectors to finite read-only proc files and 
   assert.match(source, /--no-collector.netdev.netlink/);
   assert.match(source, /pid: !reset null/); assert.match(source, /cap_drop: \[ALL\]/); assert.match(source, /ports: !reset \[\]/);
   assert.doesNotMatch(source, /network_mode: host|pid: host|source: \/(?:proc|sys)?\s*$/m);
+});
+
+test("history reads a fixed 40 seconds plus one predecessor, reuses host definitions and caches concurrent requests", async () => {
+  const requests = [];
+  let time = clock + 721;
+  const queryRange = async (expression, bounds) => {
+    requests.push({ expression, bounds });
+    const { start, end, step } = bounds;
+    const values = Array.from({ length: (end - start) / step + 1 }, (_, index) => start + index * step);
+    const series = (metric, value) => ({ metric, values: values.map(seconds => [seconds, String(typeof value === "function" ? value(seconds) : value)]) });
+    const filesystem = { mountpoint: "/", device: "/dev/sda1" };
+    switch (expression) {
+      case HOST_METRIC_QUERIES.up: return [series({}, seconds => seconds === end - 6 ? 0 : 1)];
+      case HOST_METRIC_QUERIES.sampleTime: return [series({}, seconds => seconds - 2)];
+      case HOST_BASE_METRIC_QUERIES.cpuPercent: return [series({}, 0)];
+      case HOST_BASE_METRIC_QUERIES.memoryTotal: return [series({}, 100)];
+      case HOST_BASE_METRIC_QUERIES.memoryAvailable: return [series({}, 60)];
+      case HOST_BASE_METRIC_QUERIES.diskSize: return [series(filesystem, 100), series({ ...filesystem, mountpoint: "/srv/platform-nvme" }, 100)];
+      case HOST_BASE_METRIC_QUERIES.diskAvailable: return [series(filesystem, 75), series({ ...filesystem, mountpoint: "/srv/platform-nvme" }, 75)];
+      case HOST_METRIC_QUERIES.rxBytesPerSecond: return [series({ device: "eth0" }, 100), series({ device: "veth0" }, 1000)];
+      case HOST_METRIC_QUERIES.txBytesPerSecond: throw Error("unavailable");
+      case HOST_METRIC_QUERIES.readBytesPerSecond: return [series({ device: "sda" }, 200)];
+      case HOST_METRIC_QUERIES.writeBytesPerSecond: return [series({ device: "sda" }, "NaN")];
+      default: return [];
+    }
+  };
+  const read = createHostMetricsHistoryReader({ queryRange, now: () => time });
+  const [history, concurrent] = await Promise.all([read(), read()]);
+  assert.strictEqual(concurrent, history);
+  assert.equal(history.samples.length, 21);
+  assert.equal(history.samples[0].capturedAt, new Date(clock - 42000).toISOString());
+  assert.equal(history.samples.at(-1).capturedAt, new Date(clock).toISOString());
+  assert.equal(history.samples.some(sample => sample.capturedAt === new Date(clock - 6000).toISOString()), false);
+  assert.deepEqual(history.samples.at(-1), {
+    capturedAt: new Date(clock).toISOString(), cpu: 0, memory: 40, disk: 25, receive: 100, send: null, diskRead: 200, diskWrite: null,
+  });
+  const expectedBounds = { start: clock / 1000 - 42, end: clock / 1000, step: 2 };
+  assert.ok(requests.every(({ bounds }) => JSON.stringify(bounds) === JSON.stringify(expectedBounds)));
+  const requestCount = requests.length;
+  assert.equal(new Set(requests.map(({ expression }) => expression)).size, requestCount);
+  time += 2999;
+  assert.strictEqual(await read(), history);
+  time += 1;
+  assert.notStrictEqual(await read(), history);
+  assert.equal(requests.length, requestCount * 2);
+});
+
+test("missing or stale exporters return no historical points", async () => {
+  const read = createHostMetricsHistoryReader({ now: () => clock, queryRange: async (expression, { end }) => {
+    if (expression === HOST_METRIC_QUERIES.up) return [{ values: [[end, "1"]] }];
+    if (expression === HOST_METRIC_QUERIES.sampleTime) return [{ values: [[end, String(end - 61)]] }];
+    return [{ values: [[end, "50"]] }];
+  } });
+  assert.deepEqual(await read(), { samples: [] });
 });

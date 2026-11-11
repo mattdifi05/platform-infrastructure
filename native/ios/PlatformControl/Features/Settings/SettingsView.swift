@@ -24,7 +24,7 @@ struct SettingsView: View {
                 Toggle(isOn: Binding(get: { backup["control"]["enabled"].boolValue == true }, set: { _ in confirmBackup = true })) {
                     Label("Backup del server", systemImage: "externaldrive.badge.timemachine")
                 }.disabled(busy || backup["control"]["available"].boolValue != true || backup["controlQueueActive"].boolValue != true)
-                if busy { HStack { ProgressView(); Text("In attesa della conferma del server…").font(.subheadline).foregroundStyle(.secondary) } }
+                if busy { LoadingState(title: "In attesa della conferma del server…", style: .row) }
                 NavigationLink { BackupManagementView() } label: { Label("Copie e ripristino", systemImage: "clock.arrow.circlepath") }
             } header: { Text("Backup") } footer: { Text("Controlla le copie locali e FTP. I backup inclusi nel servizio Hostinger hanno una gestione separata.") }
             Section("Aspetto") {
@@ -40,7 +40,7 @@ struct SettingsView: View {
             }
             Section { LabeledContent("Platform", value: appVersion) }.foregroundStyle(.secondary)
         }.navigationTitle("Impostazioni").navigationBarTitleDisplayMode(.inline)
-            .task { await load() }.refreshable { await load() }
+            .task { await load() }.skeletonRefreshable { await load() }
             .confirmationDialog(backup["control"]["enabled"].boolValue == true ? "Disattivare i backup?" : "Attivare i backup?", isPresented: $confirmBackup, titleVisibility: .visible) {
                 Button(backup["control"]["enabled"].boolValue == true ? "Disattiva backup" : "Attiva backup") { Task { await changeBackup() } }
                 Button("Annulla", role: .cancel) { }
@@ -111,9 +111,9 @@ private struct BackupManagementView: View {
                 Section {
                     Button { confirmCapture = true } label: { Label("Crea backup completo", systemImage: "plus.circle") }
                         .disabled(busy || catalog["enabled"].boolValue != true || catalog["queueActive"].boolValue != true)
-                    if busy { ProgressView("Richiesta del backup…") }
+                    if busy { LoadingState(title: "Richiesta del backup…", style: .row) }
                 }
-            } else if busy { ProgressView("Caricamento copie…") }
+            } else if busy { LoadingState(title: "Caricamento copie…") }
             else { Button("Carica copie con passkey") { Task { await load() } } }
         }.navigationTitle("Copie e ripristino").navigationBarTitleDisplayMode(.inline)
             .confirmationDialog("Creare un backup completo del server?", isPresented: $confirmCapture, titleVisibility: .visible) {
@@ -162,7 +162,7 @@ private struct BackupRestoreView: View {
                     Button("Ripristina questa copia", role: .destructive) { Task { await restore() } }.disabled(busy || plan["details"]["enabled"].boolValue != true || confirmation.isEmpty || confirmation != plan["details"]["confirmationRequired"].text)
                 }
             } else { Button("Verifica il piano di ripristino") { Task { await review() } }.disabled(busy) }
-            if busy { ProgressView("Verifica del server…") }
+            if busy { LoadingState(title: "Verifica del server…", style: .row) }
         }.navigationTitle("Ripristino").navigationBarTitleDisplayMode(.inline)
     }
     private func review() async { busy = true; defer { busy = false }; do { try await model.stepUp(); plan = try await model.post("/control/backups/production-restore", body: .object(["manifestId": record["id"]])); error = nil } catch is CancellationError { } catch { self.error = error.localizedDescription } }

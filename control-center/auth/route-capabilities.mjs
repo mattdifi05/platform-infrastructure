@@ -128,6 +128,7 @@ const CONTROL_ROUTES = Object.freeze([
   viewer("runtime-updates.operation", "control", "runtime-updates", "operations", parameter("operationId")),
 
   viewer("resources.host.read", "control", "resources", "host"),
+  viewer("resources.host.history", "control", "resources", "host", "history"),
   viewer("resources.summary.read", "control", "resources", "summary"),
   admin("resources.limits.plan", "control", "resources", "limits"),
   viewer("monitoring.read", "control", "monitoring"),
@@ -173,6 +174,7 @@ const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   owner("POST", "native.vault.challenge", "api", "native", "v1", "vault", "secrets", parameter("vaultItemId"), "challenge"),
   owner("POST", "native.vault.reveal", "api", "native", "v1", "vault", "secrets", parameter("vaultItemId"), "reveal"),
   viewer("native.applications", "api", "native", "v1", "applications"),
+  viewer("native.application-databases", "api", "native", "v1", "applications", parameter("projectId"), "databases"),
   ownerFresh("POST", "native.database", "api", "native", "v1", "database-command"),
   ownerFresh("POST", "native.database-delete", "api", "native", "v1", "database-delete-command"),
   admin("native.redis-backup", "api", "native", "v1", "redis-backup-command"),

@@ -65,8 +65,17 @@ final class AppModel {
         vaultCredentialNeedsRenewal = false
     }
 
-    func signVaultChallenge(_ challenge: String) async throws -> String {
-        do { return try await VaultFaceID.sign(challenge: challenge) }
+    func requestVaultRevealChallenge(itemID: String) async throws -> String {
+        let interval = VaultFaceID.timing.beginInterval("Vault challenge request")
+        defer { VaultFaceID.timing.endInterval("Vault challenge request", interval) }
+        return try await post("/api/native/v1/vault/secrets/\(itemID)/challenge")["challenge"].text
+    }
+
+    func vaultRevealProof(requestingChallenge: @MainActor @Sendable () async throws -> String) async throws -> JSONValue {
+        do {
+            let proof = try await VaultFaceID.sign(requestingChallenge: requestingChallenge)
+            return .object(["challenge": .string(proof.challenge), "signature": .string(proof.signature)])
+        }
         catch VaultFaceIDError.credentialUnavailable {
             vaultCredentialNeedsRenewal = true
             throw VaultFaceIDError.credentialUnavailable

@@ -99,7 +99,7 @@ struct SecretsView: View {
         .navigationTitle("Secrets")
         .searchable(text: $search, prompt: "Nome, applicazione o ambiente")
         .toolbar { ToolbarItem(placement: .primaryAction) { Button("Nuovo secret", systemImage: "plus") { sheet = .create } } }
-        .refreshable { await load() }
+        .skeletonRefreshable { await load() }
         .task { await load() }
         .sheet(item: $sheet) { mode in
             VaultEditorSheet(mode: mode, revision: catalog["revision"].text, projects: catalog["projects"].arrayValue) { message in
@@ -145,9 +145,18 @@ private struct VaultEntryView: View {
         default: return "Ogni \(days) giorni"
         }
     }
+    private struct PendingChallenge {
+        let deadline: ContinuousClock.Instant
+        let request: Task<String, Error>
+    }
+
     let manage: (String) -> Void
+    @State private var detailVisible = false
+    @State private var pendingChallenge: PendingChallenge?
+    @State private var challengeExpiry: Task<Void, Never>?
     @State private var revealedValue: String?
     @State private var expiresAt: Date?
+    @State private var revealRequest: Task<Void, Never>?
     @State private var revealTask: Task<Void, Never>?
     @State private var pasteboardChange: Int?
     @State private var revealGeneration = UUID()
@@ -160,6 +169,7 @@ private struct VaultEntryView: View {
                 if let revealedValue, let expiresAt, expiresAt > Date(), scenePhase == .active {
                     Text(revealedValue).font(.body.monospaced()).privacySensitive()
                         .accessibilityLabel("Valore secret").accessibilityValue(revealedValue)
+                        .onAppear { VaultFaceID.timing.emitEvent("Vault value visible") }
                     Button("Copia valore", systemImage: "doc.on.doc") { copy(revealedValue, until: expiresAt) }
                     Button("Nascondi", systemImage: "eye.slash") { clear() }
                 } else if entry.value["valueStored"].boolValue == false {
@@ -167,8 +177,8 @@ private struct VaultEntryView: View {
                 } else if !app.vaultFaceIDSupported {
                     Text("Face ID non disponibile per questo server").foregroundStyle(.secondary)
                 } else {
-                    Button { Task { await showValue() } } label: {
-                        if revealing { ProgressView() }
+                    Button(action: beginReveal) {
+                        if revealing { LoadingState(title: "Verifica Face ID…", style: .inline) }
                         else { Label(app.vaultFaceIDRegistered ? "Mostra con Face ID" : "Abilita Face ID", systemImage: "faceid") }
                     }.disabled(revealing)
                 }
@@ -192,9 +202,27 @@ private struct VaultEntryView: View {
             }.disabled(revealing)
         }
         .navigationTitle(entry.title)
-        .onChange(of: scenePhase) { _, phase in if phase == .background { clear() } }
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            detailVisible = true
+            prefetchChallenge()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { clear() }
+            if phase == .active { prefetchChallenge() }
+        }
+        .onChange(of: app.bootstrap["csrfToken"].stringValue) { _, _ in
+            clear()
+            prefetchChallenge()
+        }
+        .onChange(of: app.authenticated) { _, authenticated in
+            if !authenticated { clear() }
+        }
         .onChange(of: catalog["items"].arrayValue.contains { $0["id"].text == entryID }) { _, exists in if !exists { clear(); dismiss() } }
-        .onDisappear { clear() }
+        .onDisappear {
+            detailVisible = false
+            clear()
+        }
     }
 
     private func dateRow(_ title: String, value: String) -> some View {
@@ -204,25 +232,41 @@ private struct VaultEntryView: View {
         }
     }
 
-    @MainActor private func showValue() async {
-        guard !revealing else { return }
-        clear()
-        let generation = revealGeneration
+    @MainActor private func beginReveal() {
+        guard detailVisible, scenePhase == .active, !revealing else { return }
+        clearRevealedValue()
+        let generation = UUID()
+        revealGeneration = generation
         revealing = true
         error = nil
-        defer { revealing = false }
+        if app.vaultFaceIDRegistered { VaultFaceID.timing.emitEvent("Vault reveal requested") }
+        revealRequest = Task { await showValue(generation: generation) }
+    }
+
+    @MainActor private func showValue(generation: UUID) async {
+        defer {
+            if generation == revealGeneration {
+                revealing = false
+                revealRequest = nil
+            }
+        }
         do {
+            try Task.checkCancellation()
             if !app.vaultFaceIDRegistered {
                 try await app.enableVaultFaceID()
                 return
             }
-            let path = "/api/native/v1/vault/secrets/\(entry.id)"
-            let nonce = try await app.post("\(path)/challenge")["challenge"].text
-            guard generation == revealGeneration, scenePhase != .background else { return }
-            let signature = try await app.signVaultChallenge(nonce)
-            guard generation == revealGeneration, scenePhase != .background else { return }
-            let result = try await app.post("\(path)/reveal", body: .object(["challenge": .string(nonce), "signature": .string(signature)]))
-            guard generation == revealGeneration, scenePhase != .background else { return }
+            let proof = try await app.vaultRevealProof {
+                try await consumeChallenge(generation: generation)
+            }
+            guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
+            let result: JSONValue
+            do {
+                let interval = VaultFaceID.timing.beginInterval("Vault reveal request")
+                defer { VaultFaceID.timing.endInterval("Vault reveal request", interval) }
+                result = try await app.post("/api/native/v1/vault/secrets/\(entryID)/reveal", body: proof)
+            }
+            guard !Task.isCancelled, generation == revealGeneration, scenePhase != .background else { return }
             let value = result["value"].stringValue
             let serverExpiry = vaultDate(result["revealExpiresAt"].text)
             guard let value, let serverExpiry, serverExpiry > Date() else { throw VaultUIError.invalidReveal }
@@ -241,6 +285,61 @@ private struct VaultEntryView: View {
         catch { if generation == revealGeneration { self.error = error.localizedDescription } }
     }
 
+    @MainActor private func prefetchChallenge() {
+        guard detailVisible, scenePhase == .active, app.authenticated, app.vaultFaceIDSupported,
+              app.vaultFaceIDRegistered, entry.value["valueStored"].boolValue == true,
+              !revealing, revealedValue == nil, pendingChallenge == nil else { return }
+
+        // The server lifetime starts after the request arrives. Start our
+        // shorter lifetime before sending the request, using a monotonic clock.
+        let deadline = ContinuousClock.now + .seconds(45)
+        let request = Task { [app, entryID] in
+            try await app.requestVaultRevealChallenge(itemID: entryID)
+        }
+        pendingChallenge = PendingChallenge(deadline: deadline, request: request)
+        challengeExpiry = Task {
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
+            guard pendingChallenge?.deadline == deadline else { return }
+            discardChallenge()
+        }
+    }
+
+    @MainActor private func consumeChallenge(generation: UUID) async throws -> String {
+        try Task.checkCancellation()
+        guard detailVisible, generation == revealGeneration, scenePhase != .background, app.authenticated else {
+            throw CancellationError()
+        }
+        if let pending = pendingChallenge {
+            pendingChallenge = nil
+            challengeExpiry?.cancel()
+            challengeExpiry = nil
+            if pending.deadline > .now {
+                // Remove it before awaiting so it is available for only this tap.
+                let nonce = await withTaskCancellationHandler {
+                    try? await pending.request.value
+                } onCancel: {
+                    pending.request.cancel()
+                }
+                try Task.checkCancellation()
+                if let nonce, pending.deadline > .now { return nonce }
+            } else {
+                pending.request.cancel()
+            }
+        }
+        guard detailVisible, generation == revealGeneration, scenePhase != .background, app.authenticated else {
+            throw CancellationError()
+        }
+        return try await app.requestVaultRevealChallenge(itemID: entryID)
+    }
+
+    @MainActor private func discardChallenge() {
+        pendingChallenge?.request.cancel()
+        pendingChallenge = nil
+        challengeExpiry?.cancel()
+        challengeExpiry = nil
+    }
+
     @MainActor private func copy(_ value: String, until expiry: Date) {
         guard expiry > Date(), scenePhase == .active else { clear(); return }
         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: value]], options: [.localOnly: true, .expirationDate: expiry])
@@ -249,6 +348,14 @@ private struct VaultEntryView: View {
 
     @MainActor private func clear() {
         revealGeneration = UUID()
+        revealRequest?.cancel()
+        revealRequest = nil
+        revealing = false
+        discardChallenge()
+        clearRevealedValue()
+    }
+
+    @MainActor private func clearRevealedValue() {
         revealTask?.cancel(); revealTask = nil
         revealedValue = nil; expiresAt = nil
         if let pasteboardChange, UIPasteboard.general.changeCount == pasteboardChange { UIPasteboard.general.items = [] }
@@ -309,7 +416,7 @@ private struct VaultEditorSheet: View {
                 case .importExisting:
                     Section {
                         Text("Importa i valori dalle sole posizioni già approvate sul server. I file originali vengono conservati; i record presenti vengono saltati.")
-                        if busy { ProgressView("Preparazione…") }
+                        if busy { LoadingState(title: "Preparazione…", style: .row) }
                         if importPlan["dryRun"].boolValue == true {
                             let details = importPlan["details"]
                             LabeledContent("Importabili", value: "\(details["importableCount"].intValue ?? 0)")
@@ -322,7 +429,7 @@ private struct VaultEditorSheet: View {
                 }
                 Section {
                     Button { Task { await save() } } label: {
-                        if busy { ProgressView("Operazione in corso…") } else { Text(title) }
+                        if busy { LoadingState(title: "Operazione in corso…", style: .inline) } else { Text(title) }
                     }.disabled(!enabled).foregroundStyle(isDelete ? .red : .accentColor)
                 }
             }
