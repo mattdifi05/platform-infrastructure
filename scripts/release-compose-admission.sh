@@ -23,10 +23,12 @@ jq -e -s '
   def digest_image:
     type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$");
   def exact_subject($receipt; $deployment; $compose; $key; $service):
-    ([ $receipt.subjects[] | select(.key == $key) ] | length == 1) and
-    ([ $receipt.subjects[] | select(.key == $key) ][0].image) as $image |
-    ([ $receipt.subjectVerificationReceipts[] | select(.key == $key and .image == $image) ] | length == 1) and
-    ([ $receipt.subjectVerificationReceipts[] | select(.key == $key and .image == $image) ][0].registry.platforms) as $platforms |
+    [ $receipt.subjects[] | select(.key == $key) ] as $subjects |
+    $subjects[0].image as $image |
+    [ $receipt.subjectVerificationReceipts[] | select(.key == $key and .image == $image) ] as $verifications |
+    $verifications[0].registry.platforms as $platforms |
+    ($subjects | length == 1) and
+    ($verifications | length == 1) and
     ($platforms | type == "array" and length == 1) and
     ($platforms[0].platform == "linux/amd64") and
     ($platforms[0].digest | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
