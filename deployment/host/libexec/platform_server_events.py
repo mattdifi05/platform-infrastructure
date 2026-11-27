@@ -154,6 +154,20 @@ def operation_scopes(row):
     return {'runtime:' + str(value) for value in components} if components else {'runtime:' + str(row.get('componentId') or kind)}
 
 
+def partial_apply_scopes(row):
+    """Only completed components supersede older failures; skipped ones do not."""
+    succeeded, unresolved = set(), set()
+    for item in row.get('componentResults', []):
+        if not isinstance(item, dict) or not item.get('componentId'):
+            continue
+        scope = 'runtime:' + str(item['componentId'])
+        if item.get('status') == 'succeeded':
+            succeeded.add(scope)
+        elif item.get('status') != 'skipped':
+            unresolved.add(scope)
+    return succeeded - unresolved, unresolved
+
+
 def expected_firewall_warning(message):
     match = UFW_INGRESS_DROP.match(message)
     if not match:
@@ -325,6 +339,11 @@ class ServerEventsCollector:
             if row.get('status') == 'succeeded' or row.get('operatorReconciled') or failed and verified_operation_resolution(row, observed):
                 resolved.update(scopes)
                 continue
+            if failed and row.get('kind', 'apply') == 'apply' and row.get('componentResults') and not row.get('recoveryRequired'):
+                succeeded, scopes = partial_apply_scopes(row)
+                resolved.update(succeeded)
+                scopes -= resolved
+                service = ', '.join(sorted(scopes))
             if scopes <= resolved:
                 continue
             if row.get('status') in ['queued', 'running'] and not row.get('recoveryRequired'):

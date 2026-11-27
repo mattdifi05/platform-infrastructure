@@ -22,7 +22,7 @@ The 2026-06-29 live runtime still contains the historical app-coupled services:
 ```text
 alertmanager, backend, cadvisor, control-center, grafana, keycloak, local-dns,
 loki, mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin, postgres,
-project-router, prometheus, promtail, redis, traefik, waf, web, worker-jobs,
+project-router, prometheus, alloy, redis, traefik, waf, web, worker-jobs,
 worker-notifications
 ```
 
@@ -35,7 +35,7 @@ T18 candidate core, verified 2026-07-10 with no live recreate:
 alertmanager, backup-scheduler, cadvisor, control-center,
 docker-operation-gateway, grafana, keycloak, local-dns, local-registry, loki,
 mariadb, minio, nats, node-exporter, phppgadmin, phpmyadmin,
-platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
+platform-alert-dispatcher, postgres, project-router, prometheus, alloy,
 redis, traefik, waf
 ```
 
@@ -88,7 +88,7 @@ LAN-only Ubuntu server.
 | Staging | 8/10 | Staging overlays and gates exist; a real staging host/domain still has to be exercised. |
 | Production | 7.5/10 | Production/VPS overlays, preflight, rollback and release evidence tooling exist; real VPS deploy remains required. |
 | Security | 8.5/10 | Secrets, WAF, rate limits, CSP, platform admin audit, smoke tests and hardening scripts are in place. |
-| Observability | 8.5/10 | Prometheus, Alertmanager, Loki, Promtail, Grafana dashboards, email alerts and alert evidence tooling are wired. |
+| Observability | 8.5/10 | Prometheus, Alertmanager, Loki, Alloy, Grafana dashboards, email alerts and alert evidence tooling are wired. |
 | Disaster Recovery | 8.5/10 | Full local restore drills, off-site Restic restore automation with full-family coverage checks and rollback evidence tooling exist; live remote restore must be proven. |
 | Linux Portability | 9.5/10 | Shell scripts, LF normalization, Dockerized ops runner and Linux syntax checks are present. |
 

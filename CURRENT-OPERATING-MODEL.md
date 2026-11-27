@@ -104,7 +104,7 @@ Historical services currently running on the unchanged reference stack:
 ```text
 alertmanager, backend, cadvisor, control-center, grafana, keycloak, local-dns,
 loki, mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin, postgres,
-project-router, prometheus, promtail, redis, traefik, waf, web, worker-jobs,
+project-router, prometheus, alloy, redis, traefik, waf, web, worker-jobs,
 worker-notifications
 ```
 
@@ -114,7 +114,7 @@ The T18 candidate core instead renders exactly 24 services:
 alertmanager, backup-scheduler, cadvisor, control-center,
 docker-operation-gateway, grafana, keycloak, local-dns, local-registry, loki,
 mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin,
-platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
+platform-alert-dispatcher, postgres, project-router, prometheus, alloy,
 redis, traefik, waf
 ```
 

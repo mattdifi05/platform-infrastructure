@@ -98,7 +98,7 @@ services:
     restart: always
     ports: !reset []
 
-  promtail:
+  alloy:
     restart: always
 
 configs:

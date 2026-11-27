@@ -34,9 +34,11 @@ const invalid = () => { throw new RuntimeUpdatesError(400, 'invalid_request'); }
 export function validateRuntimeUpdatesRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || !actions.has(body.action)) invalid();
   const required = fields[body.action];
-  const optional = body.action === 'host-plan' ? ['rebootAfter'] : [];
+  const optional = body.action === 'host-plan' ? ['rebootAfter', 'coordinatedReboot'] : [];
   if (required.some(key => !Object.hasOwn(body, key)) || Object.keys(body).some(key => key !== 'action' && !required.includes(key) && !optional.includes(key))) invalid();
   if (Object.hasOwn(body, 'rebootAfter') && typeof body.rebootAfter !== 'boolean') invalid();
+  if (Object.hasOwn(body, 'coordinatedReboot') && (typeof body.coordinatedReboot !== 'boolean'
+      || body.coordinatedReboot && body.rebootAfter !== true)) invalid();
   const confirmations = body.action === 'host-reboot-apply' ? ['REBOOT'] : body.action === 'host-apply' ? ['UPDATE', 'UPDATE_AND_REBOOT'] : ['UPDATE'];
   if (body.action === 'database-sizes' && !validRuntimeUpdatesId(body.projectId)) invalid();
   for (const key of required) {
@@ -62,7 +64,7 @@ function packageVersions(rows, count) {
     const { name, currentVersion, targetVersion } = row ?? {};
     const version = value => typeof value === 'string' && value.length <= 256 && /^[A-Za-z0-9.+:~_-]+$/.test(value);
     if (typeof name !== 'string' || name.length > 256 || !/^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?$/.test(name)
-        || seen.has(name) || !version(currentVersion) || !version(targetVersion)) throw new RuntimeUpdatesError(503, 'invalid_response');
+        || seen.has(name) || (currentVersion !== null && !version(currentVersion)) || !version(targetVersion)) throw new RuntimeUpdatesError(503, 'invalid_response');
     seen.add(name);
     return { name, currentVersion, targetVersion };
   });
@@ -80,6 +82,11 @@ function operation(value) {
   for (const key of ['componentId', 'targetVersion']) if (text(value[key], 128)) result[key] = value[key];
   for (const key of ['createdAt', 'startedAt', 'finishedAt']) if (timestamp(value[key])) result[key] = value[key];
   result.recoveryRequired = value.recoveryRequired === true;
+  if (value.pairedWith !== undefined) {
+    if (!validRuntimeUpdatesId(value.pairedWith) || value.pairedWith === value.id) throw new RuntimeUpdatesError(503, 'invalid_response');
+    result.pairedWith = value.pairedWith;
+  }
+  result.waitingForMaintenance = value.waitingForMaintenance === true;
   if (value.error) result.error = 'Operazione non riuscita. Controlla lo stato e verifica un nuovo piano.';
   const serviceStates = new Set(['queued', 'preparing', 'checking', 'updating', 'verifying', 'verified', 'succeeded', 'failed', 'rolled-back', 'skipped']);
   for (const key of ['currentComponent', 'currentService']) if (value[key] === null || text(value[key], 256)) result[key] = value[key];
@@ -160,13 +167,16 @@ function sanitizeResult(body, value) {
   if (body.action === 'host-plan' || body.action === 'host-reboot-plan') {
     const reboot = body.action === 'host-reboot-plan';
     const rebootAfter = !reboot && body.rebootAfter === true;
+    const coordinatedReboot = rebootAfter && body.coordinatedReboot === true;
     if (!validRuntimeUpdatesId(value.planId) || value.revision !== body.revision || !timestamp(value.expiresAt)
         || value.confirmationRequired !== (reboot ? 'REBOOT' : rebootAfter ? 'UPDATE_AND_REBOOT' : 'UPDATE') || value.kind !== (reboot ? 'host-reboot' : 'host-upgrade')
         || (value.rebootAfter === true) !== rebootAfter
+        || (value.coordinatedReboot === true) !== coordinatedReboot
         || !Array.isArray(value.steps) || !Array.isArray(value.risks) || !Number.isSafeInteger(value.packageCount) || value.packageCount < 0
         || value.autoremoveCount !== undefined && (!Number.isSafeInteger(value.autoremoveCount) || value.autoremoveCount < 0 || value.autoremoveCount > 100000)) throw new RuntimeUpdatesError(503, 'invalid_response');
     return { planId: value.planId, revision: value.revision, expiresAt: value.expiresAt, kind: value.kind, packageCount: value.packageCount, autoremoveCount: value.autoremoveCount ?? 0,
       packages: packageVersions(value.packages, value.packageCount), rebootAfter,
+      ...(coordinatedReboot ? { coordinatedReboot: true } : {}),
       steps: strings(value.steps), risks: strings(value.risks), confirmationRequired: value.confirmationRequired };
   }
   if (body.action === 'operation') {

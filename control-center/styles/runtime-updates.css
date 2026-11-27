@@ -1,48 +1,70 @@
 .cc-settings > .ops-project-detail-panel{border-radius:var(--cc-radius-2xl,16px)}
-.cc-settings > .cc-updates,.cc-settings > .cc-host-updates{gap:10px}
+.cc-settings > .cc-updates{gap:10px}
 .cc-updates-header,.cc-updates-actions{display:flex;align-items:center;gap:8px;justify-content:space-between}
 .cc-updates-header h2{font-size:16px}.cc-updates-header .cc-settings-note{margin:3px 0 0;font-size:11px}
 .cc-updates-actions{justify-content:flex-end;flex-wrap:wrap}.cc-updates-actions .ops-button{min-height:30px;padding:6px 10px;font-size:11px}
-.cc-updates .cc-updates-actions [data-updates-refresh]{width:30px;min-width:30px;padding:6px}
-.cc-updates .cc-settings-note,.cc-host-updates .cc-settings-note{margin:0;font-size:11px;line-height:1.45}
-.cc-updates [hidden],.cc-host-updates [hidden]{display:none!important}
-.cc-updates [data-updates-status],.cc-host-updates [data-host-updates-status]{font-size:12px;line-height:1.45;margin:0}
-.cc-updates [data-updates-status]:empty,.cc-host-updates [data-host-updates-status]:empty{display:none}
+.cc-updates .cc-settings-note{margin:0;font-size:11px;line-height:1.45}
+.cc-updates [hidden]{display:none!important}
 .cc-updates-list{display:grid;min-width:0}
-.cc-update-row{display:grid;grid-template-columns:minmax(155px,1.5fr) minmax(100px,.8fr) minmax(100px,.8fr) auto auto;align-items:center;gap:8px 14px;padding:10px 0;border-top:1px solid #e8ecf2;min-width:0}
-.cc-update-row>div:first-child{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
-.cc-update-row strong{font-size:12px;overflow-wrap:anywhere}.cc-update-row>div:first-child>strong{font-size:13px}
-.cc-update-row small{font-size:10px;color:var(--cc-muted,#64748b);line-height:1.35}
-.cc-update-current,.cc-update-latest{min-width:0;position:relative}
-.cc-update-current small,.cc-update-latest small{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-.cc-update-latest::before{content:'→';color:#8994a4;font-size:12px;position:absolute;left:-17px;top:0}
-.cc-update-row>.ops-button{font-size:11px;min-height:29px;padding:5px 10px}
-.cc-update-detail{min-width:0;font-size:11px;color:var(--cc-muted,#64748b)}
-.cc-update-detail summary{cursor:pointer;white-space:nowrap;min-height:26px;display:flex;align-items:center;gap:5px;list-style:none}
-.cc-update-detail summary::before,.cc-update-results summary::before{content:'›';display:inline-block;font-size:16px;line-height:1;transition:transform .18s ease}
-.cc-update-detail[open],.cc-update-results[open]{grid-column:1/-1}
-.cc-update-detail[open] summary::before,.cc-update-results[open] summary::before{transform:rotate(90deg)}
-.cc-update-detail p{font-size:11px;line-height:1.5;margin:4px 0 0;padding:8px 10px;border-radius:8px;background:#f5f7fa;overflow-wrap:anywhere}
-.cc-updates [data-updates-progress]{display:grid;gap:8px;padding:10px 12px;border:1px solid #dce2eb;border-radius:12px;background:#f8faff;overflow:hidden}
-.cc-update-progress-heading,.cc-host-updates [data-host-updates-progress]{display:flex;align-items:center;gap:10px;font-size:11px;min-width:0}
-.cc-updates progress,.cc-host-updates progress{width:140px;max-width:30%;height:6px;accent-color:#1860d7;flex-shrink:0}
+.cc-update-results summary::before{content:'›';display:inline-block;font-size:16px;line-height:1;transition:transform .18s ease}
+.cc-update-results[open]{grid-column:1/-1}
+.cc-update-results[open] summary::before{transform:rotate(90deg)}
+.cc-update-progress-heading{display:flex;align-items:center;gap:10px;font-size:11px;min-width:0}
+.cc-updates progress{width:140px;max-width:30%;height:6px;accent-color:#1860d7;flex-shrink:0}
 .cc-update-results{min-width:0}.cc-update-results summary{cursor:pointer;display:flex;align-items:center;gap:5px;list-style:none;font-size:11px;color:#64748b}
 .cc-update-services{list-style:none;margin:7px 0 0;padding:0;display:grid;gap:4px}
 .cc-update-service{display:grid;grid-template-columns:minmax(150px,1fr) minmax(110px,auto);gap:3px 12px;padding:7px 9px;border-radius:7px;background:#fff;border:1px solid #e8ecf2;font-size:11px}
 .cc-update-service small{grid-column:1/-1;color:var(--cc-muted,#64748b);overflow-wrap:anywhere;font-size:10px}
 .cc-update-service strong{overflow-wrap:anywhere;font-size:11px}.cc-update-service[data-service-status=verified] small,.cc-update-service[data-service-status=succeeded] small{display:none}
 .cc-update-service[data-service-status=verified],.cc-update-service[data-service-status=succeeded]{border-color:#c8e3d4}.cc-update-service[data-service-status=failed]{border-color:#e7b5b5}.cc-update-service[data-service-status=updating],.cc-update-service[data-service-status=verifying]{border-color:#9ebde9}
-.cc-host-updates [data-host-updates-progress]{overflow:hidden;padding:8px 0}
 .cc-updates-dialog{border:1px solid #dce2eb;border-radius:16px;padding:22px;width:min(520px,calc(100vw - 40px));max-height:85vh;overflow:auto;color:inherit;background:var(--cc-panel,#fff)}
 .cc-updates-dialog::backdrop{background:#14243b66}.cc-updates-dialog h2{font-size:17px}.cc-updates-dialog h3{font-size:12px;margin:14px 0 6px}.cc-updates-dialog p,.cc-updates-dialog li{font-size:12px;line-height:1.5;overflow-wrap:anywhere}.cc-updates-dialog ul{padding-left:19px;margin:6px 0}.cc-updates-dialog label{display:grid;gap:7px;font-size:12px;margin:16px 0}.cc-updates-dialog .cc-updates-actions{margin-top:16px}
-.cc-updates input,.cc-host-updates input{font:inherit;border:1px solid #dce2eb;border-radius:8px;padding:8px;background:var(--cc-panel,#fff);color:inherit;min-width:0}
-.cc-updates .ops-button:disabled,.cc-host-updates .ops-button:disabled,.cc-updates-dialog .ops-button:disabled{opacity:.45;cursor:not-allowed}
-.cc-updates button:focus-visible,.cc-host-updates button:focus-visible,.cc-updates input:focus-visible,.cc-host-updates input:focus-visible,.cc-update-detail summary:focus-visible,.cc-update-results summary:focus-visible{outline:3px solid #a6c5ff;outline-offset:2px}
-@media(max-width:850px){.cc-updates-header{align-items:flex-start;flex-direction:column}.cc-update-row{grid-template-columns:minmax(130px,1fr) minmax(75px,.6fr) minmax(75px,.6fr) auto;gap:8px}.cc-update-detail{grid-column:1/-1}.cc-update-row>div:first-child{gap:4px}}
-@media(prefers-reduced-motion:reduce){.cc-updates progress,.cc-host-updates progress,.cc-update-detail summary::before,.cc-update-results summary::before{animation:none;transition:none}}
+.cc-updates input{font:inherit;border:1px solid #dce2eb;border-radius:8px;padding:8px;background:var(--cc-panel,#fff);color:inherit;min-width:0}
+.cc-updates .ops-button:disabled,.cc-updates-dialog .ops-button:disabled{opacity:.45;cursor:not-allowed}
+.cc-updates button:focus-visible,.cc-updates input:focus-visible,.cc-update-results summary:focus-visible{outline:3px solid #a6c5ff;outline-offset:2px}
+@media(max-width:850px){.cc-updates-header{align-items:flex-start;flex-direction:column}}
+@media(prefers-reduced-motion:reduce){.cc-updates progress,.cc-update-results summary::before{animation:none;transition:none}}
 .cc-progress-track{position:relative;display:inline-block;overflow:hidden;width:140px;max-width:30%;height:6px;flex-shrink:0;border-radius:10px;background:#dce5f0}
 .cc-progress-fill{position:absolute;inset:0;background:#1860d7;transform:scaleX(0);transform-origin:left center;transition:transform 400ms cubic-bezier(.22,1,.36,1);border-radius:inherit;pointer-events:none}
-.cc-updates .cc-progress-track progress,.cc-host-updates .cc-progress-track progress{position:absolute;inset:0;width:100%;max-width:none;height:100%;opacity:0;margin:0}
+.cc-updates .cc-progress-track progress{position:absolute;inset:0;width:100%;max-width:none;height:100%;opacity:0;margin:0}
 .cc-progress-track[data-progress-state=indeterminate] .cc-progress-fill{transform-origin:center;animation:cc-progress-wait 1.15s ease-in-out infinite;transition:none}
 @keyframes cc-progress-wait{0%{transform:translateX(-70%) scaleX(.3)}100%{transform:translateX(90%) scaleX(.3)}}
 @media(prefers-reduced-motion:reduce){.cc-progress-fill{transition:none}.cc-progress-track[data-progress-state=indeterminate] .cc-progress-fill{animation:none;transform:scaleX(.3)}}
+
+[data-platform-updates-progress]{display:grid;gap:8px;padding:10px 12px;border:1px solid #dce2eb;border-radius:12px;background:#f8faff}[data-platform-updates-status]{font-size:12px;line-height:1.45;margin:0}[data-platform-updates-status]:empty{display:none}
+
+/* Updates use the surrounding app canvas; the two lists provide the surfaces. */
+.cc-settings > .cc-updates{padding:0;border:0;background:transparent;box-shadow:none;gap:18px}
+.cc-updates-header{min-height:44px;gap:16px;margin-bottom:2px}
+.cc-update-title{display:flex;align-items:center;gap:16px;min-width:0}
+.cc-settings .cc-update-title h2{font-size:24px;line-height:1.2;letter-spacing:-.55px;font-weight:700;white-space:nowrap}
+.cc-update-count{font-size:13px;color:var(--cc-muted,#6b7280);padding-left:16px;border-left:1px solid #d8deea;white-space:nowrap;min-width:92px}
+.cc-updates-actions{gap:9px}.cc-updates-header .ops-button{font-size:12px;font-weight:600;min-height:36px;padding:8px 13px;border-radius:9px;transition:background .16s ease,box-shadow .16s ease,transform .16s ease}
+.cc-updates-header .ops-button.primary{background:#4f46e5;border:1px solid #4f46e5;color:#fff;box-shadow:0 2px 4px #4f46e51a}
+.cc-updates-header .ops-button.primary:hover:not(:disabled){background:#4338ca;box-shadow:0 3px 8px #4f46e52a}.cc-updates-header .ops-button:active:not(:disabled){transform:translateY(1px)}
+.cc-updates-header .ops-button.secondary{background:var(--cc-panel,#fff);border:1px solid #ccd3e0;color:var(--cc-text,#172033)}
+[data-platform-updates-list],.cc-updates [data-platform-updates-installed]{border:1px solid #d5dbe6;border-radius:12px;background:var(--cc-panel,#fff);overflow:hidden;box-shadow:0 1px 2px #1b2c4403}
+.cc-platform-version-row{display:grid;grid-template-columns:34px minmax(120px,1fr) minmax(75px,max-content) 20px minmax(75px,max-content);align-items:center;gap:14px;min-height:58px;padding:10px 18px;border-top:1px solid #e8ebf1;font-size:13px;overflow-wrap:anywhere}
+.cc-platform-version-row:first-child{border-top:0}.cc-platform-version-row strong{font-weight:600;color:var(--cc-text,#151d2f);min-width:0;letter-spacing:-.12px}
+.cc-update-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:8px;background:#efedff;color:#66608e}.cc-update-icon svg{width:17px;height:17px}.cc-update-icon-storage{background:#eeecff;color:#655c94}.cc-update-icon-network{background:#eaf4ea;color:#587856}.cc-update-icon-package{background:#fcf2e2;color:#94764c}
+.cc-update-version-from,.cc-update-arrow{color:var(--cc-muted,#738094)}.cc-update-version-from,.cc-update-version-to{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap;font-size:12px}.cc-update-version-to{color:#4f46e5;font-weight:650;min-width:75px}.cc-update-arrow{text-align:center;font-size:16px}
+.cc-updates [data-platform-updates-installed]>summary{min-height:47px;padding:11px 18px;gap:10px;color:var(--cc-text,#172033);font-size:13px;font-weight:600;outline-offset:-4px}
+.cc-update-results summary::before{font-size:20px;color:#48556c;width:12px}.cc-update-installed-count{font-size:12px;font-weight:400;color:var(--cc-muted,#738094);font-variant-numeric:tabular-nums;min-width:15px}
+[data-platform-updates-installed-list]{overflow:hidden;border-top:1px solid #e8ebf1}.cc-platform-installed-row{grid-template-columns:30px minmax(120px,1fr) auto;min-height:47px;padding:8px 18px;gap:14px}.cc-platform-installed-row .cc-update-icon{width:28px;height:28px;border-radius:7px}.cc-platform-installed-row .cc-update-icon svg{width:15px;height:15px}.cc-platform-installed-row .cc-update-arrow,.cc-platform-installed-row .cc-update-version-to{display:none}
+[data-platform-updates-reboot]{justify-self:start}
+.cc-skeleton-block{background:linear-gradient(100deg,#e9edf3 25%,#f4f6fa 45%,#e9edf3 65%);background-size:220% 100%;animation:cc-update-shimmer 1.5s linear infinite;border-radius:5px;display:inline-block;min-height:12px}
+.cc-skeleton-name{width:min(150px,80%);height:13px}.cc-skeleton-version{width:70px;height:12px;justify-self:end}.cc-update-skeleton .cc-update-icon{border-radius:8px}.cc-update-skeleton .cc-update-arrow{color:#d9dfeb}
+.cc-updates[data-loading=true] .cc-update-count{border:0;width:92px;height:14px;padding:0}.cc-updates[data-loading=true] .cc-update-installed-count{width:20px}.cc-updates[data-loading=false] .cc-update-count,.cc-updates[data-loading=false] .cc-update-installed-count{background:none;animation:none;border-radius:0}
+@keyframes cc-update-shimmer{to{background-position:-220% 0}}
+@media(max-width:700px){.cc-updates-header{align-items:stretch;gap:12px}.cc-update-title{justify-content:space-between}.cc-settings .cc-update-title h2{font-size:21px}.cc-updates-actions{justify-content:flex-start}.cc-platform-version-row{grid-template-columns:28px minmax(80px,1fr) minmax(55px,max-content) 15px minmax(55px,max-content);padding:9px 12px;gap:8px;min-height:54px}.cc-update-icon{width:28px;height:28px}.cc-platform-version-row strong{font-size:12px}.cc-update-version-from,.cc-update-version-to{font-size:11px;min-width:0}.cc-platform-installed-row{grid-template-columns:28px minmax(80px,1fr) auto;min-height:45px}.cc-updates [data-platform-updates-installed]>summary{padding:10px 12px}}
+@media(prefers-reduced-motion:reduce){.cc-skeleton-block{animation:none}.cc-updates-header .ops-button{transition:none}}
+
+.cc-platform-empty-row .cc-update-version-from,.cc-platform-empty-row .cc-update-arrow,.cc-platform-empty-row .cc-update-version-to{display:none}
+
+/* Installed services share equal columns while candidate updates stay a flat list. */
+.cc-updates{container:cc-updates / inline-size}
+[data-platform-updates-installed-list]{grid-template-columns:repeat(3,minmax(0,1fr))}
+[data-platform-updates-installed-list]>.cc-platform-installed-row{grid-template-columns:28px minmax(0,1fr) auto;min-width:0;gap:10px;padding:8px 14px;border:0;box-shadow:inset -1px -1px #e8ebf1}
+.cc-platform-installed-row .cc-update-version-from{max-width:110px;white-space:normal;overflow-wrap:anywhere}
+@container cc-updates (max-width:860px){[data-platform-updates-installed-list]{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container cc-updates (max-width:540px){[data-platform-updates-installed-list]{grid-template-columns:minmax(0,1fr)}}

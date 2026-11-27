@@ -7,7 +7,7 @@
   "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "coreSemanticPolicy": {
     "schema": "platform-no-hosted-core-capability-policy/v2",
-    "sha256": "ffb4170cb808429ec1fc5f7d86292e24977499df7c044fe4113747ad9dbc4d3d"
+    "sha256": "97ce32bb7157b442991631f5ee9cfb5641dd666c81248b62c1bfa96a275cae4d"
   },
   "projectName": "platform_infra_greenfield",
   "protectedResourceNames": {
@@ -51,6 +51,7 @@
     ],
     "services": [
       "alertmanager",
+      "alloy",
       "backup-scheduler",
       "broker-auth-bootstrap",
       "control-center",
@@ -67,7 +68,6 @@
       "postgres",
       "project-router",
       "prometheus",
-      "promtail",
       "redis",
       "traefik",
       "waf"
@@ -79,6 +79,7 @@
       "docker_action_broker_socket",
       "docker_action_broker_state",
       "enterprise_alertmanager_data",
+      "enterprise_alloy_data",
       "enterprise_grafana_data",
       "enterprise_keycloak_data",
       "enterprise_loki_data",

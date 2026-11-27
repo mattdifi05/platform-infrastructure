@@ -57,8 +57,8 @@ services:
     container_name: gf-project-router
   prometheus:
     container_name: gf-prometheus
-  promtail:
-    container_name: gf-promtail
+  alloy:
+    container_name: gf-alloy
   redis:
     container_name: gf-redis
   traefik:
@@ -152,4 +152,8 @@ volumes:
     external: false
   docker_action_broker_state:
     name: greenfield_docker_action_broker_state
+    external: false
+
+  enterprise_alloy_data:
+    name: greenfield_alloy_data
     external: false

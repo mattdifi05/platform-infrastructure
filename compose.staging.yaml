@@ -62,7 +62,7 @@ services:
   loki:
     container_name: !reset null
 
-  promtail:
+  alloy:
     container_name: !reset null
 
   waf:
@@ -90,3 +90,6 @@ volumes:
     name: ${PROMETHEUS_DATA_VOLUME:-enterprise_prometheus_data_staging}
   enterprise_loki_data:
     name: ${LOKI_DATA_VOLUME:-enterprise_loki_data_staging}
+
+  enterprise_alloy_data:
+    name: ${ALLOY_DATA_VOLUME:-enterprise_alloy_data_staging}

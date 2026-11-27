@@ -9,7 +9,7 @@ ZONE=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/generated/mate
 BACKUP=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/local-private-backup')
 RUNTIME=pathlib.Path('/home/platform_infrastructure/v1-fresh-runtime/state')
 MACHINE=hashlib.sha256(pathlib.Path('/etc/machine-id').read_bytes()).hexdigest() if pathlib.Path('/etc/machine-id').exists() else None
-CORE_CONTAINERS=frozenset('gf-postgres gf-mariadb gf-redis gf-keycloak gf-nats gf-grafana gf-prometheus gf-loki gf-alertmanager gf-node-exporter gf-local-dns gf-traefik gf-waf gf-project-router gf-phpmyadmin gf-phppgadmin gf-rustfs gf-minio-gateway gf-platform-alert-dispatcher gf-promtail'.split())
+CORE_CONTAINERS=frozenset('gf-postgres gf-mariadb gf-redis gf-keycloak gf-nats gf-grafana gf-prometheus gf-loki gf-alertmanager gf-node-exporter gf-local-dns gf-traefik gf-waf gf-project-router gf-phpmyadmin gf-phppgadmin gf-rustfs gf-minio-gateway gf-platform-alert-dispatcher gf-alloy'.split())
 HOSTING=frozenset()
 CONTAINERS=CORE_CONTAINERS|HOSTING
 INVENTORY=pathlib.Path('/etc/platform-infrastructure/admin/infrastructure-inventory.json')
@@ -26,7 +26,7 @@ class Rejected(Exception): pass
 PORTABLE=False
 HOST_CONFIG_PATH='/etc/platform-infrastructure/admin/admin-host.json'
 VPS_CONTAINERS=CORE_CONTAINERS|frozenset('gf-control-center gf-cadvisor gf-local-registry gf-minio gf-docker-action-broker gf-docker-action-activation-sidecar gf-backup-scheduler'.split())
-VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-promtail enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
+VPS_CONTAINERS=VPS_CONTAINERS|frozenset('enterprise-traefik enterprise-postgres enterprise-redis enterprise-keycloak enterprise-nats enterprise-minio enterprise-control-center enterprise-project-router mariadb phpmyadmin phppgadmin enterprise-local-dns enterprise-prometheus enterprise-node-exporter enterprise-cadvisor enterprise-platform-alert-dispatcher enterprise-alertmanager enterprise-grafana enterprise-loki enterprise-alloy enterprise-local-registry enterprise-waf enterprise-docker-action-broker enterprise-docker-action-activation-sidecar enterprise-backup-scheduler enterprise-broker-auth-bootstrap'.split())
 VPS_SERVICES=SERVICES|frozenset(['docker.service','ssh.service','auditd.service','apparmor.service','ufw.service'])
 LOCKOUT_SERVICES=frozenset(['ssh.service','sshd.service','docker.service','containerd.service','dbus.service','systemd-logind.service','systemd-resolved.service','systemd-networkd.service','NetworkManager.service','networking.service','ufw.service','firewalld.service','cloudflared.service','platform-cloudflared-vps.service','platform-admin.service'])
 HOME_JOBS=dict(JOBS)

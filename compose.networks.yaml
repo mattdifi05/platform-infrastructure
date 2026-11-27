@@ -104,7 +104,7 @@ services:
     networks: !override
       - platform_observability
 
-  promtail:
+  alloy:
     networks: !override
       - platform_observability
 

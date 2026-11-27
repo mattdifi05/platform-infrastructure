@@ -17,10 +17,11 @@ _GITHUB = {
     'prom/node-exporter': 'prometheus/node_exporter',
     'grafana/grafana': 'grafana/grafana',
     'grafana/loki': 'grafana/loki',
-    'grafana/promtail': 'grafana/loki',
+    'grafana/alloy': 'grafana/alloy',
     'rustfs/rustfs': 'rustfs/rustfs',
 }
 _VERSION = re.compile(r'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?$')
+_WAF_TAG = re.compile(r'^((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-nginx-([0-9]{12})$')
 
 
 def _version(value):
@@ -64,6 +65,35 @@ class _Client:
             return (raw.decode('utf-8') if url.startswith('https://raw.githubusercontent.com/') else json.loads(raw)), response.headers
 
 
+def _public_github_latest(client, repository):
+    """GitHub's public latest route selects its non-prerelease published release.
+
+    Read only the first response; never follow a Location to an untrusted host.
+    """
+    remaining = client.deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('release discovery deadline exceeded')
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+            return None
+    releases_url = 'https://github.com/' + repository + '/releases'
+    request = urllib.request.Request(releases_url + '/latest',
+                                     method='HEAD', headers={'User-Agent': 'platform-runtime-releases/1'})
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=min(4, remaining)):
+            raise ValueError('public latest release did not redirect')
+    except urllib.error.HTTPError as error:
+        if error.code != 302:
+            raise
+        location = error.headers.get('Location', '')
+        match = re.fullmatch(re.escape(releases_url) + r'/tag/(v?)([0-9]+\.[0-9]+\.[0-9]+)', location)
+        if not match:
+            raise ValueError('untrusted or non-stable public GitHub release')
+        version = match.group(2)
+        _version(version)
+        return {'tag_name': match.group(1) + version, 'draft': False, 'prerelease': False}
+
+
 def _release(client, repository, tag, architecture):
     images = tag.get('images', [])
     if not any(image.get('os') == 'linux' and image.get('architecture') == architecture
@@ -87,6 +117,15 @@ def _release(client, repository, tag, architecture):
         return None
     if not _DIGEST.fullmatch(str(digest)):
         raise ValueError('registry digest unavailable')
+    if repository in {'owasp/modsecurity-crs', 'rustfs/rustfs'}:
+        matches = [item['digest'] for item in manifests
+                   if item.get('platform', {}).get('os') == 'linux'
+                   and item.get('platform', {}).get('architecture') == architecture
+                   and _DIGEST.fullmatch(str(item.get('digest', '')))]
+        if len(matches) != 1 or not any(image.get('os') == 'linux' and image.get('architecture') == architecture
+                                      and image.get('digest') == matches[0] for image in images):
+            raise ValueError('WAF architecture manifest mismatch' if repository == 'owasp/modsecurity-crs' else 'RustFS architecture manifest mismatch')
+        digest = matches[0]
     return {'version': tag['_version'], 'imageReference': 'docker.io/' + repository + ':' + tag['name'], 'imageDigest': digest,
             'sourceUrl': _HUB + '/r/' + repository + '/tags?name=' + urllib.parse.quote(tag['name'], safe='')}
 
@@ -112,20 +151,33 @@ def resolve_release(component, current_version):
         client = _Client()
         path = '/v2/repositories/' + repository + '/tags/'
         url = _HUB + path + '?page_size=100&ordering=last_updated'
+        waf = repository == 'owasp/modsecurity-crs'
+        if waf:
+            if prefix or suffix:
+                raise ValueError('WAF requires the explicit dated nginx tag policy')
+            url += '&name=-nginx-'
         tags = {}
         official = repository.startswith('library/')
         github = _GITHUB.get(repository)
         if github:
-            releases = []
-            newest, _ = client.get('https://api.github.com/repos/' + github + '/releases/latest')
-            releases.append(newest)
-            for page in range(1, 3):
-                batch, headers = client.get('https://api.github.com/repos/' + github + '/releases?per_page=100&page=' + str(page))
-                if not isinstance(batch, list):
-                    raise ValueError('invalid official release listing')
-                releases.extend(batch)
-                if len(batch) < 100:
-                    break
+            try:
+                releases = []
+                newest, _ = client.get('https://api.github.com/repos/' + github + '/releases/latest')
+                releases.append(newest)
+                for page in range(1, 3):
+                    batch, headers = client.get('https://api.github.com/repos/' + github + '/releases?per_page=100&page=' + str(page))
+                    if not isinstance(batch, list):
+                        raise ValueError('invalid official release listing')
+                    releases.extend(batch)
+                    if len(batch) < 100:
+                        break
+            except urllib.error.HTTPError as error:
+                # These channels can use the public stable release redirect when
+                # rate-limited. Authorization and transport failures stay visible.
+                if (repository not in {'rustfs/rustfs', 'grafana/alloy'} or not error.url.startswith('https://api.github.com/repos/' + github + '/releases')
+                        or not (error.code == 429 or error.code == 403 and error.headers.get('X-RateLimit-Remaining') == '0')):
+                    raise
+                releases = [_public_github_latest(client, github)]
             for release in releases:
                 if release.get('draft') or release.get('prerelease'):
                     continue
@@ -151,20 +203,28 @@ def resolve_release(component, current_version):
                 except ValueError:
                     continue
                 tags[name] = {'name': name, '_version': version, '_needsMetadata': True}
-        for page in range(0 if official or github else 8):
+        for page in range(0 if official or github else (16 if waf else 8)):
             payload, _ = client.get(url)
             if not isinstance(payload.get('results'), list):
                 raise ValueError('invalid tag listing')
             for tag in payload['results']:
                 name = tag.get('name', '')
+                if waf:
+                    match = _WAF_TAG.fullmatch(name) if isinstance(name, str) else None
+                    if not match:
+                        continue
+                    version, build_date = match.groups()
+                else:
+                    build_date = ''
                 if not isinstance(name, str) or not name.startswith(prefix) or (suffix and not name.endswith(suffix)):
                     continue
-                version = name[len(prefix):len(name)-len(suffix) if suffix else None]
+                if not waf:
+                    version = name[len(prefix):len(name)-len(suffix) if suffix else None]
                 try:
                     parsed = _version(version)
                 except ValueError:
                     continue
-                entry = dict(tag, _version=version)
+                entry = dict(tag, _version=version, _buildDate=build_date)
                 # The same tag appearing on two pages must have identical metadata.
                 if name in tags and tags[name] != entry:
                     raise ValueError('tag changed during discovery')
@@ -183,7 +243,7 @@ def resolve_release(component, current_version):
             # NGINX's documented stable channel uses even minor versions;
             # odd minor versions are mainline, despite having numeric tags.
             tags = {name: tag for name, tag in tags.items() if _version(tag['_version'])[1] % 2 == 0}
-        ordered = sorted(tags.values(), key=lambda item: (_version(item['_version']), item['name']), reverse=True)
+        ordered = sorted(tags.values(), key=lambda item: (_version(item['_version']), item.get('_buildDate', ''), item['name']), reverse=True)
         latest = None
         for tag in ordered:
             if tag.get('_needsMetadata'):

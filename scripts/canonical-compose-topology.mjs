@@ -16,11 +16,11 @@ function requiredSha256(value, label) {
 const NO_HOSTED_WORKLOAD_LOCKS = Object.freeze({
   VPS: Object.freeze({
     path: "config/no-hosted-workloads.lock.json",
-    sha256: "200594faaf46f0f17860e50c73184efd09cd38558681897732f9dcdc1a3c210b",
+    sha256: "2a78042b0f5a0e1a30ccc1738fc9c50e25af8151e6286230aff7b624622787e6",
   }),
   LOCAL_PRIVATE: Object.freeze({
     path: "config/no-hosted-workloads.local-private.lock.json",
-    sha256: "ee5a1b120674d153343886b342bcf6f5898df2218d00ea6206aa2029fdda2543",
+    sha256: "d1593554aff8edf454af595a63216457cff50b461700d3f2533e9ebed6f0f1ec",
   }),
 });
 

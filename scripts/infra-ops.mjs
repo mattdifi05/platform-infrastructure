@@ -3237,7 +3237,7 @@ async function runtimeHealthChecks() {
     "enterprise-alertmanager",
     "enterprise-grafana",
     "enterprise-loki",
-    "enterprise-promtail",
+    "enterprise-alloy",
   ];
   log("==> Platform container health and runtime guardrails");
   for (const container of runtimeContainers) {
@@ -6046,7 +6046,7 @@ function platformFunctionalHealthProbes() {
   return validateFunctionalHealthProbes([
     { id: "keycloak-ready", kind: "http", container: "enterprise-keycloak", port: 9000, path: "/health/ready", expectedStatuses: [200] },
     { id: "loki-ready", kind: "http", container: "enterprise-loki", port: 3100, path: "/ready", expectedStatuses: [200], bodyIncludes: "ready" },
-    { id: "promtail-ready", kind: "http", container: "enterprise-promtail", port: 9080, path: "/ready", expectedStatuses: [200] },
+    { id: "alloy-ready", kind: "docker-health", container: "enterprise-alloy" },
     { id: "prometheus-ready", kind: "http", container: "enterprise-prometheus", port: 9090, path: "/-/ready", expectedStatuses: [200] },
     { id: "alertmanager-ready", kind: "http", container: "enterprise-alertmanager", port: 9093, path: "/-/ready", expectedStatuses: [200] },
     { id: "grafana-api", kind: "http", container: "enterprise-grafana", port: 3000, path: "/api/health", expectedStatuses: [200] },
@@ -6086,6 +6086,18 @@ dns.lookup(server, (lookupError, address) => {
 `;
 
 function runFunctionalProbe(probe) {
+  // Alloy exposes readiness only on its container loopback. Read the result
+  // of its configured HTTP healthcheck instead of opening a network listener.
+  if (probe.kind === "docker-health") {
+    const result = run("docker", ["inspect", "--format", "{{json .State.Health}}", probe.container], { allowFailure: true, capture: true });
+    if (result.status !== 0) return { error: "docker-health-inspection-failed" };
+    try {
+      const health = JSON.parse(String(result.stdout ?? ""));
+      return { healthStatus: health?.Status ?? "missing", source: "docker-healthcheck" };
+    } catch {
+      return { error: "docker-health-invalid-response" };
+    }
+  }
   const executor = "enterprise-control-center";
   const args = probe.kind === "dns"
     ? ["exec", executor, "node", "-e", FUNCTIONAL_DNS_PROBE_SCRIPT, probe.container, probe.query]
@@ -6526,12 +6538,12 @@ function addAuditLogPatternCheck(checks, issues, { name, category, filePath, pat
 async function auditLogEvidence(options = {}) {
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const controlCenter = readText(path.join(infraRoot, "control-center", "server.mjs"));
-  const promtail = readText(path.join(infraRoot, "promtail", "config.yml"));
+  const alloy = readText(path.join(infraRoot, "deployment", "config", "alloy", "alloy.config"));
   const checks = [
     { name: "admin-audit-file", passed: /PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/.test(compose) },
     { name: "append-only-admin-audit", passed: /appendAuditRecord|appendAudit/.test(controlCenter) && /audit\.jsonl/.test(controlCenter) },
     { name: "audit-secret-redaction", passed: /redact|sensitive|secret/i.test(controlCenter) },
-    { name: "central-log-shipping", passed: /docker_sd_configs|__meta_docker_container_name|loki/i.test(promtail) },
+    { name: "central-log-shipping", passed: /docker_sd_configs|__meta_docker_container_name|loki/i.test(alloy) },
   ];
   const issues = checks.filter((check) => !check.passed).map((check) => check.name);
   const payload = { generatedAt: new Date().toISOString(), status: issues.length ? "failed" : "passed", scope: "platform-infrastructure", infraChecksPassed: checks.filter((check) => check.passed).length, checks, issues };
@@ -10994,7 +11006,7 @@ function repoCoverageCategory(filePath) {
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
     ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
     ["database", /^deployment\/config\/gf-mariadb\//],
-    ["observability", /^deployment\/config\/gf-promtail\//],
+    ["observability", /^deployment\/config\/(?:alloy|gf-alloy)\//],
     ["object-storage", /^deployment\/config\/storage\//],
     ["platform-config", /^(?:config\/.+\.json|deployment\/config\/.+|deployment\/host\/libexec\/.+\.json|deployment\/host\/vault-bindings\.example\.json|deployment\/reference\/home-server\/.+\.conf\.txt|deployment\/vps-backup\/[^/]+\.example\.json)$/],
     ["object-storage", /^minio\//],
@@ -11009,7 +11021,7 @@ function repoCoverageCategory(filePath) {
     ["operations-script", /^(?:scripts\/.+\.(?:awk|sh|mjs|py|rb)|deployment\/host\/(?:libexec|empty-vps|tests)\/.+\.(?:sh|mjs|py)|deployment\/vps-backup\/.+\.(?:sh|mjs|py))$/],
     ["governance-policy", /^(?:governance\/.+\.(?:json|jsonl|md)|policy\/.+\.(?:json|pem))$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
-    ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\/|^deployment\/host\/empty-vps\/prometheus\.host-metrics\.yml$/],
+    ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|alloy)\/|^deployment\/host\/empty-vps\/prometheus\.host-metrics\.yml$/],
     ["identity", /^keycloak\//],
     ["database", /^(?:postgres|mariadb|phppgadmin)\//],
     ["control-plane", /^(?:control-center)\/|^deployment\/(?:phpmyadmin\/composer\.(?:json|lock)|vps-backup\/.+\.(?:patch|test\.mjs))$/],
@@ -14105,7 +14117,7 @@ async function infraHealth() {
 
 async function infraHealthBody() {
   const defaultContainers = [
-    "enterprise-traefik", "enterprise-waf", "enterprise-postgres", "enterprise-redis", "enterprise-keycloak", "enterprise-nats", "enterprise-minio", "php-apache", "enterprise-control-center", "enterprise-project-router", "mariadb", "phpmyadmin", "phppgadmin", "enterprise-local-dns", "enterprise-prometheus", "enterprise-node-exporter", "enterprise-cadvisor", "enterprise-platform-alert-dispatcher", "enterprise-alertmanager", "enterprise-grafana", "enterprise-loki", "enterprise-promtail",
+    "enterprise-traefik", "enterprise-waf", "enterprise-postgres", "enterprise-redis", "enterprise-keycloak", "enterprise-nats", "enterprise-minio", "php-apache", "enterprise-control-center", "enterprise-project-router", "mariadb", "phpmyadmin", "phppgadmin", "enterprise-local-dns", "enterprise-prometheus", "enterprise-node-exporter", "enterprise-cadvisor", "enterprise-platform-alert-dispatcher", "enterprise-alertmanager", "enterprise-grafana", "enterprise-loki", "enterprise-alloy",
   ];
   const containers = (argv.containers ? String(argv.containers).split(",") : defaultContainers).map((container) => container.trim()).filter(Boolean);
   const envFile = path.resolve(infraRoot, argv.envFile ?? ".env");

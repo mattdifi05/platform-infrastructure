@@ -150,9 +150,9 @@ def records(kind):
     return [json.loads(x['value']) for x in rows]
 
 
-def recovery_required():
+def recovery_required(exclude_operation_id=None):
     with db() as c:
-        rows = c.execute("SELECT value FROM records WHERE kind='operation'").fetchall()
+        rows = c.execute("SELECT value FROM records WHERE kind='operation' AND id IS NOT ?", (exclude_operation_id,)).fetchall()
     return any(json.loads(x['value']).get('recoveryRequired') for x in rows)
 
 
@@ -270,8 +270,10 @@ def common_release(row, cached, version, alignment):
     release = None
     if latest and version and row['strategy'] != 'observe':
         comparison = compare_versions(latest['version'], version)
-        db_major_change = database_family(row) and version_key(latest['version'])[0] != version_key(version)[0]
-        if not db_major_change and (comparison > 0 or comparison == 0 and alignment):
+        db_major_change = data_sensitive(row) and version_key(latest['version'])[0] != version_key(version)[0]
+        qualified = row.get('runtimeFamily') != 'modsecurity-crs' or (
+            row.get('qualifiedDigest') and latest.get('imageDigest') == row['qualifiedDigest'])
+        if qualified and not db_major_change and (comparison > 0 or comparison == 0 and alignment):
             release = latest
     return release, latest
 
@@ -296,8 +298,8 @@ def catalog():
             comparison = compare_versions(release['version'], version)
             eligible = eligible and (comparison > 0 or comparison == 0 and alignment)
         reason = row.get('blockedReason') or cached.get('reason')
-        mixed_db_major = database_family(row) and len({version_key(v)[0] for v in versions}) > 1
-        db_major_change = database_family(row) and version and latest and version_key(latest['version'])[0] != version_key(version)[0]
+        mixed_db_major = data_sensitive(row) and len({version_key(v)[0] for v in versions}) > 1
+        db_major_change = data_sensitive(row) and version and latest and version_key(latest['version'])[0] != version_key(version)[0]
         if mixed_db_major or db_major_change:
             eligible, reason = False, 'Serve una migrazione dedicata per aggiornare la serie principale del database.'
         elif data_sensitive(row) and row.get('recoveryPolicy') != 'offline-snapshot-v1':
@@ -315,6 +317,8 @@ def catalog():
             reason = None
         elif row['strategy'] == 'observe':
             reason = row.get('blockedReason') or 'Componente dedicato: serve manutenzione assistita.'
+        elif row.get('runtimeFamily') == 'modsecurity-crs' and latest and not release:
+            status, reason = 'unsupported', 'La nuova immagine WAF richiede una verifica delle regole locali.'
         elif latest and release and latest['version'] != release['version']:
             reason = 'Una serie diversa richiede un percorso di compatibilità separato.'
         elif latest and version and not release and compare_versions(latest['version'], version) > 0:
@@ -360,6 +364,21 @@ def nonreboot_host_upgrade(job_id):
                 and public.get('kind') == 'host-upgrade' and public.get('confirmationRequired') == 'UPDATE')
 
 
+def coordinated_host_upgrade(job_id):
+    execution = load('host-execution', job_id, {})
+    native = execution.get('native') or {}
+    stored = load('host-plan', native.get('planId', ''), {})
+    return (execution.get('coordinatedReboot') is True and native.get('rebootAfter') is True
+            and native.get('confirmationRequired') == 'UPDATE_AND_REBOOT'
+            and stored.get('native') == native and stored.get('public', {}).get('coordinatedReboot') is True)
+
+
+def coordinated_peer(job_id):
+    item = load('operation', job_id, {})
+    peer = load('operation', item.get('pairedWith', ''), {})
+    return peer if peer.get('kind') == 'apply' and peer.get('pairedWith') == job_id else None
+
+
 def maintenance_partner(kind):
     pending = [item for item in records('operation') if item['status'] in ['queued', 'running']]
     if not pending:
@@ -369,7 +388,7 @@ def maintenance_partner(kind):
         kinds = {kind, other.get('kind')}
         if kinds == {'host-check', 'check'}:
             return other['id']
-        if kinds == {'host-upgrade', 'apply'} and (other['kind'] != 'host-upgrade' or nonreboot_host_upgrade(other['id'])):
+        if kinds == {'host-upgrade', 'apply'} and (other['kind'] != 'host-upgrade' or nonreboot_host_upgrade(other['id']) or coordinated_host_upgrade(other['id'])):
             if other['kind'] == 'host-upgrade':
                 execution = load('host-execution', other['id'])
                 with HOST_JOB_GUARD:
@@ -403,7 +422,7 @@ def paired_update(job_id):
     if partner.get('pairedWith') != job_id or {item.get('kind'), partner.get('kind')} != {'host-upgrade', 'apply'}:
         return False
     host_id = job_id if item['kind'] == 'host-upgrade' else partner['id']
-    return nonreboot_host_upgrade(host_id)
+    return nonreboot_host_upgrade(host_id) or coordinated_host_upgrade(host_id)
 
 
 def check_job(job_id):
@@ -543,12 +562,127 @@ def routing_checks(row, actual, expected=None):
     return checks
 
 
+def storage_runtime_checks(row, actual):
+    if row.get('repository') == 'rustfs/rustfs':
+        if (row.get('strategy') != 'image' or row.get('probe') != ['rustfs', '--version']
+                or row.get('requiresRecovery') is not True or row.get('compatibility') != 'major'
+                or row.get('recoveryPolicy') != 'offline-snapshot-v1'):
+            raise Rejected('unsupported', 'RustFS richiede probe ufficiale, stessa serie e recupero offline.', 422)
+        for old in actual:
+            recovery_sources(old)
+            if not any(x.get('Destination') == '/data' and x.get('RW') is True
+                       and x.get('Type') in ['volume', 'bind'] for x in old['Mounts']):
+                raise Rejected('unsupported', 'Persistenza RustFS non verificata.', 422)
+    if row.get('runtimeFamily') == 'rustfs-gateway':
+        if row.get('repository') != 'library/nginx' or row.get('strategy') != 'reviewed-build' or row.get('probe') != ['nginx', '-v']:
+            raise Rejected('unsupported', 'Builder gateway non ammesso.', 422)
+        source = protected(row['dockerfile'])
+        content = source.read_bytes()
+        if (hashlib.sha256(content).hexdigest() != row.get('builderSha256')
+                or not re.fullmatch(rb'FROM nginx:[0-9]+\.[0-9]+\.[0-9]+-alpine@sha256:[a-f0-9]{64}\nRUN apk upgrade --no-cache\n?', content)):
+            raise Rejected('unsupported', 'Builder gateway diverso da quello revisionato.', 422)
+        for old in actual:
+            gateway_config(old, row)
+
+
+def gateway_config(old, row):
+    mounts = old['Mounts']
+    if len(mounts) != 1 or mounts[0].get('Type') != 'bind' or mounts[0].get('RW') is not False or mounts[0].get('Destination') != '/etc/nginx/nginx.conf':
+        raise Rejected('unsupported', 'Gateway richiede il solo bind nginx.conf in lettura.', 422)
+    source = pathlib.Path(mounts[0]['Source'])
+    if not source.is_absolute() or source.resolve() != source:
+        raise Rejected('unsupported', 'Percorso della configurazione gateway non valido.', 422)
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as config:
+        if not stat.S_ISREG(os.fstat(config.fileno()).st_mode):
+            raise Rejected('unsupported', 'Configurazione gateway non regolare.', 422)
+        content = config.read(65537)
+    if len(content) > 65536 or hashlib.sha256(content).hexdigest() != row.get('gatewayConfigSha256'):
+        raise Rejected('unsupported', 'Configurazione gateway diversa da quella revisionata.', 422)
+    return content
+
+
+def gateway_preflight(old, row, image, directory):
+    source = directory / 'nginx.reviewed.conf'
+    atomic(source, gateway_config(old, row), 0o644)
+    # Variable proxy_pass defers backend DNS resolution; syntax checking needs no network.
+    run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+         '--security-opt', 'no-new-privileges', '--pids-limit', '64', '--memory', '128m',
+         '--user', old['Config'].get('User') or '101:101', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=32m',
+         '--mount', 'type=bind,src=' + str(source) + ',dst=/etc/nginx/nginx.conf,readonly',
+         '--entrypoint', 'nginx', image, '-t'], timeout=30)
+
+
+WAF_CRS_RULES = '/etc/modsecurity.d/owasp-crs/rules/'
+WAF_RULE_FILES = [WAF_CRS_RULES + 'REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf',
+                  WAF_CRS_RULES + 'RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf']
+
+
+def qualified_waf_body_rules(row):
+    recipe = protected(row['dockerfile']).read_bytes()
+    copies = re.findall(rb'^COPY(?: --chmod=0644)? ([a-z0-9][a-z0-9_-]*\.conf) '
+                        rb'(/etc/nginx/conf\.d/zz-[a-z0-9][a-z0-9_-]*\.conf)[ \t]*$', recipe, re.MULTILINE)
+    if len(copies) != 1:
+        raise Rejected('unsupported', 'La ricetta WAF deve specificare un file di regole revisionato.', 422)
+    source, target = (value.decode('ascii') for value in copies[0])
+    rules = protected(protected(row['buildContext']) / source).read_bytes()
+    if [hashlib.sha256(value).hexdigest() for value in (recipe, rules)] != row.get('qualifiedBuildHashes'):
+        raise Rejected('stale_plan', 'La ricetta o le regole WAF sono cambiate dalla prova isolata.', 409)
+    return target
+
+
+def waf_inputs(container, body_rules):
+    values = {key: container['Config'].get(key) for key in ['User', 'Entrypoint', 'Cmd', 'Env', 'Healthcheck']}
+    values['mounts'] = sorted(container['Mounts'], key=lambda mount: mount['Destination'])
+    values['rules'] = [run(['docker', 'exec', container['Id'], 'sha256sum', path], timeout=10).split()[0]
+                       for path in [body_rules, *WAF_RULE_FILES]]
+    return values
+
+
+def waf_input_fingerprint(container, body_rules):
+    return digest(waf_inputs(container, body_rules))
+
+
+def verify_waf_inputs(old, new, qualified, body_rules):
+    def environment(entries):
+        values = dict(entry.split('=', 1) for entry in entries)
+        if len(values) != len(entries):
+            raise Rejected('updates_unavailable', 'Variabili WAF duplicate nella configurazione.', 503)
+        return values
+
+    previous = old['Config'].get('Env') or []
+    image = docker('GET', '/images/' + new['Image'] + '/json')
+    defaults = environment(image['Config'].get('Env') or [])
+    actual = waf_inputs(new, body_rules)
+    # Docker retains the old container values and fills missing keys from the
+    # qualified image. Accept exactly that merge, independent of entry order.
+    matches_environment = environment(actual['Env'] or []) == defaults | environment(previous)
+    actual['Env'] = old['Config'].get('Env')
+    if not matches_environment or digest(actual) != qualified:
+        raise Rejected('updates_unavailable', 'Le regole o la configurazione WAF sono cambiate.', 503)
+
+
+def waf_runtime_checks(row, target, actual):
+    if row.get('runtimeFamily') != 'modsecurity-crs':
+        return
+    if (row.get('repository') != 'owasp/modsecurity-crs' or row.get('strategy') != 'reviewed-build'
+            or not re.fullmatch(r'sha256:[a-f0-9]{64}', str(row.get('qualifiedDigest')))
+            or target.get('imageDigest') != row['qualifiedDigest'] or len(actual) != 1
+            or actual[0]['Name'] != '/enterprise-waf' or not actual[0]['State']['Running']):
+        raise Rejected('unsupported', 'Immagine WAF senza verifica valida.', 422)
+    body_rules = qualified_waf_body_rules(row)
+    if waf_input_fingerprint(actual[0], body_rules) != row.get('qualifiedInputs'):
+        raise Rejected('stale_plan', 'La configurazione WAF è cambiata dalla prova isolata.', 409)
+
+
 def planned_family(component_id, revision, item):
     if not item['canUpdate']:
         raise Rejected('unsupported', item['blockedReason'] or 'Nessun aggiornamento compatibile disponibile.', 422)
     row = component(component_id)
     actual, _ = observed(row)
     target = item['candidateRelease']
+    storage_runtime_checks(row, actual)
+    waf_runtime_checks(row, target, actual)
     config_checks = routing_checks(row, actual)
     if data_sensitive(row):
         for old in actual:
@@ -764,6 +898,19 @@ def recreate(old, image, backups, journal=lambda: None, before_start=None, on_st
     return saved['newId']
 
 
+def php_runtime_modules(old):
+    if old.get('runtimeModules') is not None:
+        return old['runtimeModules']
+    command = ['docker', 'exec', old['Id'], 'php', '-m'] if old['State']['Running'] else [
+        'docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'php', old['Image'], '-m']
+    return run(command).splitlines()
+
+
+def verify_php_modules(before, after):
+    if set(before) - set(after):
+        raise Rejected('updates_unavailable', 'Il runtime non conserva tutte le estensioni PHP.', 503)
+
+
 def verify(old, new_id, row, version):
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -793,15 +940,21 @@ def verify(old, new_id, row, version):
                 verify_routing_http(routing['probes'], attempts=10)
             if row['strategy'] == 'php-build':
                 run(['docker', 'exec', new_id, 'apache2ctl', 'configtest'])
-                before = set(old.get('runtimeModules') or run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'php', old['Image'], '-m']).splitlines())
-                after = set(run(['docker', 'exec', new_id, 'php', '-m']).splitlines())
-                if before - after:
-                    raise Rejected('updates_unavailable', 'Il runtime non conserva tutte le estensioni PHP.', 503)
+                verify_php_modules(php_runtime_modules(old), run(['docker', 'exec', new_id, 'php', '-m']).splitlines())
                 code = run(['docker', 'exec', new_id, 'curl', '-sS', '--max-time', '15', '-o', '/dev/null', '-w', '%{http_code}', 'http://127.0.0.1/'])
                 if code.startswith('5') or code == '000':
                     raise Rejected('updates_unavailable', 'Verifica HTTP del runtime non riuscita.', 503)
             if row.get('repository') == 'library/nginx':
                 run(['docker', 'exec', new_id, 'nginx', '-t'])
+                if row.get('runtimeFamily') == 'rustfs-gateway':
+                    gateway_config(new, row)
+                    run(['docker', 'exec', new_id, 'wget', '-q', '-T', '10', '-O', '/dev/null', 'http://127.0.0.1:9000/health/ready'], timeout=15)
+            if row.get('runtimeFamily') == 'modsecurity-crs':
+                body_rules = qualified_waf_body_rules(row)
+                run(['docker', 'exec', new_id, 'nginx', '-t'], timeout=15)
+                run(['docker', 'exec', new_id, 'sh', '-ec',
+                     'nginx -T 2>&1 | grep -Fqx "# configuration file ' + body_rules + ':"'], timeout=15)
+                verify_waf_inputs(old, new, row.get('qualifiedInputs'), body_rules)
             old_mounts = sorted(old['Mounts'], key=lambda x: x['Destination'])
             if sorted(new['Mounts'], key=lambda x: x['Destination']) != old_mounts:
                 raise Rejected('updates_unavailable', 'I mount del servizio non corrispondono.', 503)
@@ -898,7 +1051,20 @@ def apply_job(job_id, stored):
         work, actual = family['directory'], family['actual']
         notify(row, None, 'preparing', 'Download e preparazione: ' + row['label'])
         if row['strategy'] != 'node-layer':
+            waf_runtime_checks(row, target, actual)
             image = image_candidate(row, target, work)
+            if row['strategy'] == 'php-build':
+                modules = run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'php', image, '-m']).splitlines()
+                for old in actual:
+                    service = old['Name'].lstrip('/')
+                    notify(row, service, 'checking', 'Verifica isolata delle estensioni PHP')
+                    old['runtimeModules'] = php_runtime_modules(old)
+                    verify_php_modules(old['runtimeModules'], modules)
+                    notify(row, service, 'queued', 'Pronto per aggiornamento')
+            storage_runtime_checks(row, actual)
+            if row.get('runtimeFamily') == 'rustfs-gateway':
+                for old in actual:
+                    gateway_preflight(old, row, image, work)
             return {old['Image']: image for old in actual}
         images = {}
         for source_image in sorted({old['Image'] for old in actual}):
@@ -938,6 +1104,8 @@ def apply_job(job_id, stored):
                 actual, _ = observed(row)
                 if fingerprint(actual) != family['fingerprint']:
                     raise Rejected('stale_plan', 'I servizi sono cambiati dopo la preparazione del piano.')
+                storage_runtime_checks(row, actual)
+                waf_runtime_checks(row, family['target'], actual)
                 routing_checks(row, actual, family.get('routingChecks'))
                 work = directory / row['id'] if batch else directory
                 if batch:
@@ -1176,7 +1344,7 @@ def reconcile_host_reboots(force=False):
             operation_update(record['id'], status='running', stage='Riavvio: verifica dello stato del server in attesa', lastReconcileAt=time.time())
 
 
-def host_plan(kind, revision, reboot_after=False):
+def host_plan(kind, revision, reboot_after=False, coordinated_reboot=False):
     current = host_catalog()
     if not current['available']:
         raise Rejected('updates_unavailable', 'Gestione aggiornamenti OS non disponibile.', 503)
@@ -1198,7 +1366,7 @@ def host_plan(kind, revision, reboot_after=False):
               'packageCount': len(native.get('packages', [])), 'packages': native.get('packages', []),
               'autoremoveCount': len(native.get('autoremove', [])), 'steps': native['steps'], 'risks': native['risks'],
               'confirmationRequired': 'REBOOT' if kind == 'host-reboot' else 'UPDATE_AND_REBOOT' if reboot_after else 'UPDATE',
-              'rebootAfter': reboot_after}
+              'rebootAfter': reboot_after, 'coordinatedReboot': coordinated_reboot}
     save('host-plan', public['planId'], {'public': public, 'native': native})
     return public
 
@@ -1249,28 +1417,59 @@ def finish_host_upgrade(job_id, execution, result):
     # Keep the verified result durable while Docker and ingress restart. This is
     # evidence from the fixed root worker, never a browser-supplied package list.
     execution['verifiedResult'] = result
-    execution.setdefault('serviceVerificationStartedAt', time.time())
     save('host-execution', job_id, execution)
+    coordinated = execution.get('coordinatedReboot') is True
+    if coordinated:
+        peer = coordinated_peer(job_id)
+        # This operation's recovery flag can be resolved by its own verified result.
+        if recovery_required(exclude_operation_id=job_id) or peer and peer.get('status') not in ['queued', 'running', 'succeeded']:
+            operation_update(job_id, status='failed', stage='Aggiornamenti non completati; riavvio annullato', finishedAt=stamp())
+            return
+        if not peer and native['expiresAt'] <= time.time():
+            operation_update(job_id, status='failed', stage='Aggiornamento servizi assente; riavvio annullato', finishedAt=stamp())
+            return
+        if not peer or peer.get('status') != 'succeeded':
+            operation_update(job_id, status='running', stage='OS verificato; attesa completamento aggiornamenti servizi',
+                             completedSteps=99, totalSteps=100, error=None, finishedAt=None, lastHostReconcileAt=time.time())
+            return
     baseline = execution.get('services')
     if not isinstance(baseline, list):
         operation_update(job_id, status='interrupted', recoveryRequired=True, completedSteps=99, totalSteps=100,
                          stage='Pacchetti verificati; baseline servizi assente: verifica assistita',
                          error='Serve una verifica amministrativa dei servizi precedenti.', lastHostReconcileAt=time.time(), finishedAt=stamp())
         return
-    if not reboot_services_healthy(baseline):
+    if 'serviceVerificationStartedAt' not in execution:
+        execution['serviceVerificationStartedAt'] = time.time()
+        save('host-execution', job_id, execution)
+    refresh_baseline = coordinated and not execution.get('coordinatedServicesVerified')
+    candidate = baseline
+    if refresh_baseline:
+        try:
+            candidate = snapshot_running_services()
+        except (Rejected, OSError, http.client.HTTPException):
+            candidate = None
+    healthy = (candidate is not None and {item['name'] for item in baseline} <= {item['name'] for item in candidate}
+               and reboot_services_healthy(candidate))
+    if not healthy:
         expired = time.time() - execution['serviceVerificationStartedAt'] >= 60
         operation_update(job_id, status='failed' if expired else 'running', recoveryRequired=expired or load('operation', job_id).get('recoveryRequired') is True,
                          stage='Pacchetti aggiornati; servizi non verificati: intervento richiesto' if expired else 'Pacchetti verificati; attesa avvio e verifica dei servizi',
                          completedSteps=99, totalSteps=100, lastHostReconcileAt=time.time(),
-                         **({'error': 'Verifica amministrativa richiesta per i servizi del server.', 'finishedAt': stamp()} if expired else {'finishedAt': None}))
+                         **({'error': 'Verifica amministrativa richiesta per i servizi del server.', 'finishedAt': stamp()} if expired else {'error': None, 'finishedAt': None}))
         return
+    if refresh_baseline:
+        baseline = candidate
+        execution['services'] = baseline
+        execution['coordinatedServicesVerified'] = True
+        save('host-execution', job_id, execution)
     save('cache', 'host-releases', None)
-    if native.get('rebootAfter') is True:
+    if native.get('rebootAfter') is True and host_updates.inventory().get('rebootRequired') is True:
         with HOST_REBOOT_GUARD:
             if load('host-reboot', job_id):
                 return
             intent = host_updates.prepare_upgrade_reboot(native)
-            save('host-reboot', job_id, {'intent': intent, 'services': baseline, 'acknowledged': True})
+            intent['requireRuntimeMarker'] = True
+            save('host-reboot', job_id, {'intent': intent, 'services': baseline, 'acknowledged': True, 'coordinatedReboot': execution.get('coordinatedReboot') is True})
             operation_update(job_id, status='running', recoveryRequired=False, error=None,
                              stage='Aggiornamento verificato; preparazione del riavvio', completedSteps=99, totalSteps=100,
                              lastHostReconcileAt=time.time(), finishedAt=None)
@@ -1278,7 +1477,7 @@ def finish_host_upgrade(job_id, execution, result):
         return
     operation_update(job_id, status='succeeded', recoveryRequired=False, error=None,
                      stage='Aggiornamento OS e servizi verificati', completedSteps=100, totalSteps=100,
-                     rebootRequired=result.get('rebootRequired') is True, lastHostReconcileAt=time.time(), finishedAt=stamp())
+                     rebootRequired=host_updates.inventory().get('rebootRequired') is True, lastHostReconcileAt=time.time(), finishedAt=stamp())
 
 
 def reconcile_host_jobs(operation_id=None, force=False):
@@ -1411,7 +1610,7 @@ def host_job(job_id, kind, stored=None):
     with HOST_JOB_GUARD:
         HOST_JOB_THREADS.add(job_id)
     if not load('host-execution', job_id):
-        save('host-execution', job_id, {'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False})
+        save('host-execution', job_id, {'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False, 'coordinatedReboot': bool(stored and stored['public'].get('coordinatedReboot'))})
     with lock_path.open('a') as lock:
         try:
             wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored else None)
@@ -1420,7 +1619,12 @@ def host_job(job_id, kind, stored=None):
                 nonlocal began_upgrade
                 if event.get('stage') in ['upgrade', 'autoremove']:
                     began_upgrade = True
-                host_progress(job_id, kind, event)
+                try:
+                    host_progress(job_id, kind, event)
+                except (sqlite3.OperationalError, OSError):
+                    # The root worker persists progress independently. Keep draining
+                    # its stream if the bridge cannot write an intermediate event.
+                    pass
             execution = load('host-execution', job_id)
             if kind == 'host-upgrade':
                 execution['services'] = snapshot_running_services()
@@ -1468,6 +1672,20 @@ def host_reboot_job(job_id):
                     save('host-reboot', job_id, private)
             stored = load('host-plan', private['intent']['planId'])
             wait_operation_lock(lock, job_id, stored['native']['expiresAt'] if stored and not combined else None)
+            if recovery_required():
+                raise Rejected('operation_conflict', 'Recupero amministrativo richiesto; riavvio bloccato.')
+            if combined and not reboot_services_healthy(private['services']):
+                raise Rejected('operation_conflict', 'Servizi non verificati; riavvio bloccato.')
+            if private.get('coordinatedReboot'):
+                peer = coordinated_peer(job_id)
+                if not peer or peer.get('status') != 'succeeded' or not reboot_services_healthy(private['services']):
+                    raise Rejected('operation_conflict', 'Aggiornamenti servizi non verificati; riavvio bloccato.')
+            if combined and host_updates.inventory().get('rebootRequired') is not True:
+                operation_update(job_id, status='succeeded', rebootRequired=False, completedSteps=100, totalSteps=100,
+                                 stage='Aggiornamenti verificati; riavvio non necessario', finishedAt=stamp())
+                private['intent']['state'] = 'succeeded'
+                save('host-reboot', job_id, private)
+                return
             private['intent'] = host_updates.schedule_reboot(private['intent'])
             save('host-reboot', job_id, private)
             operation_update(job_id, status='running', stage='Riavvio programmato; attesa nuova connessione',
@@ -1514,7 +1732,7 @@ def submit_host(kind, stored=None, idempotency_key=None, paired_with=None):
             pair_maintenance(connection, job, paired_with)
             connection.execute('INSERT INTO records VALUES(?,?,?)', ('operation', job_id, json.dumps(job)))
             if kind in ['host-upgrade', 'host-check']:
-                connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-execution', job_id, json.dumps({'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False})))
+                connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-execution', job_id, json.dumps({'kind': kind, 'native': stored['native'] if stored else None, 'dispatched': False, 'coordinatedReboot': bool(stored and stored['public'].get('coordinatedReboot'))})))
             if intent is not None:
                 connection.execute('INSERT INTO records VALUES(?,?,?)', ('host-reboot', job_id, json.dumps({'intent': intent, 'services': services, 'acknowledged': False})))
             if idempotency_key:
@@ -1562,19 +1780,19 @@ def handle_host(body, after_response=None):
                 if stored['native'].get('rebootAfter') and after_response:
                     after_response(lambda: acknowledge_host_upgrade(record['id'], stored))
                 return {'operationId': record['id'], 'status': record['status']}
-        admitted_kind = 'host-check' if action == 'host-check' else 'host-upgrade' if action == 'host-apply' and body['confirmation'] == 'UPDATE' else action
+        admitted_kind = 'host-check' if action == 'host-check' else 'host-upgrade' if action == 'host-apply' and (body['confirmation'] == 'UPDATE' or load('host-plan', body['planId'], {}).get('public', {}).get('coordinatedReboot') is True) else action
         partner = maintenance_partner(admitted_kind)
         if action == 'host-check':
             return submit_host('host-check', paired_with=partner)
         kind = 'host-reboot' if action.startswith('host-reboot-') else 'host-upgrade'
         if action in ['host-plan', 'host-reboot-plan']:
-            return host_plan(kind, body['revision'], reboot_after=body.get('rebootAfter', False))
+            return host_plan(kind, body['revision'], reboot_after=body.get('rebootAfter', False), coordinated_reboot=body.get('coordinatedReboot', False))
         stored = load('host-plan', body['planId'])
         if not stored or stored['public']['kind'] != kind:
             raise Rejected('not_found', 'Piano OS non disponibile.', 404)
         if body['confirmation'] != stored['public']['confirmationRequired']:
             raise Rejected('confirmation_required', 'Conferma esplicita richiesta.', 422)
-        if partner and (stored['native'].get('rebootAfter') is True or stored['native'].get('confirmationRequired') != 'UPDATE'):
+        if partner and not stored['public'].get('coordinatedReboot') and (stored['native'].get('rebootAfter') is True or stored['native'].get('confirmationRequired') != 'UPDATE'):
             raise Rejected('operation_conflict', 'Il riavvio richiede una manutenzione separata.')
         if stored['native']['expiresAt'] <= time.time():
             raise Rejected('plan_expired', 'Piano OS scaduto.', 410)
@@ -1697,8 +1915,10 @@ def handle(body, after_response=None):
         raise Rejected('invalid_request', 'Richiesta non valida.', 400)
     action = body['action']
     required = allowed[action] | {'action'}
-    optional = {'rebootAfter'} if action == 'host-plan' else set()
+    optional = {'rebootAfter', 'coordinatedReboot'} if action == 'host-plan' else set()
     if not required <= set(body) <= required | optional or 'rebootAfter' in body and type(body['rebootAfter']) is not bool:
+        raise Rejected('invalid_request', 'Richiesta non valida.', 400)
+    if 'coordinatedReboot' in body and (type(body['coordinatedReboot']) is not bool or body['coordinatedReboot'] and body.get('rebootAfter') is not True):
         raise Rejected('invalid_request', 'Richiesta non valida.', 400)
     for key in ['componentId', 'planId', 'operationId']:
         if key in body and (not isinstance(body[key], str) or not IDENTIFIER.fullmatch(body[key])):

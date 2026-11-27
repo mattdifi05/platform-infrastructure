@@ -33,7 +33,7 @@ esatto.
 `compose-healthcheck-coverage.sh` verifies the rendered local WAF, VPS WAF and backup-scheduler stacks have a healthcheck on every operational service and writes non-secret reports under `reports/healthchecks/`.
 `rate-limit-evidence.sh` verifies edge/API rate-limit configuration and writes non-secret reports under `reports/rate-limits/`; it runs infra-only when the Platform app source is intentionally not mounted.
 `audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Platform source wiring, then writes non-secret reports under `reports/audit-logs/`.
-`retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
+`retention-evidence.sh` verifies bounded Docker logs, Loki/Alloy retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
 
 The shell wrappers are fail-closed: there is no local image default, automatic
 build, image-label trust or host-Node bypass. When the trusted producer policy
@@ -459,7 +459,7 @@ probe. Application outbox recovery belongs to the workload runbook.
 
 ## Centralized logs and audit
 
-Promtail reads Docker JSON logs from `/var/lib/docker/containers` without Docker
+Alloy reads Docker JSON logs from `/var/lib/docker/containers` without Docker
 socket service discovery. Its pipeline unwraps Docker log entries, drops whole
 events containing body, Authorization, Cookie or Set-Cookie material, redacts
 remaining sensitive fields (`password`, `secret`, `token`, `otp`, passkey

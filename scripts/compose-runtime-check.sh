@@ -17,7 +17,7 @@ COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
 
 for service in local-registry backup-scheduler docker-operation-gateway broker-auth-bootstrap project-router control-center \
   platform-alert-dispatcher postgres redis keycloak nats minio mariadb \
-  traefik waf prometheus alertmanager grafana loki promtail node-exporter cadvisor; do
+  traefik waf prometheus alertmanager grafana loki alloy node-exporter cadvisor; do
   jq -e --arg service "$service" '.services[$service] != null' "$OUTPUT" >/dev/null
 done
 

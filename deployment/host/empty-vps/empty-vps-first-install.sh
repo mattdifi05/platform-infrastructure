@@ -72,7 +72,7 @@ if grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.*(example\.com|localhost|change_me|REPLACE
 fi
 
 cd "$ROOT"
-export EMPTY_VPS_HOSTED_LOCK_SHA256=200594faaf46f0f17860e50c73184efd09cd38558681897732f9dcdc1a3c210b
+export EMPTY_VPS_HOSTED_LOCK_SHA256=2a78042b0f5a0e1a30ccc1738fc9c50e25af8151e6286230aff7b624622787e6
 [[ $(sha256sum "$ROOT/config/no-hosted-workloads.lock.json" | cut -d ' ' -f 1) = "$EMPTY_VPS_HOSTED_LOCK_SHA256" ]] || {
   echo 'Empty-host workload lock differs from the reviewed candidate.' >&2
   exit 1

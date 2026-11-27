@@ -18,7 +18,7 @@ Included:
 - Generic PHP Apache, Node and Static runtime capability.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO and Keycloak.
 - Observability stack: Prometheus, node-exporter, cAdvisor, Grafana, Loki,
-  Promtail and Alertmanager.
+  Alloy and Alertmanager.
 - Backup, restore, disaster recovery, evidence and go/no-go tooling.
 - GitHub Actions, release evidence and provider manifests.
 
@@ -160,7 +160,7 @@ platform's ability to host them.
 | `cadvisor` | observability | Container metrics from read-only Docker mounts. | No. | None. |
 | `grafana` | observability | Metrics/log dashboards. | No public route unless explicitly protected. | `enterprise_grafana_data`. |
 | `loki` | observability | Log storage and rule engine. | No. | `enterprise_loki_data`. |
-| `promtail` | observability | Docker log collector with redaction pipeline. | No. | Reads Docker logs. |
+| `alloy` | observability | Docker log collector with redaction pipeline. | No. | Reads Docker logs. |
 | `alertmanager` | observability | Alert routing to `platform-alert-dispatcher`. | No. | `enterprise_alertmanager_data`. |
 | `phpmyadmin` | admin profile | MariaDB admin UI, enabled only with `admin` profile. | No durable public surface. | No named volume. |
 | `phppgadmin` | admin profile | PostgreSQL admin UI, enabled only with `admin` profile. | No durable public surface. | No named volume. |
@@ -208,7 +208,7 @@ Important bind mounts:
 - `project-router/` mounted read-only into the Project Router container.
 - external projects root mounted under `/var/www/projects`.
 - `projects-portal/state/` mounted read/write for Control Center metadata.
-- `/var/lib/docker/containers` read-only into Promtail.
+- `/var/lib/docker/containers` read-only into Alloy.
 - host root, Docker state and cgroups read-only into node-exporter/cAdvisor.
 
 Do not remove volumes with `docker compose down -v` on a live/reference/VPS

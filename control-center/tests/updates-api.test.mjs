@@ -236,6 +236,11 @@ test('system API projects upgrade versions and binds the three maintenance confi
   assert.equal(inventory.updateCount, 1); assert.equal(inventory.canReboot, true); assert.equal(inventory.autoremoveCount, 2);
   assert.deepEqual(inventory.packages, packages);
   assert.doesNotMatch(JSON.stringify(inventory), /SECRET|private-removal/);
+  const newDependency = { name: 'linux-modules-fixture', currentVersion: null, targetVersion: '7.0.0-44.44' };
+  source.packages = [...nativePackages, newDependency];
+  source.updateCount = 2;
+  assert.deepEqual((await client.hostCatalog()).packages, [...packages, newDependency]);
+  source.updateCount = 1;
   source.packages = [{ ...nativePackages[0], targetVersion: 'https://user:password@invalid' }];
   await assert.rejects(client.hostCatalog(), error => error.code === 'invalid_response');
   source.packages = nativePackages;
@@ -253,6 +258,13 @@ test('system API projects upgrade versions and binds the three maintenance confi
   const combined = await client.hostPlan({ revision, rebootAfter: true });
   assert.equal(combined.rebootAfter, true); assert.equal(combined.confirmationRequired, 'UPDATE_AND_REBOOT');
   assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision, rebootAfter: true });
+  await assert.rejects(client.hostPlan({ revision, coordinatedReboot: true }), error => error.status === 400);
+  await assert.rejects(client.hostPlan({ revision, rebootAfter: true, coordinatedReboot: true }), error => error.code === 'invalid_response');
+  source = { ...source, coordinatedReboot: true };
+  const coordinated = await client.hostPlan({ revision, rebootAfter: true, coordinatedReboot: true });
+  assert.equal(coordinated.coordinatedReboot, true);
+  assert.equal(coordinated.confirmationRequired, 'UPDATE_AND_REBOOT');
+  assert.deepEqual(requests.at(-1).envelope.body, { action: 'host-plan', revision, rebootAfter: true, coordinatedReboot: true });
   source = { operationId: 'reboot-1', status: 'queued' };
   assert.equal((await client.hostApply({ ...fields, confirmation: 'UPDATE_AND_REBOOT' })).operationId, 'reboot-1');
   assert.equal((await client.hostRebootApply({ ...fields, confirmation: 'REBOOT' })).operationId, 'reboot-1');
@@ -284,4 +296,18 @@ test('per-service progress retains partial success and rollback while redacting 
   assert.doesNotMatch(JSON.stringify(result), /SECRET/);
   source.totalServices = 3;
   await assert.rejects(client.operation('batch-1'), error => error.code === 'invalid_response');
+});
+
+test('paired host and service operations retain durable pairing and serialized wait progress', async t => {
+  const source = { id: 'services-1', kind: 'apply', status: 'queued', stage: 'In attesa della manutenzione host in corso',
+    completedSteps: 0, totalSteps: 2, pairedWith: 'host-1', waitingForMaintenance: true, nativePlan: 'PRIVATE' };
+  const { client } = await fixture(t, (_body, res) => send(res, source));
+  const result = await client.operation('services-1');
+  assert.equal(result.pairedWith, 'host-1');
+  assert.equal(result.waitingForMaintenance, true);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|nativePlan/);
+  source.pairedWith = source.id;
+  await assert.rejects(client.operation('services-1'), error => error.code === 'invalid_response');
+  source.pairedWith = '/private/operation';
+  await assert.rejects(client.operation('services-1'), error => error.code === 'invalid_response');
 });

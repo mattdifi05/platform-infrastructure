@@ -7,7 +7,7 @@
   "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "coreSemanticPolicy": {
     "schema": "platform-no-hosted-core-capability-policy/v2",
-    "sha256": "78856c73791153effa0576ab7468609af941152f30063774ff91edd7dc776c28"
+    "sha256": "f2d18236e3c4eedef962a419b96e7969f004dd1a465fa1b8bfe643865fa3f558"
   },
   "projectName": "platform_infra_vps",
   "protectedResourceNames": {
@@ -51,6 +51,7 @@
     ],
     "services": [
       "alertmanager",
+      "alloy",
       "backup-scheduler",
       "broker-auth-bootstrap",
       "control-center",
@@ -69,7 +70,6 @@
       "postgres",
       "project-router",
       "prometheus",
-      "promtail",
       "redis",
       "traefik",
       "waf"
@@ -81,6 +81,7 @@
       "docker_action_broker_socket",
       "docker_action_broker_state",
       "enterprise_alertmanager_data",
+      "enterprise_alloy_data",
       "enterprise_grafana_data",
       "enterprise_keycloak_data",
       "enterprise_loki_data",

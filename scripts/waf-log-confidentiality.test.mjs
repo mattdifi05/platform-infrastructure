@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const compose = fs.readFileSync(path.join(root, "compose.waf.yaml"), "utf8");
-const promtail = fs.readFileSync(path.join(root, "promtail", "config.yml"), "utf8");
+const alloy = fs.readFileSync(path.join(root, "deployment", "config", "alloy", "alloy.config"), "utf8");
 
 test("FG-021 WAF inspects bodies but audit output excludes all header/body parts", () => {
   assert.match(compose, /MODSEC_REQ_BODY_ACCESS: "On"/);
@@ -51,13 +51,15 @@ test("FG-021 no active sanitise actions in any engine-bound WAF config", () => {
   }
 });
 
-test("FG-021 Promtail fixture drops body/header events and redacts credential fields", () => {
-  const dropSource = promtail.match(/- drop:\n\s+expression: '([^']+)'\n\s+drop_counter_reason: sensitive_http_material/)?.[1];
-  const replaceMatch = promtail.match(/- replace:\n\s+expression: '([^']+)'\n\s+replace: '([^']+)'/);
-  assert.ok(dropSource, "missing fail-closed sensitive HTTP material drop stage");
-  assert.ok(replaceMatch, "missing credential replacement stage");
-  const drop = compilePromtailExpression(dropSource);
-  const replace = compilePromtailExpression(replaceMatch[1], true);
+test("FG-021 Alloy fixture drops body/header events and redacts credential fields", () => {
+  const dropStages = [...alloy.matchAll(/stage\.drop\s*\{([^}]+)\}/g)].map((match) => match[1]);
+  const sensitiveStage = dropStages.find((stage) => stage.includes('"sensitive_http_material"'));
+  const replaceStage = alloy.match(/stage\.replace\s*\{([\s\S]*?)\n\s*\}/)?.[1];
+  assert.ok(sensitiveStage, "missing fail-closed sensitive HTTP material drop stage");
+  assert.ok(replaceStage, "missing credential replacement stage");
+  const drop = compileAlloyExpression(alloyString(sensitiveStage, "expression"));
+  const replace = compileAlloyExpression(alloyString(replaceStage, "expression"), true);
+  const replacement = alloyString(replaceStage, "replace");
   const fixtures = [
     '{"transaction":{"request":{"body":"username=user&BODY_TOKEN=secret"}}}',
     'ModSecurity Authorization: Bearer AUTH_TOKEN',
@@ -68,7 +70,7 @@ test("FG-021 Promtail fixture drops body/header events and redacts credential fi
   ];
   const shipped = fixtures
     .filter((line) => !drop.test(line))
-    .map((line) => line.replace(replace, replaceMatch[2]));
+    .map((line) => line.replace(replace, replacement));
   const lokiFixture = shipped.join("\n");
   for (const token of ["BODY_TOKEN", "AUTH_TOKEN", "COOKIE_TOKEN", "SET_COOKIE_TOKEN", "JSON_TOKEN"]) {
     assert.doesNotMatch(lokiFixture, new RegExp(token));
@@ -77,7 +79,13 @@ test("FG-021 Promtail fixture drops body/header events and redacts credential fi
   assert.match(lokiFixture, /\[REDACTED\]/);
 });
 
-function compilePromtailExpression(source, global = false) {
+function compileAlloyExpression(source, global = false) {
   const caseInsensitive = source.startsWith("(?i)");
   return new RegExp(caseInsensitive ? source.slice(4) : source, `${caseInsensitive ? "i" : ""}${global ? "g" : ""}`);
+}
+
+function alloyString(stage, attribute) {
+  const literal = stage.match(new RegExp(`\\b${attribute}\\s*=\\s*("(?:\\\\.|[^"\\\\])*")`))?.[1];
+  assert.ok(literal, `missing Alloy ${attribute}`);
+  return JSON.parse(literal);
 }

@@ -22,7 +22,7 @@ test('real server authorizes updates before payload/context/bridge and enforces 
     if (body.action === 'catalog') value = { schema: 'runtime-updates/v1', available: true, canCheck: true, revision, checkedAt: new Date().toISOString(), components: [], operations: [] };
     else if (body.action === 'server-events') value = { schema: 'server-events/v1', available: true, partial: false, checkedAt: new Date().toISOString(), issues: [], events: [], sources: [{ id: 'host', available: true }] };
     else if (body.action === 'host-catalog') value = { schema: 'host-updates/v1', available: true, revision, os: { id: 'ubuntu', name: 'Ubuntu', version: '26.04' }, updateCount: 2, keptBackCount: 0, rebootRequired: true, canReboot: true, canCheck: true, canApply: true, operations: [] };
-    else if (body.action === 'host-plan' || body.action === 'host-reboot-plan') value = { planId: 'host-plan', revision, expiresAt: new Date(Date.now() + 60000).toISOString(), kind: body.action === 'host-plan' ? 'host-upgrade' : 'host-reboot', packageCount: 2, steps: ['Verifica'], risks: ['Fermo temporaneo'], rebootAfter: body.rebootAfter === true, confirmationRequired: body.rebootAfter === true ? 'UPDATE_AND_REBOOT' : body.action === 'host-plan' ? 'UPDATE' : 'REBOOT' };
+    else if (body.action === 'host-plan' || body.action === 'host-reboot-plan') value = { planId: 'host-plan', revision, expiresAt: new Date(Date.now() + 60000).toISOString(), kind: body.action === 'host-plan' ? 'host-upgrade' : 'host-reboot', packageCount: 2, steps: ['Verifica'], risks: ['Fermo temporaneo'], rebootAfter: body.rebootAfter === true, coordinatedReboot: body.coordinatedReboot === true, confirmationRequired: body.rebootAfter === true ? 'UPDATE_AND_REBOOT' : body.action === 'host-plan' ? 'UPDATE' : 'REBOOT' };
     else if (body.action === 'plan') value = { planId: 'plan-1', revision, componentId: 'php', expiresAt: new Date(Date.now() + 60000).toISOString(), targetVersion: '8.5.12', targetDigest, affectedServices: ['php-app'], steps: ['verify'], risks: [], confirmationRequired: 'UPDATE' };
     else if (body.action === 'operation') value = { id: body.operationId, status: 'running', stage: 'verify', completedSteps: 1, totalSteps: 2 };
     else value = { operationId: 'operation-1', status: 'queued' };
@@ -91,6 +91,9 @@ test('real server authorizes updates before payload/context/bridge and enforces 
   assert.equal((await request('POST', '/control/runtime-updates/system/plan', 'owner', { revision })).status, 200);
   const combined = await request('POST', '/control/v1/runtime-updates/system/plan', 'owner', { revision, rebootAfter: true });
   assert.equal(combined.status, 200); assert.equal((await combined.json()).confirmationRequired, 'UPDATE_AND_REBOOT');
+  const coordinated = await request('POST', '/control/v1/runtime-updates/system/plan', 'owner', { revision, rebootAfter: true, coordinatedReboot: true });
+  assert.equal(coordinated.status, 200); assert.equal((await coordinated.json()).coordinatedReboot, true);
+  assert.equal((await request('POST', '/control/v1/runtime-updates/system/plan', 'owner', { revision, coordinatedReboot: true })).status, 400);
   assert.equal((await request('POST', '/control/v1/runtime-updates/system/apply', 'owner', { revision, planId: 'host-plan', confirmation: 'UPDATE_AND_REBOOT', idempotencyKey: 'update-reboot-1' })).status, 202);
   assert.equal((await request('POST', '/control/v1/runtime-updates/system/plan', 'owner', { revision, rebootAfter: 'true' })).status, 400);
   assert.equal((await request('POST', '/control/runtime-updates/system/reboot/plan', 'owner', { revision })).status, 200);
