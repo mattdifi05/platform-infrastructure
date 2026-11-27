@@ -86,7 +86,7 @@ Terminologia canonica:
   esplicitamente alle applicazioni ospitate.
 - Redis per rate limit, cache/runtime state, heartbeat worker e uso applicativo
   opzionale.
-- Keycloak, NATS JetStream, MinIO, Prometheus, node-exporter, Grafana, Loki e Promtail.
+- Keycloak, NATS JetStream, MinIO, Prometheus, node-exporter, Grafana, Loki e Alloy.
 - Runtime Node/PHP/Static collegati soltanto tramite un contratto workload
   esterno verificato; nessun backend, frontend o worker applicativo e' core.
 
@@ -308,7 +308,7 @@ fallisce se manca un container in esecuzione. La V1.1 Dell non avvia ne'
 esegue lo scrape di cAdvisor: le metriche workload canoniche sono esclusivamente le serie
 `platform_container_*` del textfile collector. Vedi `WORKLOAD-METRICS.md`.
 
-I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail
+I log sono centralizzati via Alloy senza montare `docker.sock`: Alloy
 legge i log JSON bounded dei container, applica una redaction pipeline su
 header, token, cookie, OTP e segreti, e promuove `service` e `level` a label
 Loki per query operative. I workload esterni devono emettere log compatibili,
@@ -379,7 +379,7 @@ Baseline WAF: CRS paranoia level 2, blocking mode attivo, audit log
 `RelevantOnly` limitato alle parti non sensibili `A/K/Z`, request body inspection
 attiva ma body e header di autenticazione/sessione esclusi da stdout, response
 body inspection spenta, file sensibili e scanner path bloccati prima del routing
-verso runtime o app collegate. Promtail scarta inoltre in modo fail-closed ogni
+verso runtime o app collegate. Alloy scarta inoltre in modo fail-closed ogni
 evento che presenti campi body, Authorization, Cookie o Set-Cookie prima di
 Loki. PL3/PL4 vanno attivati solo dopo una finestra di tuning sui log, altrimenti
 il rischio falso positivo diventa alto per dashboard, OAuth e form PHP.
@@ -582,7 +582,7 @@ configurati puoi aggiungere `--requireEmailDelivery` o
 
 `audit-log-evidence.sh` scrive un report in `reports/audit-logs/` che verifica audit amministrativo, outbox durevole, dead-letter, alert Prometheus e dashboard Grafana. Eventuali audit table dei workload ospitati restano fuori dai gate platform.
 
-`retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Promtail, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente runtime e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il sorgente esterno non e' presente.
+`retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Alloy, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente runtime e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il sorgente esterno non e' presente.
 
 `runtime-fingerprint` consuma un manifest `platform.runtime-target/v1` con la
 `candidate` `platform.release-candidate/v1` prodotta da FG-048, deployment ID e

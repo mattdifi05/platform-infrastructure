@@ -17,7 +17,7 @@ MAX_BYTES=70_000_000_000
 BASE_CONTAINER_NAMES=frozenset('/'+name for name in (
  'enterprise-postgres','enterprise-redis','enterprise-control-center','enterprise-traefik','enterprise-waf','platform-waf-loopback-proxy',
  'mariadb','enterprise-nats','enterprise-keycloak','enterprise-project-router','gf-rustfs','gf-minio-gateway',
- 'enterprise-platform-alert-dispatcher','enterprise-alertmanager','enterprise-prometheus','enterprise-grafana','enterprise-loki','enterprise-promtail'))
+ 'enterprise-platform-alert-dispatcher','enterprise-alertmanager','enterprise-prometheus','enterprise-grafana','enterprise-loki','enterprise-alloy'))
 NODE_EXPORTER_BINDS={'/proc/stat':'/proc-host/stat','/proc/meminfo':'/proc-host/meminfo','/proc/1/mountinfo':'/proc-host/1/mountinfo','/var/lib/platform-host-metrics/rootfs':'/host'}
 
 def reviewed_membership(rows):

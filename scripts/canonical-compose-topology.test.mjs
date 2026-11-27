@@ -11,8 +11,8 @@ import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workloadLock = "secrets/hosted-workloads.lock.json";
 const workloadLockSha256 = "a".repeat(64);
-const noHostedWorkloadLockSha256 = "200594faaf46f0f17860e50c73184efd09cd38558681897732f9dcdc1a3c210b";
-const localPrivateNoHostedWorkloadLockSha256 = "ee5a1b120674d153343886b342bcf6f5898df2218d00ea6206aa2029fdda2543";
+const noHostedWorkloadLockSha256 = "2a78042b0f5a0e1a30ccc1738fc9c50e25af8151e6286230aff7b624622787e6";
+const localPrivateNoHostedWorkloadLockSha256 = "d1593554aff8edf454af595a63216457cff50b461700d3f2533e9ebed6f0f1ec";
 
 test("canonical plan invokes the deployment wrapper with a verified workload lock", () => {
   const plan = canonicalVpsTopologyPlan({

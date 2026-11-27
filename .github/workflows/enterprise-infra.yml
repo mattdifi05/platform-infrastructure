@@ -245,7 +245,9 @@ jobs:
             ([$root.services["docker-action-broker"].volumes[] | select(.target == "/var/lib/platform-backup-data")][0].source) as $backupDataSource |
             (.secrets | length) == 14 and
             (.networks | length) == 9 and
-            (.volumes | length) == 12 and
+            (.volumes | length) == 13 and
+            (.volumes.enterprise_alloy_data.name == "greenfield_alloy_data") and
+            (.services.alloy.volumes | any(.type == "volume" and .source == "enterprise_alloy_data" and .target == "/var/lib/alloy")) and
             (.services["backup-scheduler"].network_mode == "none") and
             (.services["docker-action-broker"].user == "1000:1000") and
             (.services["backup-scheduler"].user == "1000:1000") and

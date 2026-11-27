@@ -95,6 +95,7 @@ const expectedCoreInventory = {
   ],
   services: [
     "alertmanager",
+    "alloy",
     "backup-scheduler",
     "broker-auth-bootstrap",
     "control-center",
@@ -111,7 +112,6 @@ const expectedCoreInventory = {
     "postgres",
     "project-router",
     "prometheus",
-    "promtail",
     "redis",
     "traefik",
     "waf",
@@ -123,6 +123,7 @@ const expectedCoreInventory = {
     "docker_action_broker_socket",
     "docker_action_broker_state",
     "enterprise_alertmanager_data",
+    "enterprise_alloy_data",
     "enterprise_grafana_data",
     "enterprise_keycloak_data",
     "enterprise_loki_data",
@@ -2608,14 +2609,14 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v2",
-    sha256: "4e36a63d372d4fc8dc8e41a20c3bb13d93980cc46258e932c6bc5066c3197ff5",
+    sha256: "97ce32bb7157b442991631f5ee9cfb5641dd666c81248b62c1bfa96a275cae4d",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
   assert.deepEqual(lock.protectedResourceNames, expectedCoreInventory);
   assert.deepEqual(
     Object.fromEntries(protectedKinds.map((kind) => [kind, lock.protectedResourceNames[kind].length])),
-    { configs: 1, networks: 9, secrets: 22, services: 21, volumes: 17 },
+    { configs: 1, networks: 9, secrets: 22, services: 21, volumes: 18 },
   );
   assert.equal(lock.protectedResourceNames.services.includes("php-apache"), false);
   for (const kind of protectedKinds) {
@@ -3023,6 +3024,43 @@ test("QA8 exact overlay golden preserves the four independently derived canonica
       [],
       `canonical nine-overlay states were rejected: ${violations.join(",")}`,
     );
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("Alloy rename preserves exact log-reader authority and rejects legacy identity or broader mounts", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const environment = installQa8Environment(sandbox);
+    const baseline = qa8IndependentGolden(sandbox);
+    materializeQa8CanonicalSources(sandbox, baseline);
+    const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+    const alloy = baseline.services.alloy;
+    assert.equal(alloy.container_name, "enterprise-alloy");
+    assert.ok(alloy.volumes.some((mount) => mount.source === "enterprise_alloy_data"
+      && mount.target === "/var/lib/alloy"));
+    assert.ok(alloy.volumes.some((mount) => mount.target === "/etc/alloy/config.alloy"
+      && mount.source === path.join(sandbox.root, "deployment/config/alloy/alloy.config")
+      && mount.read_only === true));
+    const mutations = [
+      ["legacy service", (config) => {
+        config.services.promtail = config.services.alloy;
+        delete config.services.alloy;
+      }],
+      ["legacy container", (config) => { config.services.alloy.container_name = "enterprise-promtail"; }],
+      ["writable Docker logs", (config) => {
+        config.services.alloy.volumes.find((mount) => mount.target === "/var/lib/docker/containers").read_only = false;
+      }],
+      ["Docker socket", (config) => {
+        config.services.alloy.volumes.push({ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true });
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = structuredClone(baseline);
+      mutate(config);
+      assert.notDeepEqual(validateNoHostedCoreAuthority(lock, config, sandbox.root, environment), [], label);
+    }
   } finally {
     removeSandbox(sandbox);
   }

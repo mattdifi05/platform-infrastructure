@@ -977,14 +977,14 @@ if [[ -n "$workload_lock" ]]; then
 else
   if [[ "$compose_variant" = LOCAL_PRIVATE ]]; then
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.local-private.lock.json
-    canonical_no_hosted_lock_sha256=ee5a1b120674d153343886b342bcf6f5898df2218d00ea6206aa2029fdda2543
-    canonical_no_hosted_policy_sha256=78856c73791153effa0576ab7468609af941152f30063774ff91edd7dc776c28
+    canonical_no_hosted_lock_sha256=d1593554aff8edf454af595a63216457cff50b461700d3f2533e9ebed6f0f1ec
+    canonical_no_hosted_policy_sha256=f2d18236e3c4eedef962a419b96e7969f004dd1a465fa1b8bfe643865fa3f558
     canonical_no_hosted_secret_count=22
     canonical_no_hosted_service_count=23
   else
     canonical_no_hosted_lock=$ROOT_DIR/config/no-hosted-workloads.lock.json
-    canonical_no_hosted_lock_sha256=200594faaf46f0f17860e50c73184efd09cd38558681897732f9dcdc1a3c210b
-    canonical_no_hosted_policy_sha256=4e36a63d372d4fc8dc8e41a20c3bb13d93980cc46258e932c6bc5066c3197ff5
+    canonical_no_hosted_lock_sha256=2a78042b0f5a0e1a30ccc1738fc9c50e25af8151e6286230aff7b624622787e6
+    canonical_no_hosted_policy_sha256=97ce32bb7157b442991631f5ee9cfb5641dd666c81248b62c1bfa96a275cae4d
     canonical_no_hosted_secret_count=22
     canonical_no_hosted_service_count=21
   fi
@@ -1032,7 +1032,7 @@ else
       and (.protectedResourceNames.networks | length) == 9
       and (.protectedResourceNames.secrets | length) == $secretCount
       and (.protectedResourceNames.services | length) == $serviceCount
-      and (.protectedResourceNames.volumes | length) == 17
+      and (.protectedResourceNames.volumes | length) == 18
       and all(.protectedResourceNames[]; . == (unique | sort) and all(.[]; type == "string" and length > 0))
       and (.protectedResourceNames.services | index("php-apache")) == null
     ' "$no_hosted_lock_validation_reference" >/dev/null || {

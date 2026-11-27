@@ -201,7 +201,7 @@ def _canonical_package(name, installed):
     return candidates[0]
 
 
-def _simulation(text, installed):
+def _simulation(text, installed, *, allow_new=False):
     packages, kept, collecting = [], [], False
     for line in text.splitlines():
         if line.startswith(('Remv ', 'Purg ')):
@@ -222,12 +222,15 @@ def _simulation(text, installed):
         name, old, target = match.groups()
         if not _PACKAGE.fullmatch(name) or not _VERSION.fullmatch(target):
             raise HostUpdateError('invalid package candidate')
+        if allow_new and ':' in name and name not in installed and any(key.partition(':')[0] == name.partition(':')[0] for key in installed):
+            raise HostUpdateError('package architecture changed')
         try:
             name = _canonical_package(name, installed)
         except HostUpdateError as error:
-            raise HostUpdateError('package plan adds packages or package alias is ambiguous') from error
+            if not allow_new or old is not None or any(key.partition(':')[0] == name.partition(':')[0] for key in installed):
+                raise HostUpdateError('package plan adds packages or package alias is ambiguous') from error
         current = installed.get(name)
-        if current is None or old is not None and old != current:
+        if (current is None and not allow_new) or old is not None and old != current:
             raise HostUpdateError('package plan adds packages or inventory changed')
         packages.append({'name': name, 'currentVersion': current, 'targetVersion': target})
     if len({row['name'] for row in packages}) != len(packages):
@@ -310,9 +313,9 @@ def _autoremove_plan(installed, packages):
     # Unlike explicit `install pkg=version`, upgrade preserves automatic marks.
     # This models orphan dependencies AFTER the upgrade, not before it. The
     # ordinary and exact-pin simulations separately bind every upgrade version.
-    text = _run(['apt-get', '-s', *_cleanup_options(protected), '--autoremove', 'upgrade'], timeout=120)
+    text = _run(['apt-get', '-s', *_cleanup_options(protected), '--autoremove', '--with-new-pkgs', 'upgrade'], timeout=120)
     removals = _removals(text, installed, automatic, protected)
-    upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed)
+    upgrades, _ = _simulation('\n'.join(line for line in text.splitlines() if not line.startswith('Remv ')), installed, allow_new=True)
     removed = {row['name'] for row in removals}
     expected = [row for row in packages if row['name'] not in removed]
     if upgrades != expected:
@@ -325,11 +328,13 @@ def _autoremove_plan(installed, packages):
 def _apply_autoremove(value, installed, progress):
     _emit(progress, stage='autoremove', state='running', packageCount=len(value['autoremove']))
     automatic = _automatic_packages(installed)
-    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
-    if _digest(automatic) != value['automaticFingerprint'] or _digest(protected) != value['protectedPackageFingerprint']:
-        raise HostUpdateError('autoremove protection/automatic flags changed; no cleanup performed; create a fresh plan')
+    if _digest(automatic) != value['automaticFingerprint']:
+        raise HostUpdateError('automatic package flags changed; no cleanup performed; create a fresh plan')
     removals = value['autoremove']
     if removals:
+        protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)) | set(value.get('newPackages', [])))
+        if _digest(protected) != value['protectedPackageFingerprint']:
+            raise HostUpdateError('autoremove protection changed; no cleanup performed; create a fresh plan')
         approved_names = {row['name'] for row in removals}
         options = _cleanup_options(sorted(set(protected) | (set(installed) - approved_names)))
         text = _run(['apt-get', '-s', *options, 'autoremove'], timeout=120)
@@ -369,8 +374,8 @@ def check(progress=None):
     _run(['apt-get', '-o', 'DPkg::Lock::Timeout=30', 'update', '--error-on=any'], progress, timeout=600)
     _emit(progress, stage='inventory', state='running')
     installed = _installed()
-    text = _run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', 'upgrade'], timeout=120)
-    packages, kept = _simulation(text, installed)
+    text = _run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', '--no-remove', '--with-new-pkgs', 'upgrade'], timeout=120)
+    packages, kept = _simulation(text, installed, allow_new=True)
     cleanup = _autoremove_plan(installed, packages)
     return {**inventory(), 'checkedAt': int(time.time()), 'packages': packages, 'keptBack': kept,
             'installedFingerprint': _digest(installed), 'candidateFingerprint': _digest(packages),
@@ -450,7 +455,7 @@ def apply(value, progress=None):
     installed = _installed()
     if _digest(installed) != value['installedFingerprint']:
         raise HostUpdateError('installed package versions changed; create a fresh plan')
-    packages, kept = _simulation(_run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', 'upgrade'], timeout=120), installed)
+    packages, kept = _simulation(_run(['apt-get', '-s', '-o', 'DPkg::Lock::Timeout=30', '--no-remove', '--with-new-pkgs', 'upgrade'], timeout=120), installed, allow_new=True)
     if _digest(packages) != value['candidateFingerprint'] or kept != value['keptBack']:
         raise HostUpdateError('package candidates changed; create a fresh plan')
     cleanup = _autoremove_plan(installed, packages)
@@ -458,15 +463,16 @@ def apply(value, progress=None):
         raise HostUpdateError('autoremove plan or package protection changed; create a fresh plan')
     packages = cleanup['packages']
     pins = [row['name'] + '=' + row['targetVersion'] for row in packages]
-    command = ['apt-get', '-o', 'DPkg::Lock::Timeout=30', '--no-remove', '--only-upgrade', 'install', *pins]
+    new_names = {row['name'] for row in packages if row['currentVersion'] is None}
+    command = ['apt-get', '-o', 'DPkg::Lock::Timeout=30', '--no-remove', *([] if new_names else ['--only-upgrade']), 'install', *pins]
     if packages:
-        exact, _ = _simulation(_run(command[:1] + ['-s'] + command[1:], timeout=120), installed)
+        exact, _ = _simulation(_run(command[:1] + ['-s'] + command[1:], timeout=120), installed, allow_new=True)
         if exact != packages:
-            raise HostUpdateError('exact package upgrade differs from approved plan')
+            raise HostUpdateError('exact package upgrade differs from approved plan or adds packages')
     automatic_names = set(_automatic_packages(installed))
     if sorted(automatic_names) != value['automaticPackages']:
         raise HostUpdateError('automatic package marks changed; create a fresh plan')
-    automatic = sorted({row['name'] for row in packages} & automatic_names)
+    automatic = sorted(({row['name'] for row in packages} & automatic_names) | new_names)
     _persist_package_recovery(value, automatic, 'prepared')
     _emit(progress, stage='upgrade', state='running', packageCount=len(packages))
     upgrade_error = None
@@ -491,7 +497,16 @@ def apply(value, progress=None):
     expected = {**installed, **{row['name']: row['targetVersion'] for row in packages}}
     if any(row['state'] != 'succeeded' for row in results) or actual != expected:
         raise HostUpdateError('installed package verification failed; no rollback claimed')
-    removed_count = _apply_autoremove(value, actual, progress)
+    cleanup_value = dict(value)
+    if new_names:
+        expected_automatic = sorted(automatic_names | new_names)
+        if _automatic_packages(actual) != expected_automatic:
+            raise HostUpdateError('new dependency automatic mark verification failed; recovery required')
+        expected_protected = sorted(set(value['protectedPackages']) | new_names)
+        cleanup_value.update(automaticPackages=expected_automatic, automaticFingerprint=_digest(expected_automatic),
+                             protectedPackages=expected_protected, protectedPackageFingerprint=_digest(expected_protected),
+                             newPackages=sorted(new_names))
+    removed_count = _apply_autoremove(cleanup_value, actual, progress)
     _emit(progress, stage='complete', state='succeeded')
     return {'state': 'succeeded', 'packages': results, 'rebootRequired': inventory()['rebootRequired'],
             'removedCount': removed_count, 'autoremoveVerified': True}
@@ -538,7 +553,7 @@ def schedule_reboot(intent):
     """Call ONLY after the HTTP accepted response has been flushed by the bridge."""
     if active_maintenance() or package_manager_busy():
         raise HostUpdateError('package maintenance still running; reboot blocked')
-    if intent.get('afterUpgrade') is not True and not inventory()['rebootRequired']:
+    if (intent.get('afterUpgrade') is not True or intent.get('requireRuntimeMarker') is True) and not inventory()['rebootRequired']:
         raise HostUpdateError('reboot is no longer required')
     if intent.get('schema') != 'platform-host-reboot-intent/v1' or intent.get('state') != 'queued' or intent.get('bootIdBefore') != _boot_id():
         raise HostUpdateError('invalid or stale reboot intent')
@@ -620,7 +635,7 @@ def _write_autoremove_guard(value, installed, automatic, protected):
     record = _seal({'schema': 'platform-host-autoremove-guard/v1', 'planId': identity,
                     'bootId': _boot_id(), 'expiresAt': int(time.time()) + 3600,
                     'installed': installed, 'automaticPackages': automatic,
-                    'protectedPackages': protected, 'autoremove': value['autoremove'],
+                    'protectedPackages': protected, 'newPackages': value.get('newPackages', []), 'autoremove': value['autoremove'],
                     'approvedPlanRevision': value['revision']})
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -657,7 +672,7 @@ def _autoremove_guard(filename):
         raise HostUpdateError('autoremove guard identity mismatch')
     installed = _installed()
     automatic = _automatic_packages(installed)
-    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)))
+    protected = sorted(set(_protected_packages(installed)) | (set(installed) - set(automatic)) | set(value.get('newPackages', [])))
     if installed != value['installed'] or automatic != value['automaticPackages'] or protected != value['protectedPackages']:
         raise HostUpdateError('autoremove lock-time inventory/marks/protection changed; removal blocked')
     text = '\n'.join('Remv ' + row['name'] + ' [' + row['installedVersion'] + ']' for row in value['autoremove'])

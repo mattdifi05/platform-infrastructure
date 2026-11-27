@@ -73,7 +73,7 @@ const CORE_SEMANTIC_POLICY = {
     postgres: "enterprise-postgres",
     "project-router": "enterprise-project-router",
     prometheus: "enterprise-prometheus",
-    promtail: "enterprise-promtail",
+    alloy: "enterprise-alloy",
     redis: "enterprise-redis",
     traefik: "enterprise-traefik",
     waf: "enterprise-waf",
@@ -99,7 +99,7 @@ const CORE_SEMANTIC_POLICY = {
     postgres: "always",
     "project-router": "always",
     prometheus: "always",
-    promtail: "always",
+    alloy: "always",
     redis: "always",
     traefik: "always",
     waf: "always",
@@ -118,7 +118,7 @@ const CORE_SEMANTIC_POLICY = {
     phppgadmin: ["postgres"],
     "project-router": ["control-center"],
     prometheus: ["alertmanager", "cadvisor", "node-exporter"],
-    promtail: ["loki"],
+    alloy: ["loki"],
     waf: ["traefik"],
   },
   sensitiveSourcePrefixes: ["/etc", "/home", "/opt", "/private", "/root", "/Users", "/usr"],
@@ -923,7 +923,7 @@ const CORE_SEMANTIC_POLICY = {
         "present": false,
         "entries": {}
       },
-      "promtail": {
+      "alloy": {
         "present": false,
         "entries": {}
       },
@@ -1220,7 +1220,7 @@ const CORE_SEMANTIC_POLICY = {
           "present": false
         },
         {
-          "service": "promtail",
+          "service": "alloy",
           "count": 0,
           "present": false
         },
@@ -1671,7 +1671,7 @@ const CORE_SEMANTIC_POLICY = {
         "ulimits",
         "volumes"
       ],
-      "promtail": [
+      "alloy": [
         "blkio_config",
         "command",
         "container_name",
@@ -2124,7 +2124,7 @@ const CORE_SEMANTIC_POLICY = {
         "mem_limit": 536870912,
         "mem_reservation": 134217728
       },
-      "promtail": {
+      "alloy": {
         "init": true,
         "pids_limit": 192,
         "cpu_shares": 512,
@@ -2297,6 +2297,7 @@ const CORE_SEMANTIC_POLICY = {
       "enterprise_prometheus_data": [
         "name"
       ],
+      "enterprise_alloy_data": ["name"],
       "enterprise_loki_data": [
         "name"
       ],
@@ -2465,7 +2466,7 @@ const CORE_SEMANTIC_POLICY = {
     "postgres": ["platform_db_admin", "platform_postgres"],
     "project-router": ["platform_routing"],
     "prometheus": ["platform_observability"],
-    "promtail": ["platform_observability"],
+    "alloy": ["platform_observability"],
     "redis": ["platform_cache"],
     "traefik": ["platform_edge", "platform_egress", "platform_observability", "platform_routing"],
     "waf": ["platform_edge"],
@@ -2518,6 +2519,7 @@ const CORE_SEMANTIC_POLICY = {
     enterprise_keycloak_data: "enterprise_keycloak_data",
     enterprise_local_registry_data: "enterprise_local_registry_data",
     enterprise_loki_data: "enterprise_loki_data",
+    enterprise_alloy_data: "enterprise_alloy_data",
     enterprise_mariadb_data: "enterprise_mariadb_data",
     enterprise_minio_data: "enterprise_minio_data",
     enterprise_nats_data: "enterprise_nats_data",
@@ -2547,7 +2549,7 @@ const CORE_SEMANTIC_POLICY = {
     postgres: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
     "project-router": "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606",
     prometheus: "prom/prometheus:v3.12.0@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac",
-    promtail: "grafana/promtail:3.6.10@sha256:2a0f5e3e160ee5d549c585f6cc4f4e1c566ff783324a424bd75bc16503fc660e",
+    alloy: "grafana/alloy:v1.22.0@sha256:9acc2529bc1edb7f5b2bd801dd8334ebc80c158e3a9e5526ecd7c9a273d43189",
     redis: "redis:8.6-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763",
     traefik: "traefik:v3.7.5@sha256:e4d98158c01ad752fc1071d4e9573788747230d902cdde00a772516e692d07c9",
     waf: "owasp/modsecurity-crs:4.26.0-nginx-202605200705@sha256:468c265e9b458f73f58c6c83fd0678724e383c088a0da86d828641c5f64001ed",
@@ -2573,7 +2575,7 @@ const CORE_SEMANTIC_POLICY = {
     postgres: "POSTGRES_IMAGE",
     "project-router": "NODE_IMAGE",
     prometheus: "PROMETHEUS_IMAGE",
-    promtail: "PROMTAIL_IMAGE",
+    alloy: "ALLOY_IMAGE",
     redis: "REDIS_IMAGE",
     traefik: "TRAEFIK_IMAGE",
     waf: "WAF_IMAGE",
@@ -2608,7 +2610,7 @@ const CORE_SEMANTIC_POLICY = {
       "postgres",
       "project-router",
       "prometheus",
-      "promtail",
+      "alloy",
       "redis",
       "traefik",
       "waf",
@@ -2660,7 +2662,7 @@ const CORE_SEMANTIC_POLICY = {
     "postgres",
     "project-router",
     "prometheus",
-    "promtail",
+    "alloy",
     "redis",
     "traefik",
     "waf",
@@ -2788,8 +2790,8 @@ const CORE_SEMANTIC_POLICY = {
       timeout: "5s",
       retries: 10,
     },
-    promtail: {
-      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9080; printf \"GET /ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"],
+    alloy: {
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9080; printf \"GET /-/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"],
       interval: "20s",
       timeout: "5s",
       retries: 10,
@@ -2943,7 +2945,7 @@ const CORE_SEMANTIC_POLICY = {
       ],
       entrypoint: null,
     },
-    promtail: { command: "-config.file=/etc/promtail/config.yml", entrypoint: null },
+    alloy: { command: ["run", "--server.http.listen-addr=127.0.0.1:9080", "--disable-reporting=true", "--storage.path=/var/lib/alloy", "/etc/alloy/config.alloy"], entrypoint: null },
     redis: {
       command: ["sh", "-ec", 'REDIS_PASSWORD="$$(cat "$${REDIS_PASSWORD_FILE}")"\nexec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"\n'],
       entrypoint: null,
@@ -3015,7 +3017,7 @@ const CORE_SEMANTIC_POLICY = {
       "/etc/prometheus/prometheus.yml": ["root:prometheus/prometheus.yml"],
       "/etc/prometheus/rules": ["root:prometheus/rules"],
     },
-    promtail: { "/etc/promtail/config.yml": ["root:promtail/config.yml"] },
+    alloy: { "/etc/alloy/config.alloy": ["root:deployment/config/alloy/alloy.config"] },
     traefik: {
       "/etc/traefik/dynamic/admin-routes.yml": ["root:traefik/dynamic/admin-routes.yml"],
       "/etc/traefik/dynamic/middlewares.yml": ["root:traefik/dynamic/middlewares.yml"],
@@ -3084,7 +3086,7 @@ const CORE_SEMANTIC_POLICY = {
       "/etc/prometheus/prometheus.yml": "read-only",
       "/etc/prometheus/rules": "read-only",
     },
-    "promtail": { "/etc/promtail/config.yml": "read-only" },
+    "alloy": { "/etc/alloy/config.alloy": "read-only" },
     "traefik": {
       "/etc/traefik/dynamic/admin-routes.yml": "read-only",
       "/etc/traefik/dynamic/middlewares.yml": "read-only",
@@ -3105,7 +3107,7 @@ const CORE_SEMANTIC_POLICY = {
     ["cadvisor", "/var/run", "/var/run", "read-only"],
     ["docker-socket-proxy", "/var/run/docker.sock", "/var/run/docker.sock", "read-only"],
     ["node-exporter", "/", "/host", "read-only"],
-    ["promtail", "/var/lib/docker/containers", "/var/lib/docker/containers", "read-only"],
+    ["/var/lib/docker/containers", "/var/lib/docker/containers", "alloy", "read-only"],
   ],
   namedVolumeTargets: {
     "alertmanager": { enterprise_alertmanager_data: "/alertmanager" },
@@ -3114,6 +3116,7 @@ const CORE_SEMANTIC_POLICY = {
     "keycloak": { enterprise_keycloak_data: "/opt/keycloak/data" },
     "local-registry": { enterprise_local_registry_data: "/var/lib/registry" },
     "loki": { enterprise_loki_data: "/loki" },
+    "alloy": { enterprise_alloy_data: "/var/lib/alloy" },
     "mariadb": { enterprise_mariadb_data: "/var/lib/mysql" },
     "minio": { enterprise_minio_data: "/data" },
     "nats": { enterprise_nats_data: "/data" },
@@ -3128,6 +3131,7 @@ const CORE_SEMANTIC_POLICY = {
 // these closed overrides are the authoritative post-Broker/Release topology.
 const CURRENT_CORE_SERVICE_NAMES = [
   "alertmanager",
+  "alloy",
   "backup-scheduler",
   "broker-auth-bootstrap",
   "control-center",
@@ -3144,7 +3148,6 @@ const CURRENT_CORE_SERVICE_NAMES = [
   "postgres",
   "project-router",
   "prometheus",
-  "promtail",
   "redis",
   "traefik",
   "waf",
@@ -3543,6 +3546,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "enterprise_keycloak_data": [
       "name"
     ],
+    "enterprise_alloy_data": ["name"],
     "enterprise_loki_data": [
       "name"
     ],
@@ -3952,7 +3956,7 @@ const CURRENT_CLOSED_AUTHORITY = {
       "ulimits",
       "volumes"
     ],
-    "promtail": [
+    "alloy": [
       "blkio_config",
       "command",
       "container_name",
@@ -4428,7 +4432,7 @@ const CURRENT_CLOSED_AUTHORITY = {
         }
       }
     },
-    "promtail": {
+    "alloy": {
       "blkio_config": {
         "weight": 400
       },
@@ -4526,7 +4530,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": "enterprise-postgres",
     "project-router": "enterprise-project-router",
     "prometheus": "enterprise-prometheus",
-    "promtail": "enterprise-promtail",
+    "alloy": "enterprise-alloy",
     "redis": "enterprise-redis",
     "traefik": "enterprise-traefik",
     "waf": "enterprise-waf"
@@ -4548,7 +4552,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": "always",
     "project-router": "always",
     "prometheus": "always",
-    "promtail": "always",
+    "alloy": "always",
     "redis": "always",
     "traefik": "always",
     "waf": "always"
@@ -4576,7 +4580,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": null,
     "project-router": null,
     "prometheus": null,
-    "promtail": null,
+    "alloy": null,
     "redis": null,
     "traefik": null,
     "waf": null
@@ -4620,7 +4624,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "prometheus": [
       "alertmanager"
     ],
-    "promtail": [
+    "alloy": [
       "loki"
     ],
     "redis": [
@@ -4680,7 +4684,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "prometheus": [
       "platform_observability"
     ],
-    "promtail": [
+    "alloy": [
       "platform_observability"
     ],
     "redis": [
@@ -4830,10 +4834,10 @@ const CURRENT_CLOSED_AUTHORITY = {
       "interval": "15s",
       "retries": 10
     },
-    "promtail": {
+    "alloy": {
       "test": [
         "CMD-SHELL",
-        "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9080; printf \"GET /ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"
+        "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9080; printf \"GET /-/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3; head -n 1 <&3 | grep -q \" 200 \"'"
       ],
       "timeout": "5s",
       "interval": "20s",
@@ -4996,10 +5000,14 @@ const CURRENT_CLOSED_AUTHORITY = {
         "--web.enable-lifecycle"
       ]
     },
-    "promtail": {
+    "alloy": {
       "entrypoint": null,
       "command": [
-        "-config.file=/etc/promtail/config.yml"
+        "run",
+        "--server.http.listen-addr=127.0.0.1:9080",
+        "--disable-reporting=true",
+        "--storage.path=/var/lib/alloy",
+        "/etc/alloy/config.alloy"
       ]
     },
     "redis": {
@@ -5038,7 +5046,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": null,
     "project-router": null,
     "prometheus": null,
-    "promtail": null,
+    "alloy": null,
     "redis": null,
     "traefik": null,
     "waf": null
@@ -5066,7 +5074,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": null,
     "project-router": null,
     "prometheus": null,
-    "promtail": null,
+    "alloy": null,
     "redis": null,
     "traefik": null,
     "waf": null
@@ -5130,7 +5138,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     ],
     "project-router": [],
     "prometheus": [],
-    "promtail": [],
+    "alloy": [],
     "redis": [
       "redis_password"
     ],
@@ -5154,7 +5162,7 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": [],
     "project-router": [],
     "prometheus": [],
-    "promtail": [],
+    "alloy": [],
     "redis": [],
     "traefik": [
       {
@@ -5193,7 +5201,7 @@ const CURRENT_CLOSED_AUTHORITY = {
       "/tmp:rw,noexec,nosuid,nodev,size=32m"
     ],
     "prometheus": [],
-    "promtail": [],
+    "alloy": [],
     "redis": [],
     "traefik": [],
     "waf": []
@@ -5215,13 +5223,14 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres": null,
     "project-router": null,
     "prometheus": null,
-    "promtail": null,
+    "alloy": null,
     "redis": null,
     "traefik": null,
     "waf": null
   },
   "servicesWithDefaultLogging": [
     "alertmanager",
+    "alloy",
     "backup-scheduler",
     "control-center",
     "grafana",
@@ -5234,7 +5243,6 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres",
     "project-router",
     "prometheus",
-    "promtail",
     "redis",
     "traefik",
     "waf"
@@ -5257,6 +5265,7 @@ const CURRENT_CLOSED_AUTHORITY = {
   ],
   "requiredSecurityOpt": [
     "alertmanager",
+    "alloy",
     "backup-scheduler",
     "broker-auth-bootstrap",
     "control-center",
@@ -5272,7 +5281,6 @@ const CURRENT_CLOSED_AUTHORITY = {
     "postgres",
     "project-router",
     "prometheus",
-    "promtail",
     "redis",
     "traefik",
     "waf"
@@ -5471,6 +5479,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     enterprise_grafana_data: ["name"],
     enterprise_keycloak_data: ["name"],
     enterprise_loki_data: ["name"],
+    enterprise_alloy_data: ["name"],
     enterprise_mariadb_data: ["external", "name"],
     enterprise_minio_data: ["name"],
     enterprise_nats_data: ["name"],
@@ -5481,7 +5490,7 @@ CORE_SEMANTIC_POLICY.currentAuthority = {
     redis_auth_config: ["name"],
   },
   nodeBuildImageDefault: "node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797",
-  normalizedRenderSha256: "157bf5e52f2d6d8480fd8b8acb0068cee25f09dcdaeffceb679c0f7f5981e905",
+  normalizedRenderSha256: "6cdabcd8045e55d34265fcf2e07b7a764a13330f5008fe226c4d9d7c170e63fb",
 };
 
 const CORE_SEMANTIC_POLICY_BYTES = `${JSON.stringify(CORE_SEMANTIC_POLICY)}\n`;

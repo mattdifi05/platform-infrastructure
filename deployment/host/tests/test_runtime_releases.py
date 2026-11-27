@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -41,6 +42,47 @@ class ReleasesTests(unittest.TestCase):
 
     def test_no_downgrade(self):
         self.assertIsNone(self.resolve([tag('8.5.9-apache')])['candidateRelease'])
+
+    def test_waf_dated_nginx_release_excludes_other_variants_and_sorts_version_then_date(self):
+        self.component.update(repository='owasp/modsecurity-crs', tagSuffix='')
+        result = self.resolve([tag(n) for n in [
+            '4.30.0-nginx-202611160811', '4.29.0-nginx-202612010000',
+            '4.30.0-nginx-202611190211', '4.99.0-nginx-alpine-202611190211',
+            '4.99.0-rc1-nginx-202611190211', '4.99.0-nginx-202611190211-nightly',
+            '4.99-nginx-202611190211', '4.99.0-nginx-20261119', 'nginx', 'latest',
+        ]], '4.26.0')
+        self.assertEqual(result['candidateRelease']['version'], '4.30.0')
+        self.assertEqual(result['candidateRelease']['imageReference'],
+                         'docker.io/owasp/modsecurity-crs:4.30.0-nginx-202611190211')
+
+    def test_waf_pins_unique_architecture_manifest_and_checks_hub_agreement(self):
+        self.component.update(repository='owasp/modsecurity-crs', tagSuffix='')
+        child = 'sha256:' + 'b' * 64
+        def get(client, url, headers=None):
+            if 'auth.docker.io' in url:
+                return {'token': 'token'}, {}
+            if 'registry-1.docker.io' in url:
+                return {'manifests': [{'platform': {'os': 'linux', 'architecture': 'amd64'}, 'digest': child}]}, {'Docker-Content-Digest': D}
+            row = tag('4.30.0-nginx-202611190211')
+            row['images'][0]['digest'] = child
+            return {'results': [row], 'next': None}, {}
+        with patch.object(m._Client, 'get', get):
+            self.assertEqual(m.resolve_release(self.component, '4.26.0')['candidateRelease']['imageDigest'], child)
+        child = 'sha256:' + 'c' * 64
+        original = get
+        def mismatch(client, url, headers=None):
+            value, response_headers = original(client, url, headers)
+            if 'hub.docker.com' in url:
+                value['results'][0]['images'][0]['digest'] = D
+            return value, response_headers
+        with patch.object(m._Client, 'get', mismatch):
+            result = m.resolve_release(self.component, '4.26.0')
+        self.assertIsNone(result['candidateRelease'])
+        self.assertIn('architecture manifest mismatch', result['reason'])
+
+    def test_waf_rejects_generic_suffix_policy(self):
+        self.component.update(repository='owasp/modsecurity-crs', tagSuffix='-alpine')
+        self.assertIsNone(self.resolve([tag('4.30.0-nginx-202611190211')], '4.26.0')['latestStable'])
 
     def test_alignment_targets_latest_and_reuses_current_only_when_explicit(self):
         tags = [tag('8.5.12-apache'), tag('8.6.0-apache'), tag('8.5.11-apache')]
@@ -189,6 +231,69 @@ class ReleasesTests(unittest.TestCase):
         self.assertGreater(m.compare_versions('8.5.12', '8.5.9'), 0)
         with self.assertRaises(ValueError):
             m.compare_versions('latest', '8.5.9')
+
+
+class PublicGitHubFallbackTests(unittest.TestCase):
+    def test_public_latest_location_rejects_untrusted_and_prerelease(self):
+        for location in ['https://evil.example/rustfs/rustfs/releases/tag/1.0.6',
+                         'https://github.com/rustfs/rustfs/releases/tag/1.0.6-preview.1',
+                         'http://github.com/rustfs/rustfs/releases/tag/1.0.6',
+                         'https://github.com/rustfs/rustfs/releases/tag/1.0.6?x=1']:
+            error = m.urllib.error.HTTPError('https://github.com/rustfs/rustfs/releases/latest', 302, 'Found', {'Location': location}, None)
+            with patch.object(m.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.side_effect = error
+                with self.assertRaises(ValueError):
+                    m._public_github_latest(m._Client(), 'rustfs/rustfs')
+        error = m.urllib.error.HTTPError('https://github.com/rustfs/rustfs/releases/latest', 302, 'Found', {'Location': 'https://github.com/rustfs/rustfs/releases/tag/1.0.6'}, None)
+        with patch.object(m.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.side_effect = error
+            self.assertEqual(m._public_github_latest(m._Client(), 'rustfs/rustfs')['tag_name'], '1.0.6')
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.method, 'HEAD')
+
+    def test_rate_limit_fallback_keeps_exact_registry_architecture(self):
+        child = 'sha256:' + 'b' * 64
+        def get(client, url, headers=None):
+            if url.startswith('https://api.github.com/'):
+                raise m.urllib.error.HTTPError(url, 403, 'rate limit', {'X-RateLimit-Remaining': '0'}, io.BytesIO(b''))
+            if 'hub.docker.com' in url:
+                return tag('1.0.6', digest=child) | {'images': [{'os': 'linux', 'architecture': 'amd64', 'digest': child}]}, {}
+            if 'auth.docker.io' in url:
+                return {'token': 'token'}, {}
+            return {'manifests': [{'platform': {'os': 'linux', 'architecture': 'amd64'}, 'digest': child}]}, {'Docker-Content-Digest': D}
+        with patch.object(m._Client, 'get', get), patch.object(m, '_public_github_latest', return_value={'tag_name': '1.0.6'}) as fallback:
+            result = m.resolve_release({'repository': 'rustfs/rustfs', 'compatibility': 'major'}, '1.0.0')
+        self.assertIsNotNone(result['candidateRelease'], result)
+        self.assertEqual(result['candidateRelease']['version'], '1.0.6')
+        self.assertEqual(result['candidateRelease']['imageDigest'], child)
+        fallback.assert_called_once()
+
+    def test_rate_limited_alloy_resolves_official_v_prefixed_image(self):
+        def get(client, url, headers=None):
+            if url.startswith('https://api.github.com/repos/grafana/alloy/'):
+                raise m.urllib.error.HTTPError(url, 403, 'rate limit', {'X-RateLimit-Remaining': '0'}, io.BytesIO())
+            if url.endswith('/tags/v1.22.0/'):
+                return tag('v1.22.0'), {}
+            if 'auth.docker.io' in url:
+                return {'token': 'token'}, {}
+            self.assertTrue(url.endswith('/manifests/v1.22.0'))
+            return {'manifests': [{'platform': {'os': 'linux', 'architecture': 'amd64'}, 'digest': D}]}, {'Docker-Content-Digest': D}
+
+        redirect = m.urllib.error.HTTPError('https://github.com/grafana/alloy/releases/latest', 302, 'Found',
+                                           {'Location': 'https://github.com/grafana/alloy/releases/tag/v1.22.0'}, None)
+        with patch.object(m._Client, 'get', get), patch.object(m.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.side_effect = redirect
+            result = m.resolve_release({'repository': 'grafana/alloy', 'tagPrefix': 'v'}, '1.21.3')
+        self.assertIsNotNone(result['candidateRelease'], result)
+        self.assertEqual(result['candidateRelease']['imageReference'], 'docker.io/grafana/alloy:v1.22.0')
+        self.assertEqual(result['candidateRelease']['imageDigest'], D)
+
+    def test_non_rate_limit_forbidden_does_not_fallback(self):
+        error = m.urllib.error.HTTPError('https://api.github.com/repos/rustfs/rustfs/releases/latest', 403, 'forbidden', {}, None)
+        with patch.object(m._Client, 'get', side_effect=error), patch.object(m, '_public_github_latest') as fallback:
+            result = m.resolve_release({'repository': 'rustfs/rustfs'}, '1.0.0')
+        self.assertIsNone(result['latestStable'])
+        fallback.assert_not_called()
 
 
 if __name__ == '__main__':

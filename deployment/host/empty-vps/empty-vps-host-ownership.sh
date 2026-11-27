@@ -14,7 +14,7 @@ check_empty_vps_host_ownership() {
       platform_infra_vps:rustfs-volume-init|platform_infra_vps:rustfs-backend|platform_infra_vps:rustfs-gateway|\
       platform_infra_vps:platform-alert-dispatcher|platform_infra_vps:alertmanager|platform_infra_vps:prometheus|\
       platform_infra_vps:node-exporter|\
-      platform_infra_vps:grafana|platform_infra_vps:loki|platform_infra_vps:promtail) ;;
+      platform_infra_vps:grafana|platform_infra_vps:loki|platform_infra_vps:alloy) ;;
       *) echo "Unexpected Docker container $cid ($project:$service); refusing empty-VPS retry." >&2; return 1 ;;
     esac
   done

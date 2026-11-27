@@ -62,6 +62,27 @@ class HostTests(unittest.TestCase):
             with self.assertRaises(m.HostUpdateError):
                 m._simulation(text, INSTALLED)
 
+    def test_kernel_dependency_is_explicit_and_exactly_verified(self):
+        text = 'Inst linux-image-new (7.0 Ubuntu [amd64])\nInst openssl [1.0] (1.1 Debian [amd64])'
+        packages, kept = m._simulation(text, INSTALLED, allow_new=True)
+        self.assertIsNone(packages[0]['currentVersion'])
+        value = m.plan({'bootId': BOOT, 'checkedAt': int(m.time.time()), 'packages': packages, 'keptBack': kept,
+                        'installedFingerprint': m._digest(INSTALLED), 'candidateFingerprint': m._digest(packages),
+                        'rebootRequired': False, **self.cleanup(packages)})
+        actual = {**INSTALLED, 'openssl': '1.1', 'linux-image-new': '7.0'}
+        with patch.object(m, '_installed', side_effect=[INSTALLED, actual]), patch.object(m, '_automatic_packages', side_effect=[[], ['linux-image-new']]), patch.object(m, '_run', side_effect=[text, text, '', '']) as run:
+            self.assertEqual(m.apply(value)['state'], 'succeeded')
+        install = run.call_args_list[2].args[0]
+        self.assertIn('linux-image-new=7.0', install)
+        self.assertIn('--no-remove', install)
+        self.assertNotIn('--only-upgrade', install)
+        self.assertEqual(run.call_args_list[3].args[0], ['apt-mark', 'auto', '--', 'linux-image-new'])
+
+    def test_new_dependency_does_not_allow_alias_drift_or_removals(self):
+        for text in ['Inst curl:arm64 (3.0 Debian [arm64])', 'Remv curl [2.0]', 'Inst new-package [1.0] (2.0 Debian [amd64])']:
+            with self.assertRaises(m.HostUpdateError):
+                m._simulation(text, INSTALLED, allow_new=True)
+
     def test_check_refreshes_then_simulates_without_mutation(self):
         calls = []
         def run(args, *unused, **kwargs):
@@ -138,6 +159,14 @@ class HostTests(unittest.TestCase):
             self.assertEqual(m.reconcile_reboot(intent)['state'], 'verifying-services')
             self.assertEqual(m.reconcile_reboot(intent, lambda: True)['state'], 'succeeded')
             self.assertEqual(m.reconcile_reboot(intent, lambda: False)['state'], 'verifying-services')
+
+    def test_upgrade_reboot_with_runtime_marker_requirement_rechecks_marker(self):
+        intent = {**m.prepare_reboot(m.reboot_plan(), lambda value: None, 'REBOOT'),
+                  'afterUpgrade': True, 'requireRuntimeMarker': True}
+        with patch.object(m, 'inventory', return_value={'rebootRequired': False}), patch.object(m, '_run') as run:
+            with self.assertRaisesRegex(m.HostUpdateError, 'no longer required'):
+                m.schedule_reboot(intent)
+            run.assert_not_called()
 
     def test_failed_durable_reboot_intent_never_schedules(self):
         def fail(value):
@@ -440,6 +469,18 @@ class AutoremoveTests(unittest.TestCase):
         self.assertTrue(result['autoremoveVerified'])
         self.assertEqual(len(self.mutations()), 1)
         self.assertFalse(any(args[-1] == 'autoremove' for args in self.calls))
+
+    def test_upgrade_with_no_removals_accepts_package_priority_change(self):
+        self.combined, self.post = self.upgrade, ''
+        self.automatic.add('example-tool')
+        def protected(installed):
+            return ['example-tool'] if installed['example-tool'] == '1.0' else []
+        with patch.object(m, '_protected_packages', side_effect=protected):
+            result = m.apply(self.make_plan())
+        self.assertTrue(result['autoremoveVerified'])
+        self.assertEqual(result['removedCount'], 0)
+        self.assertIn('example-tool', self.automatic)
+        self.assertEqual(self.records[-1][0], 'autoremove-verified')
 
     def test_cleanup_only_plan_is_valid_and_does_not_run_empty_install(self):
         self.upgrade, self.combined = '', 'Remv unused-lib [2.0]\n'

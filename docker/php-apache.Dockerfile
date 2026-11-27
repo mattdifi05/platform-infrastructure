@@ -61,13 +61,25 @@ RUN install-php-extensions \
 # imagick (PHP extension) - requires ImageMagick headers (already installed above)
 ARG IMAGICK_VERSION=3.8.1
 ARG IMAGICK_SHA256=3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee
-RUN apt-get update \
- && apt-get install -y --no-install-recommends $PHPIZE_DEPS \
+# Upstream #795 replaces the removed PHP 8.6 XtOffsetOf alias with C offsetof.
+ARG IMAGICK_PHP86_PATCH_COMMIT=b580a705e2c879924bfaee2e1ed3a93c9cb3fcfb
+ARG IMAGICK_PHP86_PATCH_SHA256=d714dd8619db94d507c3986f0e346655e231f7bd9e1fbd73dacafff3fd4706db
+RUN mbstring_dev=() \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends $PHPIZE_DEPS patch \
+ && if ! php -r 'exit(extension_loaded("mbstring") ? 0 : 1);'; then \
+      apt-get install -y --no-install-recommends libonig-dev libonig5 \
+      && docker-php-ext-install -j"$(nproc)" mbstring \
+      && mbstring_dev=(libonig-dev); \
+    fi \
  && mkdir -p /usr/src/php/ext/imagick \
  && curl -fsSL -o /tmp/imagick.tgz "https://pecl.php.net/get/imagick-${IMAGICK_VERSION}.tgz" \
  && printf '%s  %s\n' "$IMAGICK_SHA256" /tmp/imagick.tgz | sha256sum -c - \
  && tar -xzf /tmp/imagick.tgz -C /usr/src/php/ext/imagick --strip-components=1 \
  && cd /usr/src/php/ext/imagick \
+ && curl -fsSL -o /tmp/imagick-php86.patch "https://github.com/Imagick/imagick/commit/${IMAGICK_PHP86_PATCH_COMMIT}.patch" \
+ && printf '%s  %s\n' "$IMAGICK_PHP86_PATCH_SHA256" /tmp/imagick-php86.patch | sha256sum -c - \
+ && patch --batch --forward --fuzz=0 -p1 < /tmp/imagick-php86.patch \
  && phpize \
  && ./configure --with-php-config=/usr/local/bin/php-config --with-imagick \
  && find . -maxdepth 1 -name "*_arginfo.h" -exec touch {} + \
@@ -76,9 +88,11 @@ RUN apt-get update \
  && make install \
  && docker-php-ext-enable imagick \
  && cd / \
- && rm -rf /usr/src/php/ext/imagick /tmp/imagick.tgz \
- && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false $PHPIZE_DEPS \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /usr/src/php/ext/imagick /tmp/imagick.tgz /tmp/imagick-php86.patch \
+ && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false $PHPIZE_DEPS patch "${mbstring_dev[@]}" \
+ && rm -rf /var/lib/apt/lists/* \
+ && php --ri mbstring \
+ && php --ri imagick
 
 # Composer
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer

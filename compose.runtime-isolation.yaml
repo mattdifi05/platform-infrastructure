@@ -251,7 +251,7 @@ services:
     mem_reservation: 128m
     pids_limit: 320
 
-  promtail:
+  alloy:
     <<: *runtime_observability
     cpus: 0.25
     mem_limit: 192m

@@ -32,3 +32,14 @@ test("missing observation fails closed", () => {
 test("process-only probes are rejected", () => {
   assert.throws(() => validateFunctionalHealthProbes([{ id: "version", kind: "process", container: "service" }]), /never process-only/);
 });
+
+
+test("loopback HTTP readiness can use Docker healthcheck state without claiming HTTP status", () => {
+  const probes = [{ id: "alloy-ready", kind: "docker-health", container: "enterprise-alloy" }];
+  const healthy = evaluateFunctionalHealth(probes, [{ id: "alloy-ready", healthStatus: "healthy" }]);
+  assert.equal(healthy.status, "passed");
+  assert.equal(healthy.checks[0].status, "healthy");
+  for (const healthStatus of ["starting", "unhealthy", "missing"]) {
+    assert.equal(evaluateFunctionalHealth(probes, [{ id: "alloy-ready", healthStatus }]).status, "failed");
+  }
+});

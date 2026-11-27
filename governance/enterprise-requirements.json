@@ -118,8 +118,8 @@
       "state": "gate-ready",
       "evidence": [
         { "type": "file", "path": "loki/config.yml" },
-        { "type": "file", "path": "promtail/config.yml" },
-        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "Promtail[\\s\\S]*redacts|retention-evidence|Alertmanager" }
+        { "type": "file", "path": "deployment/config/alloy/alloy.config" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "Alloy[\\s\\S]*redacts|retention-evidence|Alertmanager" }
       ],
       "liveProof": "Verify production infrastructure log retention, redaction and alert routing during go-live.",
       "liveProofChecks": ["retention-evidence", "real-alert-delivery"]

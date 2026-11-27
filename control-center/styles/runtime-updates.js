@@ -22,7 +22,6 @@
     var animation = node.animate(frames, { duration: duration || 200, easing: 'cubic-bezier(.22,1,.36,1)' }); motions.set(node, animation);
     animation.finished.then(function () { if (motions.get(node) === animation) motions.delete(node); }, function () {}); return animation;
   }
-  function setText(node, value) { if (node.textContent !== value) node.textContent = value; }
   function setProgress(progress, total, completed, successful) {
     var measured = Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) && completed >= 0 && completed <= total && (completed < total || successful);
     if (measured) { progress.max = total; progress.value = completed; } else progress.removeAttribute('value');
@@ -44,273 +43,159 @@
     var animation = animate(dialog, [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(5px)' }], 130);
     if (animation) animation.finished.then(function () { if (visibilityGenerations.get(dialog) === generation && dialog.open) dialog.close(); }, function () {}); else dialog.close();
   }
-  function reconcile(container, records, views, keyFor, create, update) {
-    var before = new Map(), present = new Set();
-    views.forEach(function (view, key) { if (view.row.getBoundingClientRect) before.set(key, view.row.getBoundingClientRect().top); });
-    records.forEach(function (record, index) {
-      var key = keyFor(record); present.add(key); var view = views.get(key), fresh = !view;
-      if (!view) { view = create(record); views.set(key, view); }
-      update(view, record);
-      if (container.children[index] !== view.row) container.insertBefore(view.row, container.children[index] || null);
-      if (fresh) animate(view.row, [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'translateY(0)' }]);
-      else if (before.has(key) && view.row.getBoundingClientRect) { var delta = before.get(key) - view.row.getBoundingClientRect().top; if (Math.abs(delta) > 1) animate(view.row, [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'translateY(0)' }]); }
-    });
-    views.forEach(function (view, key) { if (!present.has(key)) { view.row.remove(); views.delete(key); } });
+  function catalogOperation(value, previous) {
+    var operations = value.operations || [];
+    return operations.find(pending) || operations.find(function (operation) { return operation.recoveryRequired === true; }) || (previous && operations.find(function (operation) { return operation.id === previous.id; })) || (previous && !previous.recoveryRequired ? previous : null);
+  }
+  function blockedStatus(value, operation) {
+    if (operation && operation.recoveryRequired === true) return 'Verifica amministrativa richiesta prima di altri aggiornamenti. ' + text(operation.stage, 'Controlla lo stato della manutenzione interrotta.');
+    if (value && value.available === true && value.canCheck === false && value.canApply === false && value.busy !== true && !pending(operation)) return 'Aggiornamenti bloccati da una manutenzione in corso o da verificare. Controlla lo stato del sistema e dei servizi.';
+    return '';
   }
   function operationId(value) { return value && (value.operationId || value.id || value.operation && value.operation.id); }
-  function mount(root) {
+  function mountPlatform(root) {
     if (mounted.has(root)) return;
     mounted.add(root);
-    var select = function (selector) { return root.querySelector(selector); };
-    var state = { value: null, operation: null, busy: false, loading: false, timer: null, generation: 0, dialogGeneration: 0, plan: null, component: null, applying: false, stopped: false };
-    var list = select('[data-updates-list]'), status = select('[data-updates-status]'), check = select('[data-updates-check]'), refresh = select('[data-updates-refresh]');
-    var dialog = select('[data-updates-dialog]'), confirm = select('[data-updates-confirm]'), apply = select('[data-updates-apply]'), planStatus = select('[data-updates-plan-status]');
-    var updateAll = select('[data-updates-all]');
-    var componentViews = new Map(), serviceViews = new Map(), resultsOperation = null, resultsPending = null;
-    select('[data-updates-results]').addEventListener('toggle', function () { if (this.open) { var services = select('[data-updates-services]'); animate(services, [{ opacity: 0, height: '0px' }, { opacity: 1, height: services.scrollHeight + 'px' }]); } });
-    function alive(generation) { return !state.stopped && root.isConnected && generation === state.generation; }
-    function request(path, payload) {
-      var bridge = window.controlCenterRuntimeUpdates;
-      if (!bridge || typeof bridge.request !== 'function') return Promise.reject(Error('Collegamento al server non disponibile. Ricarica la pagina.'));
-      return bridge.request(path, payload);
-    }
-    async function authenticate() {
-      var bridge = window.controlCenterRuntimeUpdates;
-      if (!bridge || typeof bridge.authenticate !== 'function') throw Error('Conferma passkey non disponibile.');
-      await bridge.authenticate();
-    }
-    function updateApply() {
-      var plan = state.plan;
-      apply.disabled = state.applying || !plan || confirm.value !== 'UPDATE' || plan.confirmationRequired !== 'UPDATE' || !Number.isFinite(Date.parse(plan.expiresAt)) || Date.parse(plan.expiresAt) <= Date.now();
-    }
-    function render() {
-      if (!root.isConnected) return;
-      var value = state.value, components = value && Array.isArray(value.components) ? value.components : [];
-      var operation = state.operation, working = Boolean(state.busy || pending(operation));
-      check.disabled = !value || value.available !== true || value.canCheck === false || working;
-      updateAll.disabled = !value || value.available !== true || value.canApply === false || working || !components.some(updatable);
-      refresh.disabled = state.busy;
-      root.setAttribute('aria-busy', working ? 'true' : 'false');
-      var updateCount = components.filter(function (item) { return item.status === 'update-available'; }).length;
-      select('[data-updates-summary]').textContent = components.length + (components.length === 1 ? ' componente · ' : ' componenti · ') + updateCount + (updateCount === 1 ? ' aggiornamento disponibile' : ' aggiornamenti disponibili') + (value && value.checkedAt ? ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : ' · Versioni stabili non ancora verificate');
-      var progressBox = select('[data-updates-progress]'), progress = progressBox.querySelector('progress');
-      panelVisible(progressBox, working || Boolean(operation));
-      var total = operation && operation.totalServices, completed = operation && operation.completedServices;
-      var barTotal = Number.isSafeInteger(total) && total > 0 ? total : operation && operation.totalSteps;
-      var barCompleted = Number.isSafeInteger(total) && total > 0 ? completed : operation && operation.completedSteps;
-      var successful = operation && ['succeeded', 'completed'].includes(operation.status);
-      setProgress(progress, barTotal, barCompleted, successful);
-      select('[data-updates-stage]').textContent = operation ? text(operation.stage, serviceLabels[operation.status] || labels[operation.status] || 'Operazione in corso…') + (operation.currentService ? ' · ' + operation.currentService : operation.currentComponent ? ' · ' + operation.currentComponent : '') + (Number.isSafeInteger(total) && total > 0 && Number.isSafeInteger(completed) ? ' · ' + completed + ' di ' + total + ' servizi' : '') : 'Verifica in corso…';
-      var services = operation && Array.isArray(operation.serviceResults) ? operation.serviceResults : [];
-      reconcile(select('[data-updates-services]'), services, serviceViews, function (service) { return service.componentId + ':' + service.service; }, function () {
-        var row = element('li'), name = element('strong'), status = element('span'), stage = element('small'); row.className = 'cc-update-service'; row.append(name, status, stage); return { row: row, name: name, status: status, stage: stage };
-      }, function (view, service) {
-        var changed = view.phase !== service.status; view.row.setAttribute('data-service-status', service.status || 'queued'); setText(view.name, text(service.service, 'Servizio')); setText(view.status, serviceLabels[service.status] || labels[service.status] || 'Stato non disponibile'); setText(view.stage, text(service.stage, '')); view.stage.hidden = !service.stage;
-        if (view.phase && changed) animate(view.status, [{ opacity: .35 }, { opacity: 1 }], 180); view.phase = service.status;
-      });
-      var results = select('[data-updates-results]'); results.hidden = !services.length;
-      setText(select('[data-updates-results-summary]'), services.length + ' servizi · Dettagli');
-      if (operation && (resultsOperation !== operation.id || resultsPending !== pending(operation))) { results.open = pending(operation) || !successful; resultsOperation = operation.id; resultsPending = pending(operation); }
-      reconcile(list, components.slice().sort(function (a, b) { return Number(updatable(b)) - Number(updatable(a)); }), componentViews, function (item) { return item.id; }, function (item) {
-        var row = element('article'); row.className = 'cc-update-row'; row.setAttribute('data-update-id', item.id);
-        var name = element('div'), title = element('strong'), badge = element('small'); name.append(title, badge);
-        var current = element('div'), currentValue = element('strong'); current.className = 'cc-update-current'; current.append(element('small', 'Installata'), currentValue);
-        var latest = element('div'), latestValue = element('strong'); latest.className = 'cc-update-latest'; latest.append(element('small', 'Stabile'), latestValue);
-        var button = element('button', 'Aggiorna'); button.type = 'button'; button.className = 'ops-button secondary compact';
-        var details = element('details'), summary = element('summary', 'Dettagli'), reason = element('p'); details.className = 'cc-update-detail'; details.append(summary, reason);
-        details.addEventListener('toggle', function () { if (details.open) animate(reason, [{ opacity: 0, height: '0px' }, { opacity: 1, height: reason.scrollHeight + 'px' }]); });
-        row.append(name, current, latest, button, details);
-        var view = { row: row, title: title, badge: badge, current: currentValue, latest: latestValue, button: button, details: details, reason: reason, item: item };
-        button.addEventListener('click', function () { openPlan(view.item); }); return view;
-      }, function (view, item) {
-        view.item = item; setText(view.title, text(item.label, item.id)); setText(view.badge, labels[item.status] || 'Stato non disponibile'); setText(view.current, currentVersion(item)); setText(view.latest, text(item.latestStable && item.latestStable.version, 'Non disponibile'));
-        view.button.disabled = working || value.available !== true || value.canApply === false || !updatable(item);
-        var reason = item.blockedReason || (item.installed !== false && !item.candidateRelease && item.status !== 'current' ? 'Nessun aggiornamento compatibile verificato.' : '');
-        if (item.candidateRelease && item.candidateRelease.version && item.latestStable && item.latestStable.version && item.candidateRelease.version !== item.latestStable.version) reason += (reason ? ' · ' : '') + 'Aggiornamento compatibile: ' + item.candidateRelease.version + ' · ' + text(item.compatibilityReason, 'La serie più recente richiede una verifica di compatibilità.');
-        if ((item.services || []).length) reason += (reason ? ' · ' : '') + 'Servizi: ' + item.services.join(', ');
-        setText(view.reason, reason); view.details.hidden = !reason;
-        if (view.phase && view.phase !== item.status) animate(view.badge, [{ opacity: .35 }, { opacity: 1 }], 180); view.phase = item.status;
-      });
-      status.hidden = !status.textContent;
-      select('[data-updates-empty]').hidden = components.length > 0;
-      updateApply();
-    }
-    function schedule() {
-      clearTimeout(state.timer);
-      if (!state.stopped && root.isConnected && !document.hidden) state.timer = setTimeout(load, pending(state.operation) ? 2000 : 30000);
-    }
-    async function load() {
-      if (state.stopped || !root.isConnected || document.hidden || state.busy || state.loading) return;
-      var generation = state.generation; state.loading = true;
-      try {
-        if (pending(state.operation)) {
-          var operation = await request('/control/runtime-updates/operations/' + encodeURIComponent(state.operation.id));
-          if (!alive(generation)) return;
-          state.operation = operation.operation || operation;
-          status.textContent = text(state.operation.error && (state.operation.error.message || state.operation.error), labels[state.operation.status] || serviceLabels[state.operation.status] || 'Operazione in corso…');
-          if (pending(state.operation)) return;
-        }
-        var value = await request('/control/runtime-updates');
-        if (!alive(generation)) return;
-        state.value = value;
-        if (!pending(state.operation)) state.operation = (value.operations || []).find(pending) || state.operation;
-        if (value.available !== true) status.textContent = text(value.unavailableReason, 'Aggiornamenti non disponibili su questo server.');
-        else if (!state.operation) status.textContent = '';
-      } catch (error) { if (alive(generation)) status.textContent = pending(state.operation) ? 'Connessione temporaneamente interrotta. Riconnessione automatica; verifica dell’operazione in corso…' : text(error.message, 'Impossibile verificare gli aggiornamenti.'); }
-      finally { if (alive(generation)) { state.loading = false; render(); schedule(); } }
-    }
-    function acceptOperation(value) {
-      var id = operationId(value); if (!id) throw Error('Il server non ha restituito un identificativo operazione.');
-      state.operation = { id: id, status: value.status || 'queued', stage: value.stage || 'In coda' };
-      status.textContent = 'Richiesta accettata. In attesa della verifica del server.';
-    }
-    check.addEventListener('click', async function () {
-      if (check.disabled) return; var generation = state.generation; state.busy = true; clearTimeout(state.timer); render();
-      try { var value = await request('/control/runtime-updates/check', {}); if (alive(generation)) acceptOperation(value); }
-      catch (error) { if (alive(generation)) status.textContent = error.message; }
-      finally { if (alive(generation)) { state.busy = false; render(); schedule(); } }
-    });
-    updateAll.addEventListener('click', function () { if (!updateAll.disabled) openPlan({ id: 'all', label: 'Tutti i componenti aggiornabili' }); });
-    function close() { if (state.applying) return; state.dialogGeneration++; state.plan = null; state.component = null; confirm.value = ''; updateApply(); closeDialog(dialog); }
-    async function openPlan(item) {
-      if (state.busy || pending(state.operation)) return;
-      var generation = state.generation, dialogGeneration = ++state.dialogGeneration;
-      state.plan = null; state.component = item; confirm.value = ''; select('[data-updates-confirm-label]').hidden = true;
-      select('[data-updates-plan-details]').replaceChildren(); planStatus.textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); openDialog(dialog);
-      try {
-        await authenticate();
-        if (!alive(generation) || dialogGeneration !== state.dialogGeneration || !dialog.open) return;
-        var value = await request('/control/runtime-updates/' + encodeURIComponent(item.id) + '/plan', { revision: state.value.revision });
-        if (!alive(generation) || dialogGeneration !== state.dialogGeneration || !dialog.open) return;
-        var plan = value.plan || value;
-        if (!plan.planId || !plan.targetVersion || !plan.targetDigest || plan.confirmationRequired !== 'UPDATE') throw Error('Piano di aggiornamento non valido.');
-        if (item.id === 'all' && (plan.kind !== 'batch' || !Array.isArray(plan.components) || !plan.components.length)) throw Error('Piano di aggiornamento completo non disponibile.');
-        state.plan = plan; state.idempotencyKey = crypto.randomUUID();
-        var details = select('[data-updates-plan-details]');
-        apply.textContent = item.id === 'all' ? 'Aggiorna tutto' : 'Aggiorna componente';
-        if (item.id === 'all') {
-          details.append(element('p', 'Il piano aggiorna i componenti elencati alle versioni stabili indicate.'));
-          var targets = element('ul');
-          plan.components.forEach(function (component) { targets.append(element('li', text(component.label, component.id) + ' → ' + component.targetVersion + ' · ' + (component.affectedServices || []).join(', '))); }); details.append(targets);
-        } else details.append(element('p', item.label + ': ' + currentVersion(item) + ' → ' + plan.targetVersion));
-        details.append(element('p', 'Servizi interessati: ' + (plan.affectedServices || []).join(', ')));
-        if (item.needsAlignment || (item.current && Array.isArray(item.current.versions))) details.append(element('p', 'Versione unica per tutti i servizi elencati.'));
-        ['steps', 'risks'].forEach(function (key) { details.append(element('h3', key === 'steps' ? 'Passaggi' : 'Impatto e rischi')); var ul = element('ul'); (plan[key] || []).forEach(function (entry) { ul.append(element('li', typeof entry === 'string' ? entry : text(entry.label || entry.description, 'Passaggio'))); }); details.append(ul); });
-        select('[data-updates-confirm-label]').hidden = false; planStatus.textContent = 'Rivedi il piano prima di confermare.'; updateApply();
-      } catch (error) { if (alive(generation) && dialogGeneration === state.dialogGeneration && dialog.open) planStatus.textContent = error.message; }
-    }
-    apply.addEventListener('click', async function () {
-      updateApply(); if (apply.disabled) return;
-      var generation = state.generation, dialogGeneration = state.dialogGeneration, plan = state.plan, item = state.component;
-      state.applying = true; updateApply();
-      try {
-        await authenticate();
-        if (!alive(generation) || dialogGeneration !== state.dialogGeneration || !dialog.open) return;
-        if (Date.parse(plan.expiresAt) <= Date.now()) throw Error('Piano scaduto. Chiudi e prepara un nuovo piano.');
-        var value = await request('/control/runtime-updates/' + encodeURIComponent(item.id) + '/apply', { revision: plan.revision, planId: plan.planId, confirmation: 'UPDATE', idempotencyKey: state.idempotencyKey });
-        if (!alive(generation) || dialogGeneration !== state.dialogGeneration) return;
-        acceptOperation(value); state.applying = false; close(); render(); schedule();
-      } catch (error) { if (alive(generation)) planStatus.textContent = error.message; }
-      finally { if (alive(generation)) { state.applying = false; updateApply(); } }
-    });
-    confirm.addEventListener('input', updateApply);
-    select('[data-updates-close]').addEventListener('click', close);
-    dialog.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
-    refresh.addEventListener('click', load);
-    var lifecycle = { root: root, stop: function () { state.stopped = true; state.generation++; state.dialogGeneration++; clearTimeout(state.timer); state.plan = null; if (dialog.open) dialog.close(); }, resume: load, pause: function () { clearTimeout(state.timer); } };
-    active.add(lifecycle); load();
-  }
-  function mountHost(root) {
-    if (mounted.has(root)) return;
-    mounted.add(root);
-    var select = function (name) { return root.querySelector('[data-host-updates-' + name + ']'); };
-    var state = { value: null, operation: null, busy: false, loading: false, stopped: false, timer: null, generation: 0, review: 0, plan: null, applying: false };
-    var status = select('status'), dialog = select('dialog'), confirm = select('confirm'), apply = select('apply'), check = select('check'), upgrade = select('upgrade'), reboot = select('reboot');
+    var select = function (name) { return root.querySelector('[data-platform-updates-' + name + ']'); };
+    var scopes = [{ id: 'system', label: 'Sistema operativo', path: '/control/runtime-updates/system' }, { id: 'services', label: 'Runtime e servizi', path: '/control/runtime-updates' }];
+    var state = { catalogs: {}, operations: {}, errors: {}, plans: [], busy: false, loading: false, applying: false, stopped: false, generation: 0, review: 0, timer: null };
+    var versionViews = new Map(), installedViews = new Map(), resultViews = new Map(), hydrated = false;
+    var check = select('check'), upgrade = select('upgrade'), reboot = select('reboot'), dialog = select('dialog'), confirm = select('confirm'), apply = select('apply');
     function alive(generation) { return !state.stopped && root.isConnected && generation === state.generation; }
     function request(path, payload) { var bridge = window.controlCenterRuntimeUpdates; return bridge && typeof bridge.request === 'function' ? bridge.request(path, payload) : Promise.reject(Error('Collegamento al server non disponibile.')); }
     async function authenticate() { var bridge = window.controlCenterRuntimeUpdates; if (!bridge || typeof bridge.authenticate !== 'function') throw Error('Conferma passkey non disponibile.'); await bridge.authenticate(); }
-    function updateApply() { var plan = state.plan; apply.disabled = state.applying || !plan || confirm.value !== plan.confirmationRequired || !Number.isFinite(Date.parse(plan.expiresAt)) || Date.parse(plan.expiresAt) <= Date.now(); }
+    function inProgress() { return Object.values(state.operations).some(pending); }
+    function targets() { return scopes.filter(function (scope) { var value = state.catalogs[scope.id]; return value && (scope.id === 'system' ? value.updateCount > 0 || value.autoremoveCount > 0 : (value.components || []).some(updatable)); }); }
+    function updateApply() { apply.disabled = state.applying || !state.plans.length || confirm.value !== 'REBOOT' || state.plans.some(function (entry) { return !Number.isFinite(Date.parse(entry.plan.expiresAt)) || Date.parse(entry.plan.expiresAt) <= Date.now(); }); }
+    function setText(node, value) { if (node.textContent !== value) node.textContent = value; }
+    function reconcile(container, records, views, create, update) {
+      var present = new Set();
+      records.forEach(function (record, index) { present.add(record.key); var view = views.get(record.key), fresh = !view;
+        if (!view) { view = create(record); views.set(record.key, view); }
+        update(view, record);
+        if (container.children[index] !== view.row) container.insertBefore(view.row, container.children[index] || null);
+        if (fresh && hydrated) animate(view.row, [{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'translateY(0)' }], 160);
+      });
+      views.forEach(function (view, key) { if (!present.has(key)) { view.row.remove(); views.delete(key); } });
+    }
+    function createVersion(record) {
+      var row = element('div'), name = element('strong'), current = element('span'), arrow = element('span', '→'), target = element('span'), icon = element('span');
+      row.className = 'cc-platform-version-row' + (record.installed ? ' cc-platform-installed-row' : record.empty ? ' cc-platform-empty-row' : ''); icon.className = 'cc-update-icon cc-update-icon-' + record.icon; icon.setAttribute('aria-hidden', 'true');
+      var template = select('icon-' + record.icon); if (template && template.content && template.content.firstElementChild) icon.append(template.content.firstElementChild.cloneNode(true));
+      current.className = 'cc-update-version-from'; target.className = 'cc-update-version-to'; arrow.className = 'cc-update-arrow'; arrow.setAttribute('aria-hidden', 'true');
+      row.append(icon, name, current, arrow, target); return { row: row, name: name, current: current, target: target };
+    }
+    function updateVersion(view, record) { setText(view.name, record.name); setText(view.current, record.empty ? '' : record.current === null ? 'Nuova dipendenza' : text(record.current, 'Non verificata')); setText(view.target, record.target || ''); }
+    function componentIcon(item) { return /nginx|traefik|gateway/i.test(item.id) ? 'network' : /rust|storage|redis|postgres|maria|mysql/i.test(item.id) ? 'storage' : 'runtime'; }
     function render() {
       if (!root.isConnected) return;
-      var value = state.value, working = state.busy || pending(state.operation), available = value && value.available === true;
-      check.disabled = Boolean(working || available && value.canCheck === false);
-      upgrade.disabled = !available || value.canApply === false || !(Number.isSafeInteger(value.updateCount) && value.updateCount > 0 || Number.isSafeInteger(value.autoremoveCount) && value.autoremoveCount > 0) || working;
-      reboot.hidden = !available || value.rebootRequired !== true;
-      reboot.disabled = !available || value.canReboot === false || value.rebootRequired !== true || working;
-      root.setAttribute('aria-busy', working ? 'true' : 'false');
-      select('os').textContent = value && value.os ? [text(value.os.name, value.os.id), value.os.version].filter(Boolean).join(' ') : 'Sistema non disponibile';
-      select('summary').textContent = value ? (value.checkedAt ? (Number.isSafeInteger(value.updateCount) ? value.updateCount : 0) + (value.updateCount === 1 ? ' aggiornamento disponibile' : ' aggiornamenti disponibili') + (Number.isSafeInteger(value.autoremoveCount) && value.autoremoveCount > 0 ? ' · ' + value.autoremoveCount + (value.autoremoveCount === 1 ? ' dipendenza da rimuovere' : ' dipendenze da rimuovere') : '') + (Number.isSafeInteger(value.keptBackCount) && value.keptBackCount > 0 ? ' · ' + value.keptBackCount + ' mantenuti alla versione attuale' : '') + ' · Verifica: ' + new Date(value.checkedAt).toLocaleString('it-IT') : 'Aggiornamenti non ancora verificati') + (value.rebootRequired ? ' · Riavvio richiesto' : '') : '';
-      var box = select('progress'), progress = box.querySelector('progress'), operation = state.operation;
-      panelVisible(box, working || Boolean(operation));
-      var total = operation && operation.totalSteps, completed = operation && operation.completedSteps;
-      setProgress(progress, total, completed, operation && ['succeeded', 'completed'].includes(operation.status));
-      select('stage').textContent = operation ? text(operation.stage, labels[operation.status] || serviceLabels[operation.status] || 'Manutenzione in corso…') : 'Preparazione…';
-      status.hidden = !status.textContent;
+      var working = state.busy || state.applying || inProgress(), loaded = scopes.every(function (scope) { return state.catalogs[scope.id]; });
+      check.disabled = working || !loaded || scopes.some(function (scope) { var value = state.catalogs[scope.id]; return !value || value.available !== true || value.canCheck === false; });
+      upgrade.disabled = working || !loaded || !targets().length || targets().some(function (scope) { return state.catalogs[scope.id].available !== true || state.catalogs[scope.id].canApply === false; });
+      root.setAttribute('aria-busy', working || !state.initialized ? 'true' : 'false');
+      root.setAttribute('data-loading', state.initialized ? 'false' : 'true');
+      var system = state.catalogs.system, services = state.catalogs.services;
+      var candidates = [], installedRecords = [];
+      if (system) (system.packages || []).forEach(function (item) { candidates.push({ key: 'package:' + item.name, name: item.name, current: item.currentVersion, target: item.targetVersion, icon: 'package' }); });
+      if (services) (services.components || []).forEach(function (item) { if (item.installed === false) return; var record = { key: 'component:' + item.id, name: text(item.label, item.id), current: currentVersion(item), icon: componentIcon(item) }; installedRecords.push(Object.assign({}, record, { installed: true })); if (updatable(item)) candidates.push(Object.assign({}, record, { target: item.candidateRelease.version })); });
+      var count = (system && system.updateCount || 0) + (services ? (services.components || []).filter(updatable).length : 0);
+      setText(select('summary'), state.initialized ? count + ' disponibili' : '');
+      setText(select('installed-count'), state.initialized ? String(installedRecords.length) : '');
+      reboot.hidden = !system || system.rebootRequired !== true;
+      reboot.disabled = working || !system || system.canReboot === false || system.rebootRequired !== true;
+      if (state.initialized) {
+        var list = select('list'), installed = select('installed-list');
+        if (!hydrated) list.replaceChildren();
+        if (system && system.autoremoveCount > 0) candidates.push({ key: 'cleanup', name: 'Dipendenze inutilizzate', current: String(system.autoremoveCount), target: 'Rimozione', icon: 'package' });
+        if (!candidates.length) candidates.push({ key: 'empty', name: loaded ? 'Tutto aggiornato' : 'Aggiornamenti non disponibili', current: '', icon: 'runtime', empty: true });
+        reconcile(list, candidates, versionViews, createVersion, updateVersion);
+        reconcile(installed, installedRecords, installedViews, createVersion, updateVersion);
+        hydrated = true;
+      }
+      select('status').textContent = scopes.map(function (scope) { return state.errors[scope.id] ? scope.label + ': ' + state.errors[scope.id] : ''; }).filter(Boolean).join(' · ');
+      var operations = Object.values(state.operations), progress = select('progress'); panelVisible(progress, operations.length > 0);
+      var completed = operations.filter(function (operation) { return ['succeeded', 'completed'].includes(operation.status); }).length;
+      setProgress(progress.querySelector('progress'), operations.length, completed, operations.length > 0 && completed === operations.length);
+      select('stage').textContent = inProgress() ? 'In corso · ' + completed + ' di ' + operations.length : operations.length ? (completed === operations.length ? 'Operazioni completate' : 'Controlla gli esiti') : '';
+      var resultRecords = [];
+      scopes.forEach(function (scope) {
+        var operation = state.operations[scope.id]; if (!operation) return;
+        var entries = scope.id === 'services' && Array.isArray(operation.serviceResults) && operation.serviceResults.length ? operation.serviceResults : [operation];
+        entries.forEach(function (entry) { resultRecords.push({ key: scope.id + ':' + (entry.service || operation.id || 'submission'), name: entry.service || (scope.id === 'system' ? 'Pacchetti del server' : 'Aggiornamento servizi'), status: entry.status, stage: text(entry.stage, text(operation.stage, 'In attesa')) + (operation.waitingForMaintenance ? ' · In attesa dell’altra manutenzione' : '') }); });
+      });
+      reconcile(select('results'), resultRecords, resultViews, function () { var row = element('li'), name = element('strong'), status = element('span'), stage = element('small'); row.className = 'cc-update-service'; row.append(name, status, stage); return { row: row, name: name, status: status, stage: stage }; }, function (view, record) { setText(view.name, record.name); setText(view.status, labels[record.status] || serviceLabels[record.status] || 'In corso'); setText(view.stage, record.stage); view.row.setAttribute('data-service-status', record.status); });
       updateApply();
     }
-    function schedule() { clearTimeout(state.timer); if (pending(state.operation) && !state.stopped && root.isConnected && !document.hidden) state.timer = setTimeout(load, 2000); }
+    function schedule() { clearTimeout(state.timer); if (!state.stopped && root.isConnected && !document.hidden) state.timer = setTimeout(load, inProgress() ? 2000 : 30000); }
     async function load() {
-      if (state.stopped || !root.isConnected || document.hidden || state.loading || state.busy) return;
+      if (state.stopped || !root.isConnected || document.hidden || state.loading || state.busy || dialog.open) return;
       var generation = state.generation; state.loading = true;
       try {
-        if (pending(state.operation)) {
-          var operation = await request('/control/runtime-updates/operations/' + encodeURIComponent(state.operation.id));
-          if (!alive(generation)) return; state.operation = operation.operation || operation;
-          status.textContent = text(state.operation.error && (state.operation.error.message || state.operation.error), labels[state.operation.status] || serviceLabels[state.operation.status] || 'Manutenzione in corso…');
-          if (pending(state.operation)) return;
-        }
-        var value = await request('/control/runtime-updates/system');
-        if (!alive(generation)) return; state.value = value;
-        if (!pending(state.operation)) state.operation = (value.operations || []).find(pending) || state.operation;
-        if (!value.available) status.textContent = text(value.unavailableReason, 'Gestione del sistema non disponibile su questo server.');
-        else if (!state.operation) status.textContent = '';
-      } catch (error) { if (alive(generation)) status.textContent = pending(state.operation) ? 'Server temporaneamente non raggiungibile. Riconnessione automatica dopo la manutenzione o il riavvio…' : text(error.message, 'Impossibile verificare il sistema.'); }
-      finally { if (alive(generation)) { state.loading = false; render(); schedule(); } }
+        await Promise.all(scopes.map(async function (scope) {
+          try {
+            var operation = state.operations[scope.id];
+            if (pending(operation)) { var response = await request('/control/runtime-updates/operations/' + encodeURIComponent(operation.id)); if (!alive(generation)) return; state.operations[scope.id] = response.operation || response; if (pending(state.operations[scope.id])) { delete state.errors[scope.id]; return; } }
+            var value = await request(scope.path); if (!alive(generation)) return; state.catalogs[scope.id] = value;
+            var previous = state.operations[scope.id];
+            var latest = previous && previous.submissionFailed ? ((value.operations || []).find(pending) || previous) : catalogOperation(value, previous); if (latest) state.operations[scope.id] = latest;
+            state.errors[scope.id] = value.available !== true ? text(value.unavailableReason, 'Aggiornamenti non disponibili') : blockedStatus(value, latest) || (latest && latest.error ? text(latest.error.message || latest.error, 'Operazione non riuscita') : '');
+          } catch (error) { if (alive(generation)) state.errors[scope.id] = pending(state.operations[scope.id]) ? 'Connessione interrotta. Riconnessione automatica e verifica dell’operazione in corso…' : error.message; }
+        }));
+      } finally { if (alive(generation)) { state.loading = false; state.initialized = true; render(); schedule(); } }
     }
-    function accept(value) { var id = operationId(value); if (!id) throw Error('Il server non ha restituito un identificativo operazione.'); state.operation = { id: id, status: value.status || 'queued', stage: 'In coda' }; status.textContent = 'Richiesta accettata. In attesa della verifica del server.'; }
+    function accept(scope, value) { var id = operationId(value); if (!id) throw Error('Il server non ha restituito un identificativo operazione.'); state.operations[scope.id] = { id: id, status: value.status || 'queued', stage: 'Richiesta accettata; verifica del server in attesa' }; delete state.errors[scope.id]; }
     check.addEventListener('click', async function () {
-      if (check.disabled) return; if (!state.value || !state.value.available) { load(); return; } var generation = state.generation; state.busy = true; render();
-      try { var value = await request('/control/runtime-updates/system/check', {}); if (alive(generation)) accept(value); }
-      catch (error) { if (alive(generation)) status.textContent = error.message; }
+      if (check.disabled) return; var generation = state.generation; state.busy = true; clearTimeout(state.timer); render();
+      await Promise.all(scopes.map(async function (scope) { try { var value = await request(scope.path + '/check', {}); if (alive(generation)) accept(scope, value); } catch (error) { if (alive(generation)) { state.errors[scope.id] = error.message; state.operations[scope.id] = { status: 'failed', stage: error.message, error: error.message, submissionFailed: true }; } } }));
+      if (alive(generation)) { state.busy = false; render(); schedule(); }
+    });
+    function close() { if (state.applying) return; state.review++; state.plans = []; confirm.value = ''; updateApply(); closeDialog(dialog); schedule(); }
+    upgrade.addEventListener('click', async function () {
+      if (upgrade.disabled) return;
+      var generation = state.generation; state.busy = true; clearTimeout(state.timer); render();
+      try {
+        await authenticate(); if (!alive(generation)) return;
+        var catalogs = await Promise.all(scopes.map(function (scope) { return request(scope.path); })); if (!alive(generation)) return;
+        catalogs.forEach(function (value, index) { state.catalogs[scopes[index].id] = value; });
+        var selected = targets(); if (!selected.length) throw Error('Nessun aggiornamento disponibile.');
+        if (selected.some(function (scope) { var value = state.catalogs[scope.id]; return value.available !== true || value.canApply === false; })) throw Error('Aggiornamenti bloccati. Verifica lo stato del server.');
+        var plans = await Promise.all(selected.map(async function (scope) {
+          var value = await request(scope.path + (scope.id === 'services' ? '/all' : '') + '/plan', Object.assign({ revision: state.catalogs[scope.id].revision }, scope.id === 'system' ? Object.assign({ rebootAfter: true }, selected.some(function (item) { return item.id === 'services'; }) ? { coordinatedReboot: true } : {}) : {})), plan = value.plan || value;
+          if (!plan.planId || !plan.revision || plan.revision !== state.catalogs[scope.id].revision || plan.confirmationRequired !== (scope.id === 'system' ? 'UPDATE_AND_REBOOT' : 'UPDATE') || !Number.isFinite(Date.parse(plan.expiresAt)) || Date.parse(plan.expiresAt) <= Date.now() || (scope.id === 'system' ? plan.kind !== 'host-upgrade' || plan.rebootAfter !== true || (plan.coordinatedReboot === true) !== selected.some(function (item) { return item.id === 'services'; }) : plan.kind !== 'batch' || !Array.isArray(plan.components) || !plan.components.length || !plan.targetVersion || !plan.targetDigest)) throw Error('Piano di aggiornamento non valido o scaduto.');
+          return { scope: scope, plan: plan, key: crypto.randomUUID() };
+        }));
+        if (!alive(generation)) return;
+        if (plans.some(function (entry) { return Date.parse(entry.plan.expiresAt) <= Date.now(); })) throw Error('Piano scaduto. Verifica nuovamente gli aggiornamenti.');
+        await Promise.all(plans.map(async function (entry) { try { var value = await request(entry.scope.path + (entry.scope.id === 'services' ? '/all' : '') + '/apply', { revision: entry.plan.revision, planId: entry.plan.planId, confirmation: entry.scope.id === 'system' ? 'UPDATE_AND_REBOOT' : 'UPDATE', idempotencyKey: entry.key }); if (alive(generation)) { accept(entry.scope, value); if (entry.scope.id === 'system') state.operations.system.stage = 'Aggiornamento avviato. Riavvio automatico se necessario; riconnessione automatica.'; } } catch (error) { if (alive(generation)) { state.errors[entry.scope.id] = error.message; state.operations[entry.scope.id] = { status: 'failed', stage: error.message, error: error.message, submissionFailed: true }; } } }));
+      } catch (error) { if (alive(generation)) state.errors.system = error.message; }
       finally { if (alive(generation)) { state.busy = false; render(); schedule(); } }
     });
-    function close() { if (state.applying) return; state.review++; state.plan = null; confirm.value = ''; updateApply(); closeDialog(dialog); }
-    async function review(rebooting) {
-      if (state.busy || pending(state.operation)) return;
-      var generation = state.generation, review = ++state.review, expected = rebooting ? 'REBOOT' : 'UPDATE';
-      state.plan = null; state.rebooting = rebooting; confirm.value = ''; select('confirm-label').hidden = true; select('plan-details').replaceChildren();
-      select('review-title').textContent = rebooting ? 'Rivedi riavvio del server' : 'Rivedi aggiornamento del sistema';
-      select('plan-status').textContent = 'Conferma la tua identità per preparare il piano…'; updateApply(); openDialog(dialog);
+    reboot.addEventListener('click', async function () {
+      if (reboot.disabled) return;
+      var generation = state.generation, review = ++state.review; state.plans = []; confirm.value = ''; select('confirm-label').hidden = true; select('plan-details').replaceChildren(); select('plan-status').textContent = 'Conferma la tua identità per preparare il riavvio…'; updateApply(); openDialog(dialog); clearTimeout(state.timer);
       try {
         await authenticate(); if (!alive(generation) || review !== state.review || !dialog.open) return;
-        var value = await request('/control/runtime-updates/system/' + (rebooting ? 'reboot/' : '') + 'plan', { revision: state.value.revision });
+        var value = await request('/control/runtime-updates/system/reboot/plan', { revision: state.catalogs.system.revision }), plan = value.plan || value;
         if (!alive(generation) || review !== state.review || !dialog.open) return;
-        var plan = value.plan || value;
-        if (!plan.planId || !plan.revision || plan.kind !== (rebooting ? 'host-reboot' : 'host-upgrade') || plan.confirmationRequired !== expected) throw Error('Piano di manutenzione non valido.');
-        state.plan = plan; state.idempotencyKey = crypto.randomUUID();
-        var details = select('plan-details');
-        if (!rebooting) details.append(element('p', (Number.isSafeInteger(plan.packageCount) ? plan.packageCount : 0) + (plan.packageCount === 1 ? ' pacchetto da aggiornare · ' : ' pacchetti da aggiornare · ') + (Number.isSafeInteger(plan.autoremoveCount) ? plan.autoremoveCount : 0) + (plan.autoremoveCount === 1 ? ' dipendenza non più necessaria da rimuovere.' : ' dipendenze non più necessarie da rimuovere.')));
-        ['steps', 'risks'].forEach(function (key) { details.append(element('h3', key === 'steps' ? 'Passaggi' : 'Impatto e rischi')); var list = element('ul'); (plan[key] || []).forEach(function (item) { list.append(element('li', typeof item === 'string' ? item : text(item.label || item.description, 'Passaggio'))); }); details.append(list); });
-        select('confirm-prompt').textContent = 'Scrivi ' + expected + ' per confermare'; select('confirm-label').hidden = false;
-        select('plan-status').textContent = rebooting ? 'Il portale sarà temporaneamente non raggiungibile durante il riavvio.' : 'Rivedi i pacchetti e l’impatto prima di aggiornare.';
-        apply.textContent = rebooting ? 'Riavvia server' : 'Aggiorna sistema'; updateApply();
-      } catch (error) { if (alive(generation) && review === state.review && dialog.open) select('plan-status').textContent = error.message; }
-    }
-    upgrade.addEventListener('click', function () { if (!upgrade.disabled) review(false); }); reboot.addEventListener('click', function () { if (!reboot.disabled) review(true); });
+        if (!plan.planId || !plan.revision || plan.kind !== 'host-reboot' || plan.confirmationRequired !== 'REBOOT') throw Error('Piano di riavvio non valido.');
+        state.plans = [{ plan: plan, key: crypto.randomUUID() }]; select('plan-details').append(element('p', 'Il server sarà temporaneamente irraggiungibile durante il riavvio.')); select('confirm-label').hidden = false; select('plan-status').textContent = 'Conferma il riavvio del server.'; updateApply();
+      } catch (error) { if (alive(generation) && review === state.review) select('plan-status').textContent = error.message; }
+    });
     apply.addEventListener('click', async function () {
-      updateApply(); if (apply.disabled) return; var generation = state.generation, review = state.review, plan = state.plan, rebooting = state.rebooting; state.applying = true; updateApply();
+      updateApply(); if (apply.disabled) return; var generation = state.generation, review = state.review, entry = state.plans[0]; state.applying = true; updateApply();
       try {
         await authenticate(); if (!alive(generation) || review !== state.review || !dialog.open) return;
-        if (Date.parse(plan.expiresAt) <= Date.now()) throw Error('Piano scaduto. Prepara un nuovo piano.');
-        var value = await request('/control/runtime-updates/system/' + (rebooting ? 'reboot/' : '') + 'apply', { revision: plan.revision, planId: plan.planId, confirmation: plan.confirmationRequired, idempotencyKey: state.idempotencyKey });
-        if (!alive(generation) || review !== state.review) return; accept(value); state.applying = false; close(); render(); schedule();
+        if (Date.parse(entry.plan.expiresAt) <= Date.now()) throw Error('Piano scaduto. Prepara un nuovo riavvio.');
+        var value = await request('/control/runtime-updates/system/reboot/apply', { revision: entry.plan.revision, planId: entry.plan.planId, confirmation: 'REBOOT', idempotencyKey: entry.key });
+        if (alive(generation)) { accept(scopes[0], value); state.applying = false; close(); render(); schedule(); }
       } catch (error) { if (alive(generation)) select('plan-status').textContent = error.message; }
       finally { if (alive(generation)) { state.applying = false; updateApply(); } }
     });
     confirm.addEventListener('input', updateApply); select('close').addEventListener('click', close); dialog.addEventListener('cancel', function (event) { event.preventDefault(); close(); });
-    active.add({ root: root, stop: function () { state.stopped = true; state.generation++; state.review++; clearTimeout(state.timer); if (dialog.open) dialog.close(); }, resume: function () { if (pending(state.operation)) load(); }, pause: function () { clearTimeout(state.timer); } }); load();
+    select('installed').addEventListener('toggle', function () { if (this.open) { var list = select('installed-list'); animate(list, [{ opacity: 0, height: '0px' }, { opacity: 1, height: list.scrollHeight + 'px' }]); } });
+    active.add({ root: root, stop: function () { state.stopped = true; state.generation++; state.review++; clearTimeout(state.timer); if (dialog.open) dialog.close(); }, resume: load, pause: function () { clearTimeout(state.timer); } }); load();
   }
-  function scan() { active.forEach(function (entry) { if (!entry.root.isConnected) { entry.stop(); active.delete(entry); } }); document.querySelectorAll('[data-runtime-updates]').forEach(mount); document.querySelectorAll('[data-host-updates]').forEach(mountHost); }
+  function scan() { active.forEach(function (entry) { if (!entry.root.isConnected) { entry.stop(); active.delete(entry); } }); document.querySelectorAll('[data-platform-updates]').forEach(mountPlatform); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', scan); else scan();
   if (window.MutationObserver) new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
   document.addEventListener('visibilitychange', function () { active.forEach(function (entry) { if (document.hidden) entry.pause(); else entry.resume(); }); });

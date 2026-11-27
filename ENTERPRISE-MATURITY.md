@@ -23,7 +23,7 @@ Production go-live: NO-GO finche' mancano dominio/provider/evidence esterne.
 | 7 | CI/CD remoto | Repo-ready | Workflow GitHub e release/deploy gate container-first |
 | 8 | Backup off-site e restore drill | Repo-ready + environment action | Backup e restore drill PostgreSQL, MariaDB, MinIO, Keycloak, Secret Manager metadata; Restic richiede repository off-site reale |
 | 9 | Alerting reale | Gate-ready | Prometheus, Alertmanager, `platform-alert-dispatcher`, Loki/Grafana e runbook provider |
-| 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con redaction e audit amministrativo append-only JSONL |
+| 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Alloy con redaction e audit amministrativo append-only JSONL |
 | 11 | WAF/rate limit/bot protection | Repo-ready | OWASP CRS, Traefik rate limit e prove WAF platform |
 | 12 | RBAC admin plane | Repo-ready | Control Center identity metadata, Cloudflare Access policy, platform-admin-audit |
 | 13 | Hosted workload isolation | Repo-ready | manifest esterno, lock SHA-256, project-router, reti dedicate e diff core/combined |

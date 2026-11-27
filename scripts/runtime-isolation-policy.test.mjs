@@ -45,6 +45,7 @@ const CANONICAL_REQUIRED_CHECK_IDS = Object.freeze([
 const CANDIDATE_PROJECT_PRIVATE_VOLUMES = [
   "backup_scheduler_logs",
   "enterprise_alertmanager_data",
+  "enterprise_alloy_data",
   "enterprise_grafana_data",
   "enterprise_keycloak_data",
   "enterprise_local_registry_data",

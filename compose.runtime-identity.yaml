@@ -56,7 +56,7 @@ services:
     labels: *platform_runtime_labels
   prometheus:
     labels: *platform_runtime_labels
-  promtail:
+  alloy:
     labels: *platform_runtime_labels
   redis:
     labels: *platform_runtime_labels

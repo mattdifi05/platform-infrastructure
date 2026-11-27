@@ -224,6 +224,47 @@ func main(){
                 self.jobs = [{**failed, **invalid}]
                 self.assertEqual(len(self.refresh()['issues']), 1)
 
+    def test_partial_apply_only_reports_unresolved_component_and_retains_history(self):
+        self.jobs = [{'kind': 'apply', 'status': 'failed', 'recoveryRequired': False,
+                      'finishedAt': m.iso(self.at[0] - 60), 'componentResults': [
+                          {'componentId': 'nats', 'status': 'succeeded'},
+                          {'componentId': 'node', 'status': 'failed'},
+                          {'componentId': 'php', 'status': 'skipped'}]}]
+        value = self.collector()
+        self.assertEqual([item['service'] for item in value['issues']], ['runtime:node'])
+        self.assertEqual([item['code'] for item in value['events']], ['update-failed-history'])
+        self.jobs.insert(0, {'kind': 'apply', 'status': 'succeeded', 'componentId': 'node'})
+        value = self.refresh()
+        self.assertEqual(value['issues'], [])
+        self.assertTrue(any(item['code'] == 'update-failed-history' for item in value['events']))
+
+    def test_partial_apply_success_resolves_older_failure_but_skip_does_not(self):
+        self.jobs = [{'kind': 'apply', 'status': 'failed', 'componentResults': [
+                         {'componentId': 'nats', 'status': 'succeeded'},
+                         {'componentId': 'node', 'status': 'failed'},
+                         {'componentId': 'php', 'status': 'skipped'}]},
+                     {'kind': 'apply', 'status': 'failed', 'componentId': 'nats'},
+                     {'kind': 'apply', 'status': 'failed', 'componentId': 'php'}]
+        self.assertEqual({item['service'] for item in self.collector()['issues']}, {'runtime:node', 'runtime:php'})
+
+    def test_older_skipped_component_does_not_reopen_newer_success(self):
+        self.jobs = [{'kind': 'apply', 'status': 'succeeded', 'componentId': 'node'},
+                     {'kind': 'apply', 'status': 'failed', 'componentResults': [
+                         {'componentId': 'nats', 'status': 'succeeded'},
+                         {'componentId': 'node', 'status': 'skipped'}]},
+                     {'kind': 'apply', 'status': 'failed', 'componentId': 'node'}]
+        self.assertEqual(self.collector()['issues'], [])
+
+    def test_partial_apply_does_not_discard_job_recovery_requirement(self):
+        self.jobs = [{'kind': 'apply', 'status': 'succeeded', 'componentId': 'node'},
+                     {'kind': 'apply', 'status': 'failed', 'recoveryRequired': True, 'componentResults': [
+                         {'componentId': 'nats', 'status': 'succeeded'},
+                         {'componentId': 'node', 'status': 'failed'},
+                         {'componentId': 'php', 'status': 'skipped'}]}]
+        value = self.collector()
+        self.assertEqual([item['code'] for item in value['issues']], ['update-recovery-required'])
+        self.assertEqual(value['issues'][0]['service'], 'runtime:nats, runtime:node, runtime:php')
+
     def test_current_unresolved_recovery_is_active_without_using_error_payload(self):
         self.jobs = [{'kind': 'host-upgrade', 'status': 'interrupted', 'recoveryRequired': True, 'error': 'password=TOP_SECRET'}]
         value = self.collector()

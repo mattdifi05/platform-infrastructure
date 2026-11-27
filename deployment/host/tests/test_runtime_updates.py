@@ -1091,6 +1091,7 @@ class UpdatesTests(unittest.TestCase):
                 'state': 'succeeded', 'planId': public['planId'], 'packages': [{**row, 'state': 'succeeded'} for row in public['packages']],
                 'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True, 'rebootRequired': False
             }
+            self.host_inventory['rebootRequired'] = True  # APT creates the actual runtime marker.
             m.host_job(identity, 'host-upgrade', stored)
             executor.assert_called_once_with(m.host_reboot_job, identity)
             self.assertEqual(m.load('operation', identity)['status'], 'running')
@@ -1104,6 +1105,168 @@ class UpdatesTests(unittest.TestCase):
         m.reconcile_host_reboots(force=True)
         self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
         self.assertEqual(m.load('operation', identity)['completedSteps'], 100)
+
+    def coordinated_fixture(self, host_first=True):
+        self.host_fixture()
+        public = m.handle({'action': 'host-plan', 'revision': m.host_catalog()['revision'],
+                           'rebootAfter': True, 'coordinatedReboot': True})
+        host_body = {**self.host_apply_body(public), 'confirmation': 'UPDATE_AND_REBOOT', 'idempotencyKey': uuid.uuid4().hex}
+        service_body = {**self.apply_body(self.plan()), 'idempotencyKey': uuid.uuid4().hex}
+        callbacks = []
+        with patch.object(m.EXECUTOR, 'submit'):
+            if host_first:
+                host = m.handle(host_body, after_response=callbacks.append)
+                service = m.handle(service_body)
+            else:
+                service = m.handle(service_body)
+                host = m.handle(host_body, after_response=callbacks.append)
+        identity = host['operationId']
+        execution = m.load('host-execution', identity)
+        execution.update(services=m.snapshot_running_services(), dispatched=True, acknowledged=True)
+        m.save('host-execution', identity, execution)
+        result = {'state': 'succeeded', 'planId': public['planId'],
+                  'packages': [{**row, 'state': 'succeeded'} for row in public['packages']],
+                  'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True}
+        return identity, service['operationId'], execution, result
+
+    def test_coordinated_pair_both_orders_waits_for_peer_and_schedules_once(self):
+        for host_first in [True, False]:
+            with self.subTest(host_first=host_first):
+                identity, peer, execution, result = self.coordinated_fixture(host_first)
+                with patch.object(m.EXECUTOR, 'submit') as executor:
+                    m.finish_host_upgrade(identity, execution, result)
+                    executor.assert_not_called()
+                    self.assertIsNone(m.load('host-reboot', identity))
+                    m.operation_update(peer, status='succeeded')
+                    # Updated services may have new container IDs; refresh the baseline.
+                    with patch.object(m, 'snapshot_running_services', return_value=execution['services']) as snapshot:
+                        m.finish_host_upgrade(identity, execution, result)
+                        snapshot.assert_called_once()
+                    executor.assert_called_once_with(m.host_reboot_job, identity)
+                m.host_reboot_job(identity); m.host_reboot_job(identity)
+                self.host.schedule_reboot.assert_called_once()
+                self.assertTrue(m.load('host-reboot', identity)['intent']['requireRuntimeMarker'])
+                self.host_inventory['bootId'] = 'new-boot'
+                m.reconcile_host_reboots(force=True)
+                self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+
+    def test_coordinated_peer_failure_recovery_or_missing_never_prepares_reboot(self):
+        for condition in ['failed', 'recovery', 'missing']:
+            with self.subTest(condition=condition):
+                identity, peer, execution, result = self.coordinated_fixture()
+                if condition == 'missing':
+                    m.operation_update(identity, pairedWith='absent')
+                else:
+                    m.operation_update(peer, status='failed' if condition == 'failed' else 'succeeded',
+                                       recoveryRequired=condition == 'recovery')
+                with patch.object(m.EXECUTOR, 'submit') as executor:
+                    m.finish_host_upgrade(identity, execution, result)
+                    executor.assert_not_called()
+                self.assertIsNone(m.load('host-reboot', identity))
+                self.host.prepare_upgrade_reboot.assert_not_called()
+                # Clear terminal fixtures before the next admission.
+                m.operation_update(identity, status='failed')
+                m.operation_update(peer, status='failed', recoveryRequired=False)
+
+    def test_coordinated_success_without_runtime_marker_completes_without_reboot(self):
+        identity, peer, execution, result = self.coordinated_fixture()
+        m.operation_update(peer, status='succeeded')
+        self.host_inventory['rebootRequired'] = False
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            m.finish_host_upgrade(identity, execution, result)
+            executor.assert_not_called()
+        self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+        self.host.prepare_upgrade_reboot.assert_not_called()
+
+    def test_coordinated_reboot_rejects_missing_pre_upgrade_service(self):
+        identity, peer, execution, result = self.coordinated_fixture()
+        m.operation_update(peer, status='succeeded')
+        execution['services'] = [{'name': 'vanished', 'id': 'old', 'image': 'old'}]
+        execution['serviceVerificationStartedAt'] = time.time() - 61
+        with patch.object(m.EXECUTOR, 'submit') as executor:
+            m.finish_host_upgrade(identity, execution, result)
+        executor.assert_not_called()
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'failed')
+        self.assertTrue(record['recoveryRequired'])
+        self.host.prepare_upgrade_reboot.assert_not_called()
+
+    def test_coordinated_upgrade_recovers_its_own_flag_after_docker_returns(self):
+        identity, peer, execution, result = self.coordinated_fixture()
+        m.operation_update(peer, status='succeeded')
+        m.operation_update(identity, status='interrupted', recoveryRequired=True)
+        execution['verifiedResult'] = result
+        m.save('host-execution', identity, execution)
+        self.host_inventory['rebootRequired'] = False
+        baseline = execution['services']
+
+        with patch.object(m, 'snapshot_running_services', side_effect=[OSError('daemon restarting'), [], baseline, baseline]), \
+             patch.object(m, 'reboot_services_healthy', side_effect=[False, True]), \
+             patch.object(m.EXECUTOR, 'submit') as executor:
+            for _ in range(3):
+                m.reconcile_host_jobs(identity, force=True)
+                record = m.load('operation', identity)
+                self.assertEqual(record['status'], 'running')
+                self.assertTrue(record['recoveryRequired'])
+                saved = m.load('host-execution', identity)
+                self.assertEqual(saved['services'], baseline)
+                self.assertFalse(saved.get('coordinatedServicesVerified', False))
+            m.reconcile_host_jobs(identity, force=True)
+            executor.assert_not_called()
+
+        record = m.load('operation', identity)
+        self.assertEqual(record['status'], 'succeeded')
+        self.assertEqual(record['completedSteps'], 100)
+        self.assertFalse(record['recoveryRequired'])
+        self.assertIsNone(record['error'])
+        self.host.run_transient.assert_not_called()
+
+    def test_coordinated_reboot_rechecks_safety_inside_maintenance_lock(self):
+        for condition in ['failed-peer', 'recovery', 'unhealthy', 'marker-cleared']:
+            with self.subTest(condition=condition):
+                identity, peer, execution, result = self.coordinated_fixture()
+                m.operation_update(peer, status='succeeded')
+                with patch.object(m.EXECUTOR, 'submit'):
+                    m.finish_host_upgrade(identity, execution, result)
+                if condition == 'failed-peer':
+                    m.operation_update(peer, status='failed')
+                elif condition == 'recovery':
+                    m.operation_update(peer, recoveryRequired=True)
+                elif condition == 'marker-cleared':
+                    self.host_inventory['rebootRequired'] = False
+                with patch.object(m, 'reboot_services_healthy', return_value=condition != 'unhealthy'):
+                    m.host_reboot_job(identity)
+                self.host.schedule_reboot.assert_not_called()
+                m.operation_update(identity, status='failed', recoveryRequired=False)
+                m.operation_update(peer, status='failed', recoveryRequired=False)
+
+    def test_coordinated_background_resume_finishes_without_browser_polling(self):
+        identity, peer, execution, result = self.coordinated_fixture()
+        execution['verifiedResult'] = result
+        m.save('host-execution', identity, execution)
+        m.operation_update(identity, status='running')
+        m.operation_update(peer, status='succeeded')
+        def background_tick(_):
+            # Simulate the existing executor completing its single reboot timer,
+            # then the boot ID changing while the browser remains disconnected.
+            m.host_reboot_job(identity)
+            self.host_inventory['bootId'] = 'background-new-boot'
+            m.reconcile_host_maintenance(operation_id=identity, force=True)
+        with patch.object(m.EXECUTOR, 'submit'), patch.object(m.time, 'sleep', side_effect=background_tick):
+            m.resume_combined_maintenance()
+        self.assertEqual(m.load('operation', identity)['status'], 'succeeded')
+        self.host.schedule_reboot.assert_called_once()
+        self.host.run_transient.assert_not_called()
+
+    def test_coordinated_reboot_restores_intent_after_restart_without_second_apt(self):
+        identity, peer, execution, result = self.coordinated_fixture()
+        m.operation_update(peer, status='succeeded')
+        with patch.object(m.EXECUTOR, 'submit'):
+            m.finish_host_upgrade(identity, execution, result)
+            m.initialize()
+        m.host_reboot_job(identity)
+        self.host.schedule_reboot.assert_called_once()
+        self.host.run_transient.assert_not_called()
 
     def test_host_catalog_and_runtime_catalog_keep_operation_streams_separate(self):
         self.host_fixture()
@@ -1184,6 +1347,8 @@ class UpdatesTests(unittest.TestCase):
             kwargs['progress']({'stage': 'upgrade', 'state': 'running'})
             kwargs['progress']({'stage': 'packages', 'percent': 37.5, 'package': 'fixture-package', 'state': 'running'})
             self.assertEqual(m.load('operation', identity)['completedSteps'], 37)
+            with patch.object(m, 'host_progress', side_effect=m.sqlite3.OperationalError('unable to open database file')):
+                kwargs['progress']({'stage': 'packages', 'percent': 75, 'state': 'running'})
             return {'state': 'succeeded', 'planId': stored['native']['planId'],
                     'packages': [{**item, 'state': 'succeeded'} for item in self.host_check_result['packages']], 'rebootRequired': True,
                     'packageVersionsVerified': True, 'dpkgAuditClean': True, 'marksRestored': True}
@@ -1567,6 +1732,24 @@ class UpdatesTests(unittest.TestCase):
         with self.assertRaises(m.Rejected) as error:
             self.plan()
         self.assertEqual(error.exception.status, 409)
+
+    def test_php_missing_module_blocks_before_any_live_mutation(self):
+        stored = self.stored()
+        stored['component']['strategy'] = 'php-build'
+        self.prepare_job()
+        before = copy.deepcopy(self.docker.rows)
+        def modules(argv, **kwargs):
+            if argv == ['docker', 'exec', 'old-container', 'php', '-m']:
+                return 'Core\nmbstring\nimagick\n'
+            if argv == ['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'php', NEW_IMAGE, '-m']:
+                return 'Core\nimagick\n'
+            raise AssertionError(argv)
+        with patch.object(m, 'image_candidate', return_value=NEW_IMAGE), patch.object(m, 'run', side_effect=modules), patch.object(m, 'refresh_admission') as admission:
+            m.apply_job('job-1', stored)
+        self.assertEqual(m.load('operation', 'job-1')['status'], 'failed')
+        self.assertEqual(self.docker.rows, before)
+        self.assertFalse(any(method != 'GET' for method, _, _ in self.docker.calls))
+        admission.assert_not_called()
 
     def test_stopped_container_preserved_and_config_secret_remains_root_only(self):
         self.docker = DockerFixture(running=False)

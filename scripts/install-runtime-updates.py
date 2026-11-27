@@ -27,7 +27,7 @@ def official_provider_repository(reference):
     repository = match.group(1)
     if repository in ['nginx', 'traefik', 'nats']:
         repository = 'library/' + repository
-    return repository if repository in {'library/nginx', 'library/traefik', 'library/nats', 'prom/prometheus', 'prom/alertmanager', 'prom/node-exporter', 'grafana/grafana', 'grafana/promtail', 'grafana/loki'} else None
+    return repository if repository in {'library/nginx', 'library/traefik', 'library/nats', 'prom/prometheus', 'prom/alertmanager', 'prom/node-exporter', 'grafana/grafana', 'grafana/alloy', 'grafana/loki', 'rustfs/rustfs'} else None
 
 
 def image_provider_identities(image_metadata):
@@ -56,7 +56,22 @@ def discover(rows, infra, image_metadata=None):
         if not row['State']['Running'] and ((labels.get('com.docker.compose.project'), service) in active or name not in {service, 'enterprise-' + service, labels.get('com.docker.compose.project', '') + '-' + service + '-1'}):
             continue
         entry = {'strategy': 'observe', 'category': 'Piattaforma', 'compatibility': 'latest', 'tagSuffix': '', 'tagPrefix': '', 'architecture': 'amd64'}
-        if 'phpmyadmin' in name:
+        if service == 'rustfs-gateway' and labels.get('com.docker.compose.project') == 'platform_infra_vps':
+            builder = infra / 'deployment/docker/s3-gateway.Dockerfile'
+            config = infra / 'deployment/config/storage/rustfs-gateway.conf'
+            entry.update(label='RustFS Gateway (Nginx)', runtimeFamily='rustfs-gateway', category='Archiviazione',
+                         repository='library/nginx', strategy='reviewed-build', tagSuffix='-alpine',
+                         dockerfile=str(builder), probe=['nginx', '-v'], compatibility='major')
+            if builder.is_file() and config.is_file():
+                entry.update(builderSha256=hashlib.sha256(builder.read_bytes()).hexdigest(),
+                             gatewayConfigSha256=hashlib.sha256(config.read_bytes()).hexdigest())
+            else:
+                entry.update(strategy='observe', blockedReason='Builder o configurazione gateway revisionata non disponibile.')
+        elif official.get(row['Image']) == 'rustfs/rustfs':
+            entry.update(label='RustFS', category='Archiviazione', repository='rustfs/rustfs', strategy='image',
+                         probe=['rustfs', '--version'], compatibility='major', requiresRecovery=True,
+                         recoveryPolicy='offline-snapshot-v1')
+        elif 'phpmyadmin' in name:
             entry.update(label='phpMyAdmin', category='Amministrazione', repository='library/phpmyadmin', strategy='reviewed-build', dockerfile=str(infra / 'deployment/docker/phpmyadmin-remediated.Dockerfile'), probe=['php', '-r', 'define("VERSION_SUFFIX", ""); require "/var/www/html/libraries/classes/Version.php"; echo \\PhpMyAdmin\\Version::VERSION;'])
         elif 'phppgadmin' in name:
             entry.update(label='phpPgAdmin', category='Amministrazione', blockedReason='Il pacchetto usa un builder dedicato senza una release stabile numerata verificabile. Richiede manutenzione assistita.')
@@ -82,7 +97,7 @@ def discover(rows, infra, image_metadata=None):
                 ('prometheus', 'Prometheus', 'prom/prometheus', ['/bin/prometheus', '--version'], 'v', '', 'Monitoraggio'),
                 ('alertmanager', 'Alertmanager', 'prom/alertmanager', ['/bin/alertmanager', '--version'], 'v', '', 'Monitoraggio'),
                 ('grafana', 'Grafana', 'grafana/grafana', ['grafana', '--version'], '', '', 'Monitoraggio'),
-                ('promtail', 'Promtail', 'grafana/promtail', ['/usr/bin/promtail', '--version'], '', '', 'Monitoraggio'),
+                ('alloy', 'Grafana Alloy', 'grafana/alloy', ['/bin/alloy', '--version'], 'v', '', 'Monitoraggio'),
                 ('loki', 'Loki', 'grafana/loki', ['/usr/bin/loki', '--version'], '', '', 'Monitoraggio'),
             ]
             for match, label, repository, probe, prefix, suffix, category in providers:
@@ -103,7 +118,9 @@ def discover(rows, infra, image_metadata=None):
         # Dedicated/unrecognized builds remain separate and cannot become plain images.
         repository = entry.get('repository')
         family = repository.replace('library/', '').replace('/', '-') if repository else None
-        key = ('supplier', repository) if family else ('dedicated', row['Image'], entry['label'])
+        if entry.get('runtimeFamily') == 'rustfs-gateway':
+            family = 'rustfs-gateway'
+        key = ('supplier', family) if family else ('dedicated', row['Image'], entry['label'])
         if key not in groups:
             identity = family or (re.sub('[^a-z0-9-]', '-', entry['label'].lower()).strip('-')[:48] + '-' + row['Image'][-10:])
             groups[key] = {**entry, 'id': identity, 'containers': [], 'initialImages': [], 'familyPolicy': 'single-version-v1' if family else None, 'targetPolicy': 'latest-stable-direct-v1' if family else None}
@@ -128,6 +145,15 @@ def preserve_enrollment_policy(components, previous):
             prior_family = next((entry for entry in previous if entry.get('repository') == 'library/traefik'), None)
             if prior_family and 'routeProbes' in prior_family:
                 row['routeProbes'] = prior_family['routeProbes']
+        if row.get('runtimeFamily') == 'rustfs-gateway':
+            admitted = next((entry for entry in previous if entry.get('runtimeFamily') == 'rustfs-gateway' and tuple(sorted(entry['containers'])) == tuple(sorted(row['containers']))), None)
+            if admitted:
+                for field in ['builderSha256', 'gatewayConfigSha256', 'buildContext', 'dockerfile']:
+                    if field in admitted:
+                        row[field] = admitted[field]
+        if prior and prior.get('runtimeFamily') == 'modsecurity-crs':
+            # The qualification belongs to this exact service membership.
+            row.update({key: value for key, value in prior.items() if key not in ('containers', 'initialImages', 'architecture')})
         if prior and row.get('familyPolicy') != 'single-version-v1':
             row['id'] = prior['id']
 
@@ -167,6 +193,9 @@ def main():
         shutil.copy2(SOURCE / 'deployment/host/libexec' / name, pathlib.Path('/usr/local/libexec') / name)
         (pathlib.Path('/usr/local/libexec') / name).chmod(0o755)
     shutil.copy2(SOURCE / 'deployment/host/systemd/platform-runtime-updates.service', '/etc/systemd/system/platform-runtime-updates.service')
+    runtime_dirs = '/etc/tmpfiles.d/platform-control-runtime-dirs.conf'
+    shutil.copy2(SOURCE / 'deployment/host/systemd/platform-control-runtime-dirs.conf', runtime_dirs)
+    subprocess.run(['systemd-tmpfiles', '--create', runtime_dirs], check=True)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'enable', '--now', 'platform-runtime-updates.service'], check=True)
     print('Enrolled runtime groups:', len(components))

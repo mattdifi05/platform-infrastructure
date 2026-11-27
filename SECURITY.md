@@ -94,7 +94,7 @@ not platform go-live gates.
 
 - PostgreSQL is not public in production.
 - Query execution is statement-time-limited and row-limited.
-- Operational logs are centralized in Loki/Promtail with platform redaction;
+- Operational logs are centralized in Loki/Alloy with platform redaction;
   Control Center administrative events use append-only JSONL evidence.
 - Each hosted workload owns its schema and migration path. Its services use
   distinct PostgreSQL logins and must prove cross-table denial before legacy

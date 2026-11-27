@@ -8,7 +8,7 @@ export function validateFunctionalHealthProbes(probes) {
     const kind = String(probe?.kind || "http").trim();
     if (!id || seen.has(id)) throw new Error(`Invalid or duplicate functional health probe: ${id || "missing"}.`);
     if (!String(probe?.container || "").trim()) throw new Error(`Probe ${id} must name a container.`);
-    if (!["http", "dns"].includes(kind)) throw new Error(`Probe ${id} must be HTTP or DNS, never process-only.`);
+    if (!["http", "dns", "docker-health"].includes(kind)) throw new Error(`Probe ${id} must use HTTP, DNS or a configured Docker healthcheck, never process-only.`);
     if (kind === "http") {
       if (!Number.isInteger(probe.port) || probe.port <= 0) throw new Error(`Probe ${id} has an invalid port.`);
       if (!String(probe.path || "").startsWith("/")) throw new Error(`Probe ${id} has an invalid path.`);
@@ -30,13 +30,14 @@ export function evaluateFunctionalHealth(probes, observations) {
       passed = probe.expectedStatuses.includes(Number(observation.status));
       if (passed && probe.bodyIncludes) passed = String(observation.body || "").includes(probe.bodyIncludes);
     }
+    if (passed && probe.kind === "docker-health") passed = observation.healthStatus === "healthy";
     if (passed && probe.kind === "dns") passed = Array.isArray(observation.answers) && observation.answers.length > 0;
     return {
       id: probe.id,
       kind: probe.kind,
       container: probe.container,
       passed,
-      status: observation?.status ?? null,
+      status: observation?.status ?? observation?.healthStatus ?? null,
       latencyMs: Number(observation?.latencyMs ?? 0),
       error: observation?.error ? "probe-failed" : null,
     };

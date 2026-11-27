@@ -29,8 +29,10 @@ export async function handleRuntimeUpdatesApi(req, res, url, { readJson = bounde
       const action = segments.at(-1), reboot = segments.length === 3;
       if (!['check', 'plan', 'apply'].includes(action) || reboot && action === 'check') throw new RuntimeUpdatesError(404, 'not_found');
       const body = payload(await readJson(req), action === 'check' ? [] : action === 'plan' ? ['revision'] : ['revision', 'planId', 'confirmation', 'idempotencyKey'],
-        !reboot && action === 'plan' ? ['rebootAfter'] : []);
+        !reboot && action === 'plan' ? ['rebootAfter', 'coordinatedReboot'] : []);
       if (Object.hasOwn(body, 'rebootAfter') && typeof body.rebootAfter !== 'boolean') throw new RuntimeUpdatesError(400, 'invalid_request');
+      if (Object.hasOwn(body, 'coordinatedReboot') && (typeof body.coordinatedReboot !== 'boolean'
+          || body.coordinatedReboot && body.rebootAfter !== true)) throw new RuntimeUpdatesError(400, 'invalid_request');
       const operation = reboot ? action === 'plan' ? 'hostRebootPlan' : 'hostRebootApply' : action === 'check' ? 'hostCheck' : action === 'plan' ? 'hostPlan' : 'hostApply';
       value = await client[operation](body); status = action === 'plan' ? 200 : 202;
     }
