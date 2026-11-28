@@ -2118,6 +2118,40 @@ class InstallerDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(components), 1)
         self.assertEqual(components[0]['containers'], ['web-proxy'])
 
+    def test_mariadb_plan_uses_a_dedicated_builder_without_local_images(self):
+        maria = self.runtime('mariadb', 'platform/mariadb:reviewed', ['MARIADB_VERSION=13.0.2'])
+        components = self.installer.discover([maria], pathlib.Path('/fixture/platform'))
+        row = components[0]
+        self.assertEqual(row['strategy'], 'reviewed-build')
+        self.assertEqual(row['recoveryPolicy'], 'offline-snapshot-v1')
+        with tempfile.TemporaryDirectory() as temporary:
+            config = pathlib.Path(temporary).resolve() / 'updates'
+            context = config / 'build-contexts' / 'mariadb'
+            real_stat = pathlib.Path.stat
+
+            def root_owned(path, *args, **kwargs):
+                info = real_stat(path, *args, **kwargs)
+                if path in (config, context.parent, context):
+                    return types.SimpleNamespace(st_uid=0, st_mode=info.st_mode)
+                return info
+
+            with patch.object(self.installer, 'CONFIG', config), patch.object(pathlib.Path, 'stat', root_owned):
+                self.installer.stage_mariadb_builder(components)
+            self.assertEqual(row['buildContext'], str(context))
+            self.assertEqual(row['dockerfile'], str(context / 'Dockerfile'))
+            self.assertEqual(list(context.iterdir()), [context / 'Dockerfile'])
+            work = config.parent / 'job'
+            work.mkdir()
+            target = {'imageReference': 'docker.io/library/mariadb', 'imageDigest': NEW_IMAGE}
+            with patch.object(m, 'protected', side_effect=pathlib.Path), patch.object(m, 'run', return_value=NEW_IMAGE) as run:
+                self.assertEqual(m.image_candidate(row, target, work), NEW_IMAGE)
+            built = (work / 'Dockerfile').read_text()
+            self.assertEqual(built.splitlines()[0], 'FROM docker.io/library/mariadb@' + NEW_IMAGE + ' AS runtime')
+            self.assertIn('\nFROM runtime\n', built)
+            self.assertIn('COPY --from=gosu-build', built)
+            self.assertNotIn('platform/runtime-helpers:', built)
+            self.assertEqual(run.call_args_list[1].args[0][-1], str(context))
+
 
 if __name__ == '__main__':
     unittest.main()

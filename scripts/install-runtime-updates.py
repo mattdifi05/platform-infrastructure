@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1]
 CONFIG = pathlib.Path('/etc/platform-infrastructure/updates')
@@ -83,7 +84,7 @@ def discover(rows, infra, image_metadata=None):
         elif 'PG_VERSION' in env:
             entry.update(label='PostgreSQL', category='Database', repository='library/postgres', strategy='reviewed-build', compatibility='latest', tagSuffix='-alpine', versionEnv='PG_VERSION', dockerfile=str(infra / 'deployment/docker/postgres-remediated.Dockerfile'), probe=['postgres', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'MARIADB_VERSION' in env:
-            entry.update(label='MariaDB', category='Database', repository='library/mariadb', strategy='reviewed-build', versionEnv='MARIADB_VERSION', dockerfile=str(infra / 'deployment/docker/mariadb-remediated.Dockerfile'), probe=['mariadbd', '--version'], recoveryPolicy='offline-snapshot-v1')
+            entry.update(label='MariaDB', category='Database', repository='library/mariadb', strategy='reviewed-build', versionEnv='MARIADB_VERSION', dockerfile=str(SOURCE / 'deployment/docker/mariadb-remediated.Dockerfile'), probe=['mariadbd', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif 'REDIS_VERSION' in env:
             entry.update(label='Redis', category='Database', repository='library/redis', strategy='image', tagSuffix='-alpine', versionEnv='REDIS_VERSION', probe=['redis-server', '--version'], recoveryPolicy='offline-snapshot-v1')
         elif image.startswith('quay.io/keycloak/keycloak:'):
@@ -158,6 +159,31 @@ def preserve_enrollment_policy(components, previous):
             row['id'] = prior['id']
 
 
+def stage_mariadb_builder(components):
+    rows = [row for row in components if row.get('repository') == 'library/mariadb'
+            and row.get('strategy') == 'reviewed-build']
+    if not rows:
+        return
+    context = CONFIG / 'build-contexts' / 'mariadb'
+    for directory in (CONFIG, context.parent, context):
+        directory.mkdir(mode=0o700, exist_ok=True)
+        info = directory.stat()
+        if directory.resolve() != directory or info.st_uid != 0 or info.st_mode & 0o022:
+            raise RuntimeError('MariaDB builder directory is not root-protected')
+    recipe = (SOURCE / 'deployment/docker/mariadb-remediated.Dockerfile').read_bytes()
+    dockerfile = context / 'Dockerfile'
+    with tempfile.NamedTemporaryFile(dir=context, delete=False) as staged:
+        try:
+            staged.write(recipe)
+            staged.flush()
+            os.fsync(staged.fileno())
+            os.replace(staged.name, dockerfile)
+        finally:
+            pathlib.Path(staged.name).unlink(missing_ok=True)
+    for row in rows:
+        row.update(buildContext=str(context), dockerfile=str(dockerfile))
+
+
 def main():
     if os.geteuid() != 0:
         raise SystemExit('Run as root on the target VPS')
@@ -181,6 +207,7 @@ def main():
     if config.exists():
         old = json.loads(config.read_text())
         preserve_enrollment_policy(value['components'], old['components'])
+    stage_mariadb_builder(components)
     config.write_text(json.dumps(value, indent=2) + '\n')
     config.chmod(0o600)
     key = CONFIG / 'bridge-key'
